@@ -1,0 +1,24 @@
+[package]
+name = "camerata-gateway"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+# This crate is the VERIFIED layer-1 governance gate (RUST_CORE_VERIFICATION.md):
+# a Rust MCP server whose tools enforce the active rule-subset before executing.
+# Phase 0 will: (1) implement core::GovernanceGateway over this, (2) key the
+# rule-subset by session_id, (3) decide transport (stdio-subprocess vs embedded
+# streamable-http so the orchestrator's live state is in-process).
+
+[[bin]]
+name = "camerata-gateway"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1"
+anyhow = { workspace = true }

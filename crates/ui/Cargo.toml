@@ -1,0 +1,6 @@
+[package]
+name = "camerata-ui"
+edition.workspace = true
+version = "0.0.0"
+
+[dependencies]

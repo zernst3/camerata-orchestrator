@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
+    "crates/gateway",     # layer-1 real-time governance gate: Rust MCP server (VERIFIED)
+    "crates/agent",       # agent runtime: drives `claude -p` subprocesses, parses stream-json
+    "crates/rules",       # rule corpus loader, enforcement_kind, rule-subset selection
+    "crates/persistence", # SQLite state + JSON provenance
+    "crates/checks",      # layer-2 post-task gate: CheckRunner + ESLint subprocess
+    "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
+    "crates/cli",         # binary entrypoint wiring it all together
+    "crates/ui",          # Dioxus cockpit (separate process)
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Zachary Ernst"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+async-trait = "0.1"

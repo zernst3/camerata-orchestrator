@@ -1,0 +1,8 @@
+[package]
+name = "camerata-rules"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[dependencies]
