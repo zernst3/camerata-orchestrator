@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Camerata runtime (per-task isolated checkouts + coordination artifacts)
+.claude/worktrees/
+.claude/coordination/
+.camerata/cache/
+
+# Secrets and local config (NEVER commit; see TECH_DESIGN section 10)
+.env
+.env.*
+!.env.example
+*.local
+secrets.*
+
+# Persistence store (local SQLite / flat-file Story spine)
+*.sqlite
+*.sqlite-journal
+*.db
+data/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
