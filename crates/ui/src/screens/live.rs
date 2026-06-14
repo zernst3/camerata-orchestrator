@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
+use crate::app_state::AppState;
 use crate::data;
 use crate::Screen;
 
@@ -24,12 +25,25 @@ enum Phase {
 
 #[component]
 pub fn LiveScreen(screen: Signal<Screen>) -> Element {
+    let app = use_context::<Signal<Option<AppState>>>();
     let mut phase = use_signal(|| Phase::Publishing);
+    // The live URL returned by the real deploy seam (LocalDeployTarget by default).
+    let mut live_url = use_signal(|| None::<String>);
 
-    // A short, honest publishing beat, then the live state. Honesty over instant
-    // magic: it narrates that it's going onto the user's own cloud.
+    // A short, honest publishing beat that REALLY deploys through the seam, then the
+    // live state with the returned URL. Honesty over instant magic.
     let _driver = use_future(move || async move {
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        let app_name = app
+            .peek()
+            .as_ref()
+            .map(|s| s.project.onboarding.app_name.clone())
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| "your-app".to_string());
+        let outcome = crate::deploy_run::publish_app(&app_name).await;
+        if let Some(url) = outcome.url {
+            live_url.set(Some(url));
+        }
+        tokio::time::sleep(Duration::from_millis(2000)).await;
         phase.set(Phase::Live);
     });
 
@@ -52,7 +66,7 @@ pub fn LiveScreen(screen: Signal<Screen>) -> Element {
 
                 div { class: "live-url",
                     span { class: "lock", "🔒" }
-                    span { "{data::LIVE_URL}" }
+                    span { "{live_url().unwrap_or_else(|| data::LIVE_URL.to_string())}" }
                 }
                 p { class: "live-own", "On your own cloud · you own it, you control it" }
 

@@ -34,6 +34,8 @@ camerata-persistence = { path = "../persistence" }
 # The governed build runner: lets the Build screen run a REAL governed fleet
 # (gateway + claude -p agents) in-process, the same path the CLI po-demo uses.
 camerata-fleet = { path = "../fleet" }
+# The BYO-infra publish step: the Live screen deploys through this seam.
+camerata-deploy = { path = "../deploy" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
