@@ -178,42 +178,9 @@ pub const CLARIFY_READY: &str =
     "That's everything I needed. I'm confident I can build this well. Here's the plan \
      — have a look, and build it when you're happy.";
 
-/// One node in the approved plan's visual map: an entity and what a person can
-/// do with it, plus the human decision that shaped it (folded back from clarify).
-#[derive(Clone, PartialEq)]
-pub struct PlanNode {
-    pub entity: String,
-    pub actions: Vec<String>,
-    pub note: Option<String>,
-}
-
-pub fn plan_map() -> Vec<PlanNode> {
-    vec![
-        PlanNode {
-            entity: "Class".into(),
-            actions: vec!["add".into(), "list".into(), "edit".into(), "remove".into()],
-            note: Some("past classes kept as history".into()),
-        },
-        PlanNode {
-            entity: "Student".into(),
-            actions: vec!["add".into(), "list".into(), "edit".into(), "search".into()],
-            note: Some("email visible only to you".into()),
-        },
-        PlanNode {
-            entity: "Booking".into(),
-            actions: vec!["add".into(), "list".into(), "cancel".into()],
-            note: Some("waitlist when full · seat frees on cancel".into()),
-        },
-        // Folded in from the accepted product-level suggestion in clarify.
-        PlanNode {
-            entity: "People & permissions".into(),
-            actions: vec!["invite".into(), "set role".into(), "remove".into()],
-            note: Some("the admin area I suggested".into()),
-        },
-    ]
-}
-
 /// The plain-language plan prose, in the user's own words, that they approve.
+/// Used only as a fallback when no project is present; the live PlanReveal derives
+/// its prose from the real onboarding document (see `AppState::plan_prose`).
 pub const PLAN_PROSE: &str =
     "Here's what I'll build for you: a warm, phone-friendly site for Riverside \
      Pottery Studio. People can browse the weekly classes and book a seat; when a \

@@ -451,6 +451,60 @@ impl AppState {
         camerata_intake::StubLeadEngineer::plan_for(&self.project.onboarding)
     }
 
+    /// The plan-map nodes for the PlanReveal screen, derived from the REAL
+    /// onboarding entities: each entity becomes a node whose action pills are its
+    /// capabilities in consumer words, with the entity description as the note.
+    /// Returns `(entity_name, action_pills, optional_note)` per entity.
+    pub fn plan_nodes(&self) -> Vec<(String, Vec<String>, Option<String>)> {
+        self.project
+            .onboarding
+            .entities
+            .iter()
+            .map(|e| {
+                let c = &e.capabilities;
+                let mut actions = Vec::new();
+                if c.can_add {
+                    actions.push("add".to_string());
+                }
+                if c.can_list {
+                    actions.push("see a list".to_string());
+                }
+                if c.can_view {
+                    actions.push("view".to_string());
+                }
+                if c.can_edit {
+                    actions.push("edit".to_string());
+                }
+                if c.can_remove {
+                    actions.push("remove".to_string());
+                }
+                if c.can_search {
+                    actions.push("search".to_string());
+                }
+                let note = if e.description.trim().is_empty() {
+                    None
+                } else {
+                    Some(e.description.clone())
+                };
+                (e.name.clone(), actions, note)
+            })
+            .collect()
+    }
+
+    /// A plain-language plan summary derived from the onboarding document, for the
+    /// PlanReveal prose.
+    pub fn plan_prose(&self) -> String {
+        let f = &self.project.onboarding;
+        let entities: Vec<&str> = f.entities.iter().map(|e| e.name.as_str()).collect();
+        format!(
+            "Here is what I'll build for you: {desc}. It keeps track of {n} thing(s) \
+             ({list}), and you'll be able to work with each one the way you described.",
+            desc = f.description.trim().trim_end_matches('.'),
+            n = f.entities.len(),
+            list = entities.join(", "),
+        )
+    }
+
     /// The product suggestions accumulated in the active session (raised by AI
     /// review turns). Returns an empty list when there is no active session.
     pub fn active_suggestions(&self) -> Vec<ProductSuggestion> {

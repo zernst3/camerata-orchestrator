@@ -566,7 +566,14 @@ fn ConfidenceHeader(confidence: u8) -> Element {
 /// action ("Build it") advances to the build narrative.
 #[component]
 fn PlanReveal(screen: Signal<Screen>) -> Element {
-    let nodes = use_signal(data::plan_map);
+    // Derive the plan map from the REAL onboarding entities (falls back to the
+    // generic prose if there is somehow no project).
+    let app = use_context::<Signal<Option<AppState>>>();
+    let plan = app
+        .read()
+        .as_ref()
+        .map(|s| (s.plan_nodes(), s.plan_prose()));
+    let (nodes, prose) = plan.unwrap_or_else(|| (Vec::new(), data::PLAN_PROSE.to_string()));
     rsx! {
         div { class: "plan",
             div { class: "bubble bubble-eng",
@@ -577,23 +584,23 @@ fn PlanReveal(screen: Signal<Screen>) -> Element {
                 p { class: "q-text", "{data::CLARIFY_READY}" }
             }
 
-            p { class: "plan-prose", "{data::PLAN_PROSE}" }
+            p { class: "plan-prose", "{prose}" }
 
             p { class: "section-label", "What I'll build" }
             p { class: "section-hint", "Each card is a thing your app keeps track of, and what a person can do with it." }
             div { class: "plan-map",
-                for node in nodes() {
+                for (entity , actions , note) in nodes {
                     div { class: "plan-node",
                         div { class: "plan-node-head",
-                            span { class: "plan-node-glyph", "{node.entity.chars().next().unwrap_or('•')}" }
-                            span { class: "plan-node-name", "{node.entity}" }
+                            span { class: "plan-node-glyph", "{entity.chars().next().unwrap_or('•')}" }
+                            span { class: "plan-node-name", "{entity}" }
                         }
                         div { class: "plan-actions",
-                            for action in node.actions {
+                            for action in actions {
                                 span { class: "action-pill", "{action}" }
                             }
                         }
-                        if let Some(note) = node.note {
+                        if let Some(note) = note {
                             div { class: "plan-note", "{note}" }
                         }
                     }
