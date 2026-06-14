@@ -1,7 +1,7 @@
 # Overnight session 2026-06-14 (handoff)
 
-A long single session that took Camerata from a Tier-2-only prototype to a two-tier
-system, sharpened the positioning, and made the project govern its own source.
+A long single session that took Camerata from an app-builder-only prototype to a
+two-surface system, sharpened the framing, and made the project govern its own source.
 
 ## Important: local commits
 
@@ -25,25 +25,24 @@ State at handoff: a 14-crate workspace, 500+ tests, zero warnings, all four gate
 green (unsafe forbidden, clippy `-D warnings`, fmt, tests), on
 `github.com/zernst3/camerata-orchestrator`.
 
-- **Tier 2 (proven in code end to end):** the refinement-session model, versioned
+- **App-builder surface (proven in code end to end):** the refinement-session model, versioned
   event-sourced persistence, the Staff-Engineer reviewer (stub + live), the shipped
   style kit + intake picker, the opt-in design corpus with bug-fix sharing and
   opt-out-is-deletion, the post-build bug loop, the build screen wired to the real
   governed fleet (opt-in), publish wired to a deploy seam, and a standing maintenance
   panel. Composed into the Dioxus UI, with an end-to-end lifecycle test.
-- **Tier 1 (built out):** the `WorkItemProvider` port; native + Jira + Azure DevOps +
+- **Architect surface (built out):** the `WorkItemProvider` port; native + Jira + Azure DevOps +
   GitHub adapters (mapping/request/response behind an injectable transport seam, live
   `reqwest` transport type-checked); the async clarify-bridge; SyncPolicy per-field
   source-of-truth + echo suppression; an end-to-end flow test; and a runnable
   `worktracker-demo` CLI.
-- **Engine / moat:** provider-neutrality proven with a second non-Claude driver
+- **Engine:** provider-neutrality proven with a second non-Claude driver
   (`docs/PROVIDER_NEUTRALITY.md`); self-governance CI (`.github/workflows/ci.yml`,
   `docs/ENFORCEMENT.md`).
-- **Positioning:** README + VISION + POSITIONING reframed to honest two-tier framing
-  (Tier 2 proven in code, Tier 1 the durable wedge), the moat answered once, the
-  Macintosh halo cut, the false "investor passes" language scrubbed, and §7 showing
-  the overturned NO-GO as evidence. New ADRs for persistence, refinement, corpus,
-  maintenance, and the worktracker port (see `docs/decisions/`).
+- **Framing:** README + VISION + RATIONALE written as a technical artifact, honest
+  about what is proven versus staged, leading with the narrow reproducible claim and
+  showing the overturned NO-GO as evidence. New ADRs for persistence, refinement,
+  corpus, maintenance, and the worktracker port (see `docs/decisions/`).
 
 ## What remains (next session)
 
