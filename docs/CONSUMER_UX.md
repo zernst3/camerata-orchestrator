@@ -218,6 +218,15 @@ Form shape (the strict-but-flexible spine):
   entity, in consumer words (add, see a list, edit, remove, search).
 - **Anything important or unusual?** A free-text constraints box for rules,
   must-haves, and look-and-feel wishes.
+- **What should it look like?** A style picker, NOT a blank canvas. Camerata ships a
+  small curated set of tasteful **color palettes** (Warm Studio, Clean Slate,
+  Forest, Midnight, Blossom) and **style examples** the user selects from: button
+  shape (rounded, pill, blocky) and font personality (system, serif, geometric,
+  monospace). The set is curated so a non-technical user cannot pick a bad-looking
+  combination. The user can also **upload inspiration images** the AI interprets for
+  styling cues ("I love these warm tones"). Every selection is captured INTO the
+  onboarding document (`StylePreferences` on the typed `IntakeForm`), so the build
+  honors an explicit look rather than guessing from prose. See `crates/intake/src/appearance.rs`.
 
 The form produces the typed `IntakeForm` the engine already models. Once submitted,
 it is the frozen origin. The next thing the user sees is the refinement session.
@@ -323,6 +332,41 @@ Engineer and the bar for the `LeadEngineer` implementation:
 - **Reachable during the build.** It surfaces genuine mid-build questions to the
   user instead of guessing, and it does so calmly, as described in the mid-build
   escalation model.
+- **Decides the technical dependencies.** Choosing which external libraries the app
+  needs is a LEAD-ENGINEER decision, not the user's. The user never sees a package
+  name. The engineer picks them: Camerata's own `rust-chorale` for any tabular
+  surface (the default for lists and grids), and, where a capability genuinely needs
+  it, a JavaScript library for the generated app's frontend (the all-Rust rule binds
+  Camerata's ENGINE, not necessarily every generated target app). It records what it
+  chose and why in the plan, so the choice is auditable.
+
+## Maintenance: the standing ops agent (post-publish)
+
+A published app is not done; it is alive, and it needs ongoing operations. Camerata
+attaches a **standing, asynchronous maintenance agent** to every published app. It is
+the app's whole ops function, not just a package updater. Its remit (open-ended, and
+expected to grow):
+
+- **Dependency upgrades.** It scans for newer versions of the app's libraries on a
+  regular cadence.
+- **Security patching.** It watches for vulnerabilities in what the app depends on.
+- **Key and secret rotation.** It rotates credentials, API keys, and secrets on a
+  schedule, so they do not go stale or leak value over time.
+- **General ops hygiene.** Certificate renewal, backups, health, and the operational
+  chores a human ops engineer would own. This list is deliberately not exhaustive;
+  the agent owns ops, whatever ops turns out to mean for a given app.
+
+The user-facing contract is calm and honest, never alarming. The maintenance agent
+does NOT silently change a live app. When an update matters (especially a security
+one), the user gets a **plain-language recommendation** first: "It is a good idea to
+bring your app up to date. A part of it has a security fix available." Approving runs
+the update through the SAME governed build-and-QA loop as any other change (the gate
+applies to maintenance exactly as it applies to features), so "bring it up to date" is
+as safe as every other change. Nothing about the app is ever changed outside the gate.
+
+This is a real differentiator: the prompt-to-code tools hand you code and walk away;
+the debt and the rot are yours. A governed standing ops agent means a non-technical
+owner gets the maintenance a real engineering team would provide, without hiring one.
 
 ## Build order for the UI (Dioxus)
 

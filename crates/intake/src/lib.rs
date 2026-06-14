@@ -29,6 +29,7 @@
 //! `NeedsClarification` rounds, folding each Q&A into the form's
 //! `clarifications` field and re-evaluating, until the engineer is satisfied.
 
+pub mod appearance;
 pub mod clarify;
 pub mod engine;
 pub mod form;
@@ -38,6 +39,9 @@ pub mod refinement;
 pub mod review;
 pub mod story;
 
+pub use appearance::{
+    ButtonStyle, FontChoice, ImageRef, Palette, StylePreferences, SHIPPED_PALETTES,
+};
 pub use clarify::{
     AnswerSource, ClarifyDriver, ClarifyError, ClarifyOutcome, SequentialAnswerSource,
     StubAnswerSource,

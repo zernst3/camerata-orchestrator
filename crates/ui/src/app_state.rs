@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 
 use camerata_intake::{
     EntityCapabilities, EntityDefinition, EntityField, FieldType, IntakeForm, Phase, Project,
-    RefinementSession, StoryId, UserRole, UserStory, ViewKind, ViewSpec,
+    RefinementSession, StoryId, StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
 };
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, PersistenceError, RevisionOp,
@@ -72,6 +72,10 @@ pub struct IntakeInputs {
     pub roles: Vec<RoleInput>,
     /// The entities.
     pub entities: Vec<EntityInput>,
+    /// The look-and-feel selections from the intake style picker (shipped
+    /// palette, button shape, font, inspiration images). Defaults to "no
+    /// preference".
+    pub style: StylePreferences,
 }
 
 // ─── plain-language -> typed mappings ────────────────────────────────────────
@@ -153,6 +157,9 @@ pub fn intake_form_from_inputs(inputs: &IntakeInputs) -> IntakeForm {
         constraints: inputs.constraints.clone(),
         views,
         clarifications: vec![],
+        // The intake style picker is wired in a later pass; default = "no
+        // preference, the lead engineer chooses" until then.
+        style: inputs.style.clone(),
     }
 }
 
@@ -438,6 +445,7 @@ mod tests {
                 ],
                 features: vec!["add".into(), "see a list".into(), "edit".into(), "remove".into()],
             }],
+            style: StylePreferences::default(),
         }
     }
 

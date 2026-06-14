@@ -74,6 +74,8 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                             features: e.features,
                         })
                         .collect(),
+                    // The style picker UI section is a later pass; default for now.
+                    style: Default::default(),
                 };
                 app.set(Some(AppState::from_intake("project_1", &inputs)));
                 screen.set(Screen::Clarify);

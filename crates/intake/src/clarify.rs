@@ -481,6 +481,7 @@ mod tests {
             constraints: String::new(),
             views: vec![ViewSpec::new("Expense", ViewKind::List)],
             clarifications: vec![],
+            style: Default::default(),
         }
     }
 

@@ -473,6 +473,11 @@ pub struct IntakeForm {
     /// still compiles.
     #[serde(default)]
     pub views: Vec<ViewSpec>,
+    /// The PO's look-and-feel selections (shipped palette, button shape, font,
+    /// inspiration images). Defaults to "no preference, engineer's choice".
+    /// See [`crate::appearance`].
+    #[serde(default)]
+    pub style: crate::appearance::StylePreferences,
 }
 
 impl IntakeForm {
@@ -527,6 +532,7 @@ impl IntakeForm {
                 .to_string(),
             clarifications: vec![],
             views: vec![ViewSpec::new("Expense", ViewKind::List)],
+            style: crate::appearance::StylePreferences::default(),
         }
     }
 
@@ -553,6 +559,7 @@ impl IntakeForm {
             constraints: String::new(),
             clarifications: vec![],
             views: vec![ViewSpec::new("Expense", ViewKind::List)],
+            style: crate::appearance::StylePreferences::default(),
         }
     }
 
@@ -630,6 +637,7 @@ impl IntakeForm {
                 ViewSpec::new("Event", ViewKind::List),
                 ViewSpec::new("Rsvp", ViewKind::List),
             ],
+            style: crate::appearance::StylePreferences::default(),
         }
     }
 
@@ -674,6 +682,7 @@ impl IntakeForm {
             constraints: "Single user only. No social / sharing features.".to_string(),
             clarifications: vec![],
             views: vec![ViewSpec::new("ReadingItem", ViewKind::List)],
+            style: crate::appearance::StylePreferences::default(),
         }
     }
 
@@ -731,6 +740,11 @@ impl IntakeForm {
         // ── 4. Constraints ───────────────────────────────────────────────────
         if !self.constraints.is_empty() {
             out.push_str(&format!("Constraints: {}\n", self.constraints));
+        }
+
+        // ── 4b. Look and feel (the PO's style selections) ────────────────────
+        if let Some(style_block) = self.style.render() {
+            out.push_str(&style_block);
         }
 
         // ── 5. Clarifications ────────────────────────────────────────────────
