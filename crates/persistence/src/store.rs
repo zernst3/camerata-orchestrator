@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Pool, Row, Sqlite, SqlitePool};
 
 use crate::{
+    artifacts::ArtifactStore,
     error::PersistenceError,
     model::{ProvenanceEntry, ProvenanceId, SessionRecord},
 };
@@ -104,10 +105,15 @@ impl SqliteStore {
     /// Open (or create) a SQLite database at the given path.
     ///
     /// Pass `":memory:"` for an in-memory database (tests / ephemeral runs).
+    ///
+    /// Creates ALL tables on first open: session/provenance tables (via
+    /// [`Store::migrate`]) and artifact revision tables (via
+    /// [`ArtifactStore::migrate_artifacts`]).
     pub async fn open(database_url: &str) -> Result<Self, PersistenceError> {
         let pool = SqlitePool::connect(database_url).await?;
         let store = Self { pool };
         store.migrate().await?;
+        store.migrate_artifacts().await?;
         Ok(store)
     }
 

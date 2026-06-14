@@ -4,8 +4,9 @@ The design spec for the consumer-mode prototype (VISION section 5, PO mode; sect
 20, the consumer tier). This is the artifact: a flow a non-technical person walks
 through, recordable as a video, that proves a governed, clarification-first app
 generator is possible. The differentiator is not the code generation (that is
-becoming commodity). It is the **pre-build clarification conversation** and the
-**design polish**. This doc is the bar for both.
+becoming commodity). It is the **pre-build refinement conversation**, the
+**three-artifact model that keeps the project honest over time**, and the **design
+polish**. This doc is the bar for all three.
 
 > Scope note: the prototype deploys to the user's OWN Azure account
 > (bring-your-own-infra). The managed-cloud PaaS is the funded endgame (VISION
@@ -13,29 +14,29 @@ becoming commodity). It is the **pre-build clarification conversation** and the
 
 ## The one-sentence experience
 
-A person who cannot code answers a structured form, has a short back-and-forth with
-an AI lead engineer who pins down what they actually meant, watches a governed agent
-team build it, and ends with a working app live on their own cloud, never seeing a
-line of code or a single error message.
+A person who cannot code fills out a structured project form, refines a living set
+of user stories with an AI lead engineer until they are both confident, watches a
+governed agent team build it, tests the draft themselves, and ends with a working app
+live on their own cloud, never seeing a line of code or a single error message.
 
-## Design principles (the bar: best-in-class user-friendly design)
+## Design principles (the bar: best-in-class, most thorough user-friendly consumer-product design)
 
 The standard here is the most thorough, user-friendly consumer-product design, the
 kind that makes powerful machinery feel effortless. Every principle below serves
 that: the user should feel guided and capable, never lost or technical.
 
 1. **One decision per screen.** Never show the user two things to think about at
-   once. The form is paged, the clarification is one question-thread at a time, the
-   build is a single calm progress narrative.
+   once. The form is paged, the refinement session works one question-thread at a
+   time, and the build is a single calm progress narrative.
 2. **Progressive disclosure.** The complexity (governance, agents, worktrees, the
    gate) is real and total underneath, and almost entirely invisible above. The user
    sees intent and outcome, never plumbing.
 3. **Calm confidence, not dashboards.** No blinking terminals, no logs, no token
    counters. The surface communicates "this is handled" the way a well-made product
    does. Motion is slow and reassuring, not busy.
-4. **The conversation is the magic, so it gets the spotlight.** The clarify step is
-   the one moment the product feels smarter than the user expected. It is the hero
-   screen and the centerpiece of the video.
+4. **The conversation is the magic, so it gets the spotlight.** The refinement
+   session is the one moment the product feels smarter than the user expected. It is
+   the hero screen and the centerpiece of the video.
 5. **No error messages, ever, to the consumer.** When an agent stumbles, the gate
    bounces it and it retries silently (the bounce-and-revise loop). The user sees a
    slightly longer "working" state, never a stack trace.
@@ -43,84 +44,226 @@ that: the user should feel guided and capable, never lost or technical.
    magic-free. It narrates ("designing the data model", "writing the expense list",
    "checking it against the rules") so the user trusts the process they are watching.
 
-## The journey (the recordable flow)
+## The three artifact types
 
-### 1. Intake: a strict, open-ended user-story form
+Everything the user produces and everything the AI contributes lives in exactly three
+artifact types. Understanding these is the key to the whole product.
+
+### 1. The onboarding document
+
+The onboarding document is the grand project plan the user fills out first. It is
+strict in structure (every app has roles, entities, actions) and open in content (any
+domain). It forces a thorough, well-bounded user story for whatever the user wants to
+build, without being budget-specific and without collapsing into a single prompt box
+(that is the failure mode of the commodity tools).
+
+The onboarding document is the SEED the first refinement session reads. Once the
+first refinement session begins, the onboarding document is **frozen as read-only
+origin and history**. It is not the thing the user keeps editing. It is the record of
+where the project started.
+
+### 2. User stories (and bug stories)
+
+User stories are the investigation's main output: pre-filled by the AI, but written
+in consumer-abstracted prose, NOT real product-owner or engineering user stories.
+There are no API contracts, no Gherkin, no technical acceptance criteria. A user
+story a normal person understands: who it is for, and a plain bulleted list of what
+they want to be able to SEE and DO.
+
+The user can ADD, EDIT, and DELETE user stories at any point. After the onboarding
+document is frozen, **user stories (and later, bug stories) become the living source
+of truth, exactly the way stories and bug tickets are the source of truth in real
+software development.** Every refinement session works from the current story list.
+Every build executes against it. The history of edits to the story list is the
+history of the project.
+
+Bug stories are the same shape as user stories, produced through the structured bug
+form during QA. They describe a problem (where it happened, what the user did, what
+they expected, what actually happened) in a form the agents can act on. They feed
+into a refinement session, which feeds into a fix build.
+
+### 3. Clarifications and answers
+
+Clarifications are question-and-answer pairs. Both the AI and the user can add,
+edit, and delete them. They live alongside the story list throughout the project.
+They are the record of every decision that was made in conversation, so no context
+is lost between sessions.
+
+### Plus: product suggestions and the confidence score
+
+**Product suggestions** are proactive product-level catches the AI raises that the
+user would not have thought of. Example: "You added login. Apps like this usually
+also need a place to manage who has access and what they can do. Want me to include a
+simple permissions area?" (RBAC, explained plainly.) Each product suggestion
+**references a specific user story**, so the user always knows what prompted it.
+
+**The confidence score** is a running percentage. It is the single convergence
+signal for the whole refinement loop: how ready is the AI to build this well, right
+now? It updates as stories and clarifications are added or edited. It is the honest
+signal that makes "skip ahead and build anyway" a legible trade-off rather than a
+coin flip.
+
+## Persistence and version history (every edit is saved, nothing is lost)
+
+The artifacts above are not in-memory scratch. Every artifact (the onboarding
+document, each user story, each clarification, each suggestion, each refinement
+session) is persisted to a database, and every edit by the user OR the AI is written
+in real time as a new revision. The store is append-only: an edit never overwrites,
+it appends a new version, so the full history of how a story or a spec evolved is
+always recoverable, and the audit trail records WHO made each change (user or AI),
+WHAT operation (create / edit / remove), and WHEN. This is what lets the product
+show version history, undo, and a credible provenance trail, and it is what makes
+"stories are the source of truth" real rather than aspirational: the truth lives in
+the database, versioned, not in a transient UI buffer.
+
+Engine choice: the prototype and the desktop cockpit use embedded SQLite (zero-ops,
+one binary, matches the single-process monolith). The managed-cloud endgame (VISION
+section 20) moves the same store behind the same trait seam to managed Postgres. The
+version history is implemented at the application level as an event-sourced revision
+log, NOT via database-native temporal/system-versioned tables: the revision log is
+portable across SQLite and Postgres, and it carries richer intent (actor, operation,
+plain-language note) than row-state temporal tables can. See
+`crates/persistence` (`ArtifactStore`) and `docs/decisions/`.
+
+## The refinement session: the one repeating primitive
+
+There is exactly one back-and-forth loop, and it is the heart of the product. It is
+called the **refinement session**, and it works like this:
+
+> The AI reviews the current artifacts (onboarding document, user stories,
+> clarifications) and edits stories, raises product suggestions, and asks clarifying
+> questions. The user edits, answers, adds, and deletes stories, clarifications, and
+> answers. The confidence score updates. Repeat until the user is happy with the
+> confidence percentage.
+
+The user can bypass at any time ("just build it"). The confidence score shows what
+they are trading off, but it is their call. The refinement session guides; it never
+traps.
+
+The refinement session is not a one-time setup. It is the same primitive, reused in
+three contexts across the lifecycle:
+
+**Pre-build refinement.** The onboarding document seeds the first session. The AI
+investigates, fills in stories, raises suggestions, and asks questions. The user
+refines. Repeat until the user approves and the confidence is where they want it.
+This is where the plan is reviewed as both prose and a visual entity-and-action map.
+Then the user clicks Build.
+
+**Mid-build refinement.** During execution, builder agents may hit a genuine question
+that changes the outcome in a way the plan did not resolve. When that happens,
+execution PAUSES and a refinement session opens, scoped to exactly that question.
+Once the user answers and the session closes, execution RESUMES. Most builds need
+none of these. When one surfaces, it appears calmly, as a quiet question, never as
+an error.
+
+**Post-build refinement.** After a build, the user tests the draft. Problems are
+filed through the structured bug form, which forces a shape the agents can act on.
+Those bug reports become bug stories and feed a new refinement session, which feeds a
+fix build. The cycle repeats until the user is satisfied.
+
+## The lifecycle
+
+```
+onboarding document
+    |
+    v
+refinement session  <--+
+    |                  | (N rounds, until confident)
+    +------------------+
+    |
+    v
+execution (build)
+    |
+    +-- [mid-build escalation -> refinement session -> resume]  (as needed)
+    |
+    v
+post-build refinement  <--+
+    |   (QA + structured bug forms -> bug stories -> fix build)
+    +---------------------------+
+    |                          | (N rounds, until satisfied)
+    v                          |
+    +-- continue or ---------->+
+    |
+    v
+publish  (draft -> live on the user's own cloud)
+    |
+    v
+ongoing tracked changes  (each change runs the same loop in miniature)
+```
+
+The whole product is one primitive (the refinement session) alternating with
+execution, both before and after the first build, with the deterministic governance
+gate underneath every execution. Publish is the explicit draft-to-live gate. After
+publish, the user keeps changing the app: each change runs the same loop in
+miniature, and every change is safe because the same governance applies. The story
+list carries the history.
+
+## The journey screen-by-screen (the recordable flow)
+
+### 1. Intake: the onboarding document
 
 The form is the constraint that keeps the agents aligned. It is NOT a single prompt
-box (that is the failure mode of the consumer tools). It is also NOT
-budget-specific; it is open-ended enough for any small bespoke app, while forcing a
-thorough, well-bounded user story.
+box. It is also NOT budget-specific. It is open-ended enough for any small bespoke
+app while forcing a thorough, well-bounded project plan.
 
 Form shape (the strict-but-flexible spine):
-- **What is it?** App name + a one-paragraph plain-language description.
-- **Who uses it, and what can each kind of person do?** Roles + their top actions.
-  This is the user-story forcing function: "As a [role], I want to [action]."
+
+- **What is it?** App name plus a one-paragraph plain-language description.
+- **Who uses it, and what can each kind of person do?** Roles and their top actions.
+  This is the forcing function: "a person of type X wants to be able to Y."
 - **What are the things it keeps track of?** Entities, each with a few fields. The
   UI offers types in plain language ("a price", "a date", "yes/no", "a link to
   another thing"), not SQL types.
-- **What should a person be able to do with each thing?** CRUD-ish features per
-  entity, in consumer words (add / see a list / edit / remove / search).
-- **Anything important or unusual?** A free-text constraints box for the leeway and
-  creativity: rules, must-haves, look-and-feel wishes.
+- **What should a person be able to do with each thing?** CRUD-style features per
+  entity, in consumer words (add, see a list, edit, remove, search).
+- **Anything important or unusual?** A free-text constraints box for rules,
+  must-haves, and look-and-feel wishes.
 
-The form is strict in structure (every app has roles, entities, actions) and open in
-content (any domain). It produces the typed `IntakeForm` the engine already models.
+The form produces the typed `IntakeForm` the engine already models. Once submitted,
+it is the frozen origin. The next thing the user sees is the refinement session.
 
-### 2. Clarify: the lead engineer's checklist (THE HERO)
+### 2. The refinement session (THE HERO)
 
-On submit, the AI lead engineer reads the whole form and does what a good engineer
-does with a vague ticket: it finds the gaps, contradictions, and unstated
-assumptions, and works through them with the user. This is the screen the video
-lingers on, and it is the differentiator.
+This is the screen the video lingers on. It is the differentiator. Everything else a
+prompt-to-code tool does; this, done well, they do not.
 
-The conversation IS a checklist: a running list of the things the lead engineer
-needs pinned down before it feels comfortable building. Each answered item ticks
-off; the user can see how close the engineer is to "ready."
+The refinement session screen has four elements working together:
 
-- **Hybrid, free-text-led.** The user answers in their own words (free text is
-  primary), with guidance baked in: each question carries a short reason, and the UI
-  offers quick-reply chips and suggested answers so the user is steered, never stuck.
-- **A confidence score, tracked throughout and visible.** It climbs as the checklist
-  fills. It is the honest signal of "how well can I build this for you right now,"
-  and it is what makes the trade-off of skipping ahead legible.
-- **Product-level suggestions the user did not think of.** The lead engineer
-  proactively raises things a Product Owner would miss, in plain language. Example:
-  "You added login. Apps like this usually also need a place for an admin to manage
-  users and decide who can do what. Want me to include a simple users-and-permissions
-  area?" Written this way, the user understands it even though they never thought of
-  RBAC. This is the engineer earning its title.
-- **Honest about its own limits.** The lead engineer knows what Camerata can and
-  cannot build well. If the app genuinely needs a human architect in the loop, it
-  says so. If the request is beyond what Camerata can do well on its own (too large or
-  too novel), it says that plainly rather than confidently building something
-  fragile. This honesty is a trust feature, not a failure.
-- **Bypassable at any time.** The user can say "just build it" whenever they want.
-  The confidence score shows what they are trading off (a lower-confidence build), but
-  it is their call. The checklist guides; it never traps.
-- **Ends with the plan: prose AND a diagram.** A plain-language summary of what will
-  be built, alongside a visual map of the entities and their actions, with the
-  product suggestions and the decisions folded in. The user approves, tweaks, or
-  builds anyway.
+- **The user-story list.** The centerpiece. Pre-filled by the AI from the onboarding
+  document, written in plain consumer prose. Each story shows who it is for and a
+  bulleted list of what they see and do. The user can add, edit, and delete stories
+  inline.
+- **The confidence score.** Prominent, climbing. The honest signal of readiness. The
+  user watches it rise as the session progresses.
+- **Product suggestions.** Proactive raises from the AI, each anchored to a specific
+  story. Shown in a way that invites the user to act on them (accept, edit, dismiss).
+- **The running AI-to-user transcript.** Questions, answers, and reasoning, visible
+  as a clean conversation thread. The user answers in free text (primary), with
+  guidance chips and suggested replies baked in so they are steered, never stuck.
 
-This pre-build alignment is the feature the prompt-to-code tools do not have and the
-SDD tools bury behind markdown. Showing it on screen, in plain language, is the pitch.
+The user can click "just build it" at any time. The confidence score makes the
+trade-off visible.
+
+The session ends when the user is happy with the confidence percentage. At that
+point, the plan is shown as BOTH prose (a short plain-language summary of what will
+be built) AND a visual entity-and-action map. The user approves, tweaks, or builds
+anyway.
 
 ### 3. Build: governed construction, with the engineer still listening
 
-The user clicks Build once. Underneath: the plan becomes governed agent tasks, the
-fleet runs, every write passes the gate, layer-2 checks bounce anything sloppy. On
-top: a single, slow, legible progress story.
+The user clicks Build once. Underneath: the story list becomes governed agent tasks,
+the fleet runs, every write passes the gate, layer-2 checks bounce anything sloppy.
+On top: a single, slow, legible progress story.
 
 - A short list of human-readable stages ("Setting up the project", "Building the
   data model", "Creating the screens", "Checking it against the rules"), each
   completing with a quiet check.
-- When the gate bounces an agent, the stage simply takes a little longer; the copy
+- When the gate bounces an agent, the stage simply takes a little longer. The copy
   stays calm. The user never learns a rule was violated.
-- **The engineer can still ask.** If a real question surfaces mid-build that changes
-  the outcome, the lead engineer raises it to the user instead of guessing ("For the
-  export, did you want a spreadsheet or a PDF?"). Most builds need none; when one is
-  needed, it appears calmly, never as an error.
+- **Mid-build escalations appear as quiet questions.** If a builder agent hits a
+  question that changes the outcome, execution pauses, the question appears on
+  screen, the user answers, and execution resumes. Most builds need none. When one
+  appears, it is calm, never alarming.
 - No terminal, no logs, no jitter. Time-honest, trust-honest, stress-free.
 
 ### 4. QA: the user tests their own app (in draft)
@@ -129,13 +272,20 @@ The built app opens in a DRAFT state, and the user is the QA. They click around,
 the things they asked for, and confirm it does what they meant. The product is honest
 that this is a draft the user verifies, not a finished thing dropped on them.
 
-### 5. Report a problem: the structured bug form
+### 5. The bug form: structured problem reports
 
-If something is wrong, the user files it through a bug form. Like the intake form, it
-is strict: it forces the user to describe the problem in a shape the agents can act
-on (what they did, what they expected, what actually happened, on which screen or
-feature), not a vague "it's broken." The report goes back through the governed build
-loop, the agents fix it under the gate, and the user re-QAs. Iterate until happy.
+If something is wrong, the user files it through the structured bug form. Like the
+intake form, it is strict: it forces the user to describe the problem in a shape the
+agents can act on. The four fields:
+
+- **Where were you?** The screen or feature.
+- **What did you do?** The action the user took.
+- **What did you expect?** What should have happened.
+- **What actually happened?** What did happen.
+
+This is not a free-text complaint box. It produces a bug story in the same format as
+a user story. The bug story feeds a refinement session (scoped to the fix), which
+feeds a targeted build, and the user re-QAs. Iterate until satisfied.
 
 ### 6. Publish: out of draft, onto your cloud
 
@@ -144,75 +294,132 @@ deployed to their own cloud (BYO-infra for the prototype). "Your app is live" wi
 real URL on their own account. The draft-to-publish gate keeps the user in control of
 when their app becomes real.
 
-### 7. Change it: tracked changes
+### 7. Ongoing tracked changes
 
-After publishing, the user can keep changing the app. Each change is tracked and runs
-the same loop in miniature (describe -> clarify -> governed build -> QA -> publish).
-The app has a history, and every change is safe because the same governance applies to
-all of them. This is the iteration that makes the prompt-to-code tools collapse into
-debt, made durable by the gate.
+After publishing, the user can keep changing the app. Each change is described,
+refined, built, and QA-tested through the same loop in miniature. The story list
+grows. Bug stories accumulate. Every change is safe because the same governance
+applies to all of them. This is the iteration that makes the prompt-to-code tools
+collapse into debt, made durable by the gate.
 
 ## The lead engineer's behavior (the intelligence the user feels)
 
-This is the spec for what makes the conversation feel like a real Staff Engineer, and
-the bar for the `LeadEngineer` implementation:
+This is the spec for what makes the refinement session feel like a real Staff
+Engineer and the bar for the `LeadEngineer` implementation:
 
-- **Checklist-driven.** It maintains an explicit list of what it needs to know, works
-  the user through it, and shows progress.
-- **Confidence-scored.** It tracks and exposes how ready it is to build well.
-- **Proactively suggestive.** It raises product-level needs the user would not think
-  of (admin/RBAC alongside login, soft-delete, audit, etc.), always explained plainly.
-- **Honest about limits.** It recommends a human architect when warranted and declines
-  to over-promise on apps beyond Camerata's reach, rather than building something that
-  will fail QA.
-- **Reachable during the build.** It surfaces genuine mid-build questions instead of
-  guessing.
-
-## What the video shows (the artifact) and the definition of done
-
-The recording is the whole flow, as a regular person: fill the open-ended form, work
-the clarify checklist (the engineer catching things you did not think of, suggesting
-the admin page, the confidence score climbing), approve the plan (prose + diagram),
-watch the calm governed build, QA the draft yourself, optionally file a structured bug
-and watch it get fixed, then publish to a real cloud URL on your own account.
-
-**Definition of done for the prototype:** Zach can screen-record that entire flow,
-twice, for two genuinely different apps (one improvised on the spot), and show a
-working published end product on his own Azure. Scope-honest: the apps are real but
-modest (a useful small CRUD-class app), within what Camerata can build well, NOT a
-full Salesforce-scale system. The artifact proves the *product is possible* and that
-the consumer-as-Product-Owner clarify loop is real; it does not productionize the
-managed PaaS (that is the funded endgame, VISION section 20).
+- **Checklist-driven.** It maintains an explicit list of what it needs to know,
+  works the user through it, and shows progress. The story list is the artifact that
+  grows out of this checklist.
+- **Confidence-scored.** It tracks and exposes how ready it is to build well. The
+  score is a first-class output of every session turn, not an afterthought.
+- **Proactively suggestive, with story references.** It raises product-level needs
+  the user would not think of (admin access alongside login, soft-delete, audit
+  trails, etc.), always explained plainly, always anchored to the specific story that
+  prompted the observation.
+- **Honest about limits.** It recommends a human architect when the app genuinely
+  needs one. It declines to over-promise on apps beyond Camerata's reach, rather than
+  confidently building something that will fail QA. This honesty is a trust feature,
+  not a failure.
+- **Reachable during the build.** It surfaces genuine mid-build questions to the
+  user instead of guessing, and it does so calmly, as described in the mid-build
+  escalation model.
 
 ## Build order for the UI (Dioxus)
 
 1. The screens as static, beautifully-styled Dioxus views with mocked data (intake,
-   clarify-checklist, build, QA, bug form, publish/live), to nail the look and the
-   motion first (get the feel right before wiring, the way the best consumer products
-   do).
-2. Wire intake -> the typed `IntakeForm`.
-3. Wire clarify -> the real multi-turn `LeadEngineer` loop with the checklist,
-   confidence score, and product suggestions.
-4. Wire build -> the `FleetCoordinator` with a live progress stream (needs stream-json
-   from the agent driver) and the mid-build question channel.
-5. Wire QA / bug form -> the governed fix loop; publish -> the BYO-infra deploy.
-5. Wire live -> the Azure deploy adapter.
+   refinement session, build, QA, bug form, publish/live), to nail the look and the
+   motion first. Get the feel right before wiring, the way the best consumer products
+   do.
+2. Wire intake into the typed `IntakeForm`.
+3. Wire the refinement session into the real multi-turn `LeadEngineer` loop: the
+   editable story list, the confidence score, the product suggestions with story
+   references, and the running clarification transcript.
+4. Wire build into the `FleetCoordinator` with a live progress stream (needs
+   stream-json from the agent driver) and the mid-build escalation channel.
+5. Wire QA and the bug form into the governed fix loop. Wire publish into the
+   BYO-infra deploy adapter.
 
-Dogfood chorale for any tabular surfaces (the generated app's own admin lists), per
-the family conventions.
+Dogfood rust-chorale for any tabular surfaces (the story list, the generated app's
+own admin views), per the family conventions.
+
+## What the video shows and the definition of done
+
+The recording is the whole flow, as a regular person: fill the open-ended onboarding
+document, work the refinement session (the AI pre-filling stories in plain prose, the
+confidence score climbing, a product suggestion anchored to a specific story), approve
+the plan (prose and diagram), watch the calm governed build, test the draft yourself,
+optionally file a structured bug and watch it feed a targeted fix, then publish to a
+real cloud URL on your own account.
+
+**Definition of done for the prototype:** Zach can screen-record that entire flow,
+twice, for two genuinely different apps (one improvised on the spot), and show a
+working published end product on his own Azure. Scope-honest: the apps are real but
+modest (useful small CRUD-class apps), within what Camerata can build well, NOT a
+full enterprise-scale system. The artifact proves the product is possible and that the
+consumer-as-Product-Owner refinement loop is real. It does not productionize the
+managed PaaS (that is the funded endgame, VISION section 20).
 
 ## Resolved UX decisions (Zach, 2026-06-14)
 
-1. **The clarify conversation is HYBRID, free-text-led.** The user goes back and
-   forth in their own words (free text is primary), but guidance is baked in: the
-   engineer frames each question with a short reason, offers quick-reply chips and
-   suggested answers, and steers the user toward a complete story. The model is the
-   kind of guided back-and-forth this very project was designed through: open
-   conversation, but never aimless.
-2. **The plan is shown as BOTH prose AND diagrams.** A short plain-language summary
+1. **Stories and bug stories are the source of truth after the onboarding document is
+   frozen.** The onboarding document is read-only history once the first refinement
+   session begins. Everything after that lives in the story list and the
+   clarification record. This mirrors the way real software development works:
+   tickets and stories, not the original brief, are the source of truth.
+2. **The refinement session is the single primitive, reused in all three contexts.**
+   Pre-build, mid-build, and post-build all run the same loop: review artifacts,
+   edit stories, raise suggestions, ask questions, update confidence, repeat. There
+   is no separate "clarify" step and "bug triage" step; it is one primitive with
+   three contexts.
+3. **The clarification conversation is hybrid, free-text-led.** The user goes back
+   and forth in their own words (free text is primary), but guidance is baked in: the
+   AI frames each question with a short reason, offers quick-reply chips and suggested
+   answers, and steers the user toward a complete story. The model is the kind of
+   guided back-and-forth this very project was designed through: open conversation,
+   but never aimless.
+4. **The plan is shown as both prose and a diagram.** A short plain-language summary
    of what is being built, alongside a visual map of the entities and their actions,
    so the user understands the app from two angles before approving.
-3. **The demo video is a MONTAGE OF TWO open-ended apps.** Not one canned example.
+5. **The demo video is a montage of two open-ended apps.** Not one canned example.
    Two genuinely different apps, ideally one improvised on the spot, to prove the
-   flow works for whatever a person dreams up, not a pre-scripted budgeting demo.
-   The open-ended form (not budget-specific) exists precisely to make this possible.
+   flow works for whatever a person dreams up, not a pre-scripted scenario. The
+   open-ended form (not budget-specific, not domain-specific) exists precisely to
+   make this possible.
+
+## UI status
+
+The consumer UI prototype lives in `crates/ui` (`camerata-ui`).
+
+**Screens that exist** (one Dioxus view per stop of the journey, in
+`crates/ui/src/screens/`):
+
+- **Intake** — the open-ended onboarding document form.
+- **Clarify** — the refinement session (the hero screen): editable story list,
+  confidence score, product suggestions, clarification transcript.
+- **Build** — governed-construction narrative with stage-by-stage progress beats.
+- **Qa** — the user tests their own draft app.
+- **Bug** — the structured "report a problem" form (a side loop off Qa).
+- **Live** — publish / out-of-draft.
+
+**Stack / target.** Dioxus 0.7.9, **desktop** target (chosen over web to avoid
+the wasm toolchain for a build-it/run-it/screen-record-it artifact; matches the
+family version used by rust-portfolio and rust-chorale). Navigation is a single
+`Screen` enum plus one signal. Styling is a hand-written global stylesheet
+(`style.rs`); no component kit.
+
+**Run command (desktop app):**
+
+```bash
+cargo run -p camerata-ui
+```
+
+(Optionally `dx serve` from `crates/ui` if you have the Dioxus CLI and want
+hot-reload; the plain `cargo run` needs no extra tooling.)
+
+**Wired vs. mocked.** Everything is **mocked**. All screen content comes from
+the static fixtures in `crates/ui/src/data.rs`; the Build screen's progress is a
+timed dwell (`tokio::time::sleep` inside `use_future`), not a live fleet stream.
+No engine wiring yet: Intake does not yet produce a typed `IntakeForm`, the
+refinement session does not call the real multi-turn `LeadEngineer` loop, Build does
+not drive the `FleetCoordinator`, and Live does not deploy. The goal of this pass is
+the look, the motion, and the flow; wiring follows the build order above.

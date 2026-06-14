@@ -33,6 +33,9 @@ pub mod clarify;
 pub mod engine;
 pub mod form;
 pub mod plan;
+pub mod project;
+pub mod refinement;
+pub mod story;
 
 pub use clarify::{
     AnswerSource, ClarifyDriver, ClarifyError, ClarifyOutcome, SequentialAnswerSource,
@@ -52,6 +55,12 @@ pub use form::{
     IntakeForm,
 };
 pub use plan::{Plan, PlanTask, TaskKind};
+pub use project::{LifecycleError, Phase, Project};
+pub use refinement::{
+    Actor, BugReport, Escalation, RefinementContext, RefinementReview, RefinementSession,
+    RefinementTurn, SessionState,
+};
+pub use story::{StoryId, StoryOrigin, UserStory};
 
 use serde::{Deserialize, Serialize};
 

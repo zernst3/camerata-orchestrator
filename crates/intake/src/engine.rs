@@ -37,6 +37,7 @@ use thiserror::Error;
 
 use crate::form::IntakeForm;
 use crate::plan::{Plan, PlanTask, TaskKind};
+use crate::story::StoryId;
 use crate::Intake;
 
 // ─── confidence score newtype ─────────────────────────────────────────────────
@@ -46,7 +47,7 @@ use crate::Intake;
 /// 0 = no idea yet; 100 = fully pinned down. It rises as [`ChecklistItem`]s are
 /// resolved. The UI renders it as a progress signal so the PO understands the
 /// trade-off of skipping ahead ("lower-confidence build is your call").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ConfidenceScore(u8);
 
 impl ConfidenceScore {
@@ -140,10 +141,17 @@ pub struct ProductSuggestion {
     /// The rationale in one sentence, so the PO can decide without needing
     /// engineering context.
     pub rationale: String,
+    /// The [`StoryId`](crate::story::StoryId) this suggestion is about, when it
+    /// arises from a specific user story (e.g. an "admin area" suggestion that
+    /// references the "log in" story). `None` for project-wide suggestions that
+    /// do not attach to one story. The UI renders the link so the PO sees WHICH
+    /// part of their app the suggestion concerns.
+    #[serde(default)]
+    pub story_id: Option<StoryId>,
 }
 
 impl ProductSuggestion {
-    /// Construct a product suggestion.
+    /// Construct a project-wide product suggestion (not tied to one story).
     pub fn new(
         id: impl Into<String>,
         suggestion: impl Into<String>,
@@ -153,7 +161,29 @@ impl ProductSuggestion {
             id: id.into(),
             suggestion: suggestion.into(),
             rationale: rationale.into(),
+            story_id: None,
         }
+    }
+
+    /// Construct a product suggestion that references a specific user story.
+    pub fn for_story(
+        id: impl Into<String>,
+        story_id: StoryId,
+        suggestion: impl Into<String>,
+        rationale: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            suggestion: suggestion.into(),
+            rationale: rationale.into(),
+            story_id: Some(story_id),
+        }
+    }
+
+    /// Attach (or replace) the referenced story id. Builder form.
+    pub fn referencing(mut self, story_id: StoryId) -> Self {
+        self.story_id = Some(story_id);
+        self
     }
 }
 
