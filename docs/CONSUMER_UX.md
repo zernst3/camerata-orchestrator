@@ -1,16 +1,15 @@
 # CONSUMER_UX.md
 
-The design spec for the consumer-mode prototype (VISION section 5, PO mode; section
-20, the consumer tier). This is the artifact: a flow a non-technical person walks
-through, recordable as a video, that proves a governed, clarification-first app
-generator is possible. The differentiator is not the code generation (that is
+The design spec for the consumer-mode prototype (the app-builder surface in VISION).
+This is the artifact: a flow a non-technical person walks through, recordable as a
+video, that shows a governed, clarification-first app generator is possible. The differentiator is not the code generation (that is
 becoming commodity). It is the **pre-build refinement conversation**, the
 **three-artifact model that keeps the project honest over time**, and the **design
 polish**. This doc is the bar for all three.
 
 > Scope note: the prototype deploys to the user's OWN Azure account
-> (bring-your-own-infra). The managed-cloud PaaS is the funded endgame (VISION
-> section 20), not this artifact.
+> (bring-your-own-infra). Fully managed hosting is a later direction (VISION),
+> not this artifact.
 
 ## The one-sentence experience
 
@@ -19,9 +18,9 @@ of user stories with an AI lead engineer until they are both confident, watches 
 governed agent team build it, tests the draft themselves, and ends with a working app
 live on their own cloud, never seeing a line of code or a single error message.
 
-## Design principles (the bar: best-in-class, most thorough user-friendly consumer-product design)
+## Design principles (the bar: best-in-class, most thorough user-friendly consumer-grade design)
 
-The standard here is the most thorough, user-friendly consumer-product design, the
+The standard here is the most thorough, user-friendly consumer-grade design, the
 kind that makes powerful machinery feel effortless. Every principle below serves
 that: the user should feel guided and capable, never lost or technical.
 
@@ -32,22 +31,22 @@ that: the user should feel guided and capable, never lost or technical.
    gate) is real and total underneath, and almost entirely invisible above. The user
    sees intent and outcome, never plumbing.
 3. **Calm confidence, not dashboards.** No blinking terminals, no logs, no token
-   counters. The surface communicates "this is handled" the way a well-made product
+   counters. The surface communicates "this is handled" the way a well-made app
    does. Motion is slow and reassuring, not busy.
 4. **The conversation is the magic, so it gets the spotlight.** The refinement
-   session is the one moment the product feels smarter than the user expected. It is
+   session is the one moment the app feels smarter than the user expected. It is
    the hero screen and the centerpiece of the video.
 5. **No error messages, ever, to the consumer.** When an agent stumbles, the gate
    bounces it and it retries silently (the bounce-and-revise loop). The user sees a
    slightly longer "working" state, never a stack trace.
-6. **Honesty about what it is.** The product never pretends the build is instant or
+6. **Honesty about what it is.** The app never pretends the build is instant or
    magic-free. It narrates ("designing the data model", "writing the expense list",
    "checking it against the rules") so the user trusts the process they are watching.
 
 ## The three artifact types
 
 Everything the user produces and everything the AI contributes lives in exactly three
-artifact types. Understanding these is the key to the whole product.
+artifact types. Understanding these is the key to the whole experience.
 
 ### 1. The onboarding document
 
@@ -111,14 +110,14 @@ session) is persisted to a database, and every edit by the user OR the AI is wri
 in real time as a new revision. The store is append-only: an edit never overwrites,
 it appends a new version, so the full history of how a story or a spec evolved is
 always recoverable, and the audit trail records WHO made each change (user or AI),
-WHAT operation (create / edit / remove), and WHEN. This is what lets the product
+WHAT operation (create / edit / remove), and WHEN. This is what lets the app
 show version history, undo, and a credible provenance trail, and it is what makes
 "stories are the source of truth" real rather than aspirational: the truth lives in
 the database, versioned, not in a transient UI buffer.
 
 Engine choice: the prototype and the desktop cockpit use embedded SQLite (zero-ops,
-one binary, matches the single-process monolith). The managed-cloud endgame (VISION
-section 20) moves the same store behind the same trait seam to managed Postgres. The
+one binary, matches the single-process monolith). A later managed-cloud direction
+moves the same store behind the same trait seam to managed Postgres. The
 version history is implemented at the application level as an event-sourced revision
 log, NOT via database-native temporal/system-versioned tables: the revision log is
 portable across SQLite and Postgres, and it carries richer intent (actor, operation,
@@ -127,7 +126,7 @@ plain-language note) than row-state temporal tables can. See
 
 ## The refinement session: the one repeating primitive
 
-There is exactly one back-and-forth loop, and it is the heart of the product. It is
+There is exactly one back-and-forth loop, and it is the heart of the experience. It is
 called the **refinement session**, and it works like this:
 
 > The AI reviews the current artifacts (onboarding document, user stories,
@@ -191,7 +190,7 @@ publish  (draft -> live on the user's own cloud)
 ongoing tracked changes  (each change runs the same loop in miniature)
 ```
 
-The whole product is one primitive (the refinement session) alternating with
+The whole experience is one primitive (the refinement session) alternating with
 execution, both before and after the first build, with the deterministic governance
 gate underneath every execution. Publish is the explicit draft-to-live gate. After
 publish, the user keeps changing the app: each change runs the same loop in
@@ -308,7 +307,7 @@ On top: a single, slow, legible progress story.
 ### 4. QA: the user tests their own app (in draft)
 
 The built app opens in a DRAFT state, and the user is the QA. They click around, try
-the things they asked for, and confirm it does what they meant. The product is honest
+the things they asked for, and confirm it does what they meant. The app is honest
 that this is a draft the user verifies, not a finished thing dropped on them.
 
 ### 5. The bug form: structured problem reports
@@ -427,11 +426,11 @@ real cloud URL on your own account.
 
 **Definition of done for the prototype:** Zach can screen-record that entire flow,
 twice, for two genuinely different apps (one improvised on the spot), and show a
-working published end product on his own Azure. Scope-honest: the apps are real but
+working published app on the user's own Azure. Scope-honest: the apps are real but
 modest (useful small CRUD-class apps), within what Camerata can build well, NOT a
-full enterprise-scale system. The artifact proves the product is possible and that the
-consumer-as-Product-Owner refinement loop is real. It does not productionize the
-managed PaaS (that is the funded endgame, VISION section 20).
+full enterprise-scale system. The artifact shows the approach works and that the
+requirements-owner refinement loop is real. It does not implement fully managed
+hosting (a later direction, VISION).
 
 ## Resolved UX decisions (Zach, 2026-06-14)
 

@@ -1,4 +1,4 @@
-# Persistence: SQLite now, event-sourced versioning, Postgres at the endgame
+# Persistence: SQLite now, event-sourced versioning, Postgres later
 
 Date: 2026-06-14
 Status: Accepted
@@ -17,9 +17,8 @@ Postgres, and whether to use database-native temporal (system-versioned) tables.
 1. **Engine: embedded SQLite for the prototype and the desktop cockpit.** It is
    zero-ops, ships in one binary, and matches the single-process Tokio monolith the
    whole orchestrator already is (MONOLITH-1). The persistence is behind the
-   `Store` / `ArtifactStore` trait seam, so the managed-cloud endgame (VISION
-   section 20) swaps in managed Postgres (the same engine the Agora stack already
-   runs on Azure) without touching callers.
+   `Store` / `ArtifactStore` trait seam, so a later managed-cloud direction
+   (VISION) swaps in managed Postgres without touching callers.
 
 2. **Versioning: an application-level event-sourced revision log, NOT
    database-native temporal/system-versioned tables.** One append-only
@@ -54,5 +53,5 @@ seam makes the later switch cheap, so paying that cost now is premature.
   does not depend on `camerata-intake`.
 - "Real-time updates" is a wiring obligation on the UI: each user/AI edit calls
   `record_revision` immediately. The store already supports per-edit append.
-- The managed PaaS endgame must port the schema + queries to Postgres behind the
-  same trait; the event-sourced shape means no data-model rethink.
+- A later managed-cloud direction must port the schema + queries to Postgres behind
+  the same trait; the event-sourced shape means no data-model rethink.

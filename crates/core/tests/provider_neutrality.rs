@@ -4,9 +4,9 @@
 //!
 //! # What this test proves
 //!
-//! The POSITIONING.md moat claim states: "Camerata's governance gate is
-//! provider-neutral by construction." This file turns that assertion into a
-//! demonstrated, tested artifact via three independent proofs:
+//! The RATIONALE.md claim states: "Camerata's governance gate is provider-neutral
+//! by construction." This file turns that assertion into a demonstrated, tested
+//! artifact via three independent proofs:
 //!
 //! ## Proof 1 -- FleetCoordinator governs a non-Claude fake driver identically
 //!

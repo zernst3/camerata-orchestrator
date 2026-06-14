@@ -1,13 +1,13 @@
 # Provider Neutrality
 
-> Audience: technical evaluators and collaborators who have read POSITIONING.md
-> and want to verify the moat claim with code pointers, not adjectives.
+> Audience: technical evaluators and collaborators who have read [`RATIONALE.md`](RATIONALE.md)
+> and want to verify the provider-neutrality property with code pointers, not adjectives.
 
 ## The claim
 
-POSITIONING.md states that Camerata's governance gate is "provider-neutral by
-construction." This document turns that assertion into a demonstrated, tested
-artifact.
+[`RATIONALE.md`](RATIONALE.md) states that Camerata's governance gate is
+"provider-neutral by construction." This document turns that assertion into a
+demonstrated, tested artifact.
 
 ## Why it holds structurally
 
@@ -90,16 +90,16 @@ which model produced them. But "passes clippy" is a lower bound, not a ceiling.
 Layer-2 + bounce-and-revise is the mechanism that makes the floor provider-
 neutral; it does not make every provider equally skilled above that floor.
 
-That distinction matters for the moat argument. Provider neutrality is the
-property that prevents the governance layer from becoming a single-vendor
-dependency. It is not a claim that all models are equivalent.
+That distinction matters. Provider neutrality is the property that prevents the
+governance layer from becoming a single-vendor dependency. It is not a claim
+that all models are equivalent.
 
-## Tie-back to POSITIONING.md
+## Tie-back to the rationale
 
-POSITIONING.md identifies provider neutrality as the second tier-1 moat item:
-"A model vendor's guardrail governs THAT vendor's agents. Camerata's gate is
-provider-neutral by design (an MCP tool-gateway plus an agent-runtime seam, so
-a non-Claude model swaps in without touching the gate)."
+[`RATIONALE.md`](RATIONALE.md) identifies provider neutrality as a load-bearing
+architectural property: a vendor's guardrail governs THAT vendor's agents, while
+Camerata's gate is provider-neutral by design (an MCP tool-gateway plus an
+agent-runtime seam, so a non-Claude model swaps in without touching the gate).
 
 The `AgentDriver` trait is the agent-runtime seam. `GenericCliDriver` is the
 first non-Claude implementation. The proof test in

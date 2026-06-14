@@ -26,7 +26,7 @@ and use.
    semantic-retrieval call. The in-memory implementation uses naive token overlap to
    prove the seam; the production implementation embeds the abstracted documents
    (designs, stories, resolved bugs) and stores the vectors in a vector DB
-   (pgvector on the same Postgres the managed PaaS uses, or a dedicated store like
+   (pgvector on a shared Postgres, or a dedicated store like
    Qdrant / LanceDB), then retrieves by semantic similarity. Swapping it in is a new
    `impl DesignCorpus`, no caller changes.
 

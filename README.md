@@ -10,44 +10,41 @@ blocked from a forbidden write before it touches disk, in microseconds, in-proce
 fail-closed. That is the claim this repo backs end to end, and it is reproducible by
 running `cargo run -p camerata -- live-demo`.
 
-Everything else here is the product **vision** built out around that core to show where
-it leads. The vision is a governed multi-agent engineering platform exposed at two tiers
-on one engine. What is genuinely proven versus what is staged or opt-in is stated
-plainly in [Status](#status-what-runs-today-and-what-is-staged) below; this intro does
-not blur the two.
+Everything else here is built around that core to show where the architecture leads: a
+governed multi-agent engineering engine exposed through two interaction surfaces. What
+is genuinely proven versus what is staged or opt-in is stated plainly in
+[Status](#status-what-runs-today-and-what-is-staged) below; this intro does not blur the
+two.
 
-- **Tier 2 — the consumer app builder.** A non-technical owner refines an app with an
-  AI lead engineer, gets a working app they own on their own cloud, and a standing AI
+- **The app-builder surface.** A non-technical user refines an app with an AI lead
+  engineer, gets a working app they own on their own cloud, and a standing AI
   maintenance routine keeps it alive. The full data-and-flow spine is built and tested
   end to end; in the default experience the "lead engineer" is a deterministic stub and
   the build screen is a timed narrative, with the real governed fleet available opt-in
-  (see Status). It is the demonstration artifact and the larger-TAM bet. See
+  (see Status). It is the broadest surface. See
   [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
-- **Tier 1 — enterprise governed orchestration.** A human architect and a real Product
-  Owner collaborate through the tracker they already use (Jira / Azure DevOps / GitHub),
-  governed agents execute, and Camerata writes provenance, gate results, PR links, and
-  sign-off back onto their work items. This is the strongest **strategic** story (the
-  switching cost and provider-neutrality argument an incumbent's guardrail toggle cannot
-  match) and, honestly, the weakest **runtime** proof: it is the most code and the
-  most-tested crate, but every adapter test runs against a scripted fake and no live
-  Jira/ADO/GitHub call has been made yet (the real HTTP transport exists but is wired in
-  nowhere). The moat argument lives once, in [`docs/POSITIONING.md`](docs/POSITIONING.md);
-  the integration design is in [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
+- **The architect surface (governed orchestration).** A human architect and a real
+  requirements owner collaborate through the tracker they already use (Jira / Azure
+  DevOps / GitHub), governed agents execute, and Camerata writes provenance, gate
+  results, PR links, and sign-off back onto their work items. It is the most code and the
+  most-tested crate, but, stated honestly, every adapter test runs against a scripted
+  fake and no live Jira/ADO/GitHub call has been made yet (the real HTTP transport
+  exists but is wired in nowhere). The design rationale is in
+  [`docs/RATIONALE.md`](docs/RATIONALE.md); the integration design is in
+  [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
 
-## Tier 2 in detail
+## The app-builder surface in detail
 
-A non-technical owner IS the Product Owner, with no developer or architect in the
+A non-technical user is the requirements owner, with no developer or architect in the
 loop. They fill a structured intake form (including a shipped style kit), then work a
 **refinement session** with an AI lead engineer: an editable list of plain-language
-user stories, a climbing confidence score, proactive product suggestions, and honest
-limits. The same refinement loop runs before the build, during it (escalations), and
-after it (QA + structured bug reports). Camerata is the all-in service, including the
-standing AI maintenance routine. The whole flow is the artifact. See
-[`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+user stories, a climbing confidence score, proactive suggestions, and honest limits.
+The same refinement loop runs before the build, during it (escalations), and after it
+(QA + structured bug reports), including a standing AI maintenance routine. The whole
+flow is the artifact. See [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
 
-The small-business target (NOT individuals making to-do apps, NOT enterprises) and
-the "real competitor is the spreadsheet, not Buildium" thesis are detailed in
-[`docs/POSITIONING.md`](docs/POSITIONING.md).
+The interaction-design reasoning behind the clarification-first intake is in
+[`docs/RATIONALE.md`](docs/RATIONALE.md).
 
 ## What makes it different
 
@@ -105,15 +102,15 @@ because the intended reader is exactly the person who will run the code and chec
 
 **Built and tested, but not yet wired to anything live:**
 
-- **The default Tier-2 experience is deterministic, not model-driven.** The "AI lead
-  engineer" in the default flow is a deterministic `StubRefinementReviewer` (it asks
+- **The default app-builder experience is deterministic, not model-driven.** The "AI
+  lead engineer" in the default flow is a deterministic `StubRefinementReviewer` (it asks
   smart, form-derived questions, but calls no model), and the build screen is a timed
   narrative. The REAL governed fleet (gateway + `claude -p` agents, the same path the
   `po-demo` exercises) is opt-in behind `CAMERATA_LIVE_BUILD=1`, because a live build
   spends tokens. Publish runs through a deploy seam whose Azure path is a plan, not a
   live `az` execution.
-- **Tier 1 is the most code and the most-tested crate, and has made zero live API
-  calls.** The `WorkItemProvider` port, the Jira / Azure DevOps / GitHub adapters, the
+- **The architect surface is the most code and the most-tested crate, and has made zero
+  live API calls.** The `WorkItemProvider` port, the Jira / Azure DevOps / GitHub adapters, the
   async clarify-bridge, and SyncPolicy per-field source-of-truth + echo suppression all
   exist with an end-to-end flow test, but every adapter test runs against a scripted
   fake transport. The real `ReqwestTransport` compiles but is instantiated nowhere; no
@@ -132,23 +129,23 @@ needed, and narrate what they exercise:
 ```
 cargo run -p camerata -- live-demo          # the gate denies a real claude -p agent's forbidden write
 cargo run -p camerata -- po-demo            # a PO form -> lead engineer -> governed fleet -> cargo build/test
-cargo run -p camerata -- worktracker-demo   # Tier 1: ingest a story, the PO answers from their board, status written back
-cargo run -p camerata -- maintenance-demo   # Tier 2: the standing ops agent (security recommendation, approval gate, rotation)
-cargo run -p camerata -- deploy-demo        # Tier 2: the draft->publish gate, a local deploy, and the Azure az-CLI plan
-cargo run -p camerata-ui                    # the Dioxus consumer app (desktop)
+cargo run -p camerata -- worktracker-demo   # architect surface: ingest a story, the owner answers from their board, status written back
+cargo run -p camerata -- maintenance-demo   # app-builder surface: the standing ops agent (security recommendation, approval gate, rotation)
+cargo run -p camerata -- deploy-demo        # app-builder surface: the draft->publish gate, a local deploy, and the Azure az-CLI plan
+cargo run -p camerata-ui                    # the Dioxus app-builder surface (desktop)
 ```
 
 ## Read in this order
 
-1. [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md) — the product: the consumer flow,
-   screen by screen, and the lead engineer's behavior.
-2. [`docs/POSITIONING.md`](docs/POSITIONING.md) — who it is for, the moat, and the
-   honest caveats.
+1. [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md) — the app-builder flow, screen by
+   screen, and the lead engineer's behavior.
+2. [`docs/RATIONALE.md`](docs/RATIONALE.md) — why it is built this way, and the honest
+   caveats.
 3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the all-Rust stack, top to bottom.
 4. [`docs/decisions/`](docs/decisions/) — the design-decision records (start with the
    [index](docs/decisions/README.md)).
-5. [`docs/VISION.md`](docs/VISION.md) — the long-form north star and the two-tier
-   product model (the enterprise/architect tool and the consumer PaaS endgame).
+5. [`docs/VISION.md`](docs/VISION.md) — the technical north star and where the
+   architecture leads.
 
 ## Architecture in one breath
 
@@ -161,8 +158,8 @@ cargo run -p camerata-ui                    # the Dioxus consumer app (desktop)
 - **Agent layer:** short-lived `claude -p` subprocesses, one per role, scoped by
   prompt, allowed tools, path boundaries, and rule subset. Provider/model agnostic
   behind a seam.
-- **Persistence:** a versioned, event-sourced store (SQLite now, Postgres at the
-  managed-cloud endgame) so every user/AI edit is saved with full history.
+- **Persistence:** a versioned, event-sourced store (SQLite now, Postgres later behind
+  the same trait seam) so every user/AI edit is saved with full history.
 - **UI:** a Dioxus app; tabular surfaces dogfood [Chorale](../rust-chorale).
 
 ## Family

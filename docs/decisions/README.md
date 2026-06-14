@@ -6,8 +6,8 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
-- **2026-06-14_worktracker_port_architecture.md** — Tier 1: one `WorkItemProvider`
-  port (core imports no provider); our Story spine is canonical, the tracker is a
+- **2026-06-14_worktracker_port_architecture.md** — the architect surface: one
+  `WorkItemProvider` port (core imports no provider); our Story spine is canonical, the tracker is a
   mirror configurable per field (provenance/gate/PR/sign-off always ours); two
   independent loop-avoidance guards (per-field direction + echo suppression); map to
   stable status categories never user names; native-first build order then board /
@@ -24,11 +24,9 @@ written down, so the trail is navigable, not just buried in commit messages.
   external-library choices (chorale default; JS allowed for target apps); a standing
   async maintenance/ops agent owns the whole post-publish ops function (upgrades,
   security patches, key rotation, certs, backups), changing a live app only through
-  the governed loop with calm security-update recommendations. Also records two open
-  strategic questions (per-user economics / tiered pricing; the automate-self
-  reflection).
+  the governed loop with calm security-update recommendations.
 - **2026-06-14_persistence_sqlite_event_sourced_versioning.md** — SQLite now,
-  Postgres behind the trait seam at the endgame; an application-level event-sourced
+  Postgres behind the trait seam later; an application-level event-sourced
   revision log (not DB-native temporal tables) gives persistence + real-time updates
   + full version history with actor/operation provenance.
 
@@ -43,15 +41,14 @@ written down, so the trail is navigable, not just buried in commit messages.
 | Versioned persistence | ADR `persistence_sqlite_event_sourced_versioning` |
 | Shared design corpus + opt-in/opt-out + bug-fix sharing + vector DB | ADR `design_corpus_vector_db`; `CONSUMER_UX.md` (the shared-design opt-in) |
 | Maintenance / ops agent + dependency ownership | ADR `maintenance_ops_agent_and_dependencies`; `CONSUMER_UX.md` (Maintenance section) |
-| Target audience (small-business middle) + "why not off-the-shelf" | `POSITIONING.md` |
-| Two-tier product (enterprise tool / consumer PaaS), BYO-infra | `VISION.md` (sections 19-20) |
-| The governance gate + enforcement (the moat) | `POSITIONING.md`; `ENFORCEMENT.md`; `RUST_CORE_VERIFICATION.md` |
+| Why deterministic governance, and the design rationale | `RATIONALE.md` |
+| Two interaction surfaces on one engine, BYO-infra | `VISION.md` |
+| The governance gate + enforcement | `RATIONALE.md`; `ENFORCEMENT.md`; `RUST_CORE_VERIFICATION.md` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |
 
 ## Convention
 
-When a non-trivial design decision is made (especially one Zach raises in
-conversation), write it down HERE as a dated record at the moment it is made, with
-the context and rationale, not just in a commit message. Update this index. Keep the
-user-facing flow in `CONSUMER_UX.md` and the market reasoning in `POSITIONING.md`;
-this folder is for the "why we chose X over Y" records.
+When a non-trivial design decision is made, write it down HERE as a dated record at
+the moment it is made, with the context and rationale, not just in a commit message.
+Update this index. Keep the user-facing flow in `CONSUMER_UX.md` and the design
+rationale in `RATIONALE.md`; this folder is for the "why we chose X over Y" records.

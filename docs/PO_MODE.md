@@ -175,32 +175,30 @@ IntakeForm ──▶ ClarifyDriver { LeadEngineer + AnswerSource } ──▶ Int
 
 ---
 
-## 3. The deploy target: BYO-infra (V1) vs the Camerata PaaS (endgame)
+## 3. The deploy target: bring-your-own-infra now, managed hosting later
 
 The pipeline above stops at "a built, tested crate in a worktree." Turning that
-into a running app for the Product Owner is the deploy step, and the deploy
-target is where the two product tiers diverge (VISION section 20).
+into a running app for the requirements owner is the deploy step, and the deploy
+target is where the two directions diverge (VISION).
 
-- **V1 — bring-your-own-infra (BYO-infra).** The generated app deploys to the
-  Product Owner's OWN cloud account. Camerata generates and governs the app; the
-  user owns the infrastructure it runs on. This is the solo-achievable prototype
-  of the consumer vision: it proves the abstraction (a form becomes a deployed
-  bespoke app) without Camerata having to own a cloud platform. The deploy
-  ADAPTER that takes the governed worktree and pushes it to the user's cloud is
-  the next major increment after the pipeline (see remaining work). `po-demo`
-  today stops at the cargo gate and does not yet deploy.
+- **Now — bring-your-own-infra (BYO-infra).** The generated app deploys to the
+  user's OWN cloud account. Camerata generates and governs the app; the user owns
+  the infrastructure it runs on. This is the solo-achievable shape: it shows the
+  abstraction (a form becomes a deployed bespoke app) without Camerata having to
+  own a cloud platform. The deploy ADAPTER that takes the governed worktree and
+  pushes it to the user's cloud is the next major increment after the pipeline
+  (see remaining work). `po-demo` today stops at the cargo gate and does not yet
+  deploy.
 
-- **Endgame — the Camerata-owned PaaS (VISION section 20).** A platform-as-a-
-  service for non-technical people. The consumer logs into the Camerata cloud,
-  fills out the intake form, and the platform provisions and manages EVERYTHING
-  underneath the generated app: containers, databases, blob storage, custom
-  domains, the lot. The consumer never sees a container or a connection string.
-  This is the funded, company-scale magnum opus, not V1. V1 (BYO-infra) proves
-  the abstraction; the PaaS productizes it by owning the full resource lifecycle.
+- **Later — fully managed hosting (VISION).** A managed direction where the
+  platform provisions and manages everything underneath the generated app:
+  containers, databases, blob storage, custom domains. The user never sees a
+  container or a connection string. This is a much larger undertaking, well
+  beyond this artifact. The BYO-infra shape shows the abstraction; managed
+  hosting would own the full resource lifecycle.
 
-The intake form and the AI lead engineer are the SAME in both tiers. Only the
-deploy/ownership surface changes: the user's cloud (V1) vs. Camerata's cloud
-(endgame).
+The intake form and the AI lead engineer are the SAME either way. Only the
+deploy/ownership surface changes: the user's cloud now, managed hosting later.
 
 ---
 

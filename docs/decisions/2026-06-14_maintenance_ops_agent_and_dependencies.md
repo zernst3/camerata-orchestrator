@@ -41,22 +41,6 @@ ongoing operations (not just package upgrades).
 
 The prompt-to-code tools hand over code and walk away; the rot and the debt become
 the owner's problem. A governed standing ops agent gives a non-technical owner the
-maintenance a real engineering team would provide. Combined with the clarification
-loop and the deterministic gate, "we keep it alive and safe for you, under the same
-governance" is a durable differentiator, not a feature bullet.
-
-## Related open strategic questions (NOT decided, captured so they are not lost)
-
-- **Per-user economics / pricing.** If real users run real apps, each app carries
-  full-stack infra + database + AI-orchestration overhead + Camerata overhead, all of
-  which passes to the end user. A bespoke app could be a meaningful monthly cost.
-  Likely shape: tiered plans (e.g. N apps per price tier per month). This is the
-  managed-PaaS endgame's business model (VISION section 20) and is explicitly NOT
-  being decided now; it is recorded as the open question it is.
-
-- **The automation-of-self reflection.** If the lead engineer eventually handles even
-  third-party integrations, it abstracts away work that developers (including Zach) do
-  today. The architect's answer: the person who builds and GOVERNS the system that
-  builds the apps has moved up a level, not out of one. That is precisely the
-  AI-orchestration-architect position this project is the proof of. Recorded as
-  strategic context, not an action item.
+maintenance a real engineering team would provide, under the same governance that
+built the app. Keeping a published app alive and safe is part of the architecture,
+not an afterthought.
