@@ -1,12 +1,14 @@
 //! camerata-checks: layer-2 post-task gate.
 //!
-//! Implements [`camerata_core::CheckRunner`] for Rust worktrees. Phase 0 ships
-//! two concrete runners:
+//! Implements [`camerata_core::CheckRunner`] for Rust worktrees. Three concrete
+//! runners, composed by [`RustCheckRunner`]:
 //!
 //! - [`FmtCheckRunner`] -- shells out to `cargo fmt --check`, maps failure to
 //!   `RUST-FMT`.
 //! - [`ClippyCheckRunner`] -- shells out to `cargo clippy`, maps warnings/errors
 //!   to `RUST-CLIPPY`.
+//! - [`TestCheckRunner`] -- shells out to `cargo test --no-fail-fast`, maps a
+//!   failed test or a compile failure to `RUST-TEST`.
 //!
 //! The subprocess invocation layer ([`subprocess`]) and the output-to-RuleId
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be
@@ -48,6 +50,10 @@ pub fn clippy_rule() -> RuleId {
     RuleId("RUST-CLIPPY".to_string())
 }
 
+pub fn test_rule() -> RuleId {
+    RuleId("RUST-TEST".to_string())
+}
+
 // ─── fmt runner ──────────────────────────────────────────────────────────────
 
 /// Runs `cargo fmt --check` and returns `[RUST-FMT]` if the worktree has
@@ -82,13 +88,33 @@ impl CheckRunner for ClippyCheckRunner {
     }
 }
 
+// ─── test runner ───────────────────────────────────────────────────────────
+
+/// Runs `cargo test --no-fail-fast` and returns `[RUST-TEST]` if any test fails
+/// or the crate does not compile.
+pub struct TestCheckRunner;
+
+#[async_trait]
+impl CheckRunner for TestCheckRunner {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        let output = subprocess::run_test(worktree)
+            .await
+            .context("running cargo test")?;
+
+        Ok(parse::map_test_output(&output))
+    }
+}
+
 // ─── composite runner ────────────────────────────────────────────────────────
 
-/// Runs both fmt and clippy checks; aggregates all violated rule ids.
-/// The coordinator can use this as its default Rust gate.
+/// Runs fmt, clippy, AND test checks; aggregates all violated rule ids. The
+/// coordinator uses this as its default Rust gate, so generated code that
+/// compiles and lints clean but fails its own tests is still bounced back for
+/// revision (the failure mode that otherwise becomes silent debt).
 pub struct RustCheckRunner {
     fmt: FmtCheckRunner,
     clippy: ClippyCheckRunner,
+    test: TestCheckRunner,
 }
 
 impl RustCheckRunner {
@@ -96,6 +122,7 @@ impl RustCheckRunner {
         Self {
             fmt: FmtCheckRunner,
             clippy: ClippyCheckRunner,
+            test: TestCheckRunner,
         }
     }
 }
@@ -109,10 +136,14 @@ impl Default for RustCheckRunner {
 #[async_trait]
 impl CheckRunner for RustCheckRunner {
     async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        // Run sequentially; fmt is cheap and its errors often make clippy noisy.
+        // Run sequentially, cheapest-first: fmt errors often make clippy noisy,
+        // and a clippy/compile failure makes the test run redundant. Ordering the
+        // gate this way surfaces the cheapest fix first in the bounce-back.
         let mut violations = self.fmt.check(role, worktree).await?;
         let mut clippy_violations = self.clippy.check(role, worktree).await?;
         violations.append(&mut clippy_violations);
+        let mut test_violations = self.test.check(role, worktree).await?;
+        violations.append(&mut test_violations);
         // Deduplicate so the bounce-back message is clean.
         violations.dedup_by(|a, b| a.0 == b.0);
         Ok(violations)

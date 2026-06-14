@@ -294,7 +294,7 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
         "  plan tasks (governed fleet stages):       {}",
         plan.task_count()
     );
-    println!("  layer-2 gate during fleet:                RustCheckRunner (fmt + clippy)");
+    println!("  layer-2 gate during fleet:                RustCheckRunner (fmt + clippy + test)");
     println!(
         "  per-stage layer-2 bounces:                {}",
         outcome.total_bounces
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn po_demo_uses_a_real_rust_check_runner_for_layer2() {
         // Compile-level guarantee that the demo's layer-2 gate is the REAL
-        // RustCheckRunner (fmt + clippy), not a no-op. The fleet-level proof
+        // RustCheckRunner (fmt + clippy + test), not a no-op. The fleet-level proof
         // that this runner actually bounces a violation mid-fleet lives in
         // crates/core/tests/fleet_real_check.rs.
         use camerata_checks::RustCheckRunner;

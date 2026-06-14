@@ -11,7 +11,8 @@ use camerata_core::RuleId;
 
 use crate::{
     clippy_rule, fmt_rule,
-    subprocess::{ClippyOutput, FmtOutput},
+    subprocess::{ClippyOutput, FmtOutput, TestOutput},
+    test_rule,
 };
 
 /// Map `cargo fmt --check` output to violated rule ids.
@@ -46,6 +47,46 @@ pub fn map_clippy_output(output: &ClippyOutput) -> Vec<RuleId> {
     vec![]
 }
 
+/// Map `cargo test` output to violated rule ids.
+///
+/// `cargo test` exits non-zero when a test fails OR the crate does not compile.
+/// Either is a layer-2 violation worth a bounce-back, so a non-zero exit maps to
+/// `RUST-TEST`. As with clippy, we also scan the text so a caller that injects
+/// pre-captured output (exit code unavailable) still gets a correct result.
+///
+/// Rule: a failing test OR a compile error → `RUST-TEST`.
+pub fn map_test_output(output: &TestOutput) -> Vec<RuleId> {
+    if !output.success {
+        return vec![test_rule()];
+    }
+    if has_test_failure(&output.combined) {
+        return vec![test_rule()];
+    }
+    vec![]
+}
+
+/// Returns true if the text indicates a failed test run or a compile failure.
+///
+/// Matches the canonical signals libtest / cargo emit:
+/// - `test result: FAILED` — the libtest summary line on any failure
+/// - a `failures:` block header libtest prints before listing failed tests
+/// - `error[E…]` / `error: aborting` — the crate did not compile, so tests
+///   could not even run (reuses the same rustc openers clippy keys off)
+///
+/// Conservative on purpose: it does not fire on the mere word "failed" in prose
+/// (e.g. a test literally named `it_handles_failed_login`), only on the libtest
+/// summary form `test result: FAILED`.
+pub fn has_test_failure(text: &str) -> bool {
+    text.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("test result: FAILED")
+            || t == "failures:"
+            || t.starts_with("error[")
+            || t.starts_with("error: aborting")
+            || t.contains("\"level\":\"error\"")
+    })
+}
+
 /// Returns true if the text contains at least one clippy/rustc diagnostic line.
 ///
 /// Matches the canonical prefixes emitted by rustc:
@@ -72,7 +113,7 @@ pub fn has_clippy_diagnostic(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subprocess::{ClippyOutput, FmtOutput};
+    use crate::subprocess::{ClippyOutput, FmtOutput, TestOutput};
 
     // ── fmt mapping ──────────────────────────────────────────────────────────
 
@@ -133,6 +174,63 @@ mod tests {
             success: true,
         };
         assert_eq!(map_clippy_output(&output), vec![crate::clippy_rule()]);
+    }
+
+    // ── test mapping ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_all_passing_returns_no_violations() {
+        let output = TestOutput {
+            combined: "test result: ok. 12 passed; 0 failed; 0 ignored\n".to_string(),
+            success: true,
+        };
+        assert_eq!(map_test_output(&output), vec![]);
+    }
+
+    #[test]
+    fn test_nonzero_exit_returns_rust_test_rule() {
+        let output = TestOutput {
+            combined: "test result: FAILED. 10 passed; 2 failed; 0 ignored\n".to_string(),
+            success: false,
+        };
+        assert_eq!(map_test_output(&output), vec![crate::test_rule()]);
+    }
+
+    #[test]
+    fn test_failure_in_text_returns_rule_even_when_exit_zero() {
+        // Injected/replayed output where the exit code is unavailable.
+        let output = TestOutput {
+            combined: "running 3 tests\ntest result: FAILED. 2 passed; 1 failed; 0 ignored\n"
+                .to_string(),
+            success: true,
+        };
+        assert_eq!(map_test_output(&output), vec![crate::test_rule()]);
+    }
+
+    #[test]
+    fn test_compile_failure_returns_rule() {
+        // The crate did not compile, so tests could not run.
+        let output = TestOutput {
+            combined: "error[E0425]: cannot find value `x` in this scope\n".to_string(),
+            success: false,
+        };
+        assert_eq!(map_test_output(&output), vec![crate::test_rule()]);
+    }
+
+    #[test]
+    fn test_failure_detection_ignores_test_named_failed() {
+        // A passing run whose test names contain "failed" must NOT trip the scan.
+        assert!(!has_test_failure(
+            "test login::it_rejects_failed_password ... ok\ntest result: ok. 1 passed; 0 failed\n"
+        ));
+    }
+
+    #[test]
+    fn test_failure_detection_recognises_summary_and_block() {
+        assert!(has_test_failure(
+            "test result: FAILED. 0 passed; 1 failed\n"
+        ));
+        assert!(has_test_failure("\nfailures:\n    tests::it_works\n"));
     }
 
     // ── has_clippy_diagnostic ─────────────────────────────────────────────────

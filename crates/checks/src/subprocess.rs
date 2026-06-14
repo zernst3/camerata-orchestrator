@@ -7,6 +7,8 @@
 //! `cargo fmt --check` exits non-zero when files would be reformatted; that is
 //! not a spawn error, so we capture it and hand the text back to the caller.
 //! `cargo clippy` follows the same pattern: non-zero exit means lints fired.
+//! `cargo test` follows it too: non-zero exit means a test failed (or the crate
+//! did not compile).
 
 use std::path::Path;
 use tokio::process::Command;
@@ -25,6 +27,13 @@ pub struct FmtOutput {
 /// Raw output from `cargo clippy`.
 pub struct ClippyOutput {
     pub combined: String,
+    pub success: bool,
+}
+
+/// Raw output from `cargo test`.
+pub struct TestOutput {
+    pub combined: String,
+    /// True when `cargo test` exits 0 (the crate compiled and every test passed).
     pub success: bool,
 }
 
@@ -59,6 +68,29 @@ pub async fn run_clippy(worktree: &Path) -> std::io::Result<ClippyOutput> {
     let combined = format!("{stdout}\n{stderr}");
 
     Ok(ClippyOutput {
+        combined,
+        success: out.status.success(),
+    })
+}
+
+/// Run `cargo test` in `worktree` and return the raw output.
+///
+/// `--no-fail-fast` so the agent gets the full set of failures to fix in one
+/// revision pass rather than discovering them one at a time across several
+/// bounce-backs. A non-zero exit means a test failed or the crate did not
+/// compile; either way the layer-2 gate should bounce the work back.
+pub async fn run_test(worktree: &Path) -> std::io::Result<TestOutput> {
+    let out = Command::new("cargo")
+        .args(["test", "--no-fail-fast"])
+        .current_dir(worktree)
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let combined = format!("{stdout}\n{stderr}");
+
+    Ok(TestOutput {
         combined,
         success: out.status.success(),
     })
