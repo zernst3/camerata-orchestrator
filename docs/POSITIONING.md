@@ -67,9 +67,9 @@ So the answer to "why not the established app" is three things, in order of weig
 Camerata replaces the markdown engineer with a **consumer intake + clarification loop** (PO_MODE.md: the user answers questions before any code is generated) and replaces the AI verifier with two deterministic layers:
 
 - **Layer 1 — real-time MCP tool-gateway**: deny-before-execute. Requests to write files, run commands, or call external APIs are intercepted at the tool boundary. A security violation that a prompt-only tool would silently permit is rejected before it executes.
-- **Layer 2 — post-task LanguageCheckRunner**: after each agent task completes, linter/AST checks run out-of-process. The result is binary pass/fail, not "the model thinks this looks right."
+- **Layer 2 — post-task LanguageCheckRunner**: after each agent task completes, linter/structural checks run out-of-process. The result is binary pass/fail, not "the model thinks this looks right."
 
-This combination is proven in the prototype. A live agent attempted a real security violation and was denied at the gateway (ENFORCEMENT.md, RUST_CORE_VERIFICATION.md). A non-technical intake form produced a working, deployed application (PO_MODE.md).
+What is proven, stated narrowly so it is bulletproof: a live `claude -p` agent, locked to a single gated tool, was denied a forbidden write before it touched disk, in microseconds, in-process and fail-closed (ENFORCEMENT.md, RUST_CORE_VERIFICATION.md, LIVE_RUN_VERIFICATION.md). That is the rare, reproducible claim and the one to lead with. Two honest scoping notes belong right next to it: the gate today enforces four rules (one a path-substring guard, three regex heuristics; no AST yet), with the rest of the corpus catalogued but not yet given enforcement arms; and the end-to-end consumer run (PO_MODE.md, the `po-demo`) takes a non-technical intake form through the lead engineer and a governed fleet to a passing `cargo build`/`cargo test`, not to a live deployed application. The seam is the achievement; depth and live deployment are the staged work.
 
 ### Why this is a moat (and where it is not)
 
@@ -81,7 +81,9 @@ The Tier-1 moat is not corpus depth or polish. It is three things a platform-shi
 2. **Provider-neutrality the platform structurally cannot ship.** A model vendor's guardrail governs THAT vendor's agents; it is vendor lock by construction. Camerata's gate is provider-neutral by design (an MCP tool-gateway plus an agent-runtime seam, so a non-Claude model swaps in without touching the gate). An enterprise that will not bet its governance on one model vendor needs exactly the neutral layer, and a vendor cannot ship neutrality without un-locking its own platform. Distribution does not help an incumbent build the one thing its business model forbids.
 3. **The builder's proven strength is the product.** Selling the governed gate as developer/team infrastructure puts deterministic systems architecture at the center, rather than racing consumer-codegen incumbents on design and go-to-market.
 
-Tier 2 is what is proven end to end in code today, and it is the larger-TAM bet on the same engine. The near-term defensibility lives in Tier 1.
+Tier 2's data-and-flow spine is what is proven end to end in code today, and it is the larger-TAM bet on the same engine. The near-term defensibility lives in Tier 1.
+
+One caveat stated plainly, because it is the gap a sharp evaluator will find: Tier 1 is the strongest *strategic* story and currently the weakest *runtime* proof. It is the most code and the most-tested crate in the workspace, but every adapter test runs against a scripted fake transport, the real HTTP transport is instantiated nowhere, and no live Jira / ADO / GitHub board has been touched. The switching-cost and provider-neutrality arguments above are about why the *design* is defensible; they are not claims that the live integration ships today. It does not, yet.
 
 ---
 
@@ -97,10 +99,10 @@ The governance does not run on the consumer's device. There is no Node install, 
 
 - The user fills in a form or answers a clarification loop.
 - A Camerata-orchestrated build step executes remotely (in the Camerata cloud environment, or in a BYO-infra build container for the prototype).
-- The MCP gateway, the LanguageCheckRunner, and all linter/AST checks run server-side.
+- The MCP gateway, the LanguageCheckRunner, and the structural/linter checks run server-side.
 - The consumer sees a status update and, on success, a deployed application.
 
-For the prototype, the build and gate run in a Camerata-orchestrated step and deploy to the user's own Azure subscription. The vision (see VISION.md §20) is a fully managed PaaS where Camerata owns the infra — the consumer hits a button and gets a governed, deployed product.
+The bullets above describe the designed flow. To be precise about the prototype's runtime status: the build and gate run in a Camerata-orchestrated step, and the Azure deploy step is currently a generated plan (the `az`-CLI command sequence the deploy seam would run), not a live execution against a real subscription, which needs BYO-infra credentials. The vision (see VISION.md §20) is a fully managed PaaS where Camerata owns the infra: the consumer hits a button and gets a governed, deployed product.
 
 ---
 
@@ -118,7 +120,11 @@ These are stated directly because omitting them would make the document less use
 
 ## 7. Career Artifact Framing
 
-This document is part of a deliberate portfolio, not a market-domination thesis. The claim is narrow and verifiable: Camerata shows, with working code, that a non-trivial governance layer can be built over an LLM agent and that it catches real violations a raw-prompt tool would miss.
+This document is part of a deliberate portfolio, not a market-domination thesis. The claim to lead with is the narrow one that is bulletproof, not the broad one that invites gap-finding:
+
+> I built a deterministic, deny-before-execute MCP gate in Rust, locked a real `claude -p` agent to a single gated tool, and verified end to end that it blocks a forbidden write before it touches disk, in microseconds.
+
+That sentence is true, reproducible, and rare, and it is a better artifact than "governed multi-agent platform with two tiers," because the broad framing is the one that makes a sharp reviewer go looking and find the stubbed default flow and the never-called adapters. Everything beyond that sentence in this repo, the two-tier product, the consumer UX, the worktracker integration, is the vision built out around the proven core to show where it leads, and the README's Status section draws the line between proven and staged explicitly. The honesty of that line is itself part of the artifact.
 
 The strongest evidence is a decision the builder made AGAINST an initial analysis and then overturned by experiment. An early assessment returned a NO-GO on a pure-Rust core, on the assumption that governing live agents required the TypeScript Agent SDK. That conclusion was reversed by running a real `claude -p` agent against a real Rust MCP gate, denying a real forbidden write before it touched disk, and measuring the outcome (see `RUST_CORE_VERIFICATION.md` and `LIVE_RUN_VERIFICATION.md`). The architecture pivoted to all-Rust on that evidence. That is the signal worth more than any adjective: the human, not the model, made the load-bearing call, and changed it when an experiment said to. The same posture shows up in the project governing its own source in CI (`ENFORCEMENT.md`) and in stating exactly which rules are enforced versus not.
 

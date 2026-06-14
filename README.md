@@ -4,28 +4,35 @@
 > theme: Camerata writes the rules, Chorale renders the tables, the Conductor leads
 > the ensemble.
 
-**Camerata is a governed multi-agent engineering platform: a deterministic governance
-gate (mechanically enforced rules, not prompt suggestions) over a fleet of AI coding
-agents.** Every agent action is allowed or denied BEFORE it executes, the result is
-auditable, and the gate is provider-neutral by construction (it does not bet on one
-model vendor). The gate is the core and the moat.
+**The proven core, in one sentence:** Camerata is a deterministic, deny-before-execute
+MCP gate written in Rust; a real `claude -p` agent, locked to a single gated tool, is
+blocked from a forbidden write before it touches disk, in microseconds, in-process and
+fail-closed. That is the claim this repo backs end to end, and it is reproducible by
+running `cargo run -p camerata -- live-demo`.
 
-It is exposed at two tiers on one engine, and they play different roles:
+Everything else here is the product **vision** built out around that core to show where
+it leads. The vision is a governed multi-agent engineering platform exposed at two tiers
+on one engine. What is genuinely proven versus what is staged or opt-in is stated
+plainly in [Status](#status-what-runs-today-and-what-is-staged) below; this intro does
+not blur the two.
 
-- **Tier 2 is what is proven in code today.** The small-business app builder: a
-  non-technical owner refines an app with an AI lead engineer, gets a working app they
-  own on their own cloud, and a standing AI maintenance routine keeps it alive. It is
-  built and tested end to end. It is the demonstration artifact and the larger-TAM
-  bet. See [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
-- **Tier 1 is where the durable business is.** Enterprise governed orchestration: a
-  human architect and a real Product Owner collaborate through the tracker they
-  already use (Jira / Azure DevOps / GitHub), governed agents execute, and Camerata
-  writes provenance, gate results, PR links, and sign-off back onto their work items.
-  Governance here is infrastructure woven into an org's workflow, with switching cost
-  and a provider-neutrality an incumbent's guardrail checkbox cannot match. This is the
-  defensible wedge. The moat argument lives once, in
-  [`docs/POSITIONING.md`](docs/POSITIONING.md); the integration design is in
-  [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
+- **Tier 2 — the consumer app builder.** A non-technical owner refines an app with an
+  AI lead engineer, gets a working app they own on their own cloud, and a standing AI
+  maintenance routine keeps it alive. The full data-and-flow spine is built and tested
+  end to end; in the default experience the "lead engineer" is a deterministic stub and
+  the build screen is a timed narrative, with the real governed fleet available opt-in
+  (see Status). It is the demonstration artifact and the larger-TAM bet. See
+  [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+- **Tier 1 — enterprise governed orchestration.** A human architect and a real Product
+  Owner collaborate through the tracker they already use (Jira / Azure DevOps / GitHub),
+  governed agents execute, and Camerata writes provenance, gate results, PR links, and
+  sign-off back onto their work items. This is the strongest **strategic** story (the
+  switching cost and provider-neutrality argument an incumbent's guardrail toggle cannot
+  match) and, honestly, the weakest **runtime** proof: it is the most code and the
+  most-tested crate, but every adapter test runs against a scripted fake and no live
+  Jira/ADO/GitHub call has been made yet (the real HTTP transport exists but is wired in
+  nowhere). The moat argument lives once, in [`docs/POSITIONING.md`](docs/POSITIONING.md);
+  the integration design is in [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
 
 ## Tier 2 in detail
 
@@ -52,8 +59,12 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
 2. **Deterministic governance, not an AI verifier.** A real-time MCP tool-gateway
    denies bad agent actions before they execute, and an out-of-process structural
    check bounces violations back for revision. Binary pass/fail, not "the model
-   thinks this looks right." This is what makes the generated apps durable instead of
-   collapsing into debt at the three-month wall.
+   thinks this looks right." The architecture is the differentiator, not the rule
+   count: today the gate enforces four rules (one a path-substring guard, three regex
+   heuristics; no AST analysis yet), and the broader corpus is catalogued and selected
+   but not yet given executable enforcement arms. The point this repo proves is the
+   *seam* (deny-before-execute, provider-neutral, fail-closed); deepening the rule set
+   behind it is incremental, not architectural.
 3. **A standing maintenance/ops agent.** A published app is alive: upgrades, security
    patches, key rotation, all run through the same governed loop, with calm
    plain-language recommendations. The owner gets the maintenance a real team would
@@ -62,30 +73,53 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
    abstracted designs and bug fixes from prior apps make future builds faster, more
    consistent, and easier to maintain. A network effect a lone owner could never have.
 
-## Status: a working system, not a plan
+## Status: what runs today, and what is staged
 
-This is not a design folder. It is a compiling, tested, all-Rust workspace:
+This is a compiling, tested, all-Rust workspace, not a design folder. The line between
+what is verified at runtime and what is built-but-not-yet-live is drawn deliberately,
+because the intended reader is exactly the person who will run the code and check.
+
+**Verified at runtime (you can reproduce it):**
 
 - A 14-crate workspace, 500+ passing tests, zero warnings, no
   `todo!`/`unimplemented!` stubs, governing its OWN source in CI (unsafe forbidden,
   clippy `-D warnings`, fmt, tests; see [`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
-- **Tier 2 (proven in code):** the full Product-Owner flow end to end (intake +
-  style kit, refinement, the reviewer, versioned persistence, the shared corpus, the
-  post-build bug loop), composed into a Dioxus UI, with the build screen wired to the
-  real governed fleet and publish wired to a deploy seam.
-- **Tier 1 (built out):** the `WorkItemProvider` port with a native provider plus
-  Jira, Azure DevOps, and GitHub adapters; the async clarify-bridge; and SyncPolicy
-  per-field source-of-truth + echo suppression (loop avoidance), with an end-to-end
-  flow test.
-- The governance gate is verified denying a real `claude -p` agent's tool call end to
-  end ([`docs/LIVE_RUN_VERIFICATION.md`](docs/LIVE_RUN_VERIFICATION.md),
-  [`docs/RUST_CORE_VERIFICATION.md`](docs/RUST_CORE_VERIFICATION.md)), and
-  provider-neutrality is proven with a second non-Claude driver
-  ([`docs/PROVIDER_NEUTRALITY.md`](docs/PROVIDER_NEUTRALITY.md)).
+- **The gate denies a real agent.** `camerata -- live-demo` runs a real `claude -p`
+  subprocess locked to a single gated tool and shows the forbidden write blocked before
+  it hits disk. Provider-neutrality is shown with a second, non-Claude driver
+  ([`docs/PROVIDER_NEUTRALITY.md`](docs/PROVIDER_NEUTRALITY.md)). Caveat, stated so you
+  are not surprised: the committed proof in
+  [`docs/LIVE_RUN_VERIFICATION.md`](docs/LIVE_RUN_VERIFICATION.md) /
+  [`docs/RUST_CORE_VERIFICATION.md`](docs/RUST_CORE_VERIFICATION.md) is a captured
+  transcript, and `cargo test` exercises the gate against a fake in-process
+  `EchoDriver`, not a live model. The live denial is reproducible by running the
+  `live-demo` binary; it is not re-run by the test suite (a live agent in CI spends
+  tokens on every push).
+- **The Tier-2 data-and-flow spine, end to end:** typed intake + style kit, the
+  refinement session, versioned persistence with full revision history (durable
+  on-disk across launches), the shared corpus, and the post-build bug loop, composed
+  into a runnable Dioxus desktop app.
 
-Still ahead: live execution wiring for the external worktracker adapters (OAuth /
-webhooks), the Azure deploy adapter's live execution (BYO-infra credentials), and
-closing the tracked unwrap-cleanup frontier into the blocking lint bar.
+**Built and tested, but not yet wired to anything live:**
+
+- **The default Tier-2 experience is deterministic, not model-driven.** The "AI lead
+  engineer" in the default flow is a deterministic `StubRefinementReviewer` (it asks
+  smart, form-derived questions, but calls no model), and the build screen is a timed
+  narrative. The REAL governed fleet (gateway + `claude -p` agents, the same path the
+  `po-demo` exercises) is opt-in behind `CAMERATA_LIVE_BUILD=1`, because a live build
+  spends tokens. Publish runs through a deploy seam whose Azure path is a plan, not a
+  live `az` execution.
+- **Tier 1 is the most code and the most-tested crate, and has made zero live API
+  calls.** The `WorkItemProvider` port, the Jira / Azure DevOps / GitHub adapters, the
+  async clarify-bridge, and SyncPolicy per-field source-of-truth + echo suppression all
+  exist with an end-to-end flow test, but every adapter test runs against a scripted
+  fake transport. The real `ReqwestTransport` compiles but is instantiated nowhere; no
+  real board has been touched yet.
+
+**Still ahead:** live execution wiring for the worktracker adapters (OAuth / webhooks),
+the Azure deploy adapter's live execution (BYO-infra credentials), deepening the gate's
+rule set (more enforcement arms, AST-level checks), and closing the tracked
+unwrap-cleanup frontier into the blocking lint bar.
 
 ## Try it (runnable demos)
 
