@@ -18,7 +18,11 @@ an AI lead engineer who pins down what they actually meant, watches a governed a
 team build it, and ends with a working app live on their own cloud, never seeing a
 line of code or a single error message.
 
-## Design principles (the Apple bar)
+## Design principles (the bar: best-in-class user-friendly design)
+
+The standard here is the most thorough, user-friendly consumer-product design, the
+kind that makes powerful machinery feel effortless. Every principle below serves
+that: the user should feel guided and capable, never lost or technical.
 
 1. **One decision per screen.** Never show the user two things to think about at
    once. The form is paged, the clarification is one question-thread at a time, the
@@ -124,8 +128,8 @@ was interviewed into a correct spec and got a dependable app, governed end to en
 ## Build order for the UI (Dioxus)
 
 1. The four screens as static, beautifully-styled Dioxus views (intake, clarify,
-   build, live) with mocked data, to nail the look and the motion first (Apple bar:
-   get the feel right before wiring).
+   build, live) with mocked data, to nail the look and the motion first (get the
+   feel right before wiring, the way the best consumer products do).
 2. Wire intake -> the typed `IntakeForm`.
 3. Wire clarify -> the real multi-turn `LeadEngineer` loop (the engine piece landing
    now).
@@ -137,11 +141,18 @@ was interviewed into a correct spec and got a dependable app, governed end to en
 Dogfood chorale for any tabular surfaces (the generated app's own admin lists), per
 the family conventions.
 
-## Open UX questions for Zach
+## Resolved UX decisions (Zach, 2026-06-14)
 
-- How much of the clarify conversation is free-text chat vs guided choices? (Pure
-  chat feels smarter; guided choices are more reliable and more on-brand for "strict
-  but open".) A hybrid (chat with occasional quick-reply chips) is the likely answer.
-- Does the user see the plan as prose, as a visual map of entities/actions, or both?
-- For the video: one polished example app end to end, or a short montage of two very
-  different apps from the same flow (to prove open-endedness)?
+1. **The clarify conversation is HYBRID, free-text-led.** The user goes back and
+   forth in their own words (free text is primary), but guidance is baked in: the
+   engineer frames each question with a short reason, offers quick-reply chips and
+   suggested answers, and steers the user toward a complete story. The model is the
+   kind of guided back-and-forth this very project was designed through: open
+   conversation, but never aimless.
+2. **The plan is shown as BOTH prose AND diagrams.** A short plain-language summary
+   of what is being built, alongside a visual map of the entities and their actions,
+   so the user understands the app from two angles before approving.
+3. **The demo video is a MONTAGE OF TWO open-ended apps.** Not one canned example.
+   Two genuinely different apps, ideally one improvised on the spot, to prove the
+   flow works for whatever a person dreams up, not a pre-scripted budgeting demo.
+   The open-ended form (not budget-specific) exists precisely to make this possible.
