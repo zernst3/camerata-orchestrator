@@ -808,4 +808,59 @@ mod tests {
         assert_eq!(state.project.resolved_bugs.len(), 1);
         assert_eq!(state.project.resolved_bugs[0].fix, "Reject bookings when full");
     }
+
+    /// End-to-end: drive the whole composed consumer lifecycle through the bridge,
+    /// proving the session's pieces (review, persistence, execution, post-build bug
+    /// loop, corpus contribute/withdraw) compose. Doubles as executable documentation
+    /// of the flow.
+    #[tokio::test]
+    async fn full_consumer_lifecycle_through_the_bridge() {
+        let store = SqliteStore::open("sqlite::memory:").await.unwrap();
+        let corpus = InMemoryDesignCorpus::new();
+        let reviewer = StubRefinementReviewer::new();
+
+        // 1. INTAKE: a typed onboarding document + seeded stories + a pre-build session.
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        assert_eq!(state.phase(), Phase::Refining);
+        // The initial documents persist (onboarding + stories) with version history.
+        let initial = state.take_pending();
+        assert!(flush(&store, &initial).await.unwrap() >= 1);
+
+        // 2. REFINE: a real AI review turn moves confidence off zero and suggests RBAC.
+        assert!(state.run_review_turn(&reviewer).await.unwrap());
+        assert!(state.confidence() > 0);
+        assert!(state
+            .active_session()
+            .unwrap()
+            .suggestions
+            .iter()
+            .any(|s| s.id == "admin_users"));
+
+        // 3. CONVERGE + EXECUTE: the user is happy; the build runs (governed elsewhere).
+        state.project.active_session_mut().unwrap().converge();
+        state.project.enter_execution().unwrap();
+        assert_eq!(state.phase(), Phase::Executing);
+        state.project.finish_execution().unwrap();
+
+        // 4. POST-BUILD: QA finds a bug; filing it opens a post-build session.
+        state.file_bug(BugReport::new("Class list", "tapped Book on a full class", "a waitlist", "nothing"));
+        assert_eq!(state.active_session().unwrap().context.label(), "post_build");
+        // The fix is built and recorded.
+        state.record_fix("Booking allowed past the seat limit", "Reject bookings when full");
+
+        // 5. PUBLISH after the (already executed) build.
+        state.project.publish().unwrap();
+        assert!(state.project.is_published());
+
+        // 6. SHARE (opt-in): the abstracted design + the fix reach the corpus.
+        state.project.sharing.contribute_design = true;
+        assert!(state.contribute_if_consented(&corpus).await);
+        let hits = corpus.similar(&intake_form_from_inputs(&sample_inputs())).await;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].resolved_bugs.iter().any(|b| b.fix.contains("Reject bookings")));
+
+        // 7. OPT-OUT (right to be forgotten): the contribution is deleted.
+        state.withdraw_from_corpus(&corpus).await;
+        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+    }
 }
