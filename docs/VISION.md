@@ -493,3 +493,71 @@ enforced gates, not advisory documents. For the enterprise user the harness is a
 they curated. For the consumer it is invisible and absolute, the rigid foundation that makes the app
 literally unable to be built poorly regardless of who is driving. The harness comes first; the application
 is built inside it.
+
+## 20. Productization: the two tiers (enterprise tool, consumer PaaS)
+
+The full shape of the endgame is two product tiers on one governance engine. This is the magnum-opus
+version of the vision; it is a massive undertaking, captured here as the north star rather than as Phase-0
+scope.
+
+### Tier 1: Enterprise (the tool we are building now)
+
+The principal architect's cockpit, governing professional agent fleets on real codebases (sections 1
+through 18). It exists today as the local node (section 3.5). The only thing the enterprise tier needs to
+add later is a cloud-hosted Camerata for multi-user / multi-tenant teams. That is a future increment, not a
+rewrite: the engine is the same, the cloud is a deployment surface on top of it.
+
+### Tier 2: Consumer (a PaaS that generates and hosts bespoke apps)
+
+A platform-as-a-service for non-technical people. The consumer logs into the Camerata cloud and creates
+"basic" bespoke applications: CRUD apps with a frontend, a backend, and a database. The consumer never sees
+a container, a database connection, or a hosting config. They step into the Product Owner role, and for
+simple-enough apps the platform abstracts away even the principal architect. The human supplies intent; the
+governed engine supplies everything below it.
+
+**Camerata cloud owns the infrastructure.** The PaaS provisions and manages all the resources underneath
+the generated app: the app containers, the databases, blob storage, custom domains, the lot. The consumer
+is disconnected entirely from resource creation and ops. This is the largest part of the scope and the
+hardest: the consumer tier is not just a code generator, it is a cloud platform that owns the full lifecycle
+of the resources it stands up.
+
+**The intake form and the AI lead engineer.** Good output needs good story-level requirements, so the
+consumer fills out a thorough intake form rather than a single prompt box. On submit, an AI evaluates the
+project as the lead engineer, then converses back and forth with the consumer to clarify scope, edge cases,
+and intent before anything is built. This is the enterprise investigation and clarify loop (section 2),
+re-skinned for a consumer who is the Product Owner.
+
+**Complexity tiers, and where a human steps in.** The product is tiered by complexity, which also sets
+pricing:
+
+- **Self-serve (basic).** Plain CRUD bespoke apps are fully automated: intake, clarify, governed build,
+  managed hosting, no human in the loop.
+- **Pre-built integrations.** "Simple" third-party integrations can be baked into the platform so they too
+  need no engineer; the consumer just toggles them on.
+- **Architect-assisted (complex).** A genuinely complex third-party integration (for example, "I want to
+  add Stripe") may require a human Platform Architect to step in. Camerata, the company, employs Platform
+  Architects for exactly this role: they handle the integrations and bespoke complexity the platform cannot
+  yet fully automate.
+
+**Pricing follows complexity and footprint.** Tiers are priced by the complexity of the build and the
+number of provisioned services (app containers, databases, blob storage, custom domains, and so on), since
+those are the real cost drivers the platform carries on the consumer's behalf.
+
+### Why the over-engineering is the unlock
+
+The same point as section 19, sharpened: over-engineering a "simple" app (its own test suite, CI, robust
+structure, managed infrastructure, safe deploys) is exactly what lets the result meet a consumer's
+expectations. A consumer does not want a fragile toy; they want something that works and keeps working as
+they change their mind. Mechanized over-engineering is how a "basic" app becomes genuinely dependable, and
+dependability is the product.
+
+### Realism
+
+This is a massive scope, well beyond a solo effort and beyond Phase 0. The consumer PaaS in particular
+requires owning a real cloud platform underneath (resource provisioning, isolation, billing, ops), which is
+a company, not a feature. It would need more people and very likely funding to build in full. The right near
+-term move is to hold this as the destination, prove the governance engine on the enterprise tier first
+(where it is already a high-leverage artifact), and build a prototype of the consumer flow once the engine
+is robust enough that abstracting the architect is realistic. The thesis is the same at every tier: the
+constraint is the enforcement of quality, and whoever mechanizes that enforcement can move the human all the
+way up to pure intent.
