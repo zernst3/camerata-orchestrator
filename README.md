@@ -87,6 +87,20 @@ Still ahead: live execution wiring for the external worktracker adapters (OAuth 
 webhooks), the Azure deploy adapter's live execution (BYO-infra credentials), and
 closing the tracked unwrap-cleanup frontier into the blocking lint bar.
 
+## Try it (runnable demos)
+
+These run end to end on the in-process providers and stubs, no network or credentials
+needed, and narrate what they exercise:
+
+```
+cargo run -p camerata -- live-demo          # the gate denies a real claude -p agent's forbidden write
+cargo run -p camerata -- po-demo            # a PO form -> lead engineer -> governed fleet -> cargo build/test
+cargo run -p camerata -- worktracker-demo   # Tier 1: ingest a story, the PO answers from their board, status written back
+cargo run -p camerata -- maintenance-demo   # Tier 2: the standing ops agent (security recommendation, approval gate, rotation)
+cargo run -p camerata -- deploy-demo        # Tier 2: the draft->publish gate, a local deploy, and the Azure az-CLI plan
+cargo run -p camerata-ui                    # the Dioxus consumer app (desktop)
+```
+
 ## Read in this order
 
 1. [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md) — the product: the consumer flow,
