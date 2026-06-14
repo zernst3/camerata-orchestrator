@@ -21,3 +21,5 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+# A throwaway directory for the on-disk durability test (open_path).
+tempfile = "3"

@@ -5,9 +5,12 @@
 //! self-contained). Migrations are idempotent (`CREATE TABLE IF NOT EXISTS`,
 //! `CREATE INDEX IF NOT EXISTS`).
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use camerata_core::{Role, SessionId};
 use chrono::{DateTime, Utc};
+use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Pool, Row, Sqlite, SqlitePool};
 
 use crate::{
@@ -111,6 +114,27 @@ impl SqliteStore {
     /// [`ArtifactStore::migrate_artifacts`]).
     pub async fn open(database_url: &str) -> Result<Self, PersistenceError> {
         let pool = SqlitePool::connect(database_url).await?;
+        let store = Self { pool };
+        store.migrate().await?;
+        store.migrate_artifacts().await?;
+        Ok(store)
+    }
+
+    /// Open (or create) a SQLite database at a filesystem path, creating the file
+    /// if it does not yet exist.
+    ///
+    /// Unlike [`open`](Self::open), this takes a real [`Path`] and uses
+    /// [`SqliteConnectOptions`] directly, so paths containing characters that are
+    /// awkward in a URL (spaces, as in macOS's `Application Support`) work without
+    /// any encoding. This is the durable, across-launch store the desktop app uses;
+    /// `open(":memory:")` remains the ephemeral path for tests.
+    ///
+    /// The caller is responsible for ensuring the parent directory exists.
+    pub async fn open_path(path: &Path) -> Result<Self, PersistenceError> {
+        let options = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
         let store = Self { pool };
         store.migrate().await?;
         store.migrate_artifacts().await?;
@@ -282,6 +306,42 @@ mod tests {
         assert!(rec.is_some(), "session should exist");
         let rec = rec.unwrap();
         assert_eq!(rec.session_id, "sess-001");
+        assert_eq!(rec.role, "Backend");
+    }
+
+    /// The whole point of `open_path`: data written in one session is still there
+    /// after the store is dropped and a *new* store is opened on the same file.
+    /// This is what makes the desktop app's version history survive a relaunch.
+    #[tokio::test]
+    async fn open_path_persists_across_reopen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("history.db");
+        let sid = SessionId("sess-durable".to_string());
+        let role = make_role("Backend", &["RUST-DOMAIN-5"]);
+        let started = Utc::now();
+
+        // First session: open, write, drop.
+        {
+            let store = SqliteStore::open_path(&path).await.expect("open_path");
+            store
+                .record_session(&sid, &role, started)
+                .await
+                .expect("record_session");
+        }
+
+        // The file must actually exist on disk.
+        assert!(path.exists(), "open_path should create the database file");
+
+        // Second session: reopen the SAME file, the row is still there.
+        let store = SqliteStore::open_path(&path)
+            .await
+            .expect("reopen open_path");
+        let rec = store
+            .session_by_id(&sid)
+            .await
+            .expect("session_by_id")
+            .expect("session should survive a reopen");
+        assert_eq!(rec.session_id, "sess-durable");
         assert_eq!(rec.role, "Backend");
     }
 

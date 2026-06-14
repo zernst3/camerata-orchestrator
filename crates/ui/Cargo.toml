@@ -42,6 +42,9 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
+# Locate the per-user data directory so the SQLite version history persists across
+# launches (platform-correct: ~/Library/Application Support on macOS, etc.).
+dirs = "6"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread"] }

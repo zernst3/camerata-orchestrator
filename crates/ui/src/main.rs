@@ -50,6 +50,18 @@ fn main() {
     dioxus::launch(App);
 }
 
+/// The on-disk location of the version-history database, under the per-user data
+/// directory (e.g. `~/Library/Application Support/camerata/history.db` on macOS).
+///
+/// Creates the `camerata` data directory if it does not exist. Returns `None` if
+/// the platform data dir can't be resolved or the directory can't be created, in
+/// which case the caller falls back to an ephemeral in-memory store.
+fn store_path() -> Option<std::path::PathBuf> {
+    let dir = dirs::data_dir()?.join("camerata");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("history.db"))
+}
+
 /// Root. Owns the current-screen signal and injects the global stylesheet once.
 /// Each screen receives the signal so its primary action can advance the journey.
 #[component]
@@ -67,10 +79,17 @@ fn App() -> Element {
     use_context_provider(|| Arc::new(InMemoryDesignCorpus::new()));
 
     // Persistence. One SQLite store, opened once and held for the whole session,
-    // so versions accumulate (an in-memory store recreated per flush would lose
-    // history). In-memory for the prototype; pointing it at a file path under the
-    // app-data dir is the one-line change for durability across launches.
-    let store = use_resource(|| async { SqliteStore::open("sqlite::memory:").await.ok() });
+    // so versions accumulate. The database lives on disk under the per-user data
+    // directory, so the full version history of every project survives across app
+    // launches (the user explicitly wanted real-time, version-tracked persistence
+    // in a database). If the data dir can't be resolved or opened (rare), we fall
+    // back to an ephemeral in-memory store so the app still runs.
+    let store = use_resource(|| async {
+        match store_path() {
+            Some(path) => SqliteStore::open_path(&path).await.ok(),
+            None => SqliteStore::open(":memory:").await.ok(),
+        }
+    });
 
     // Whenever the project has queued revisions (every user/AI edit queues one),
     // drain them and flush to the store. Draining happens synchronously, OUTSIDE
