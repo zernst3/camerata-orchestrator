@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
+/// The async clarify-bridge: post the lead engineer's questions to the PO's board,
+/// poll for the PO's answer. Provider-agnostic.
+pub mod clarify_bridge;
+pub use clarify_bridge::{ClarifyBridge, PendingClarification, PoAnswer};
+
 /// Injectable HTTP transport seam + `FakeTransport` test double + `ReqwestTransport`.
 pub mod http;
 
