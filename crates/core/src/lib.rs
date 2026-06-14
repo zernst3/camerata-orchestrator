@@ -82,3 +82,6 @@ pub trait CheckRunner: Send + Sync {
 
 pub mod coordinator;
 pub use coordinator::{Coordinator, CoordinatorError, RunReport};
+
+pub mod fleet;
+pub use fleet::{FleetCoordinator, FleetReport, FleetStage, StageReport};

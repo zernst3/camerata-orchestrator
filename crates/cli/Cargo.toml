@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-intake = { path = "../intake" }
 camerata-gateway = { path = "../gateway" }
 camerata-agent = { path = "../agent" }
 camerata-checks = { path = "../checks" }

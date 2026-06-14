@@ -70,6 +70,12 @@ pub fn allowed_tools_for_role(role: &Role) -> Vec<String> {
 }
 
 /// Drives the Claude Code CLI in headless mode against the Camerata gateway.
+///
+/// `Clone` so a caller that prepares N per-session drivers in a loop (e.g. the
+/// PO-mode fleet, one session per plan task) can own each driver independently of
+/// the [`SessionSpawn`] it came from. Cloning copies only the config paths +
+/// flags; it spawns nothing.
+#[derive(Clone)]
 pub struct ClaudeCliDriver {
     /// Path to the MCP config that points the agent at the Rust gateway.
     pub mcp_config_path: String,

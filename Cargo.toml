@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
+    "crates/intake",      # PO-mode: intake form schema + LeadEngineer (architect-abstracted second level)
     "crates/gateway",     # layer-1 real-time governance gate: Rust MCP server (VERIFIED)
     "crates/agent",       # agent runtime: drives `claude -p` subprocesses, parses stream-json
     "crates/rules",       # rule corpus loader, enforcement_kind, rule-subset selection
