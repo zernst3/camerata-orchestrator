@@ -16,6 +16,7 @@ mod app_state;
 mod build_run;
 mod data;
 mod deploy_run;
+mod maintenance_run;
 mod screens;
 mod style;
 

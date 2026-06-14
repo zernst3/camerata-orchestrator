@@ -36,6 +36,8 @@ camerata-persistence = { path = "../persistence" }
 camerata-fleet = { path = "../fleet" }
 # The BYO-infra publish step: the Live screen deploys through this seam.
 camerata-deploy = { path = "../deploy" }
+# The standing ops agent: scans the live app for dependency and security news.
+camerata-maintenance = { path = "../maintenance" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

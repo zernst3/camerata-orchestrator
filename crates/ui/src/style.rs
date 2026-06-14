@@ -746,6 +746,64 @@ html, body {
   margin: 0;
 }
 
+/* ---- live: maintenance panel ------------------------------------------ */
+/* Calm, secondary. Sits below the live actions and never competes with them. */
+.maintenance-panel {
+  margin-top: 40px;
+  padding: 20px 22px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  text-align: left;
+  animation: rise .8s var(--ease) both;
+  animation-delay: .25s;
+}
+.maintenance-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.maintenance-icon {
+  font-size: 14px;
+  color: var(--good);
+  line-height: 1;
+}
+.maintenance-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  color: var(--ink-soft);
+}
+.maintenance-note {
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  margin: 0 0 14px;
+}
+.maintenance-note:last-child { margin-bottom: 0; }
+.maintenance-confirmed {
+  color: var(--good);
+}
+.maintenance-update-btn {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 560;
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+  border: 1px solid #efd9d0;
+  border-radius: 999px;
+  padding: 9px 20px;
+  cursor: pointer;
+  transition: background .25s var(--ease), transform .2s var(--ease);
+}
+.maintenance-update-btn:hover {
+  background: #f0d4cb;
+  transform: translateY(-1px);
+}
+.maintenance-update-btn:active { transform: translateY(0); }
+
 /* Intake style picker: palette swatches + selectable chips */
 .chip.selected {
   border-color: var(--accent);
