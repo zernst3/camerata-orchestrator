@@ -43,6 +43,21 @@ This audience choice is what makes the economics work, and the two reinforce eac
 
 In one line: Camerata is for the business that needs the app a real dev team would build, at a price that is a fraction of hiring one, kept alive and safe by governance instead of staff.
 
+### "Why not just use an established app?"
+
+This is the first objection any buyer or investor raises, and the honest answer is precise about who it does and does not apply to.
+
+For a business whose process fits an off-the-shelf vertical app (a standard property manager fits Buildium, a standard studio fits Mindbody), they SHOULD use it. It is mature, supported, and cheaper than anything bespoke. Camerata should not, and the lead engineer's honest-limits behavior should even SAY so: "what you are describing is essentially a standard CRM, you will likely be happier with an existing one" is a trust feature, not a lost sale.
+
+The customer is the business whose process does NOT fit any category. Most small operational needs are slightly off-axis from every vertical SaaS: a pottery studio that also rents kilns by the hour and sells clay by weight and runs a membership does not fit Mindbody or Shopify or any single tool. These businesses end up running three subscriptions plus a tangle of spreadsheets to cover the gaps. The realistic alternative Camerata competes with is NOT Buildium; it is the spreadsheets-and-email duct tape the business is using right now precisely because nothing fit. That is a large, fragmented, underserved long tail, underserved for the structural reason that no single vertical product can serve a need that has no category.
+
+So the answer to "why not the established app" is three things, in order of weight:
+1. **Exact fit.** Vertical SaaS makes the business bend to the app's assumptions; Camerata builds the one app shaped to how the business actually works.
+2. **The real competitor is the spreadsheet.** The buyer is the long-tail business with no category to fit into, currently held together by manual tools.
+3. **Ownership and consolidation.** One owned app on the business's own cloud (BYO-infra), no per-seat pricing that scales punishingly, no vendor lock-in, replacing a stack of partial subscriptions.
+
+"Maybe not good enough for everyone" is exactly right and is the point: the honest boundary (fits a category, use the category) is what makes the claim credible for the businesses where it does apply.
+
 ---
 
 ## 3. The Differentiator and the Moat
