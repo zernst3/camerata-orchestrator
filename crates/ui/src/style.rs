@@ -837,4 +837,21 @@ html, body {
 }
 .swatch-name { font-weight: 600; font-size: 14px; color: var(--ink); }
 .swatch-desc { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
+
+/* Persistence banner — shown only when version-history durability is degraded.
+   Calm and informative, not alarming: a soft amber wash, a small dot, plain text.
+   Sits above the rail so it reads as ambient status, not an error modal. */
+.persist-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 18px;
+  background: #fdf4e6;                 /* soft amber wash, warmer than an alert red */
+  border-bottom: 1px solid #f0e2c8;
+  color: #7a5a2e;
+  font-size: 13px; line-height: 1.4;
+}
+.persist-banner-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: #d9a441;                 /* amber dot — noticeable, not urgent */
+}
+.persist-banner-text { font-weight: 500; }
 "#;
