@@ -71,6 +71,10 @@ pub fn arch_no_secrets_in_url_1_rule() -> RuleId {
 
 // ─── public rule registry ─────────────────────────────────────────────────────
 
+/// A pure rule-arm function: `Ok(())` = allow, `Err(reason)` = deny.
+/// Takes `(path, content)` from the `gated_write` call.
+pub type RuleArmFn = fn(path: &str, content: &str) -> Result<(), String>;
+
 /// A single entry in the rule registry.
 ///
 /// The registry is ordered (alphabetically within their security / governance
@@ -82,10 +86,10 @@ pub struct RuleEntry {
     pub description: &'static str,
     /// The pure rule function: `Ok(())` = allow, `Err(reason)` = deny.
     ///
-    /// Takes `(path, content)` from the `gated_write` call — `path` is the
+    /// Takes `(path, content)` from the `gated_write` call -- `path` is the
     /// target filesystem path and `content` is the file body the agent wants
     /// to write.
-    pub arm: fn(path: &str, content: &str) -> Result<(), String>,
+    pub arm: RuleArmFn,
 }
 
 /// All implemented rule arms, keyed by rule-id string.
@@ -124,8 +128,11 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
 
 /// Look up the arm function for `rule_id`, or `None` when the id is not
 /// implemented (safe no-op).
-pub fn lookup_arm(rule_id: &str) -> Option<fn(&str, &str) -> Result<(), String>> {
-    RULE_REGISTRY.iter().find(|e| e.id == rule_id).map(|e| e.arm)
+pub fn lookup_arm(rule_id: &str) -> Option<RuleArmFn> {
+    RULE_REGISTRY
+        .iter()
+        .find(|e| e.id == rule_id)
+        .map(|e| e.arm)
 }
 
 // ─── reusable rule-evaluation (pure) ─────────────────────────────────────────
@@ -224,7 +231,7 @@ fn arm_gov1(path: &str, _content: &str) -> Result<(), String> {
 /// - Slack tokens:    `xox[baprs]-` (xoxb-, xoxa-, xoxp-, xoxr-, xoxs-)
 /// - AWS access keys: `AKIA` followed by 16 uppercase alphanumeric chars
 /// - OpenAI / Stripe: `sk-` followed by 20+ alphanumeric chars (both use
-///                    the `sk-` prefix; Stripe also uses `sk-live_`, `sk-test_`)
+///   the `sk-` prefix; Stripe also uses `sk-live_`, `sk-test_`)
 /// - Google API key:  `AIza` followed by 35 alphanumeric / `_` / `-` chars
 /// - PEM private key: `-----BEGIN` ... `PRIVATE KEY-----` (covers RSA, EC, etc.)
 static SEC_SECRETS_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -594,8 +601,12 @@ mod tests {
     #[test]
     fn sec_secrets_denies_pem_private_key() {
         let subset = vec![sec_no_hardcoded_secrets_1_rule()];
-        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
-        let d = evaluate_call(&subset, &write_call_with_content("certs/private.pem", content));
+        let content =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
+        let d = evaluate_call(
+            &subset,
+            &write_call_with_content("certs/private.pem", content),
+        );
         assert!(
             matches!(d, Decision::Deny { .. }),
             "expected deny for PEM private key"
@@ -632,7 +643,9 @@ mod tests {
                 assert_eq!(rule, sec_no_raw_sql_concat_1_rule());
                 assert!(reason.contains("SEC-NO-RAW-SQL-CONCAT-1"));
             }
-            Decision::Allow => panic!("expected SEC-NO-RAW-SQL-CONCAT-1 deny for format interpolation"),
+            Decision::Allow => {
+                panic!("expected SEC-NO-RAW-SQL-CONCAT-1 deny for format interpolation")
+            }
         }
     }
 
@@ -684,7 +697,10 @@ mod tests {
                 sql.trim_start().to_uppercase().starts_with("SELECT")
             }
         "#;
-        let d = evaluate_call(&subset, &write_call_with_content("src/sql_util.rs", content));
+        let d = evaluate_call(
+            &subset,
+            &write_call_with_content("src/sql_util.rs", content),
+        );
         assert!(
             matches!(d, Decision::Allow),
             "SQL keyword in comment without interpolation should be allowed"
@@ -696,7 +712,8 @@ mod tests {
     #[test]
     fn arch_url_secret_denies_api_key_in_query() {
         let subset = vec![arch_no_secrets_in_url_1_rule()];
-        let content = r#"let url = "https://api.example.com/data?api_key=supersecret123&format=json";"#;
+        let content =
+            r#"let url = "https://api.example.com/data?api_key=supersecret123&format=json";"#;
         let d = evaluate_call(&subset, &write_call_with_content("src/client.rs", content));
         match d {
             Decision::Deny { rule, reason } => {
@@ -846,8 +863,13 @@ mod tests {
     async fn governed_gateway_fails_closed_on_unknown_session() {
         let gw = GovernedGateway::new();
         let unknown = SessionId("ghost".to_string());
-        let d = gw.evaluate(&unknown, &write_call("crates/core/ok.rs")).await;
-        assert!(matches!(d, Decision::Deny { .. }), "unbound session must fail closed");
+        let d = gw
+            .evaluate(&unknown, &write_call("crates/core/ok.rs"))
+            .await;
+        assert!(
+            matches!(d, Decision::Deny { .. }),
+            "unbound session must fail closed"
+        );
     }
 
     #[test]

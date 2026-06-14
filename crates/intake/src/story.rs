@@ -142,7 +142,12 @@ impl UserStory {
     /// lead engineer) can read verbatim. Used in the brief the AI reviews and in
     /// the UI transcript.
     pub fn render(&self) -> String {
-        let mut out = format!("Story «{}» — {}\n  For: {}\n", self.id.as_str(), self.title, self.for_whom);
+        let mut out = format!(
+            "Story «{}» — {}\n  For: {}\n",
+            self.id.as_str(),
+            self.title,
+            self.for_whom
+        );
         for want in &self.wants {
             out.push_str(&format!("  • {want}\n"));
         }

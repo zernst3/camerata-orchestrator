@@ -3,6 +3,9 @@ name = "camerata"
 edition.workspace = true
 version = "0.0.0"
 
+[lints]
+workspace = true
+
 [lib]
 name = "camerata"
 path = "src/lib.rs"

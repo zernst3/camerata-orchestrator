@@ -32,9 +32,14 @@ pub async fn run_build(
 pub fn event_label(ev: &BuildEvent) -> Option<String> {
     match ev {
         BuildEvent::Scaffolding => Some("Setting up the project".to_string()),
-        BuildEvent::StageStarted { index, total, kind, .. } => {
-            Some(format!("Building {} ({} of {})", humanize_kind(kind), index + 1, total))
-        }
+        BuildEvent::StageStarted {
+            index, total, kind, ..
+        } => Some(format!(
+            "Building {} ({} of {})",
+            humanize_kind(kind),
+            index + 1,
+            total
+        )),
         BuildEvent::Verifying => Some("Checking it against the rules".to_string()),
         BuildEvent::Done { .. } => Some("Putting it together for you to try".to_string()),
         // Stage-finished is folded into the next line's progress, no own label.

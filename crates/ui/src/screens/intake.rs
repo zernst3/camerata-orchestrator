@@ -66,7 +66,10 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                     constraints: constraints(),
                     roles: roles()
                         .into_iter()
-                        .map(|r| RoleInput { name: r.name, actions: r.actions })
+                        .map(|r| RoleInput {
+                            name: r.name,
+                            actions: r.actions,
+                        })
                         .collect(),
                     entities: entities()
                         .into_iter()
@@ -75,7 +78,10 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                             fields: e
                                 .fields
                                 .into_iter()
-                                .map(|f| FieldInput { name: f.name, type_label: f.type_label })
+                                .map(|f| FieldInput {
+                                    name: f.name,
+                                    type_label: f.type_label,
+                                })
                                 .collect(),
                             features: e.features,
                         })
@@ -89,7 +95,11 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
     };
 
     let is_last = section() == Section::Style;
-    let primary_label = if is_last { "Talk to the engineer" } else { "Next" };
+    let primary_label = if is_last {
+        "Talk to the engineer"
+    } else {
+        "Next"
+    };
 
     rsx! {
         div { class: "page",
@@ -300,10 +310,7 @@ fn StyleSection(mut style: Signal<StylePreferences>) -> Element {
 }
 
 #[component]
-fn ConstraintsSection(
-    constraints: Signal<String>,
-    on_change: EventHandler<String>,
-) -> Element {
+fn ConstraintsSection(constraints: Signal<String>, on_change: EventHandler<String>) -> Element {
     rsx! {
         h1 { class: "h1", "Anything important or unusual?" }
         p { class: "lede", "Rules, must-haves, a look you're after. Anything you'd tell a designer over coffee. The engineer reads this carefully before we start." }

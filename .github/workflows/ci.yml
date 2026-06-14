@@ -1,0 +1,60 @@
+name: CI
+
+# Camerata governs its own source the way it governs the agents: mechanically, in
+# CI, on every push and pull request. The whole thesis is "examples are not
+# enforcement, the gate is", so this gate runs on Camerata's own code.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  govern:
+    name: Camerata governs its own code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + rustfmt + clippy)
+        run: rustup toolchain install stable --profile minimal --component rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Gate 1: formatting is mechanically enforced (no "looks fine to me").
+      - name: Format gate
+        run: cargo fmt --all -- --check
+
+      # Gate 2: zero warnings, and `unsafe_code = "forbid"` is enforced at compile
+      # time via the workspace lint table, so unsafe code cannot land.
+      - name: Clippy gate (deny all warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Gate 3: the test suite must pass.
+      - name: Test gate
+        run: cargo test --workspace --locked
+
+  # A non-blocking informational pass that surfaces the STRICTER bar Camerata is
+  # working toward (unwrap/expect/panic removal, pedantic), without failing the
+  # build today. Honest staging, in the same spirit as docs/ENFORCEMENT.md: the
+  # blocking gate above is real; this is the tracked, not-yet-denied frontier.
+  strict-frontier:
+    name: Strict frontier (informational, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable + clippy)
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (pedantic + restriction, report only)
+        run: >
+          cargo clippy --workspace --all-targets --
+          -W clippy::pedantic
+          -W clippy::unwrap_used
+          -W clippy::expect_used
+          -W clippy::panic

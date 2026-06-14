@@ -195,11 +195,12 @@ impl ProductSuggestion {
 /// failure mode — it is a TRUST FEATURE. The UI surfaces each variant plainly:
 /// `Proceed` = full speed ahead; `RecommendArchitect` = route to a human;
 /// `TooComplex` = plain decline rather than building something fragile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "verdict", rename_all = "snake_case")]
 pub enum HonestyVerdict {
     /// The request is well-within Camerata's reach. Build when the checklist
     /// clears (or earlier, at the PO's discretion).
+    #[default]
     Proceed,
     /// The app has complexity that warrants a human architect in the loop. The
     /// `reason` field explains why in plain language.
@@ -260,12 +261,6 @@ pub struct LeadEngineerResponse {
     /// items). Empty when the engineer is ready to build.
     #[serde(default)]
     pub questions: Vec<String>,
-}
-
-impl Default for HonestyVerdict {
-    fn default() -> Self {
-        HonestyVerdict::Proceed
-    }
 }
 
 impl LeadEngineerResponse {
@@ -431,10 +426,7 @@ impl StubLeadEngineer {
             ));
         }
 
-        let has_removable = form
-            .entities
-            .iter()
-            .any(|e| e.capabilities.can_remove);
+        let has_removable = form.entities.iter().any(|e| e.capabilities.can_remove);
         if has_removable {
             suggestions.push(ProductSuggestion::new(
                 "soft_delete",
@@ -613,13 +605,15 @@ impl ClaudeLeadEngineer {
     ///
     /// Public + pure so the parsing contract is unit-tested directly (no process).
     pub fn parse_response(result_text: &str) -> Result<Intake, LeadEngineerError> {
-        let json = extract_json_object(result_text)
-            .ok_or_else(|| LeadEngineerError::ParsePlan(format!(
+        let json = extract_json_object(result_text).ok_or_else(|| {
+            LeadEngineerError::ParsePlan(format!(
                 "no JSON object found in model output: {}",
                 truncate(result_text, 200)
-            )))?;
-        let output: ModelOutput = serde_json::from_str(json)
-            .map_err(|e| LeadEngineerError::ParsePlan(format!("{e}; raw: {}", truncate(json, 200))))?;
+            ))
+        })?;
+        let output: ModelOutput = serde_json::from_str(json).map_err(|e| {
+            LeadEngineerError::ParsePlan(format!("{e}; raw: {}", truncate(json, 200)))
+        })?;
 
         let response = LeadEngineerResponse {
             checklist: output.checklist,
@@ -680,13 +674,15 @@ impl ClaudeLeadEngineer {
             return Ok(intake);
         }
         // Fall back to bare Plan JSON (the old format, for backward-compat tests).
-        let json = extract_json_object(result_text)
-            .ok_or_else(|| LeadEngineerError::ParsePlan(format!(
+        let json = extract_json_object(result_text).ok_or_else(|| {
+            LeadEngineerError::ParsePlan(format!(
                 "no JSON object found in model output: {}",
                 truncate(result_text, 200)
-            )))?;
-        let plan: Plan = serde_json::from_str(json)
-            .map_err(|e| LeadEngineerError::ParsePlan(format!("{e}; raw: {}", truncate(json, 200))))?;
+            ))
+        })?;
+        let plan: Plan = serde_json::from_str(json).map_err(|e| {
+            LeadEngineerError::ParsePlan(format!("{e}; raw: {}", truncate(json, 200)))
+        })?;
         if !plan.is_buildable() {
             return Err(LeadEngineerError::ParsePlan(
                 "model returned a plan with zero tasks".to_string(),
@@ -895,7 +891,10 @@ mod tests {
         }"#;
         let intake = ClaudeLeadEngineer::parse_response(raw).unwrap();
         assert!(!intake.is_ready());
-        assert_eq!(intake.questions(), &["Which currency?".to_string(), "What roles?".to_string()]);
+        assert_eq!(
+            intake.questions(),
+            &["Which currency?".to_string(), "What roles?".to_string()]
+        );
         let response = intake.response();
         assert_eq!(response.confidence.value(), 40);
         assert_eq!(response.open_count(), 1);
@@ -1006,7 +1005,11 @@ mod tests {
 
     #[test]
     fn product_suggestion_round_trips_json() {
-        let sug = ProductSuggestion::new("admin_users", "You need an admin panel", "without it you need DB access");
+        let sug = ProductSuggestion::new(
+            "admin_users",
+            "You need an admin panel",
+            "without it you need DB access",
+        );
         let json = serde_json::to_string(&sug).unwrap();
         let back: ProductSuggestion = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, "admin_users");

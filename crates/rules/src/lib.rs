@@ -196,8 +196,7 @@ impl RuleSet {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Default corpus path shipped with the camerata-ai repo.
-pub const DEFAULT_CORPUS_PATH: &str =
-    "/Users/zacharyernst/Documents/Repos/camerata-ai/principles";
+pub const DEFAULT_CORPUS_PATH: &str = "/Users/zacharyernst/Documents/Repos/camerata-ai/principles";
 
 /// Load the full rule corpus from `corpus_dir`, walking it recursively.
 ///
@@ -220,9 +219,7 @@ pub async fn load_corpus(corpus_dir: &Path) -> Result<RuleSet, RulesError> {
 /// Returns the successfully loaded [`RuleSet`] and a list of (path, error)
 /// pairs for files that were skipped. Useful when the corpus is evolving and
 /// some files may temporarily be malformed.
-pub async fn load_corpus_lenient(
-    corpus_dir: &Path,
-) -> (RuleSet, Vec<(PathBuf, RulesError)>) {
+pub async fn load_corpus_lenient(corpus_dir: &Path) -> (RuleSet, Vec<(PathBuf, RulesError)>) {
     let paths = match collect_toml_paths(corpus_dir).await {
         Ok(p) => p,
         Err(e) => return (RuleSet::default(), vec![(corpus_dir.to_path_buf(), e)]),
@@ -256,15 +253,12 @@ async fn collect_toml_paths(corpus_dir: &Path) -> Result<Vec<PathBuf>, RulesErro
     .unwrap_or_else(|join_err| {
         Err(RulesError::Io {
             path: corpus_dir.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, join_err.to_string()),
+            source: std::io::Error::other(join_err.to_string()),
         })
     })
 }
 
-fn collect_toml_paths_sync(
-    dir: &Path,
-    out: &mut Vec<PathBuf>,
-) -> Result<(), RulesError> {
+fn collect_toml_paths_sync(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RulesError> {
     let read_dir = std::fs::read_dir(dir).map_err(|e| RulesError::Io {
         path: dir.to_path_buf(),
         source: e,
@@ -362,7 +356,10 @@ pub enum Filter<'a> {
 /// This is a pure function: given the same `rule_set` + `filter`, it always
 /// returns the same result.
 pub fn select<'a>(rule_set: &'a RuleSet, filter: &Filter<'_>) -> Vec<&'a Rule> {
-    rule_set.iter().filter(|r| matches_filter(r, filter)).collect()
+    rule_set
+        .iter()
+        .filter(|r| matches_filter(r, filter))
+        .collect()
 }
 
 /// Pure predicate — does `rule` satisfy `filter`?
@@ -396,9 +393,7 @@ pub fn select_by_ids<'a>(rule_set: &'a RuleSet, ids: &[RuleId]) -> Vec<&'a Rule>
 pub fn select_for_domains<'a>(rule_set: &'a RuleSet, domains: &[&str]) -> Vec<&'a Rule> {
     rule_set
         .iter()
-        .filter(|r| {
-            r.domain == "*" || domains.iter().any(|d| r.domain == *d)
-        })
+        .filter(|r| r.domain == "*" || domains.iter().any(|d| r.domain == *d))
         .collect()
 }
 
@@ -502,10 +497,7 @@ pub async fn role_from_corpus(
 /// to `"**"` (all files).  The list always includes `"**"` so the role is
 /// never inadvertently restricted to zero paths.
 fn derive_allowed_paths(domains: &[&str]) -> Vec<String> {
-    let mut paths: Vec<String> = domains
-        .iter()
-        .map(|d| domain_to_glob(d))
-        .collect();
+    let mut paths: Vec<String> = domains.iter().map(|d| domain_to_glob(d)).collect();
 
     // Always add a universal catch-all so the role is usable even if the
     // domain mapping is incomplete.
@@ -554,8 +546,16 @@ mod tests {
 
     fn populated_set() -> RuleSet {
         let mut set = RuleSet::default();
-        set.push(make_rule("RUST-DOMAIN-1", "rust", EnforcementKind::Structured));
-        set.push(make_rule("RUST-DOMAIN-4", "rust", EnforcementKind::Structured));
+        set.push(make_rule(
+            "RUST-DOMAIN-1",
+            "rust",
+            EnforcementKind::Structured,
+        ));
+        set.push(make_rule(
+            "RUST-DOMAIN-4",
+            "rust",
+            EnforcementKind::Structured,
+        ));
         set.push(make_rule(
             "ORCH-NEW-PATH-TESTS-1",
             "agentic",
@@ -741,8 +741,14 @@ mod tests {
         // ask for "agentic" only — universal "*" should appear too
         let result = select_for_domains(&set, &["agentic"]);
         let ids: Vec<&str> = result.iter().map(|r| r.id_str()).collect();
-        assert!(ids.contains(&"ORCH-NEW-PATH-TESTS-1"), "agentic rule present");
-        assert!(ids.contains(&"SPIRIT-OPTIMIZE-1"), "universal rule included");
+        assert!(
+            ids.contains(&"ORCH-NEW-PATH-TESTS-1"),
+            "agentic rule present"
+        );
+        assert!(
+            ids.contains(&"SPIRIT-OPTIMIZE-1"),
+            "universal rule included"
+        );
         // rust and api-layer rules must NOT appear
         assert!(!ids.contains(&"RUST-DOMAIN-1"));
         assert!(!ids.contains(&"ARCH-STRICT-LAYERING-1"));
@@ -801,10 +807,7 @@ mod tests {
             set.len()
         );
         // The real corpus should be clean.
-        assert!(
-            errors.is_empty(),
-            "unexpected parse errors: {errors:#?}"
-        );
+        assert!(errors.is_empty(), "unexpected parse errors: {errors:#?}");
     }
 
     #[tokio::test]

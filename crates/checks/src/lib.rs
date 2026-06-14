@@ -3,10 +3,10 @@
 //! Implements [`camerata_core::CheckRunner`] for Rust worktrees. Phase 0 ships
 //! two concrete runners:
 //!
-//! - [`FmtCheckRunner`]    — shells out to `cargo fmt --check`, maps failure to
-//!                           `RUST-FMT`.
-//! - [`ClippyCheckRunner`] — shells out to `cargo clippy`, maps warnings/errors
-//!                           to `RUST-CLIPPY`.
+//! - [`FmtCheckRunner`] -- shells out to `cargo fmt --check`, maps failure to
+//!   `RUST-FMT`.
+//! - [`ClippyCheckRunner`] -- shells out to `cargo clippy`, maps warnings/errors
+//!   to `RUST-CLIPPY`.
 //!
 //! The subprocess invocation layer ([`subprocess`]) and the output-to-RuleId
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be

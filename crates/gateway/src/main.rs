@@ -33,11 +33,11 @@
 use camerata_core::{Decision, RuleId, ToolCall};
 use camerata_gateway::{evaluate_call, gov1_rule};
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
+    ServerHandler, ServiceExt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,10 @@ fn load_rule_subset() -> Vec<RuleId> {
                     "[gateway] loaded {} rule(s) from {}: {}",
                     ids.len(),
                     path.display(),
-                    ids.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(",")
+                    ids.iter()
+                        .map(|r| r.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 );
                 ids
             }
@@ -216,7 +219,11 @@ async fn main() -> anyhow::Result<()> {
     let subset = load_rule_subset();
     eprintln!(
         "[gateway] Camerata Rust MCP governance gateway up (rmcp 1.7, stdio); active subset: {}",
-        subset.iter().map(|r| r.0.as_str()).collect::<Vec<_>>().join(",")
+        subset
+            .iter()
+            .map(|r| r.0.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
     );
     let service = Gateway::with_rules(subset).serve(stdio()).await?;
     service.waiting().await?;

@@ -33,8 +33,12 @@ use crate::Screen;
 enum Entry {
     /// The engineer's warm opening line, before the first question.
     Opener,
-    Engineer { turn: data::ClarifyTurn },
-    User { text: String },
+    Engineer {
+        turn: data::ClarifyTurn,
+    },
+    User {
+        text: String,
+    },
 }
 
 #[component]
@@ -84,7 +88,7 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
     };
 
     // The bypass: stop here and go to the plan with whatever confidence we have.
-    let mut bypass = move |_| {
+    let bypass = move |_| {
         if !planned() {
             planned.set(true);
         }
@@ -172,7 +176,7 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
                             div { class: "bypass-row",
                                 button {
                                     class: "btn-quiet",
-                                    onclick: move |e| bypass(e),
+                                    onclick: bypass,
                                     "I have what I need — just build it"
                                 }
                             }
@@ -206,7 +210,12 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
     let (share_on, hist_on) = app
         .read()
         .as_ref()
-        .map(|s| (s.project.sharing.contribute_design, s.project.sharing.use_historical))
+        .map(|s| {
+            (
+                s.project.sharing.contribute_design,
+                s.project.sharing.use_historical,
+            )
+        })
         .unwrap_or((false, false));
     let (phase_label, ctx_label, session_conf) = match app.read().as_ref() {
         Some(s) => (
@@ -433,7 +442,11 @@ fn ConfidenceHeader(confidence: u8, answered: usize, total: usize) -> Element {
 #[component]
 fn EngineerBubble(turn: data::ClarifyTurn) -> Element {
     let is_suggestion = turn.kind == TurnKind::Suggestion;
-    let outer = if is_suggestion { "bubble bubble-eng suggestion" } else { "bubble bubble-eng" };
+    let outer = if is_suggestion {
+        "bubble bubble-eng suggestion"
+    } else {
+        "bubble bubble-eng"
+    };
     rsx! {
         div { class: "{outer}",
             div { class: "who",

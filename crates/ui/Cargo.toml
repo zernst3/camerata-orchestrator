@@ -3,6 +3,9 @@ name = "camerata-ui"
 edition.workspace = true
 version = "0.0.0"
 
+[lints]
+workspace = true
+
 # The consumer-mode prototype: a runnable Dioxus DESKTOP app that walks a
 # non-technical person through Intake -> Clarify -> Build -> Live.
 # Mocked data only (no engine wiring yet); the goal is to nail the look,

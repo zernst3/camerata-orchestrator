@@ -34,8 +34,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{AgentDriver, CheckRunner, Role, RunReport};
 use crate::coordinator::{build_revise_task, CoordinatorError};
+use crate::{AgentDriver, CheckRunner, Role, RunReport};
 
 /// One stage of a fleet pipeline: a role, its task, and the governed driver that
 /// runs it. The driver is per-stage because each governed agent is a distinct
@@ -170,14 +170,14 @@ impl<'a> FleetCoordinator<'a> {
                 })?;
 
         // 2. Layer-2 check against the shared worktree.
-        let initial_violations = self
-            .checks
-            .check(role, &self.worktree)
-            .await
-            .map_err(|source| CoordinatorError::Check {
-                pass: "initial",
-                source,
-            })?;
+        let initial_violations =
+            self.checks
+                .check(role, &self.worktree)
+                .await
+                .map_err(|source| CoordinatorError::Check {
+                    pass: "initial",
+                    source,
+                })?;
 
         // Clean on the first pass — no bounce.
         if initial_violations.is_empty() {
@@ -192,13 +192,14 @@ impl<'a> FleetCoordinator<'a> {
 
         // 3. ONE bounce-and-revise pass, citing the violated rule ids verbatim.
         let revise_task = build_revise_task(task, &initial_violations);
-        let revised_outcome = driver
-            .run(role, &revise_task)
-            .await
-            .map_err(|source| CoordinatorError::Driver {
-                pass: "revise",
-                source,
-            })?;
+        let revised_outcome =
+            driver
+                .run(role, &revise_task)
+                .await
+                .map_err(|source| CoordinatorError::Driver {
+                    pass: "revise",
+                    source,
+                })?;
 
         let final_violations = self
             .checks
@@ -282,7 +283,12 @@ mod tests {
     #[async_trait::async_trait]
     impl CheckRunner for ScriptedChecks {
         async fn check(&self, _role: &Role, _wt: &Path) -> anyhow::Result<Vec<RuleId>> {
-            Ok(self.scripted.lock().unwrap().pop_front().unwrap_or_default())
+            Ok(self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default())
         }
     }
 

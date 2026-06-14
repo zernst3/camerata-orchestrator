@@ -294,13 +294,21 @@ impl RefinementSession {
     }
 
     /// Open a mid-build session scoped to a builder escalation.
-    pub fn mid_build(id: impl Into<String>, escalation: Escalation, stories: Vec<UserStory>) -> Self {
+    pub fn mid_build(
+        id: impl Into<String>,
+        escalation: Escalation,
+        stories: Vec<UserStory>,
+    ) -> Self {
         Self::open(id, RefinementContext::MidBuild { escalation }, stories)
     }
 
     /// Open a post-build session seeded with QA bug reports. Each bug becomes a
     /// "bug story" (the conversion happens in [`Self::open`]).
-    pub fn post_build(id: impl Into<String>, bugs: Vec<BugReport>, stories: Vec<UserStory>) -> Self {
+    pub fn post_build(
+        id: impl Into<String>,
+        bugs: Vec<BugReport>,
+        stories: Vec<UserStory>,
+    ) -> Self {
         Self::open(id, RefinementContext::PostBuild { bugs }, stories)
     }
 

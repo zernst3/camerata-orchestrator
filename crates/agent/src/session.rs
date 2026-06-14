@@ -72,15 +72,9 @@ struct McpConfig {
 ///
 /// Pure (no I/O) so it is unit-testable. The server key is [`MCP_SERVER_KEY`],
 /// which is what makes the agent-visible tool name [`GATED_WRITE_TOOL`].
-pub fn render_mcp_config(
-    gateway_bin: &Path,
-    rules_file: &Path,
-) -> Result<String, SessionError> {
+pub fn render_mcp_config(gateway_bin: &Path, rules_file: &Path) -> Result<String, SessionError> {
     let mut env = std::collections::BTreeMap::new();
-    env.insert(
-        RULES_FILE_ENV.to_string(),
-        rules_file.display().to_string(),
-    );
+    env.insert(RULES_FILE_ENV.to_string(), rules_file.display().to_string());
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(
@@ -232,12 +226,9 @@ mod tests {
 
     #[test]
     fn prepare_session_writes_both_files_and_wires_driver() {
-        let dir = std::env::temp_dir().join(format!(
-            "camerata-session-test-{}",
-            std::process::id()
-        ));
-        let spawn =
-            prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role()).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("camerata-session-test-{}", std::process::id()));
+        let spawn = prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role()).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(

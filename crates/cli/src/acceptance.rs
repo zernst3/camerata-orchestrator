@@ -132,7 +132,9 @@ mod tests {
 
     #[tokio::test]
     async fn acceptance_gate_denies_planted_violation_and_allows_control() {
-        let result = run_acceptance().await.expect("acceptance run should complete");
+        let result = run_acceptance()
+            .await
+            .expect("acceptance run should complete");
 
         // The core assertion: the gate DENIED the planted forbidden write.
         match &result.planted_violation_decision {

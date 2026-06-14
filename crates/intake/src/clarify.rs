@@ -148,9 +148,7 @@ impl SequentialAnswerSource {
 #[async_trait]
 impl AnswerSource for SequentialAnswerSource {
     async fn answer(&self, _questions: &[String]) -> Vec<String> {
-        let idx = self
-            .turn
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let idx = self.turn.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Return the scripted row for this turn, or the last row if we ran out.
         let effective = idx.min(self.rounds.len().saturating_sub(1));
         self.rounds.get(effective).cloned().unwrap_or_default()
@@ -352,14 +350,12 @@ impl<'a> ClarifyDriver<'a> {
                     clarify_turns += 1;
 
                     // Re-evaluate with the enriched form.
-                    intake = self
-                        .engineer
-                        .evaluate(&working)
-                        .await
-                        .map_err(|source| ClarifyError::Engine {
+                    intake = self.engineer.evaluate(&working).await.map_err(|source| {
+                        ClarifyError::Engine {
                             turn: clarify_turns + 1,
                             source,
-                        })?;
+                        }
+                    })?;
                 }
             }
         }
@@ -374,8 +370,8 @@ mod tests {
         StubLeadEngineer,
     };
     use crate::form::{
-        ClarificationRound, EntityDefinition, EntityField, EntityCapabilities,
-        FieldType, IntakeForm, ViewKind, ViewSpec,
+        ClarificationRound, EntityCapabilities, EntityDefinition, EntityField, FieldType,
+        IntakeForm, ViewKind, ViewSpec,
     };
     use crate::plan::{Plan, PlanTask, TaskKind};
     use async_trait::async_trait;
@@ -567,7 +563,9 @@ mod tests {
         #[async_trait]
         impl LeadEngineer for InspectingEngineer {
             async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
-                let n = self.called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let n = self
+                    .called
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n == 0 {
                     // First call: ask a question.
                     Ok(Intake::NeedsClarification {

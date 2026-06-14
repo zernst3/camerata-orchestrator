@@ -9,7 +9,10 @@
 
 use camerata_core::RuleId;
 
-use crate::{clippy_rule, fmt_rule, subprocess::{ClippyOutput, FmtOutput}};
+use crate::{
+    clippy_rule, fmt_rule,
+    subprocess::{ClippyOutput, FmtOutput},
+};
 
 /// Map `cargo fmt --check` output to violated rule ids.
 ///
@@ -141,24 +144,32 @@ mod tests {
 
     #[test]
     fn diagnostic_detection_recognises_warning_bracket() {
-        assert!(has_clippy_diagnostic("warning[clippy::needless_return]: needless return\n"));
+        assert!(has_clippy_diagnostic(
+            "warning[clippy::needless_return]: needless return\n"
+        ));
     }
 
     #[test]
     fn diagnostic_detection_recognises_aborting_line() {
-        assert!(has_clippy_diagnostic("error: aborting due to 3 previous errors\n"));
+        assert!(has_clippy_diagnostic(
+            "error: aborting due to 3 previous errors\n"
+        ));
     }
 
     #[test]
     fn diagnostic_detection_ignores_plain_prose() {
         // A log line mentioning "error" without the bracketed form must not trigger.
-        assert!(!has_clippy_diagnostic("    Compiling my-crate v0.1.0\n    Finished in 1.2s\n"));
+        assert!(!has_clippy_diagnostic(
+            "    Compiling my-crate v0.1.0\n    Finished in 1.2s\n"
+        ));
     }
 
     #[test]
     fn diagnostic_detection_handles_leading_whitespace() {
         // rustc indents diagnostic lines with spaces.
-        assert!(has_clippy_diagnostic("    error[E0308]: mismatched types\n"));
+        assert!(has_clippy_diagnostic(
+            "    error[E0308]: mismatched types\n"
+        ));
     }
 
     #[test]

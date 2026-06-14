@@ -11,6 +11,9 @@ version = "0.0.0"
 # rule-subset by session_id, (3) decide transport (stdio-subprocess vs embedded
 # streamable-http so the orchestrator's live state is in-process).
 
+[lints]
+workspace = true
+
 [lib]
 name = "camerata_gateway"
 path = "src/lib.rs"

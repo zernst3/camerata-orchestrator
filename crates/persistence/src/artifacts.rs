@@ -100,7 +100,7 @@ impl ArtifactKind {
     }
 
     /// Parse from the stored snake_case string. Returns `None` for unknown values.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "onboarding_document" => Some(ArtifactKind::OnboardingDocument),
             "user_story" => Some(ArtifactKind::UserStory),
@@ -139,7 +139,7 @@ impl EditActor {
     }
 
     /// Parse from the stored snake_case string. Returns `None` for unknown values.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "user" => Some(EditActor::User),
             "ai" => Some(EditActor::Ai),
@@ -178,7 +178,7 @@ impl RevisionOp {
     }
 
     /// Parse from the stored snake_case string. Returns `None` for unknown values.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "create" => Some(RevisionOp::Create),
             "update" => Some(RevisionOp::Update),
@@ -380,15 +380,12 @@ fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactRevision, Pe
     let payload: String = row.try_get("payload")?;
     let created_at_str: String = row.try_get("created_at")?;
 
-    let kind = ArtifactKind::from_str(&kind_str).ok_or_else(|| {
-        sqlx::Error::Decode(format!("unknown artifact kind: {kind_str}").into())
-    })?;
-    let actor = EditActor::from_str(&actor_str).ok_or_else(|| {
-        sqlx::Error::Decode(format!("unknown edit actor: {actor_str}").into())
-    })?;
-    let op = RevisionOp::from_str(&op_str).ok_or_else(|| {
-        sqlx::Error::Decode(format!("unknown revision op: {op_str}").into())
-    })?;
+    let kind = ArtifactKind::parse_str(&kind_str)
+        .ok_or_else(|| sqlx::Error::Decode(format!("unknown artifact kind: {kind_str}").into()))?;
+    let actor = EditActor::parse_str(&actor_str)
+        .ok_or_else(|| sqlx::Error::Decode(format!("unknown edit actor: {actor_str}").into()))?;
+    let op = RevisionOp::parse_str(&op_str)
+        .ok_or_else(|| sqlx::Error::Decode(format!("unknown revision op: {op_str}").into()))?;
     let created_at: DateTime<Utc> = created_at_str.parse().unwrap_or_else(|_| Utc::now());
 
     Ok(ArtifactRevision {
@@ -845,8 +842,14 @@ mod tests {
 
         let ids: Vec<&str> = live.iter().map(|r| r.artifact_id.as_str()).collect();
         assert!(ids.contains(&"doc-live"), "live artifact must appear");
-        assert!(!ids.contains(&"doc-dead"), "deleted artifact must be excluded");
-        assert!(ids.contains(&"doc-reborn"), "re-created artifact must appear");
+        assert!(
+            !ids.contains(&"doc-dead"),
+            "deleted artifact must be excluded"
+        );
+        assert!(
+            ids.contains(&"doc-reborn"),
+            "re-created artifact must appear"
+        );
 
         let reborn = live.iter().find(|r| r.artifact_id == "doc-reborn").unwrap();
         assert_eq!(reborn.op, RevisionOp::Create);
@@ -1087,21 +1090,21 @@ mod tests {
             ArtifactKind::RefinementSession,
         ] {
             let s = kind.as_str();
-            let parsed = ArtifactKind::from_str(s).expect("ArtifactKind round-trip");
+            let parsed = ArtifactKind::parse_str(s).expect("ArtifactKind round-trip");
             assert_eq!(parsed, kind, "ArtifactKind::{s}");
         }
 
         // EditActor
         for actor in [EditActor::User, EditActor::Ai] {
             let s = actor.as_str();
-            let parsed = EditActor::from_str(s).expect("EditActor round-trip");
+            let parsed = EditActor::parse_str(s).expect("EditActor round-trip");
             assert_eq!(parsed, actor, "EditActor::{s}");
         }
 
         // RevisionOp
         for op in [RevisionOp::Create, RevisionOp::Update, RevisionOp::Delete] {
             let s = op.as_str();
-            let parsed = RevisionOp::from_str(s).expect("RevisionOp round-trip");
+            let parsed = RevisionOp::parse_str(s).expect("RevisionOp round-trip");
             assert_eq!(parsed, op, "RevisionOp::{s}");
         }
 

@@ -508,13 +508,16 @@ impl IntakeForm {
                 description: "A single spending record: how much, what for, and when.".to_string(),
                 fields: vec![
                     EntityField::required("amount", FieldType::Money),
-                    EntityField::required("category", FieldType::Choice(vec![
-                        "Food".to_string(),
-                        "Transport".to_string(),
-                        "Housing".to_string(),
-                        "Entertainment".to_string(),
-                        "Other".to_string(),
-                    ])),
+                    EntityField::required(
+                        "category",
+                        FieldType::Choice(vec![
+                            "Food".to_string(),
+                            "Transport".to_string(),
+                            "Housing".to_string(),
+                            "Entertainment".to_string(),
+                            "Other".to_string(),
+                        ]),
+                    ),
                     EntityField::required("spent_on", FieldType::Date),
                     EntityField::optional("note", FieldType::Text),
                 ],
@@ -666,12 +669,15 @@ impl IntakeForm {
                 fields: vec![
                     EntityField::required("title", FieldType::Text),
                     EntityField::optional("author", FieldType::Text),
-                    EntityField::required("status", FieldType::Choice(vec![
-                        "To Read".to_string(),
-                        "Reading".to_string(),
-                        "Finished".to_string(),
-                        "Abandoned".to_string(),
-                    ])),
+                    EntityField::required(
+                        "status",
+                        FieldType::Choice(vec![
+                            "To Read".to_string(),
+                            "Reading".to_string(),
+                            "Finished".to_string(),
+                            "Abandoned".to_string(),
+                        ]),
+                    ),
                     EntityField::optional("url", FieldType::Url),
                     EntityField::optional("finished_on", FieldType::Date),
                     EntityField::optional("rating", FieldType::Number),
@@ -772,7 +778,10 @@ mod tests {
     fn sample_app_has_required_spine() {
         let form = IntakeForm::sample_app();
         assert_eq!(form.app_name, "expense-tracker");
-        assert!(!form.description.is_empty(), "description must be non-empty");
+        assert!(
+            !form.description.is_empty(),
+            "description must be non-empty"
+        );
         assert!(!form.roles.is_empty(), "at least one role is required");
         assert!(!form.entities.is_empty(), "at least one entity is required");
     }
@@ -786,7 +795,10 @@ mod tests {
             .find(|e| e.name == "Expense")
             .expect("Expense entity missing");
         assert!(
-            expense.fields.iter().any(|f| f.name == "amount" && f.field_type == FieldType::Money && f.required),
+            expense
+                .fields
+                .iter()
+                .any(|f| f.name == "amount" && f.field_type == FieldType::Money && f.required),
             "Expense must have a required `amount` Money field"
         );
     }
@@ -802,8 +814,15 @@ mod tests {
     #[test]
     fn sample_app_owner_role_has_actions() {
         let form = IntakeForm::sample_app();
-        let owner = form.roles.iter().find(|r| r.name == "Owner").expect("Owner role missing");
-        assert!(!owner.actions.is_empty(), "Owner must have at least one action");
+        let owner = form
+            .roles
+            .iter()
+            .find(|r| r.name == "Owner")
+            .expect("Owner role missing");
+        assert!(
+            !owner.actions.is_empty(),
+            "Owner must have at least one action"
+        );
     }
 
     // ── sample_underspecified_app ─────────────────────────────────────────────
@@ -835,7 +854,10 @@ mod tests {
     fn sample_reading_list_has_choice_and_url_fields() {
         let form = IntakeForm::sample_reading_list_app();
         let item = &form.entities[0];
-        assert!(item.fields.iter().any(|f| matches!(f.field_type, FieldType::Choice(_))));
+        assert!(item
+            .fields
+            .iter()
+            .any(|f| matches!(f.field_type, FieldType::Choice(_))));
         assert!(item.fields.iter().any(|f| f.field_type == FieldType::Url));
     }
 
@@ -843,7 +865,14 @@ mod tests {
     fn reading_list_entity_has_full_capabilities() {
         let form = IntakeForm::sample_reading_list_app();
         let caps = &form.entities[0].capabilities;
-        assert!(caps.can_add && caps.can_list && caps.can_view && caps.can_edit && caps.can_remove && caps.can_search);
+        assert!(
+            caps.can_add
+                && caps.can_list
+                && caps.can_view
+                && caps.can_edit
+                && caps.can_remove
+                && caps.can_search
+        );
     }
 
     // ── brief() ──────────────────────────────────────────────────────────────
@@ -851,11 +880,17 @@ mod tests {
     #[test]
     fn brief_contains_app_name_description_roles_and_entities() {
         let brief = IntakeForm::sample_app().brief();
-        assert!(brief.contains("expense-tracker"), "brief must contain app name");
+        assert!(
+            brief.contains("expense-tracker"),
+            "brief must contain app name"
+        );
         assert!(brief.contains("Expense"), "brief must mention the entity");
         assert!(brief.contains("Owner"), "brief must mention the role");
         assert!(brief.contains("amount"), "brief must mention the field");
-        assert!(brief.contains("money/decimal"), "brief must show field type label");
+        assert!(
+            brief.contains("money/decimal"),
+            "brief must show field type label"
+        );
     }
 
     #[test]
@@ -872,8 +907,14 @@ mod tests {
     #[test]
     fn brief_shows_constraints_when_present() {
         let brief = IntakeForm::sample_app().brief();
-        assert!(brief.contains("Constraints:"), "brief must render the constraints section");
-        assert!(brief.contains("Single-user"), "brief must include the constraints text");
+        assert!(
+            brief.contains("Constraints:"),
+            "brief must render the constraints section"
+        );
+        assert!(
+            brief.contains("Single-user"),
+            "brief must include the constraints text"
+        );
     }
 
     #[test]
@@ -894,7 +935,10 @@ mod tests {
             answers: vec!["USD".to_string()],
         });
         let brief = form.brief();
-        assert!(brief.contains("Clarifications"), "brief must include Clarifications section");
+        assert!(
+            brief.contains("Clarifications"),
+            "brief must include Clarifications section"
+        );
         assert!(brief.contains("Which currency?"));
         assert!(brief.contains("USD"));
     }

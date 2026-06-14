@@ -19,7 +19,9 @@ async fn main() -> anyhow::Result<()> {
         "" | "help" | "--help" | "-h" => {
             println!("camerata orchestrator");
             println!("usage:");
-            println!("  camerata acceptance   run the in-process planted-violation acceptance scenario");
+            println!(
+                "  camerata acceptance   run the in-process planted-violation acceptance scenario"
+            );
             println!("  camerata live-demo    spawn a REAL claude -p twice; prove gateway deny + allow live");
             println!("  camerata build-demo   run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");
             println!("  camerata po-demo      run PO-MODE end to end: intake form -> lead engineer -> governed fleet -> cargo");
@@ -36,7 +38,10 @@ async fn run_acceptance_cmd() -> anyhow::Result<()> {
     let result: AcceptanceResult = run_acceptance().await?;
 
     println!("== Camerata planted-violation acceptance run ==");
-    println!("agent session (fake/echo driver): {}", result.agent_session_id);
+    println!(
+        "agent session (fake/echo driver): {}",
+        result.agent_session_id
+    );
     println!("role allowedTools: {}", result.allowed_tools.join(" "));
 
     match &result.planted_violation_decision {
@@ -50,7 +55,10 @@ async fn run_acceptance_cmd() -> anyhow::Result<()> {
     match &result.clean_control_decision {
         Decision::Allow => println!("clean control write     -> ALLOWED  (expected)"),
         Decision::Deny { rule, reason } => {
-            println!("clean control write     -> DENIED [{}]: {}  (UNEXPECTED)", rule.0, reason);
+            println!(
+                "clean control write     -> DENIED [{}]: {}  (UNEXPECTED)",
+                rule.0, reason
+            );
         }
     }
 

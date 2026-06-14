@@ -29,8 +29,8 @@ use std::time::Instant;
 
 use camerata_fleet::{describe_task_kind, locate_gateway_bin, BuildEvent, FLEET_DOMAINS};
 use camerata_intake::{
-    ClarifyDriver, ClarifyOutcome, ClaudeLeadEngineer, IntakeForm, Plan,
-    SequentialAnswerSource, StubLeadEngineer, TaskKind,
+    ClarifyDriver, ClarifyOutcome, ClaudeLeadEngineer, IntakeForm, Plan, SequentialAnswerSource,
+    StubLeadEngineer, TaskKind,
 };
 
 /// Where the plan the governed fleet built came from. Surfaced in the summary
@@ -77,9 +77,7 @@ fn demo_answer_source() -> SequentialAnswerSource {
             "use f64 for amounts; no need for a money type in v1".to_string(),
         ],
         // Turn 3: final round if still unresolved.
-        vec![
-            "keep it simple; any remaining questions can be deferred to v2".to_string(),
-        ],
+        vec!["keep it simple; any remaining questions can be deferred to v2".to_string()],
     ])
 }
 
@@ -113,9 +111,7 @@ async fn run_clarify_loop(
             ..
         }) => {
             if clarify_turns > 0 {
-                println!(
-                    "  clarify loop: resolved after {clarify_turns} Q&A turn(s)"
-                );
+                println!("  clarify loop: resolved after {clarify_turns} Q&A turn(s)");
             }
             (plan, PlanSource::LiveLeadEngineer, None)
         }
@@ -138,7 +134,9 @@ async fn run_clarify_loop(
         Ok(ClarifyOutcome::NeedsArchitect { reason, .. }) => (
             StubLeadEngineer::plan_for(form),
             PlanSource::StubFallback,
-            Some(format!("lead engineer recommends a human architect: {reason}")),
+            Some(format!(
+                "lead engineer recommends a human architect: {reason}"
+            )),
         ),
         Ok(ClarifyOutcome::TooComplex { reason, .. }) => (
             StubLeadEngineer::plan_for(form),
@@ -157,7 +155,9 @@ async fn run_clarify_loop(
 
 /// Run the full PO-mode pipeline and report PASS / PARTIAL.
 pub async fn run_po_demo() -> anyhow::Result<()> {
-    println!("== Camerata PO-MODE pipeline (intake -> lead engineer -> governed fleet -> cargo) ==");
+    println!(
+        "== Camerata PO-MODE pipeline (intake -> lead engineer -> governed fleet -> cargo) =="
+    );
     println!();
 
     // ── 1. The sample Product-Owner intake form ──────────────────────────────
@@ -200,8 +200,7 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     let gateway_bin = locate_gateway_bin()?;
     eprintln!("[po-demo] gateway binary: {}", gateway_bin.display());
 
-    let root =
-        std::env::temp_dir().join(format!("camerata-po-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("camerata-po-{}", std::process::id()));
 
     println!("── 3. GOVERNED FLEET BUILD ──");
     println!("  corpus domains:                        {FLEET_DOMAINS:?}");
@@ -213,11 +212,8 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
 
     // ── 4. Run the governed build via camerata_fleet::build_from_plan ─────────
     let t0 = Instant::now();
-    let outcome = camerata_fleet::build_from_plan(
-        &plan,
-        &root,
-        &gateway_bin,
-        &|event| match event {
+    let outcome =
+        camerata_fleet::build_from_plan(&plan, &root, &gateway_bin, &|event| match event {
             BuildEvent::Scaffolding => {
                 println!("  [fleet] scaffolding worktree ...");
             }
@@ -267,9 +263,8 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
                 println!("  cargo build success: {compiled}");
                 println!("  cargo test success:  {tests_passed}");
             }
-        },
-    )
-    .await?;
+        })
+        .await?;
     let fleet_wall = t0.elapsed();
     println!("  fleet wall: {:.2}s", fleet_wall.as_secs_f64());
     println!();
@@ -291,7 +286,10 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
         form.entities.len(),
         form.views.len()
     );
-    println!("  plan source:                              {}", plan_source.label());
+    println!(
+        "  plan source:                              {}",
+        plan_source.label()
+    );
     println!(
         "  plan tasks (governed fleet stages):       {}",
         plan.task_count()
@@ -323,7 +321,11 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     );
     println!();
 
-    if outcome.all_agents_ran && outcome.wrote_through_gate && outcome.compiled && outcome.tests_passed {
+    if outcome.all_agents_ran
+        && outcome.wrote_through_gate
+        && outcome.compiled
+        && outcome.tests_passed
+    {
         println!(
             "PO-DEMO: PASS (a Product-Owner form was evaluated by the lead engineer \
              into a plan, and the governed fleet built it into a compiling, passing \
@@ -355,14 +357,18 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
 
 /// "YES"/"NO" for the summary table.
 fn yesno(b: bool) -> &'static str {
-    if b { "YES" } else { "NO" }
+    if b {
+        "YES"
+    } else {
+        "NO"
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_fleet::stage_task_for;
     use camerata_agent::GATED_WRITE_TOOL;
+    use camerata_fleet::stage_task_for;
     use camerata_intake::{Plan, PlanTask, TaskKind};
 
     #[test]
@@ -440,10 +446,7 @@ mod tests {
         #[async_trait]
         impl LeadEngineer for OneQuestionEngineer {
             async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
-                if self
-                    .asked
-                    .swap(true, std::sync::atomic::Ordering::Relaxed)
-                {
+                if self.asked.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     // Second call: the answer must have been folded in.
                     assert_eq!(form.clarifications.len(), 1);
                     Ok(Intake::Ready {
@@ -504,8 +507,7 @@ mod tests {
 
         let answers = camerata_intake::StubAnswerSource::uniform(vec!["dunno".into()]);
         let form = IntakeForm::sample_underspecified_app();
-        let (plan, source, reason) =
-            run_clarify_loop(&AlwaysAsksEngineer, &answers, &form).await;
+        let (plan, source, reason) = run_clarify_loop(&AlwaysAsksEngineer, &answers, &form).await;
         assert_eq!(source, PlanSource::StubFallback);
         assert!(reason.is_some());
         assert!(plan.is_buildable(), "fallback must still be buildable");

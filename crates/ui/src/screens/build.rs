@@ -81,8 +81,10 @@ pub fn BuildScreen(screen: Signal<Screen>) -> Element {
                     // Drain the buffer into the visible stage list until the build
                     // finishes, mapping each event to a calm label.
                     let drain = move |live_stages: &mut Signal<Vec<(String, bool)>>| {
-                        let evs: Vec<BuildEvent> =
-                            buffer.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
+                        let evs: Vec<BuildEvent> = buffer
+                            .lock()
+                            .map(|mut b| b.drain(..).collect())
+                            .unwrap_or_default();
                         for ev in evs {
                             if let Some(last) = live_stages.write().last_mut() {
                                 last.1 = true;

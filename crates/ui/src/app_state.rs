@@ -138,7 +138,9 @@ pub fn intake_form_from_inputs(inputs: &IntakeInputs) -> IntakeForm {
             fields: e
                 .fields
                 .iter()
-                .map(|f| EntityField::required(f.name.clone(), field_type_from_label(&f.type_label)))
+                .map(|f| {
+                    EntityField::required(f.name.clone(), field_type_from_label(&f.type_label))
+                })
                 .collect(),
             capabilities: capabilities_from_features(&e.features),
         })
@@ -176,11 +178,7 @@ pub fn stories_from_form(form: &IntakeForm) -> Vec<UserStory> {
     let mut stories = Vec::new();
 
     for (i, role) in form.roles.iter().enumerate() {
-        let wants: Vec<String> = role
-            .actions
-            .iter()
-            .map(|a| format!("I can {a}"))
-            .collect();
+        let wants: Vec<String> = role.actions.iter().map(|a| format!("I can {a}")).collect();
         stories.push(UserStory::from_investigation(
             format!("role_{i}"),
             format!("As {}, what I can do", role.name),
@@ -221,7 +219,13 @@ pub fn stories_from_form(form: &IntakeForm) -> Vec<UserStory> {
 /// A lowercase, underscore slug for stable ids.
 fn slug(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -260,7 +264,8 @@ impl AppState {
         }
         // Each seeded story is an AI-authored Create (the investigation wrote it).
         for story in &stories {
-            if let Ok(rev) = story_revision(&project_id, story, EditActor::Ai, RevisionOp::Create, now)
+            if let Ok(rev) =
+                story_revision(&project_id, story, EditActor::Ai, RevisionOp::Create, now)
             {
                 pending.push(rev);
             }
@@ -384,10 +389,7 @@ impl AppState {
     /// Historical designs to seed/influence this intake, but ONLY if the user
     /// opted in (`use_historical`). Returns an empty list otherwise. This is how
     /// the consuming side of the shared corpus reaches the UI.
-    pub async fn historical_references(
-        &self,
-        corpus: &dyn DesignCorpus,
-    ) -> Vec<DesignReference> {
+    pub async fn historical_references(&self, corpus: &dyn DesignCorpus) -> Vec<DesignReference> {
         if self.project.sharing.is_consuming() {
             corpus.similar(&self.project.onboarding).await
         } else {
@@ -428,8 +430,10 @@ impl AppState {
     /// how many sessions have run.
     pub fn file_bug(&mut self, report: BugReport) {
         let session_id = format!("session_{}", self.project.session_count() + 1);
-        self.project
-            .begin_session(session_id, RefinementContext::PostBuild { bugs: vec![report] });
+        self.project.begin_session(
+            session_id,
+            RefinementContext::PostBuild { bugs: vec![report] },
+        );
     }
 
     /// Record that a reported bug was fixed (symptom + what changed) into the
@@ -534,11 +538,25 @@ mod tests {
             entities: vec![EntityInput {
                 name: "Class".into(),
                 fields: vec![
-                    FieldInput { name: "Title".into(), type_label: "text".into() },
-                    FieldInput { name: "Price".into(), type_label: "a price".into() },
-                    FieldInput { name: "Day".into(), type_label: "a date".into() },
+                    FieldInput {
+                        name: "Title".into(),
+                        type_label: "text".into(),
+                    },
+                    FieldInput {
+                        name: "Price".into(),
+                        type_label: "a price".into(),
+                    },
+                    FieldInput {
+                        name: "Day".into(),
+                        type_label: "a date".into(),
+                    },
                 ],
-                features: vec!["add".into(), "see a list".into(), "edit".into(), "remove".into()],
+                features: vec![
+                    "add".into(),
+                    "see a list".into(),
+                    "edit".into(),
+                    "remove".into(),
+                ],
             }],
             style: StylePreferences::default(),
         }
@@ -550,7 +568,10 @@ mod tests {
         assert_eq!(field_type_from_label("a number"), FieldType::Number);
         assert_eq!(field_type_from_label("yes / no"), FieldType::YesNo);
         assert_eq!(field_type_from_label("a date"), FieldType::Date);
-        assert!(matches!(field_type_from_label("a link to another thing"), FieldType::LinkTo(_)));
+        assert!(matches!(
+            field_type_from_label("a link to another thing"),
+            FieldType::LinkTo(_)
+        ));
         // Unknown falls back to text.
         assert_eq!(field_type_from_label("something weird"), FieldType::Text);
     }
@@ -577,7 +598,10 @@ mod tests {
         assert_eq!(class.name, "Class");
         assert_eq!(class.fields.len(), 3);
         // Price mapped to Money.
-        assert!(class.fields.iter().any(|f| f.field_type == FieldType::Money));
+        assert!(class
+            .fields
+            .iter()
+            .any(|f| f.field_type == FieldType::Money));
         assert!(class.capabilities.can_add && class.capabilities.can_remove);
         // A list view was generated for the listable entity.
         assert_eq!(form.views.len(), 1);
@@ -590,7 +614,10 @@ mod tests {
         // 2 role stories + 1 entity story.
         assert_eq!(stories.len(), 3);
         // Role stories carry the actions as plain "I can ..." wants.
-        let owner = stories.iter().find(|s| s.for_whom == "Studio owner").unwrap();
+        let owner = stories
+            .iter()
+            .find(|s| s.for_whom == "Studio owner")
+            .unwrap();
         assert!(owner.wants.iter().any(|w| w.contains("set up classes")));
         // Entity story lists the capabilities in plain language.
         let class = stories.iter().find(|s| s.title.contains("Class")).unwrap();
@@ -695,7 +722,8 @@ mod tests {
     #[test]
     fn delete_revision_has_empty_payload() {
         let story = UserStory::user_added("x", "t", "w", vec![]);
-        let rev = story_revision("p", &story, EditActor::User, RevisionOp::Delete, Utc::now()).unwrap();
+        let rev =
+            story_revision("p", &story, EditActor::User, RevisionOp::Delete, Utc::now()).unwrap();
         assert!(rev.payload.is_empty());
     }
 
@@ -743,7 +771,10 @@ mod tests {
 
         // Opted out: no contribution.
         assert!(!state.contribute_if_consented(&corpus).await);
-        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+        assert!(corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await
+            .is_empty());
 
         // Opt in: the abstracted design is contributed and findable.
         state.project.sharing = SharingPreferences {
@@ -751,21 +782,28 @@ mod tests {
             use_historical: false,
         };
         assert!(state.contribute_if_consented(&corpus).await);
-        assert!(!corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+        assert!(!corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await
+            .is_empty());
     }
 
     #[tokio::test]
     async fn contributed_design_carries_the_projects_fix_history() {
         let corpus = InMemoryDesignCorpus::new();
         let mut state = AppState::from_intake("proj_1", &sample_inputs());
-        state.project.record_fix("A class could be overbooked", "Reject bookings when full");
+        state
+            .project
+            .record_fix("A class could be overbooked", "Reject bookings when full");
         state.project.sharing = SharingPreferences {
             contribute_design: true,
             use_historical: false,
         };
         assert!(state.contribute_if_consented(&corpus).await);
 
-        let hits = corpus.similar(&intake_form_from_inputs(&sample_inputs())).await;
+        let hits = corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].resolved_bugs.len(), 1);
         assert!(hits[0].resolved_bugs[0].fix.contains("Reject bookings"));
@@ -782,11 +820,17 @@ mod tests {
             use_historical: false,
         };
         assert!(state.contribute_if_consented(&corpus).await);
-        assert!(!corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+        assert!(!corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await
+            .is_empty());
 
         // Opt out at any time: the shared data is deleted from the corpus.
         state.withdraw_from_corpus(&corpus).await;
-        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+        assert!(corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await
+            .is_empty());
     }
 
     #[test]
@@ -824,7 +868,10 @@ mod tests {
         let mut state = AppState::from_intake("proj_1", &sample_inputs());
         state.record_fix("Overbooking was possible", "Reject bookings when full");
         assert_eq!(state.project.resolved_bugs.len(), 1);
-        assert_eq!(state.project.resolved_bugs[0].fix, "Reject bookings when full");
+        assert_eq!(
+            state.project.resolved_bugs[0].fix,
+            "Reject bookings when full"
+        );
     }
 
     /// End-to-end: drive the whole composed consumer lifecycle through the bridge,
@@ -861,10 +908,21 @@ mod tests {
         state.project.finish_execution().unwrap();
 
         // 4. POST-BUILD: QA finds a bug; filing it opens a post-build session.
-        state.file_bug(BugReport::new("Class list", "tapped Book on a full class", "a waitlist", "nothing"));
-        assert_eq!(state.active_session().unwrap().context.label(), "post_build");
+        state.file_bug(BugReport::new(
+            "Class list",
+            "tapped Book on a full class",
+            "a waitlist",
+            "nothing",
+        ));
+        assert_eq!(
+            state.active_session().unwrap().context.label(),
+            "post_build"
+        );
         // The fix is built and recorded.
-        state.record_fix("Booking allowed past the seat limit", "Reject bookings when full");
+        state.record_fix(
+            "Booking allowed past the seat limit",
+            "Reject bookings when full",
+        );
 
         // 5. PUBLISH after the (already executed) build.
         state.project.publish().unwrap();
@@ -873,12 +931,20 @@ mod tests {
         // 6. SHARE (opt-in): the abstracted design + the fix reach the corpus.
         state.project.sharing.contribute_design = true;
         assert!(state.contribute_if_consented(&corpus).await);
-        let hits = corpus.similar(&intake_form_from_inputs(&sample_inputs())).await;
+        let hits = corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await;
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].resolved_bugs.iter().any(|b| b.fix.contains("Reject bookings")));
+        assert!(hits[0]
+            .resolved_bugs
+            .iter()
+            .any(|b| b.fix.contains("Reject bookings")));
 
         // 7. OPT-OUT (right to be forgotten): the contribution is deleted.
         state.withdraw_from_corpus(&corpus).await;
-        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+        assert!(corpus
+            .similar(&intake_form_from_inputs(&sample_inputs()))
+            .await
+            .is_empty());
     }
 }

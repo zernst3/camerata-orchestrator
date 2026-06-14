@@ -33,7 +33,10 @@ impl TempWorktree {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        path.push(format!("camerata-checks-{tag}-{}-{stamp}", std::process::id()));
+        path.push(format!(
+            "camerata-checks-{tag}-{}-{stamp}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path)?;
         Ok(Self { path })
     }

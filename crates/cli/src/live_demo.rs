@@ -271,17 +271,29 @@ pub async fn run_live_demo() -> anyhow::Result<()> {
     println!(
         "FORBIDDEN: file_exists={} -> {}",
         deny_run.file_exists,
-        if deny_ok { "DENIED by gateway via GOV-1 (PASS)" } else { "FILE PRESENT (FAIL)" }
+        if deny_ok {
+            "DENIED by gateway via GOV-1 (PASS)"
+        } else {
+            "FILE PRESENT (FAIL)"
+        }
     );
     println!(
         "SECRET:    file_exists={} -> {}",
         secret_run.file_exists,
-        if secret_ok { "DENIED by gateway via SEC-NO-HARDCODED-SECRETS-1 (PASS)" } else { "FILE PRESENT (FAIL)" }
+        if secret_ok {
+            "DENIED by gateway via SEC-NO-HARDCODED-SECRETS-1 (PASS)"
+        } else {
+            "FILE PRESENT (FAIL)"
+        }
     );
     println!(
         "CLEAN:     file_exists={} -> {}",
         allow_run.file_exists,
-        if allow_ok { "ALLOWED + written (PASS)" } else { "NO FILE (FAIL)" }
+        if allow_ok {
+            "ALLOWED + written (PASS)"
+        } else {
+            "NO FILE (FAIL)"
+        }
     );
 
     if deny_ok && secret_ok && allow_ok {

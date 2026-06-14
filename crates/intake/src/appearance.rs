@@ -323,7 +323,13 @@ mod tests {
 
     #[test]
     fn enums_serialize_snake_case() {
-        assert_eq!(serde_json::to_string(&ButtonStyle::Blocky).unwrap(), "\"blocky\"");
-        assert_eq!(serde_json::to_string(&FontChoice::Geometric).unwrap(), "\"geometric\"");
+        assert_eq!(
+            serde_json::to_string(&ButtonStyle::Blocky).unwrap(),
+            "\"blocky\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FontChoice::Geometric).unwrap(),
+            "\"geometric\""
+        );
     }
 }

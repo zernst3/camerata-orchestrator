@@ -152,15 +152,13 @@ pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignRefere
     // drop any motivation note that could be specific, and mark provenance.
     let stories = stories
         .iter()
-        .map(|s| {
-            UserStory {
-                id: s.id.clone(),
-                title: s.title.clone(),
-                for_whom: s.for_whom.clone(),
-                wants: s.wants.clone(),
-                so_that: None,
-                origin: StoryOrigin::Investigation,
-            }
+        .map(|s| UserStory {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            for_whom: s.for_whom.clone(),
+            wants: s.wants.clone(),
+            so_that: None,
+            origin: StoryOrigin::Investigation,
         })
         .collect();
 
@@ -238,7 +236,7 @@ impl DesignCorpus for InMemoryDesignCorpus {
             })
             .filter(|(score, _)| *score > 0)
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
         scored.into_iter().map(|(_, d)| d).collect()
     }
 
@@ -326,7 +324,9 @@ mod tests {
         let base = abstract_design(&rental_form(), &[]).with_id("proj_42");
         corpus.contribute(base.clone()).await;
         // Re-contribute the same project (e.g. after an edit): replaces, not dupes.
-        corpus.contribute(base.with_resolved_bugs(vec![ResolvedBug::new("x", "y")])).await;
+        corpus
+            .contribute(base.with_resolved_bugs(vec![ResolvedBug::new("x", "y")]))
+            .await;
 
         let mut second = IntakeForm::sample_app();
         second.entities[0].name = "Tenant".into();
@@ -355,7 +355,9 @@ mod tests {
     #[tokio::test]
     async fn corpus_returns_nothing_for_unrelated_app() {
         let corpus = InMemoryDesignCorpus::new();
-        corpus.contribute(abstract_design(&rental_form(), &[])).await;
+        corpus
+            .contribute(abstract_design(&rental_form(), &[]))
+            .await;
         // An unrelated app (expense tracker, entity "Expense") matches nothing.
         let unrelated = IntakeForm::sample_app(); // entity "Expense"
         let hits = corpus.similar(&unrelated).await;
@@ -375,12 +377,11 @@ mod tests {
 
     #[test]
     fn resolved_bugs_travel_with_a_shared_design() {
-        let design = abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![
-            ResolvedBug::new(
+        let design =
+            abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![ResolvedBug::new(
                 "A booking could be made past the seat limit",
                 "Added a check that rejects a booking when the class is full",
-            ),
-        ]);
+            )]);
         assert_eq!(design.resolved_bugs.len(), 1);
         // Fix knowledge round-trips and carries no private specifics.
         let json = serde_json::to_string(&design).unwrap();
@@ -392,9 +393,11 @@ mod tests {
     #[tokio::test]
     async fn corpus_carries_fix_knowledge_to_the_next_user() {
         let corpus = InMemoryDesignCorpus::new();
-        let shared = abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![
-            ResolvedBug::new("Late fee applied twice", "Made the late-fee job idempotent"),
-        ]);
+        let shared =
+            abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![ResolvedBug::new(
+                "Late fee applied twice",
+                "Made the late-fee job idempotent",
+            )]);
         corpus.contribute(shared).await;
 
         let mut second = IntakeForm::sample_app();

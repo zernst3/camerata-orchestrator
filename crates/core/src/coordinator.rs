@@ -100,24 +100,24 @@ impl<'a> Coordinator<'a> {
     /// Run `task` for `role`: agent → check → (bounce-and-revise once if dirty).
     pub async fn run(&self, role: &Role, task: &str) -> Result<RunReport, CoordinatorError> {
         // 1. Initial agent pass (model call lives behind the driver).
-        let initial_outcome = self
-            .driver
-            .run(role, task)
-            .await
-            .map_err(|source| CoordinatorError::Driver {
-                pass: "initial",
-                source,
-            })?;
+        let initial_outcome =
+            self.driver
+                .run(role, task)
+                .await
+                .map_err(|source| CoordinatorError::Driver {
+                    pass: "initial",
+                    source,
+                })?;
 
         // 2. Layer-2 check.
-        let initial_violations = self
-            .checks
-            .check(role, &self.worktree)
-            .await
-            .map_err(|source| CoordinatorError::Check {
-                pass: "initial",
-                source,
-            })?;
+        let initial_violations =
+            self.checks
+                .check(role, &self.worktree)
+                .await
+                .map_err(|source| CoordinatorError::Check {
+                    pass: "initial",
+                    source,
+                })?;
 
         // Clean on the first pass — no bounce.
         if initial_violations.is_empty() {
@@ -236,7 +236,12 @@ mod tests {
     #[async_trait::async_trait]
     impl CheckRunner for ScriptedChecks {
         async fn check(&self, _role: &Role, _wt: &Path) -> anyhow::Result<Vec<RuleId>> {
-            Ok(self.scripted.lock().unwrap().pop_front().unwrap_or_default())
+            Ok(self
+                .scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default())
         }
     }
 
@@ -251,7 +256,11 @@ mod tests {
         assert!(!report.bounced);
         assert!(report.is_clean());
         assert!(report.revised_outcome.is_none());
-        assert_eq!(driver.tasks.lock().unwrap().len(), 1, "agent ran exactly once");
+        assert_eq!(
+            driver.tasks.lock().unwrap().len(),
+            1,
+            "agent ran exactly once"
+        );
     }
 
     #[tokio::test]
@@ -267,7 +276,10 @@ mod tests {
 
         assert!(report.bounced);
         assert!(report.is_clean());
-        assert_eq!(report.initial_violations, vec![RuleId("RUST-FMT".to_string())]);
+        assert_eq!(
+            report.initial_violations,
+            vec![RuleId("RUST-FMT".to_string())]
+        );
         assert!(report.revised_outcome.is_some());
 
         let tasks = driver.tasks.lock().unwrap();
@@ -290,7 +302,10 @@ mod tests {
 
         assert!(report.bounced);
         assert!(!report.is_clean());
-        assert_eq!(report.final_violations, vec![RuleId("RUST-CLIPPY".to_string())]);
+        assert_eq!(
+            report.final_violations,
+            vec![RuleId("RUST-CLIPPY".to_string())]
+        );
         // AT MOST one bounce: exactly two agent runs, no more.
         assert_eq!(driver.tasks.lock().unwrap().len(), 2);
     }
@@ -322,6 +337,12 @@ mod tests {
         let driver = FailingDriver;
         let coord = Coordinator::new(&driver, &checks, "/tmp/wt");
         let err = coord.run(&role(), "x").await.unwrap_err();
-        assert!(matches!(err, CoordinatorError::Driver { pass: "initial", .. }));
+        assert!(matches!(
+            err,
+            CoordinatorError::Driver {
+                pass: "initial",
+                ..
+            }
+        ));
     }
 }

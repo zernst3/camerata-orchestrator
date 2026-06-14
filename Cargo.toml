@@ -14,6 +14,14 @@ members = [
     "crates/ui",          # Dioxus cockpit (separate process)
 ]
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# The bar is "no warnings" (enforced via -D warnings in CI). The restriction
+# lints below are tracked-but-not-yet-denied (e.g. unwrap_used across ~222 sites);
+# do NOT add them as deny/warn here, it would break the -D warnings gate.
+
 [workspace.package]
 edition = "2021"
 license = "MIT"

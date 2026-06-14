@@ -219,7 +219,10 @@ mod tests {
     fn build_args_with_worktree_adds_dir_scope() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_worktree("/tmp/wt/backend");
         let args = driver.build_args(&role(), "task");
-        let idx = args.iter().position(|a| a == "--add-dir").expect("--add-dir present");
+        let idx = args
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir present");
         assert_eq!(args[idx + 1], "/tmp/wt/backend");
     }
 

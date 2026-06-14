@@ -139,11 +139,7 @@ impl Project {
     /// Record a fixed bug in the project's history (symptom + what changed). Called
     /// when a post-build bug session's fix is built and accepted. This is the fix
     /// knowledge that, with consent, enriches the shared corpus.
-    pub fn record_fix(
-        &mut self,
-        symptom: impl Into<String>,
-        fix: impl Into<String>,
-    ) {
+    pub fn record_fix(&mut self, symptom: impl Into<String>, fix: impl Into<String>) {
         self.resolved_bugs
             .push(crate::sharing::ResolvedBug::new(symptom, fix));
     }
@@ -184,8 +180,7 @@ impl Project {
         session_id: impl Into<String>,
         context: RefinementContext,
     ) -> &mut RefinementSession {
-        let session =
-            RefinementSession::open(session_id, context, self.stories.clone());
+        let session = RefinementSession::open(session_id, context, self.stories.clone());
         self.sessions.push(session);
         self.phase = Phase::Refining;
         self.sessions.last_mut().expect("just pushed")
@@ -311,7 +306,9 @@ mod tests {
     fn cannot_seed_twice_after_freeze() {
         let mut p = Project::new("p1", onboarding());
         p.seed_from_investigation("s1", vec![story("a")]).unwrap();
-        let err = p.seed_from_investigation("s2", vec![story("b")]).unwrap_err();
+        let err = p
+            .seed_from_investigation("s2", vec![story("b")])
+            .unwrap_err();
         assert_eq!(err, LifecycleError::OnboardingFrozen);
     }
 
@@ -417,10 +414,7 @@ mod tests {
 
         // QA found a bug: open a post-build session.
         let bug = BugReport::new("List", "clicked add", "a row", "nothing");
-        p.begin_session(
-            "s2",
-            RefinementContext::PostBuild { bugs: vec![bug] },
-        );
+        p.begin_session("s2", RefinementContext::PostBuild { bugs: vec![bug] });
         // The bug became a bug story in the session.
         assert!(p
             .active_session()
@@ -460,7 +454,12 @@ mod tests {
     fn finish_execution_only_legal_while_executing() {
         let mut p = Project::new("p1", onboarding());
         let err = p.finish_execution().unwrap_err();
-        assert_eq!(err, LifecycleError::WrongPhase { actual: Phase::Onboarding });
+        assert_eq!(
+            err,
+            LifecycleError::WrongPhase {
+                actual: Phase::Onboarding
+            }
+        );
     }
 
     #[test]

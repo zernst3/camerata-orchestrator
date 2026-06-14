@@ -128,7 +128,9 @@ impl Store for SqliteStore {
     async fn migrate(&self) -> Result<(), PersistenceError> {
         sqlx::query(CREATE_SESSIONS).execute(&self.pool).await?;
         sqlx::query(CREATE_PROVENANCE).execute(&self.pool).await?;
-        sqlx::query(CREATE_PROVENANCE_IDX).execute(&self.pool).await?;
+        sqlx::query(CREATE_PROVENANCE_IDX)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -196,9 +198,7 @@ impl Store for SqliteStore {
             let rule_ids_json: String = row.try_get("rule_ids")?;
             let rule_ids: Vec<String> = serde_json::from_str(&rule_ids_json)?;
             let created_at_str: String = row.try_get("created_at")?;
-            let created_at: DateTime<Utc> = created_at_str
-                .parse()
-                .unwrap_or_else(|_| Utc::now());
+            let created_at: DateTime<Utc> = created_at_str.parse().unwrap_or_else(|_| Utc::now());
 
             entries.push(ProvenanceEntry {
                 id: Some(ProvenanceId(id)),
@@ -261,7 +261,9 @@ mod tests {
 
     /// Opens a fresh in-memory store (schema created automatically in `open`).
     async fn in_memory_store() -> SqliteStore {
-        SqliteStore::open("sqlite::memory:").await.expect("in-memory store")
+        SqliteStore::open("sqlite::memory:")
+            .await
+            .expect("in-memory store")
     }
 
     #[tokio::test]
@@ -271,7 +273,10 @@ mod tests {
         let role = make_role("Backend", &["RUST-DOMAIN-5", "SERVICE-PARALLEL-1"]);
         let started = Utc::now();
 
-        store.record_session(&sid, &role, started).await.expect("record_session");
+        store
+            .record_session(&sid, &role, started)
+            .await
+            .expect("record_session");
 
         let rec = store.session_by_id(&sid).await.expect("session_by_id");
         assert!(rec.is_some(), "session should exist");
@@ -293,7 +298,10 @@ mod tests {
         let entry1 = ProvenanceEntry::new(
             "sess-002",
             "Added async boundary for DB call",
-            vec!["RUST-DOMAIN-5".to_string(), "SERVICE-PARALLEL-1".to_string()],
+            vec![
+                "RUST-DOMAIN-5".to_string(),
+                "SERVICE-PARALLEL-1".to_string(),
+            ],
             "allowed",
         );
         let entry2 = ProvenanceEntry::new(
@@ -339,7 +347,10 @@ mod tests {
         // the non-FK path with a session that has no provenance entries.
         let sid = SessionId("sess-no-prov".to_string());
         let role = make_role("Checks", &[]);
-        store.record_session(&sid, &role, Utc::now()).await.expect("record");
+        store
+            .record_session(&sid, &role, Utc::now())
+            .await
+            .expect("record");
 
         let entries = store.provenance_by_session(&sid).await.expect("read");
         assert!(entries.is_empty());
@@ -351,20 +362,21 @@ mod tests {
         let store = in_memory_store().await;
         let sid = SessionId("sess-idem".to_string());
         let role = make_role("Backend", &[]);
-        store.record_session(&sid, &role, Utc::now()).await.expect("first insert");
+        store
+            .record_session(&sid, &role, Utc::now())
+            .await
+            .expect("first insert");
         // second call must not error
-        store.record_session(&sid, &role, Utc::now()).await.expect("second insert (idempotent)");
+        store
+            .record_session(&sid, &role, Utc::now())
+            .await
+            .expect("second insert (idempotent)");
     }
 
     #[tokio::test]
     async fn test_provenance_entry_new_is_pure() {
         // RUST-PURE-STATE-TRANSITIONS-1: constructor produces expected shape
-        let e = ProvenanceEntry::new(
-            "s1",
-            "desc",
-            vec!["RULE-A".to_string()],
-            "allowed",
-        );
+        let e = ProvenanceEntry::new("s1", "desc", vec!["RULE-A".to_string()], "allowed");
         assert!(e.id.is_none());
         assert_eq!(e.session_id, "s1");
         assert_eq!(e.rule_ids, vec!["RULE-A"]);

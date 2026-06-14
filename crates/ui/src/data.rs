@@ -13,12 +13,30 @@ pub struct FieldType {
 }
 
 pub const FIELD_TYPES: &[FieldType] = &[
-    FieldType { label: "text", glyph: "Aa" },
-    FieldType { label: "a number", glyph: "12" },
-    FieldType { label: "a price", glyph: "$" },
-    FieldType { label: "a date", glyph: "◷" },
-    FieldType { label: "yes / no", glyph: "◐" },
-    FieldType { label: "a link to another thing", glyph: "⇄" },
+    FieldType {
+        label: "text",
+        glyph: "Aa",
+    },
+    FieldType {
+        label: "a number",
+        glyph: "12",
+    },
+    FieldType {
+        label: "a price",
+        glyph: "$",
+    },
+    FieldType {
+        label: "a date",
+        glyph: "◷",
+    },
+    FieldType {
+        label: "yes / no",
+        glyph: "◐",
+    },
+    FieldType {
+        label: "a link to another thing",
+        glyph: "⇄",
+    },
 ];
 
 /// One field on an entity, as the user types it.
@@ -51,28 +69,68 @@ pub fn seed_entities() -> Vec<Entity> {
         Entity {
             name: "Class".into(),
             fields: vec![
-                Field { name: "Title".into(), type_label: "text".into() },
-                Field { name: "Day & time".into(), type_label: "a date".into() },
-                Field { name: "Price".into(), type_label: "a price".into() },
-                Field { name: "Seats".into(), type_label: "a number".into() },
+                Field {
+                    name: "Title".into(),
+                    type_label: "text".into(),
+                },
+                Field {
+                    name: "Day & time".into(),
+                    type_label: "a date".into(),
+                },
+                Field {
+                    name: "Price".into(),
+                    type_label: "a price".into(),
+                },
+                Field {
+                    name: "Seats".into(),
+                    type_label: "a number".into(),
+                },
             ],
-            features: vec!["add".into(), "see a list".into(), "edit".into(), "remove".into()],
+            features: vec![
+                "add".into(),
+                "see a list".into(),
+                "edit".into(),
+                "remove".into(),
+            ],
         },
         Entity {
             name: "Student".into(),
             fields: vec![
-                Field { name: "Name".into(), type_label: "text".into() },
-                Field { name: "Email".into(), type_label: "text".into() },
-                Field { name: "Member?".into(), type_label: "yes / no".into() },
+                Field {
+                    name: "Name".into(),
+                    type_label: "text".into(),
+                },
+                Field {
+                    name: "Email".into(),
+                    type_label: "text".into(),
+                },
+                Field {
+                    name: "Member?".into(),
+                    type_label: "yes / no".into(),
+                },
             ],
-            features: vec!["add".into(), "see a list".into(), "edit".into(), "search".into()],
+            features: vec![
+                "add".into(),
+                "see a list".into(),
+                "edit".into(),
+                "search".into(),
+            ],
         },
         Entity {
             name: "Booking".into(),
             fields: vec![
-                Field { name: "Which class".into(), type_label: "a link to another thing".into() },
-                Field { name: "Which student".into(), type_label: "a link to another thing".into() },
-                Field { name: "Paid?".into(), type_label: "yes / no".into() },
+                Field {
+                    name: "Which class".into(),
+                    type_label: "a link to another thing".into(),
+                },
+                Field {
+                    name: "Which student".into(),
+                    type_label: "a link to another thing".into(),
+                },
+                Field {
+                    name: "Paid?".into(),
+                    type_label: "yes / no".into(),
+                },
             ],
             features: vec!["add".into(), "see a list".into(), "remove".into()],
         },
@@ -90,10 +148,7 @@ pub fn seed_roles() -> Vec<Role> {
         },
         Role {
             name: "Student".into(),
-            actions: vec![
-                "browse classes".into(),
-                "book a seat".into(),
-            ],
+            actions: vec!["browse classes".into(), "book a seat".into()],
         },
     ]
 }
@@ -263,13 +318,34 @@ pub struct BuildStage {
 }
 
 pub const BUILD_STAGES: &[BuildStage] = &[
-    BuildStage { label: "Setting up the project", dwell_ms: 1100 },
-    BuildStage { label: "Building the data model", dwell_ms: 1600 },
-    BuildStage { label: "Creating the screens", dwell_ms: 1900 },
-    BuildStage { label: "Wiring up booking and the waitlist", dwell_ms: 1700 },
-    BuildStage { label: "Adding your admin area", dwell_ms: 1500 },
-    BuildStage { label: "Checking it against the rules", dwell_ms: 2100 },
-    BuildStage { label: "Putting it together for you to try", dwell_ms: 1400 },
+    BuildStage {
+        label: "Setting up the project",
+        dwell_ms: 1100,
+    },
+    BuildStage {
+        label: "Building the data model",
+        dwell_ms: 1600,
+    },
+    BuildStage {
+        label: "Creating the screens",
+        dwell_ms: 1900,
+    },
+    BuildStage {
+        label: "Wiring up booking and the waitlist",
+        dwell_ms: 1700,
+    },
+    BuildStage {
+        label: "Adding your admin area",
+        dwell_ms: 1500,
+    },
+    BuildStage {
+        label: "Checking it against the rules",
+        dwell_ms: 2100,
+    },
+    BuildStage {
+        label: "Putting it together for you to try",
+        dwell_ms: 1400,
+    },
 ];
 
 /// A genuine mid-build question the lead engineer surfaces *once*, calmly, instead
@@ -405,10 +481,22 @@ pub const BUG_FIELDS: &[BugField] = &[
 /// The calm stages the structured bug runs through when sent back into the
 /// governed build loop — same shape as a build, in miniature.
 pub const FIX_STAGES: &[BuildStage] = &[
-    BuildStage { label: "Reading your report", dwell_ms: 1100 },
-    BuildStage { label: "Finding the cause", dwell_ms: 1700 },
-    BuildStage { label: "Making the fix", dwell_ms: 1600 },
-    BuildStage { label: "Checking it against the rules", dwell_ms: 1800 },
+    BuildStage {
+        label: "Reading your report",
+        dwell_ms: 1100,
+    },
+    BuildStage {
+        label: "Finding the cause",
+        dwell_ms: 1700,
+    },
+    BuildStage {
+        label: "Making the fix",
+        dwell_ms: 1600,
+    },
+    BuildStage {
+        label: "Checking it against the rules",
+        dwell_ms: 1800,
+    },
 ];
 
 // ---------------------------------------------------------------------------

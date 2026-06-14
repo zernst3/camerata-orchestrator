@@ -208,7 +208,10 @@ impl ClaudeRefinementReviewer {
     /// brief the model reviews. Pure + public for testing.
     pub fn render_session(session: &RefinementSession) -> String {
         let mut out = String::new();
-        out.push_str(&format!("CONTEXT: {}\n\nSTORIES:\n", session.context.label()));
+        out.push_str(&format!(
+            "CONTEXT: {}\n\nSTORIES:\n",
+            session.context.label()
+        ));
         for story in &session.stories {
             out.push_str(&story.render());
         }
@@ -268,7 +271,10 @@ impl ClaudeRefinementReviewer {
     /// tolerating surrounding prose / a fence. Pure + public for direct testing.
     pub fn parse_review(result_text: &str) -> Result<RefinementReview, ReviewError> {
         let json = extract_json_object(result_text).ok_or_else(|| {
-            ReviewError::ParseReview(format!("no JSON object found: {}", truncate(result_text, 200)))
+            ReviewError::ParseReview(format!(
+                "no JSON object found: {}",
+                truncate(result_text, 200)
+            ))
         })?;
         let mut review: RefinementReview = serde_json::from_str(json)
             .map_err(|e| ReviewError::ParseReview(format!("{e}; raw: {}", truncate(json, 200))))?;
@@ -466,11 +472,8 @@ mod tests {
     #[tokio::test]
     async fn stub_confidence_climbs_and_loop_converges() {
         let reviewer = StubRefinementReviewer::new();
-        let answers = SequentialAnswerSource::new(vec![
-            vec!["a".into()],
-            vec!["b".into()],
-            vec!["c".into()],
-        ]);
+        let answers =
+            SequentialAnswerSource::new(vec![vec!["a".into()], vec!["b".into()], vec!["c".into()]]);
         let mut session = session_with_role_story(RefinementContext::PreBuild);
         let driver = RefinementDriver::new(&reviewer, &answers, 6);
         let outcome = driver.run(&mut session, &form_with_owner()).await.unwrap();
@@ -482,7 +485,11 @@ mod tests {
         }
         assert!(session.confidence.value() >= STUB_CONFIDENCE_READY);
         // The first turn raised the admin suggestion, referencing the role story.
-        let admin = session.suggestions.iter().find(|s| s.id == "admin_users").unwrap();
+        let admin = session
+            .suggestions
+            .iter()
+            .find(|s| s.id == "admin_users")
+            .unwrap();
         assert_eq!(admin.story_id.as_ref().unwrap().as_str(), "role_0");
     }
 
@@ -600,7 +607,10 @@ mod tests {
         assert_eq!(review.confidence.value(), 72);
         assert_eq!(review.upserted_stories.len(), 1);
         assert_eq!(review.removed_story_ids, vec![StoryId::new("old")]);
-        assert_eq!(review.suggestions[0].story_id.as_ref().unwrap().as_str(), "s1");
+        assert_eq!(
+            review.suggestions[0].story_id.as_ref().unwrap().as_str(),
+            "s1"
+        );
         assert!(matches!(review.verdict, HonestyVerdict::Proceed));
     }
 

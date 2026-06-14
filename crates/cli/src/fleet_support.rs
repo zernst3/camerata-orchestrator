@@ -9,5 +9,5 @@
 
 pub use camerata_fleet::{
     governed_role, locate_gateway_bin, run_cargo, scaffold_crate, tail_lines, CargoOutcome,
-    DEFAULT_CORPUS_PATH, FLEET_DOMAINS, NoopChecks,
+    NoopChecks, DEFAULT_CORPUS_PATH, FLEET_DOMAINS,
 };

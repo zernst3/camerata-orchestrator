@@ -53,12 +53,20 @@ pub use engine::{
 };
 pub use form::{
     ClarificationRound,
-    // new open-ended types
-    EntityDefinition, EntityCapabilities, EntityField, FieldType, UserRole,
     // legacy backward-compat types (kept for CLI + existing code)
-    Entity, Field, FieldKind, ViewKind, ViewSpec,
+    Entity,
+    EntityCapabilities,
+    // new open-ended types
+    EntityDefinition,
+    EntityField,
+    Field,
+    FieldKind,
+    FieldType,
     // the main form
     IntakeForm,
+    UserRole,
+    ViewKind,
+    ViewSpec,
 };
 pub use plan::{Plan, PlanTask, TaskKind};
 pub use project::{LifecycleError, Phase, Project};
@@ -226,7 +234,9 @@ mod tests {
         let intake = Intake::RecommendArchitect {
             reason: reason.clone(),
             response: LeadEngineerResponse {
-                verdict: HonestyVerdict::RecommendArchitect { reason: reason.clone() },
+                verdict: HonestyVerdict::RecommendArchitect {
+                    reason: reason.clone(),
+                },
                 ..minimal_response()
             },
         };
@@ -241,7 +251,9 @@ mod tests {
         let intake = Intake::TooComplex {
             reason: reason.clone(),
             response: LeadEngineerResponse {
-                verdict: HonestyVerdict::TooComplex { reason: reason.clone() },
+                verdict: HonestyVerdict::TooComplex {
+                    reason: reason.clone(),
+                },
                 ..minimal_response()
             },
         };
@@ -253,10 +265,22 @@ mod tests {
     fn response_is_accessible_from_every_variant() {
         let r = minimal_response();
         let variants: Vec<Intake> = vec![
-            Intake::Ready { plan: sample_plan(), response: r.clone() },
-            Intake::NeedsClarification { questions: vec![], response: r.clone() },
-            Intake::RecommendArchitect { reason: "x".into(), response: r.clone() },
-            Intake::TooComplex { reason: "x".into(), response: r.clone() },
+            Intake::Ready {
+                plan: sample_plan(),
+                response: r.clone(),
+            },
+            Intake::NeedsClarification {
+                questions: vec![],
+                response: r.clone(),
+            },
+            Intake::RecommendArchitect {
+                reason: "x".into(),
+                response: r.clone(),
+            },
+            Intake::TooComplex {
+                reason: "x".into(),
+                response: r.clone(),
+            },
         ];
         for intake in &variants {
             assert_eq!(intake.response().confidence.value(), 100);

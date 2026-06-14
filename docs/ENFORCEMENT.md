@@ -224,3 +224,38 @@ is entirely model inference; the gate adds no perceptible latency. Model cost wa
 5. **Parallel-agent latency under load.** The live run is sequential; each
    session already gets its own gateway subprocess + rules file (so they are
    isolated), but latency-under-concurrency is unmeasured. (LOW.)
+
+---
+
+## Camerata governs its OWN source (physician, heal thyself)
+
+A tool whose entire thesis is mechanically enforced quality must mechanically
+enforce its own. The same "examples are not enforcement, the gate is" principle
+applies to this repository's code, not just the agents'. What is enforced today, on
+every push and pull request, by `.github/workflows/ci.yml`:
+
+- **`unsafe_code = "forbid"`**, workspace-wide. Set in the `[workspace.lints.rust]`
+  table and opted into by every crate (`[lints] workspace = true`). Unsafe code
+  cannot land; it is a compile error, not a review note. The codebase has zero
+  unsafe blocks, so this is a kept promise, not an aspiration.
+- **Zero warnings.** CI runs `cargo clippy --workspace --all-targets -- -D warnings`.
+  Any clippy or rustc warning fails the build. This is the standard serious-Rust
+  bar, enforced, not assumed.
+- **Formatting.** `cargo fmt --all -- --check` gates every change.
+- **Tests.** `cargo test --workspace --locked` must pass.
+
+What is TRACKED but not yet denied, stated plainly in the same honest spirit as the
+rest of this document (the project does not claim enforcement it does not have):
+
+- **`unwrap`/`expect`/`panic` removal.** There are roughly 220 `.unwrap()`/`.expect()`
+  call sites in non-test code (many legitimate, e.g. mutex locks). Denying
+  `clippy::unwrap_used` workspace-wide is the goal, but it is a real cleanup, so it
+  is surfaced today by the NON-BLOCKING `strict-frontier` CI job (which also runs
+  `clippy::pedantic`) rather than fake-denied. The frontier is visible and tracked;
+  the blocking gate above is real and green. When the cleanup lands, `unwrap_used`
+  moves from the informational job into the blocking lint table.
+
+The point is the same one this whole document makes about the agents: the bar that
+matters is the one a machine enforces, not the one a human promises. Camerata now
+holds itself to that bar in CI, and is honest about the frontier it has not yet
+closed.

@@ -76,8 +76,7 @@ pub trait AgentDriver: Send + Sync {
 /// The coordinator bounces each violated rule back to the agent for revision.
 #[async_trait::async_trait]
 pub trait CheckRunner: Send + Sync {
-    async fn check(&self, role: &Role, worktree: &std::path::Path)
-        -> anyhow::Result<Vec<RuleId>>;
+    async fn check(&self, role: &Role, worktree: &std::path::Path) -> anyhow::Result<Vec<RuleId>>;
 }
 
 pub mod coordinator;
