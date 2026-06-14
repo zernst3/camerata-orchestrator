@@ -13,6 +13,8 @@ members = [
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process)
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
+    "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
+    "crates/deploy",      # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
 ]
 
 [workspace.lints.rust]

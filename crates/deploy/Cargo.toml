@@ -1,0 +1,19 @@
+[package]
+name = "camerata-deploy"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

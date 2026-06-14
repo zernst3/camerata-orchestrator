@@ -373,6 +373,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-deploy"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "camerata-fleet"
 version = "0.0.0"
 dependencies = [
@@ -411,6 +423,19 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "camerata-maintenance"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
