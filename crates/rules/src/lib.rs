@@ -403,6 +403,136 @@ pub fn select_for_domains<'a>(rule_set: &'a RuleSet, domains: &[&str]) -> Vec<&'
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Role builder
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Build a [`camerata_core::Role`] from the corpus at `corpus_path`.
+///
+/// Rules are selected using OR semantics across two axes:
+///
+/// 1. **Domain match** — any rule whose `domain` field appears in `domains`
+///    (e.g. `"rust"`, `"sql"`, `"agentic"`).  Universal rules (`domain = "*"`)
+///    are always included regardless of what `domains` contains.
+/// 2. **Explicit id override** — any rule whose id string appears in
+///    `rule_ids` is included even if its domain was not requested.
+///
+/// `domains` and `rule_ids` may each be empty; an empty `domains` with an
+/// empty `rule_ids` produces a role containing only universal rules.
+///
+/// # `allowed_paths` default
+///
+/// When no explicit domain-to-path mapping is needed the caller can pass an
+/// empty slice.  The function derives a sensible default: one glob per domain
+/// in `domains` (e.g. `"rust"` → `"**/*.rs"`), plus `"**"` for universal
+/// coverage. Callers that need precise path restrictions should call
+/// [`camerata_core::Role`] constructors directly after obtaining the
+/// `rule_subset`.
+///
+/// # Errors
+///
+/// Propagates [`RulesError`] from the corpus loader (I/O or TOML parse
+/// failures).  Consider [`load_corpus_lenient`] if you prefer to skip
+/// malformed files rather than fail.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use camerata_rules::{role_from_corpus, DEFAULT_CORPUS_PATH};
+///
+/// # async fn example() {
+/// let role = role_from_corpus(
+///     Path::new(DEFAULT_CORPUS_PATH),
+///     "Backend",
+///     &["rust", "sql", "agentic"],
+///     &[],
+/// )
+/// .await
+/// .unwrap();
+///
+/// assert!(!role.rule_subset.is_empty());
+/// # }
+/// ```
+pub async fn role_from_corpus(
+    corpus_path: &Path,
+    role_name: &str,
+    domains: &[&str],
+    rule_ids: &[&str],
+) -> Result<camerata_core::Role, RulesError> {
+    let set = load_corpus(corpus_path).await?;
+
+    // Collect matching rules: universal + domain-match + explicit-id override.
+    let mut subset: Vec<RuleId> = set
+        .iter()
+        .filter(|r| {
+            // Universal rules always included.
+            if r.domain == "*" {
+                return true;
+            }
+            // Domain match.
+            if domains.iter().any(|d| r.domain == *d) {
+                return true;
+            }
+            // Explicit id override — allows pulling in rules from foreign
+            // domains when the caller knows the exact id.
+            if rule_ids.iter().any(|id| r.id.0 == *id) {
+                return true;
+            }
+            false
+        })
+        .map(|r| r.id.clone())
+        .collect();
+
+    // Stable sort by id string for deterministic ordering.
+    subset.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Derive sensible allowed_paths from domains.
+    let allowed_paths = derive_allowed_paths(domains);
+
+    Ok(camerata_core::Role {
+        name: role_name.to_owned(),
+        rule_subset: subset,
+        allowed_paths,
+    })
+}
+
+/// Derive a default `allowed_paths` glob list from a domain slice.
+///
+/// Maps well-known domains to file-extension globs; unknown domains fall back
+/// to `"**"` (all files).  The list always includes `"**"` so the role is
+/// never inadvertently restricted to zero paths.
+fn derive_allowed_paths(domains: &[&str]) -> Vec<String> {
+    let mut paths: Vec<String> = domains
+        .iter()
+        .map(|d| domain_to_glob(d))
+        .collect();
+
+    // Always add a universal catch-all so the role is usable even if the
+    // domain mapping is incomplete.
+    if !paths.contains(&"**".to_owned()) {
+        paths.push("**".to_owned());
+    }
+
+    paths
+}
+
+/// Map a single domain string to a file-glob pattern.
+fn domain_to_glob(domain: &str) -> String {
+    // Handle sub-domain variants (e.g. "rust:dioxus", "rust:seaorm") by
+    // using the primary component only.
+    let primary = domain.split(':').next().unwrap_or(domain);
+    match primary {
+        "rust" => "**/*.rs".to_owned(),
+        "sql" => "**/*.sql".to_owned(),
+        "javascript" => "**/*.{js,ts,jsx,tsx}".to_owned(),
+        "ui" => "**/*.{tsx,css}".to_owned(),
+        "iac" => "**/*.tf".to_owned(),
+        "ci-cd" => "**/.github/**".to_owned(),
+        _ => "**".to_owned(),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Tests (ORCH-NEW-PATH-TESTS-1)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -701,5 +831,88 @@ mod tests {
                 rule.id.0, rule.domain
             );
         }
+    }
+
+    // ── role_from_corpus (integration test against real corpus) ──────────────
+
+    #[tokio::test]
+    async fn role_from_corpus_backend_has_rust_domain_2() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            // Skip when corpus is not present (CI without camerata-ai checkout).
+            return;
+        }
+
+        let role = role_from_corpus(path, "Backend", &["rust", "sql", "agentic"], &[])
+            .await
+            .expect("role_from_corpus should succeed");
+
+        assert_eq!(role.name, "Backend");
+
+        // rule_subset must be non-empty.
+        assert!(
+            !role.rule_subset.is_empty(),
+            "expected non-empty rule_subset for Backend role"
+        );
+
+        // Must contain at least the well-known RUST-DOMAIN-2 rule.
+        let known_id = RuleId("RUST-DOMAIN-2".to_owned());
+        assert!(
+            role.rule_subset.contains(&known_id),
+            "expected RUST-DOMAIN-2 in Backend rule_subset; got {:?}",
+            role.rule_subset
+        );
+
+        // allowed_paths must include at least one entry.
+        assert!(
+            !role.allowed_paths.is_empty(),
+            "expected non-empty allowed_paths"
+        );
+
+        // Report the subset size for the caller.
+        eprintln!(
+            "[role_from_corpus test] Backend rule_subset size = {}",
+            role.rule_subset.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn role_from_corpus_explicit_rule_id_override() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+
+        // Ask for no domains but pull in RUST-DOMAIN-2 by explicit id.
+        let role = role_from_corpus(path, "Targeted", &[], &["RUST-DOMAIN-2"])
+            .await
+            .expect("role_from_corpus should succeed");
+
+        let known_id = RuleId("RUST-DOMAIN-2".to_owned());
+        assert!(
+            role.rule_subset.contains(&known_id),
+            "explicit rule_id override should include RUST-DOMAIN-2"
+        );
+    }
+
+    #[tokio::test]
+    async fn role_from_corpus_empty_args_returns_only_universals() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+
+        let role = role_from_corpus(path, "Universal", &[], &[])
+            .await
+            .expect("role_from_corpus should succeed");
+
+        // With no domains / ids the subset must consist only of universal rules.
+        let set = load_corpus(path).await.expect("corpus loads");
+        let universal_count = set.iter().filter(|r| r.domain == "*").count();
+        assert_eq!(
+            role.rule_subset.len(),
+            universal_count,
+            "expected only universal rules when no domains specified"
+        );
     }
 }

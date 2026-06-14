@@ -13,10 +13,12 @@ async fn main() -> anyhow::Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "acceptance" => run_acceptance_cmd().await,
+        "live-demo" => camerata::live_demo::run_live_demo().await,
         "" | "help" | "--help" | "-h" => {
             println!("camerata orchestrator");
             println!("usage:");
-            println!("  camerata acceptance   run the planted-violation acceptance scenario");
+            println!("  camerata acceptance   run the in-process planted-violation acceptance scenario");
+            println!("  camerata live-demo    spawn a REAL claude -p twice; prove gateway deny + allow live");
             Ok(())
         }
         other => {

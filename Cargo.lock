@@ -107,6 +107,7 @@ dependencies = [
  "camerata-checks",
  "camerata-core",
  "camerata-gateway",
+ "camerata-rules",
  "serde_json",
  "tokio",
 ]
@@ -118,6 +119,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

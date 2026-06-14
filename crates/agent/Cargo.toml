@@ -8,6 +8,7 @@ version = "0.0.0"
 [dependencies]
 camerata-core = { path = "../core" }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

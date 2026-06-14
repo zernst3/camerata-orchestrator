@@ -21,6 +21,12 @@ use std::path::PathBuf;
 use camerata_core::{AgentDriver, AgentOutcome, Role};
 use thiserror::Error;
 
+pub mod session;
+pub use session::{
+    prepare_session, render_mcp_config, render_rules_file, SessionError, SessionSpawn,
+    MCP_SERVER_KEY, RULES_FILE_ENV,
+};
+
 // ─── crate-local error type (RUST-DOMAIN-4 / RUST-DOMAIN-6) ───────────────────
 
 #[derive(Debug, Error)]

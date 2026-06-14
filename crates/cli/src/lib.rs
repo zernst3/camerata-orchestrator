@@ -5,3 +5,4 @@
 //! in-process, no-network planted-violation scenario.
 
 pub mod acceptance;
+pub mod live_demo;
