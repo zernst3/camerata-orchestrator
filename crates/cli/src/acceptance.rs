@@ -2,20 +2,25 @@
 //! wired together end-to-end with NO network and NO live `claude` call.
 //!
 //! It constructs the real layer-1 gate ([`camerata_gateway::GovernedGateway`]),
-//! a fake/echo [`AgentDriver`], and a checks runner, then asserts the gate
-//! denies a planted violation that mirrors the verified slice's GOV-1 deny
-//! (RUST_CORE_VERIFICATION.md): a write to a path containing "forbidden".
+//! a fake/echo [`AgentDriver`], and a checks runner, then asserts the gate denies
+//! three planted violations across three different enforced rules, while allowing
+//! a clean control write. The role carries the FULL enforced rule set
+//! ([`enforced_gate_rules`], the same set the live fleet rides along with):
+//!   - GOV-1: a write to a path containing "forbidden" (the verified slice's deny).
+//!   - SEC-NO-PATH-ESCAPE-1: a `..` traversal that climbs out of the workspace.
+//!   - SEC-NO-HARDCODED-SECRETS-1: a hardcoded credential literal in the content.
 //!
-//! This is the engine-wiring acceptance test. The live end-to-end run (a real
-//! `claude -p` subprocess through the MCP gateway) is the NEXT step; everything
-//! up to that boundary is exercised here in-process.
+//! This is the engine-wiring acceptance test, runnable in CI with no model. The
+//! live end-to-end run (a real `claude -p` subprocess through the MCP gateway) is
+//! covered separately by the `live-demo` binary; everything up to that boundary is
+//! exercised here in-process.
 
 use camerata_agent::allowed_tools_for_role;
 use camerata_core::{
     AgentDriver, AgentOutcome, CheckRunner, Decision, GovernanceGateway, Role, RuleId, SessionId,
     ToolCall,
 };
-use camerata_gateway::{gov1_rule, GovernedGateway};
+use camerata_gateway::{enforced_gate_rules, GovernedGateway};
 use std::path::Path;
 
 /// A fake agent driver that echoes the task back as its result and makes NO
@@ -47,12 +52,13 @@ impl CheckRunner for NoopChecks {
     }
 }
 
-/// The Backend role used in the acceptance run: its rule-subset includes GOV-1,
-/// so the gateway will enforce the forbidden-path rule against it.
+/// The Backend role used in the acceptance run: its rule-subset is the FULL set
+/// of enforced gate rules (the same set the live fleet rides along with), so the
+/// gateway enforces every layer-1 rule against it, not just GOV-1.
 pub fn backend_role() -> Role {
     Role {
         name: "Backend".to_string(),
-        rule_subset: vec![gov1_rule()],
+        rule_subset: enforced_gate_rules(),
         allowed_paths: vec!["crates/".to_string()],
     }
 }
@@ -62,6 +68,10 @@ pub fn backend_role() -> Role {
 #[derive(Debug)]
 pub struct AcceptanceResult {
     pub planted_violation_decision: Decision,
+    /// Verdict on a planted `..` traversal write (SEC-NO-PATH-ESCAPE-1).
+    pub planted_path_escape_decision: Decision,
+    /// Verdict on a planted hardcoded-secret write (SEC-NO-HARDCODED-SECRETS-1).
+    pub planted_secret_decision: Decision,
     pub clean_control_decision: Decision,
     /// The fake agent's echoed outcome, proving the driver was wired in.
     pub agent_session_id: String,
@@ -70,9 +80,11 @@ pub struct AcceptanceResult {
 }
 
 impl AcceptanceResult {
-    /// The acceptance criterion: planted violation DENIED, control ALLOWED.
+    /// The acceptance criterion: every planted violation DENIED, control ALLOWED.
     pub fn passed(&self) -> bool {
         matches!(self.planted_violation_decision, Decision::Deny { .. })
+            && matches!(self.planted_path_escape_decision, Decision::Deny { .. })
+            && matches!(self.planted_secret_decision, Decision::Deny { .. })
             && matches!(self.clean_control_decision, Decision::Allow)
     }
 }
@@ -81,8 +93,8 @@ impl AcceptanceResult {
 ///
 /// Wires: GovernedGateway (real layer-1 gate) + EchoDriver (fake agent) +
 /// NoopChecks (layer-2 runner). Binds a session to the Backend role, runs the
-/// echo agent, then asks the gate to evaluate (a) a planted forbidden write and
-/// (b) a clean write.
+/// echo agent, then asks the gate to evaluate three planted violations (forbidden
+/// path, `..` traversal, hardcoded secret) and one clean control write.
 pub async fn run_acceptance() -> anyhow::Result<AcceptanceResult> {
     let role = backend_role();
     let session = SessionId("acceptance-session".to_string());
@@ -108,7 +120,31 @@ pub async fn run_acceptance() -> anyhow::Result<AcceptanceResult> {
     };
     let planted_violation_decision = gateway.evaluate(&session, &planted).await;
 
-    // Clean control: a write to a legitimate path must be allowed.
+    // Planted path-escape: a `..` traversal that climbs out of the workspace
+    // (SEC-NO-PATH-ESCAPE-1). Clean of any "forbidden" substring, so it proves a
+    // DIFFERENT rule fires through the real gateway path, not just GOV-1.
+    let path_escape = ToolCall {
+        tool: "gated_write".to_string(),
+        input: serde_json::json!({
+            "path": "crates/../../etc/cron.d/payload",
+            "content": "*/1 * * * * root sh -c id"
+        }),
+    };
+    let planted_path_escape_decision = gateway.evaluate(&session, &path_escape).await;
+
+    // Planted secret: a clean path but a hardcoded credential in the content
+    // (SEC-NO-HARDCODED-SECRETS-1), proving a content rule fires end-to-end.
+    let secret = ToolCall {
+        tool: "gated_write".to_string(),
+        input: serde_json::json!({
+            "path": "crates/core/src/config.rs",
+            "content": "let token = \"ghp_ABCDEFGHIJ1234567890abcdefghij12\";"
+        }),
+    };
+    let planted_secret_decision = gateway.evaluate(&session, &secret).await;
+
+    // Clean control: a write to a legitimate path with benign content must be
+    // allowed even with ALL rules active (the gate is not deny-everything).
     let control = ToolCall {
         tool: "gated_write".to_string(),
         input: serde_json::json!({
@@ -120,6 +156,8 @@ pub async fn run_acceptance() -> anyhow::Result<AcceptanceResult> {
 
     Ok(AcceptanceResult {
         planted_violation_decision,
+        planted_path_escape_decision,
+        planted_secret_decision,
         clean_control_decision,
         agent_session_id: agent_outcome.session_id,
         allowed_tools: allowed_tools_for_role(&role),
@@ -129,6 +167,7 @@ pub async fn run_acceptance() -> anyhow::Result<AcceptanceResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camerata_gateway::{gov1_rule, sec_no_hardcoded_secrets_1_rule, sec_no_path_escape_1_rule};
 
     #[tokio::test]
     async fn acceptance_gate_denies_planted_violation_and_allows_control() {
@@ -145,7 +184,36 @@ mod tests {
             Decision::Allow => panic!("planted violation was NOT denied — gate is not wired"),
         }
 
-        // The control write was allowed (the gate is not deny-everything).
+        // A DIFFERENT rule fires end-to-end: the `..` traversal is denied by
+        // SEC-NO-PATH-ESCAPE-1, proving more than GOV-1 rides the gateway path.
+        match &result.planted_path_escape_decision {
+            Decision::Deny { rule, reason } => {
+                assert_eq!(
+                    *rule,
+                    sec_no_path_escape_1_rule(),
+                    "denied by path-escape rule"
+                );
+                assert!(reason.contains("SEC-NO-PATH-ESCAPE-1"));
+            }
+            Decision::Allow => panic!("path-escape violation was NOT denied"),
+        }
+
+        // A content rule fires end-to-end: the hardcoded credential is denied by
+        // SEC-NO-HARDCODED-SECRETS-1.
+        match &result.planted_secret_decision {
+            Decision::Deny { rule, reason } => {
+                assert_eq!(
+                    *rule,
+                    sec_no_hardcoded_secrets_1_rule(),
+                    "denied by secrets rule"
+                );
+                assert!(reason.contains("SEC-NO-HARDCODED-SECRETS-1"));
+            }
+            Decision::Allow => panic!("hardcoded-secret violation was NOT denied"),
+        }
+
+        // The control write was allowed (the gate is not deny-everything, even
+        // with all rules active).
         assert!(matches!(result.clean_control_decision, Decision::Allow));
 
         // Whole-scenario predicate.

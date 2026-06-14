@@ -58,6 +58,24 @@ async fn run_acceptance_cmd() -> anyhow::Result<()> {
             println!("planted forbidden write -> ALLOWED  (UNEXPECTED — gate not wired)");
         }
     }
+    match &result.planted_path_escape_decision {
+        Decision::Deny { rule, reason } => {
+            println!("planted `..` traversal  -> DENIED [{}]: {}", rule.0, reason);
+        }
+        Decision::Allow => {
+            println!(
+                "planted `..` traversal  -> ALLOWED  (UNEXPECTED — path-escape rule not wired)"
+            );
+        }
+    }
+    match &result.planted_secret_decision {
+        Decision::Deny { rule, reason } => {
+            println!("planted secret literal  -> DENIED [{}]: {}", rule.0, reason);
+        }
+        Decision::Allow => {
+            println!("planted secret literal  -> ALLOWED  (UNEXPECTED — secrets rule not wired)");
+        }
+    }
     match &result.clean_control_decision {
         Decision::Allow => println!("clean control write     -> ALLOWED  (expected)"),
         Decision::Deny { rule, reason } => {
