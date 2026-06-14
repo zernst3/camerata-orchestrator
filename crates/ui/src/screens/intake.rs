@@ -8,6 +8,7 @@
 
 use dioxus::prelude::*;
 
+use crate::app_state::{AppState, EntityInput, FieldInput, IntakeInputs, RoleInput};
 use crate::data;
 use crate::Screen;
 
@@ -24,6 +25,10 @@ enum Section {
 #[component]
 pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
     let mut section = use_signal(|| Section::About);
+
+    // The shared live project. On submit we build the real typed IntakeForm +
+    // Project from the inputs below and hand it to the rest of the flow.
+    let mut app = use_context::<Signal<Option<AppState>>>();
 
     // Seeded, editable form state. Only the free-text fields are live-editable
     // in this pass; the structured entities/roles render from the seed (the
@@ -44,7 +49,35 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
         };
         match next {
             Some(s) => section.set(s),
-            None => screen.set(Screen::Clarify),
+            None => {
+                // Submit: turn the collected inputs into a real typed IntakeForm,
+                // run the deterministic investigation, and open the project. This
+                // also queues the onboarding document + seeded stories for
+                // persistence (the App effect flushes them).
+                let inputs = IntakeInputs {
+                    app_name: app_name(),
+                    description: description(),
+                    constraints: constraints(),
+                    roles: roles()
+                        .into_iter()
+                        .map(|r| RoleInput { name: r.name, actions: r.actions })
+                        .collect(),
+                    entities: entities()
+                        .into_iter()
+                        .map(|e| EntityInput {
+                            name: e.name,
+                            fields: e
+                                .fields
+                                .into_iter()
+                                .map(|f| FieldInput { name: f.name, type_label: f.type_label })
+                                .collect(),
+                            features: e.features,
+                        })
+                        .collect(),
+                };
+                app.set(Some(AppState::from_intake("project_1", &inputs)));
+                screen.set(Screen::Clarify);
+            }
         }
     };
 

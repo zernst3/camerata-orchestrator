@@ -652,4 +652,69 @@ html, body {
   width: 38px; height: 38px; border-width: 3px;
   margin: 0 auto;
 }
+
+/* ── Stories panel (the editable source of truth on the refinement screen) ── */
+.stories-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 18px 20px;
+  margin-bottom: 28px;
+  box-shadow: var(--shadow-card);
+}
+.stories-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.stories-status {
+  font-size: 12px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.stories-list { margin-top: 14px; }
+.story-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 14px 16px;
+  transition: border-color .25s var(--ease), box-shadow .25s var(--ease);
+}
+.story-card + .story-card { margin-top: 10px; }
+.story-card:hover { box-shadow: var(--shadow-card); }
+.story-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.story-title { font-weight: 600; color: var(--ink); }
+.story-for { font-size: 13px; color: var(--ink-soft); flex: 1; }
+.story-edit, .story-remove {
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--r-sm);
+  transition: color .2s var(--ease), background .2s var(--ease);
+}
+.story-edit:hover { color: var(--accent); background: var(--accent-wash); }
+.story-remove:hover { color: var(--accent-ink); background: var(--accent-wash); }
+.story-wants {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.story-wants li { margin: 2px 0; }
+.story-sothat {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--accent-ink);
+}
+.add-story { margin-top: 14px; }
 "#;

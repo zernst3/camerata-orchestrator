@@ -12,11 +12,15 @@
 //!     cargo run -p camerata-ui
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
 
+mod app_state;
 mod data;
 mod screens;
 mod style;
 
 use dioxus::prelude::*;
+
+use app_state::AppState;
+use camerata_persistence::SqliteStore;
 
 /// The screens of the consumer journey, plus the simple navigation state. One
 /// enum + one signal is the whole router — deliberately minimal, because the flow
@@ -45,6 +49,42 @@ fn main() {
 #[component]
 fn App() -> Element {
     let screen = use_signal(|| Screen::Intake);
+
+    // The live consumer project, shared with every screen via context. `None`
+    // until the intake screen builds it on submit. Intake writes it; the
+    // refinement screen reads and edits it.
+    let mut app = use_signal(|| Option::<AppState>::None);
+    use_context_provider(|| app);
+
+    // Persistence. One SQLite store, opened once and held for the whole session,
+    // so versions accumulate (an in-memory store recreated per flush would lose
+    // history). In-memory for the prototype; pointing it at a file path under the
+    // app-data dir is the one-line change for durability across launches.
+    let store = use_resource(|| async { SqliteStore::open("sqlite::memory:").await.ok() });
+
+    // Whenever the project has queued revisions (every user/AI edit queues one),
+    // drain them and flush to the store. Draining happens synchronously, OUTSIDE
+    // the spawned task, so no signal guard is held across an await.
+    use_effect(move || {
+        let ready = store.read().clone().flatten();
+        let has_pending = app
+            .read()
+            .as_ref()
+            .map(|s| s.pending_count() > 0)
+            .unwrap_or(false);
+        if let (Some(store), true) = (ready, has_pending) {
+            let pending = app
+                .write()
+                .as_mut()
+                .map(|s| s.take_pending())
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                spawn(async move {
+                    let _ = app_state::flush(&store, &pending).await;
+                });
+            }
+        }
+    });
 
     rsx! {
         // Global stylesheet, injected as a raw <style> so it works identically on

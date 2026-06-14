@@ -429,7 +429,12 @@ version = "0.0.0"
 name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
+ "camerata-intake",
+ "camerata-persistence",
+ "chrono",
  "dioxus",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

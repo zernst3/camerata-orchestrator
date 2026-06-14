@@ -22,3 +22,15 @@ dioxus = { version = "0.7", features = ["desktop"] }
 # desktop renderer already runs on a Tokio runtime, so `tokio::time::sleep`
 # drives the progress beats from inside `use_future` without a second runtime.
 tokio = { version = "1", features = ["time"] }
+
+# The real engine. The consumer app is no longer purely mocked: app_state bridges
+# the screens to the typed IntakeForm / Project / RefinementSession (intake) and
+# the versioned ArtifactStore (persistence).
+camerata-intake = { path = "../intake" }
+camerata-persistence = { path = "../persistence" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread"] }

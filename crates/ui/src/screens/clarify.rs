@@ -18,6 +18,9 @@
 
 use dioxus::prelude::*;
 
+use camerata_intake::{StoryId, UserStory};
+
+use crate::app_state::AppState;
 use crate::data::{self, TurnKind};
 use crate::Screen;
 
@@ -34,6 +37,10 @@ enum Entry {
 pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
     let turns = use_signal(data::clarify_turns);
     let total = turns().len();
+
+    // The real, editable user stories — the source of truth, built by intake and
+    // persisted on every edit. Rendered alongside the conversation.
+    let app = use_context::<Signal<Option<AppState>>>();
 
     // The transcript, the index of the turn we're currently asking, the live
     // confidence score, and whether the plan has been revealed.
@@ -88,6 +95,9 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
             // The "still working through it" header: the checklist progress and
             // the live confidence score, the honest signal of readiness.
             ConfidenceHeader { confidence: conf, answered, total }
+
+            // The real, editable source of truth: the user stories.
+            StoriesPanel { app }
 
             div { class: "transcript",
                 for entry in transcript() {
@@ -165,6 +175,118 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The editable user-story list: the living source of truth the user and the AI
+/// both shape. Each story is the consumer-abstracted unit (who it is for + a plain
+/// list of wants). Adding or removing a story mutates the real `RefinementSession`
+/// and queues a versioned revision (the App effect persists it). A small status
+/// line shows the real lifecycle phase, the session context, and the session's own
+/// confidence (distinct from the scripted conversation score above).
+#[component]
+fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
+    // Snapshot the real state for rendering.
+    let stories: Vec<UserStory> = app
+        .read()
+        .as_ref()
+        .map(|s| s.active_stories().to_vec())
+        .unwrap_or_default();
+    let (phase_label, ctx_label, session_conf) = match app.read().as_ref() {
+        Some(s) => (
+            format!("{:?}", s.phase()),
+            s.active_session()
+                .map(|x| x.context.label())
+                .unwrap_or("—")
+                .to_string(),
+            s.confidence(),
+        ),
+        None => ("—".to_string(), "—".to_string(), 0),
+    };
+
+    rsx! {
+        div { class: "stories-panel",
+            div { class: "stories-head",
+                p { class: "section-label", "Your app, as a set of stories" }
+                span { class: "stories-status",
+                    "{phase_label} · {ctx_label} · {session_conf}% pinned · {stories.len()} stories"
+                }
+            }
+            p { class: "section-hint",
+                "These are the source of truth. Edit or remove anything that's not right; every change is saved with full history."
+            }
+
+            div { class: "stories-list",
+                for story in stories.iter().cloned() {
+                    {
+                        let id = story.id.as_str().to_string();
+                        rsx! {
+                            div { class: "story-card",
+                                div { class: "story-card-head",
+                                    span { class: "story-title", "{story.title}" }
+                                    span { class: "story-for", "for {story.for_whom}" }
+                                    button {
+                                        class: "story-edit",
+                                        title: "Mark this as a must-have",
+                                        onclick: {
+                                            let story = story.clone();
+                                            move |_| {
+                                                // A real edit: pin the story as a
+                                                // must-have. Upserting records a new
+                                                // version (the user changed it).
+                                                let mut edited = story.clone();
+                                                if edited.so_that.is_none() {
+                                                    edited.so_that = Some("this one matters to me".to_string());
+                                                    if let Some(state) = app.write().as_mut() {
+                                                        state.upsert_story(edited);
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        "★"
+                                    }
+                                    button {
+                                        class: "story-remove",
+                                        title: "Remove this story",
+                                        onclick: move |_| {
+                                            let sid = StoryId::new(id.clone());
+                                            if let Some(state) = app.write().as_mut() {
+                                                state.remove_story(&sid);
+                                            }
+                                        },
+                                        "✕"
+                                    }
+                                }
+                                ul { class: "story-wants",
+                                    for want in story.wants.iter().cloned() {
+                                        li { "{want}" }
+                                    }
+                                }
+                                if let Some(so_that) = story.so_that.clone() {
+                                    p { class: "story-sothat", "★ so that {so_that}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            button {
+                class: "btn-quiet add-story",
+                onclick: move |_| {
+                    if let Some(state) = app.write().as_mut() {
+                        let n = state.active_stories().len();
+                        state.add_story(UserStory::user_added(
+                            format!("added_{n}"),
+                            "Something I want to add",
+                            "Me",
+                            vec!["I can ...".to_string()],
+                        ));
+                    }
+                },
+                "+ Add a story"
             }
         }
     }
