@@ -20,8 +20,9 @@
 use chrono::{DateTime, Utc};
 
 use camerata_intake::{
-    EntityCapabilities, EntityDefinition, EntityField, FieldType, IntakeForm, Phase, Project,
-    RefinementSession, StoryId, StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
+    abstract_design, DesignCorpus, DesignReference, EntityCapabilities, EntityDefinition,
+    EntityField, FieldType, IntakeForm, Phase, Project, RefinementReviewer, RefinementSession,
+    ReviewError, StoryId, StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
 };
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, PersistenceError, RevisionOp,
@@ -352,6 +353,60 @@ impl AppState {
     pub fn phase(&self) -> Phase {
         self.project.phase
     }
+
+    /// Run ONE AI review turn on the active session: the reviewer reads the live
+    /// session, the result is folded in (story edits, new questions, suggestions,
+    /// updated confidence), and any AI-upserted story is queued as a versioned
+    /// revision. Returns whether a turn ran (false if there is no active session).
+    ///
+    /// The session is snapshotted before the await so no borrow is held across it.
+    pub async fn run_review_turn(
+        &mut self,
+        reviewer: &dyn RefinementReviewer,
+    ) -> Result<bool, ReviewError> {
+        let form = self.project.onboarding.clone();
+        let snapshot = match self.project.active_session() {
+            Some(s) => s.clone(),
+            None => return Ok(false),
+        };
+        let review = reviewer.review(&snapshot, &form).await?;
+        let ai_upserts = review.upserted_stories.clone();
+        if let Some(session) = self.project.active_session_mut() {
+            session.apply_review(review);
+        }
+        for story in ai_upserts {
+            self.queue_story(&story, EditActor::Ai, RevisionOp::Update);
+        }
+        Ok(true)
+    }
+
+    /// Historical designs to seed/influence this intake, but ONLY if the user
+    /// opted in (`use_historical`). Returns an empty list otherwise. This is how
+    /// the consuming side of the shared corpus reaches the UI.
+    pub async fn historical_references(
+        &self,
+        corpus: &dyn DesignCorpus,
+    ) -> Vec<DesignReference> {
+        if self.project.sharing.is_consuming() {
+            corpus.similar(&self.project.onboarding).await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Contribute this project's abstracted design to the corpus, but ONLY if the
+    /// user opted in (`contribute_design`). No-op otherwise. Privacy-safe: only the
+    /// abstracted shape is contributed (see `abstract_design`). Returns whether a
+    /// contribution was made.
+    pub async fn contribute_if_consented(&self, corpus: &dyn DesignCorpus) -> bool {
+        if self.project.sharing.is_contributing() {
+            let design = abstract_design(&self.project.onboarding, self.active_stories());
+            corpus.contribute(design).await;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 // ─── persistence bridge (every edit becomes a versioned revision) ────────────
@@ -419,6 +474,7 @@ pub async fn flush<S: ArtifactStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camerata_intake::{InMemoryDesignCorpus, SharingPreferences, StubRefinementReviewer};
     use camerata_persistence::SqliteStore;
 
     fn sample_inputs() -> IntakeInputs {
@@ -602,5 +658,60 @@ mod tests {
         let story = UserStory::user_added("x", "t", "w", vec![]);
         let rev = story_revision("p", &story, EditActor::User, RevisionOp::Delete, Utc::now()).unwrap();
         assert!(rev.payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_review_turn_drives_the_real_reviewer() {
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        // Before a review the session confidence is 0.
+        assert_eq!(state.confidence(), 0);
+
+        let reviewer = StubRefinementReviewer::new();
+        let ran = state.run_review_turn(&reviewer).await.unwrap();
+        assert!(ran);
+        // The stub's first turn sets confidence to its start (55) and raises an
+        // admin suggestion (sample_inputs has a "Studio owner" role).
+        assert_eq!(state.confidence(), 55);
+        let session = state.active_session().unwrap();
+        assert!(session.suggestions.iter().any(|s| s.id == "admin_users"));
+        assert!(!session.open_questions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn historical_references_respects_the_opt_in() {
+        let corpus = InMemoryDesignCorpus::new();
+        // Seed the corpus with a prior design whose entity matches sample_inputs ("Class").
+        let prior = abstract_design(&intake_form_from_inputs(&sample_inputs()), &[]);
+        corpus.contribute(prior).await;
+
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        // Opted OUT by default: no history, even though a match exists.
+        assert!(state.historical_references(&corpus).await.is_empty());
+
+        // Opt in: now the matching prior design is offered.
+        state.project.sharing = SharingPreferences {
+            contribute_design: false,
+            use_historical: true,
+        };
+        let hits = state.historical_references(&corpus).await;
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn contribute_only_happens_with_consent() {
+        let corpus = InMemoryDesignCorpus::new();
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+
+        // Opted out: no contribution.
+        assert!(!state.contribute_if_consented(&corpus).await);
+        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+
+        // Opt in: the abstracted design is contributed and findable.
+        state.project.sharing = SharingPreferences {
+            contribute_design: true,
+            use_historical: false,
+        };
+        assert!(state.contribute_if_consented(&corpus).await);
+        assert!(!corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
     }
 }
