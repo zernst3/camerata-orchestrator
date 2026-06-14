@@ -258,6 +258,30 @@ point, the plan is shown as BOTH prose (a short plain-language summary of what w
 be built) AND a visual entity-and-action map. The user approves, tweaks, or builds
 anyway.
 
+#### The shared-design opt-in (a network effect, by consent)
+
+Inside the refinement session the user is offered two independent, opt-in choices
+(both default OFF):
+
+- **Share my design to help future apps.** If a user opts in, their design documents
+  and stories are contributed (ABSTRACTED, never the business's data or private
+  notes) to a corpus Camerata draws on when the NEXT person builds a similar app. The
+  copy says plainly: opting in helps Camerata build better, more consistent apps for
+  everyone, and only the shape of the app is shared.
+- **Use historical data to influence my design.** If a user opts in, Camerata seeds
+  their refinement from prior consented designs for similar apps (a second person
+  building a rental-payment app starts from the shape of one that already exists). The
+  copy says plainly: this can speed up your setup and start you from a proven design
+  you can still change freely.
+
+The payoff is a flywheel: every shared design makes the corpus richer, which makes
+future intakes faster and more consistent, which makes the whole fleet of bespoke
+apps more uniform and therefore easier to maintain. Privacy is the hard rule:
+contributions are abstracted to the structural shape (entities, capabilities, story
+patterns); the description, constraints, look-and-feel, and any field values are
+stripped. See `crates/intake/src/sharing.rs` (`SharingPreferences`, `DesignCorpus`,
+`abstract_design`).
+
 ### 3. Build: governed construction, with the engineer still listening
 
 The user clicks Build once. Underneath: the story list becomes governed agent tasks,

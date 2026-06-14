@@ -107,6 +107,11 @@ pub struct Project {
     pub executions: usize,
     /// The current lifecycle phase.
     pub phase: Phase,
+    /// The project's opt-in consents for the shared design corpus (contribute this
+    /// design / use historical designs). Defaults to opt-out.
+    /// See [`crate::sharing`].
+    #[serde(default)]
+    pub sharing: crate::sharing::SharingPreferences,
 }
 
 impl Project {
@@ -121,7 +126,15 @@ impl Project {
             sessions: Vec::new(),
             executions: 0,
             phase: Phase::Onboarding,
+            sharing: crate::sharing::SharingPreferences::default(),
         }
+    }
+
+    /// Set the project's sharing consents (builder form), e.g. from the
+    /// refinement screen's opt-in toggles.
+    pub fn with_sharing(mut self, sharing: crate::sharing::SharingPreferences) -> Self {
+        self.sharing = sharing;
+        self
     }
 
     /// Freeze the onboarding document and seed the project with the stories the

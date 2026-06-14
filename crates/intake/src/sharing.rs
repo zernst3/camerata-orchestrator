@@ -1,0 +1,269 @@
+//! The shared design corpus: opt-in learning across bespoke apps.
+//!
+//! Per Zach (2026-06-14): in the refinement flow a user can opt IN or OUT of
+//! sharing their design documents and stories. Shared (and abstracted) designs go
+//! into a corpus that Camerata can draw on when the NEXT user builds a similar app
+//! (a second person building a rental-payment app can start from the shape of one
+//! that already exists). The second user separately chooses whether to "use
+//! historical data to influence the design." The payoff is consistency and
+//! robustness across all the bespoke apps Camerata builds, which makes them easier
+//! to maintain, plus a faster intake for the consuming user.
+//!
+//! Two independent consents, both OPT-IN (default off):
+//! - [`SharingPreferences::contribute_design`] — share my design to help future apps.
+//! - [`SharingPreferences::use_historical`] — let prior designs influence/speed mine.
+//!
+//! Privacy is load-bearing: only the SHAPE of a design is ever shared, never the
+//! business's data or its sensitive free text. [`abstract_design`] strips the
+//! description, constraints, style, and field option-values, keeping the structure
+//! (entities, capabilities, story patterns). Fuller anonymization (e.g. generalizing
+//! identifying entity names) is a follow-up captured in the decision record.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::form::IntakeForm;
+use crate::story::{StoryOrigin, UserStory};
+
+// ─── consent ─────────────────────────────────────────────────────────────────
+
+/// A project's opt-in consents for the shared design corpus. Both default to
+/// `false`: nothing is shared and no history is used unless the user chooses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SharingPreferences {
+    /// Opt-in: contribute this project's ABSTRACTED design + stories to the corpus
+    /// so future users building similar apps can learn from them.
+    #[serde(default)]
+    pub contribute_design: bool,
+    /// Opt-in: use historical designs from prior consenting users to influence and
+    /// speed up THIS project's intake.
+    #[serde(default)]
+    pub use_historical: bool,
+}
+
+impl SharingPreferences {
+    /// Whether this project contributes its design to the corpus.
+    pub fn is_contributing(&self) -> bool {
+        self.contribute_design
+    }
+
+    /// Whether this project draws on historical designs.
+    pub fn is_consuming(&self) -> bool {
+        self.use_historical
+    }
+}
+
+/// Plain-language copy shown next to the "share my design" opt-in, so the user
+/// understands the benefit and the privacy guarantee.
+pub const CONTRIBUTE_BENEFIT: &str =
+    "Sharing your design helps Camerata build better, more consistent apps for \
+     everyone. Only the SHAPE of your app is shared (the kinds of things it tracks \
+     and what people can do); your business data and your private notes are never \
+     shared.";
+
+/// Plain-language copy shown next to the "use historical data" opt-in.
+pub const USE_HISTORICAL_BENEFIT: &str =
+    "Starting from what others built for similar apps can speed up your setup and \
+     begin you from a proven, consistent design you can still change freely.";
+
+// ─── an abstracted, shareable design ─────────────────────────────────────────
+
+/// A consented, abstracted prior design the corpus can offer the next user as a
+/// reference. It carries the SHAPE of an app, not its data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesignReference {
+    /// A short, generalized label for the kind of app (e.g. "rental payment app").
+    pub app_kind: String,
+    /// A one-line, non-identifying summary of the shape.
+    pub summary: String,
+    /// The abstracted user stories (structure + plain wants; specifics removed).
+    pub stories: Vec<UserStory>,
+}
+
+/// Abstract a form + its stories into a shareable [`DesignReference`]. Strips the
+/// description, constraints, look-and-feel, and field option-values (anything that
+/// could carry the business's specifics), keeping the structural shape. The
+/// `app_kind` is derived from the entity names, which describe the domain pattern.
+pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignReference {
+    let entity_names: Vec<&str> = form.entities.iter().map(|e| e.name.as_str()).collect();
+    let app_kind = if entity_names.is_empty() {
+        "app".to_string()
+    } else {
+        format!("{} app", entity_names.join(" / ").to_lowercase())
+    };
+    let summary = format!(
+        "Tracks {} thing(s) ({}); {} role(s).",
+        form.entities.len(),
+        entity_names.join(", "),
+        form.roles.len(),
+    );
+
+    // Re-stamp stories as corpus references: keep title/for_whom/wants (the shape),
+    // drop any motivation note that could be specific, and mark provenance.
+    let stories = stories
+        .iter()
+        .map(|s| {
+            UserStory {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                for_whom: s.for_whom.clone(),
+                wants: s.wants.clone(),
+                so_that: None,
+                origin: StoryOrigin::Investigation,
+            }
+        })
+        .collect();
+
+    DesignReference {
+        app_kind,
+        summary,
+        stories,
+    }
+}
+
+// ─── the corpus seam ─────────────────────────────────────────────────────────
+
+/// DESIGN-CORPUS SEAM — the store of consented, abstracted designs.
+///
+/// `similar` powers the consuming side (use_historical): given a form, return prior
+/// designs whose shape resembles it. `contribute` powers the contributing side: add
+/// an already-abstracted design. Implementations decide similarity + storage; the
+/// caller is responsible for only contributing designs the user consented to share.
+#[async_trait]
+pub trait DesignCorpus: Send + Sync {
+    /// Prior consented designs similar to `form`, best first.
+    async fn similar(&self, form: &IntakeForm) -> Vec<DesignReference>;
+    /// Contribute one abstracted design to the corpus.
+    async fn contribute(&self, design: DesignReference);
+}
+
+/// An in-memory [`DesignCorpus`] for tests and the prototype. Similarity is a naive
+/// overlap of entity-name tokens, which is enough to prove the seam; a real corpus
+/// would use embeddings / structural matching.
+#[derive(Debug, Default)]
+pub struct InMemoryDesignCorpus {
+    // `std` mutex is correct here: the lock is never held across an `.await`
+    // (each method locks, does synchronous work, and drops the guard), so this
+    // needs no async-mutex and no extra tokio feature.
+    designs: std::sync::Mutex<Vec<DesignReference>>,
+}
+
+impl InMemoryDesignCorpus {
+    /// Construct an empty corpus.
+    pub fn new() -> Self {
+        Self {
+            designs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl DesignCorpus for InMemoryDesignCorpus {
+    async fn similar(&self, form: &IntakeForm) -> Vec<DesignReference> {
+        let want: Vec<String> = form
+            .entities
+            .iter()
+            .map(|e| e.name.to_lowercase())
+            .collect();
+        let designs = self.designs.lock().expect("corpus mutex poisoned");
+        let mut scored: Vec<(usize, DesignReference)> = designs
+            .iter()
+            .map(|d| {
+                let score = want
+                    .iter()
+                    .filter(|w| d.app_kind.to_lowercase().contains(w.as_str()))
+                    .count();
+                (score, d.clone())
+            })
+            .filter(|(score, _)| *score > 0)
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, d)| d).collect()
+    }
+
+    async fn contribute(&self, design: DesignReference) {
+        self.designs
+            .lock()
+            .expect("corpus mutex poisoned")
+            .push(design);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rental_form() -> IntakeForm {
+        let mut form = IntakeForm::sample_app();
+        form.app_name = "rent-tracker".into();
+        form.description = "PRIVATE: my tenants and what they owe me at 42 Main St".into();
+        form.constraints = "PRIVATE: do not share my landlord LLC details".into();
+        form.entities[0].name = "Tenant".into();
+        form
+    }
+
+    #[test]
+    fn consents_default_to_opt_out() {
+        let prefs = SharingPreferences::default();
+        assert!(!prefs.is_contributing());
+        assert!(!prefs.is_consuming());
+    }
+
+    #[test]
+    fn abstraction_strips_private_text_and_keeps_shape() {
+        let form = rental_form();
+        let stories = vec![UserStory::from_investigation(
+            "s1",
+            "Track rent",
+            "Landlord",
+            vec!["I can see who owes me".into()],
+        )
+        .so_that("PRIVATE specific motivation")];
+        let design = abstract_design(&form, &stories);
+
+        // The shape is kept...
+        assert!(design.app_kind.contains("tenant"));
+        assert!(design.stories[0].wants.iter().any(|w| w.contains("owes")));
+        // ...the private specifics are gone.
+        let blob = serde_json::to_string(&design).unwrap();
+        assert!(!blob.contains("PRIVATE"));
+        assert!(!blob.contains("42 Main St"));
+        assert!(design.stories[0].so_that.is_none());
+    }
+
+    #[tokio::test]
+    async fn corpus_contributes_and_finds_similar_designs() {
+        let corpus = InMemoryDesignCorpus::new();
+        // First landlord contributes (after consenting).
+        let first = abstract_design(&rental_form(), &[]);
+        corpus.contribute(first).await;
+
+        // A second user building a similar app finds it.
+        let mut second = IntakeForm::sample_app();
+        second.entities[0].name = "Tenant".into();
+        let hits = corpus.similar(&second).await;
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].app_kind.contains("tenant"));
+    }
+
+    #[tokio::test]
+    async fn corpus_returns_nothing_for_unrelated_app() {
+        let corpus = InMemoryDesignCorpus::new();
+        corpus.contribute(abstract_design(&rental_form(), &[])).await;
+        // An unrelated app (expense tracker, entity "Expense") matches nothing.
+        let unrelated = IntakeForm::sample_app(); // entity "Expense"
+        let hits = corpus.similar(&unrelated).await;
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn preferences_round_trip_json() {
+        let prefs = SharingPreferences {
+            contribute_design: true,
+            use_historical: false,
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let back: SharingPreferences = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, prefs);
+    }
+}

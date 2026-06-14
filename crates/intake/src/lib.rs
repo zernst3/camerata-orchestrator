@@ -37,6 +37,7 @@ pub mod plan;
 pub mod project;
 pub mod refinement;
 pub mod review;
+pub mod sharing;
 pub mod story;
 
 pub use appearance::{
@@ -68,6 +69,10 @@ pub use refinement::{
 pub use review::{
     ClaudeRefinementReviewer, RefineOutcome, RefinementDriver, RefinementReviewer, ReviewError,
     StubRefinementReviewer,
+};
+pub use sharing::{
+    abstract_design, DesignCorpus, DesignReference, InMemoryDesignCorpus, SharingPreferences,
+    CONTRIBUTE_BENEFIT, USE_HISTORICAL_BENEFIT,
 };
 pub use story::{StoryId, StoryOrigin, UserStory};
 
