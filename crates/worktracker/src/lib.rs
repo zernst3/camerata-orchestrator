@@ -21,6 +21,10 @@ pub mod jira;
 /// Azure DevOps Boards adapter (Phase E, PAT + Basic auth, WIQL-polling inbound).
 pub mod azure_devops;
 
+/// GitHub Issues adapter (CODE-HOST axis Tier-1, PAT/installation-token auth,
+/// poll-inbound).
+pub mod github;
+
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use azure_devops::{
@@ -28,6 +32,11 @@ pub use azure_devops::{
     default_state_for_category, json_patch_state, parse_wiql_workitems, parse_workitem,
     status_rollup_text, status_to_category as ado_status_to_category, wiql_changed_since,
     AdoConfig, AdoParsedWorkItem, AdoProvider,
+};
+pub use github::{
+    clarifying_questions_md, issues_since_path, markdown_comment,
+    parse_issue as github_parse_issue, parse_issues, status_closes_issue, status_rollup_md,
+    status_to_labels, GithubConfig, GithubProvider,
 };
 pub use http::{FakeTransport, HttpResponse, HttpTransport, ReqwestTransport};
 pub use jira::{
