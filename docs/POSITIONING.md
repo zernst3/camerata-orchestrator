@@ -71,29 +71,23 @@ Camerata replaces the markdown engineer with a **consumer intake + clarification
 
 This combination is proven in the prototype. A live agent attempted a real security violation and was denied at the gateway (ENFORCEMENT.md, RUST_CORE_VERIFICATION.md). A non-technical intake form produced a working, deployed application (PO_MODE.md).
 
-### Why this is a moat
+### Why this is a moat (and where it is not)
 
-LLMs are probabilistic and cannot reliably verify themselves. This is not a fixable prompt problem; it is a property of the architecture. Deterministic out-of-process checks give a binary result that no amount of model scaling eliminates the need for. The moat is not the intake UI; incumbents can copy an intake. The moat is the **depth of the curated rule corpus** plus the **deterministic gate** plus the design polish required to make the governed path feel effortless. That combination takes years to tune.
+Two things are true at once. The deterministic gate is real and rare: LLMs are probabilistic and cannot reliably verify themselves, so out-of-process checks give a binary result no amount of model scaling removes the need for. But as a CONSUMER feature, "deterministic guardrails" gets absorbed the day a platform ships a guardrails toggle, and "depth of corpus plus design polish" is a thin moat against a company with 1000x the distribution. Concede that plainly. It is exactly why the durable business is Tier 1, not Tier 2.
 
-### "When the platform ships guardrails as a checkbox, what's left?" (the strongest objection)
+The Tier-1 moat is not corpus depth or polish. It is three things a platform-shipped guardrail does not replace:
 
-This is the sharpest VC objection, and it is correct ABOUT TIER 2. As a consumer feature, "deterministic guardrails" gets absorbed the day Anthropic or a codegen incumbent ships a guardrails toggle, and "depth of corpus + design polish" is a thin moat against a company with 1000x the distribution. We concede this directly. It is the central reason the two tiers carry equal weight and Tier 1 is named the defensible near-term wedge.
+1. **Integration depth and switching cost.** A vendor guardrail governs one agent in its own sandbox. It does not mirror an enterprise's Jira/ADO board with per-field source-of-truth, own the provenance / gate-results / sign-off trail and write it back onto their work items, or roll multi-repo PRs up to one story. An org that has woven this into its tracker, repos, and audit does not rip it out because a model vendor shipped a toggle.
+2. **Provider-neutrality the platform structurally cannot ship.** A model vendor's guardrail governs THAT vendor's agents; it is vendor lock by construction. Camerata's gate is provider-neutral by design (an MCP tool-gateway plus an agent-runtime seam, so a non-Claude model swaps in without touching the gate). An enterprise that will not bet its governance on one model vendor needs exactly the neutral layer, and a vendor cannot ship neutrality without un-locking its own platform. Distribution does not help an incumbent build the one thing its business model forbids.
+3. **The builder's proven strength is the product.** Selling the governed gate as developer/team infrastructure puts deterministic systems architecture at the center, rather than racing consumer-codegen incumbents on design and go-to-market.
 
-What a platform-shipped guardrail does NOT replace, and what Tier 1 is:
-
-1. **Integration depth + switching cost.** A vendor guardrail governs one agent inside that vendor's sandbox. It does not mirror an enterprise's Jira/ADO board with per-field source-of-truth, own the provenance / gate-results / sign-off trail and write it back onto their work items, or roll up multi-repo PRs to a single story. An org that has woven Camerata into its tracker, its repos, and its audit trail does not rip that out because a model vendor shipped a toggle. That is infrastructure switching cost, not a feature comparison.
-2. **Provider-neutrality is structurally un-shippable by the platform.** A model vendor's guardrail governs THAT vendor's agents; it is vendor lock by construction. Camerata's gate is provider-neutral by design (an MCP tool-gateway plus an agent-runtime seam, so a non-Claude model swaps in without touching the gate). An enterprise that refuses to bet its governance and audit posture on a single model vendor needs exactly the neutral layer, and the platform cannot ship neutrality without un-locking its own platform. The incumbent's distribution advantage does not help it build the one thing its business model forbids.
-3. **The proven builder strength is the product in Tier 1.** Selling the governed gate as developer/team infrastructure puts deterministic systems architecture (the demonstrated strength) at the center, rather than racing consumer-codegen incumbents on design and go-to-market (muscles not yet demonstrated). The honest read from two cold investor passes: the more fundable near-term wedge is the developer/team infrastructure one, not the consumer race.
-
-So the moat for Tier 1 is not "corpus depth + polish." It is integration depth, audit/provenance ownership, switching cost, and a provider-neutrality the platform is structurally unable to match. Tier 2 remains the larger-TAM bet and the end-to-end demonstration artifact, on the same engine; it is not where the near-term defensibility lives, and this document no longer pretends otherwise.
+Tier 2 is what is proven end to end in code today, and it is the larger-TAM bet on the same engine. The near-term defensibility lives in Tier 1.
 
 ---
 
-## 4. The Macintosh Framing
+## 4. The shape: complexity hidden, governed runtime, simple surface
 
-The SDD heavyweights (Kiro, Spec Kit, BMAD) are the Xerox Alto: brilliant, demonstrably capable, needs scientists to operate. Raw prompting (Bolt.new, v0) is the command line: fast, fragile, one wrong instruction breaks the world. Camerata is the move that made computing personal: **hide the complexity inside a governed runtime, surface a consumer-grade interface**.
-
-Being first to that concept matters far less than building the UX that makes it feel inevitable. Best-in-class consumer design is a harder problem than building the governance layer. Both are required; neither is sufficient alone.
+The mechanism: hide the complexity inside a governed runtime and surface a clean interface over it. The SDD tools (Kiro, Spec Kit, BMAD) expose the complexity (markdown constitutions, CLIs, a tech-stack prerequisite); raw prompting (Bolt, v0) hides it but governs nothing. Camerata does both: total governance underneath, a clean surface on top. Building that surface is a harder problem than building the gate, and both are required; neither is sufficient alone.
 
 ---
 
@@ -124,13 +118,8 @@ These are stated directly because omitting them would make the document less use
 
 ## 7. Career Artifact Framing
 
-This document is part of a deliberate portfolio, not a market-domination thesis. The positioning claim is narrow and honest: Camerata demonstrates, with working code, that a non-trivial governance layer can be built on top of an LLM agent and that it catches real violations a raw-prompt tool would miss. That is a specific, verifiable claim. The broader market claim — that this pattern is the right one for the consumer software-generation space — is a bet, not a certainty.
+This document is part of a deliberate portfolio, not a market-domination thesis. The claim is narrow and verifiable: Camerata shows, with working code, that a non-trivial governance layer can be built over an LLM agent and that it catches real violations a raw-prompt tool would miss.
 
-What the artifact establishes:
+The strongest evidence is a decision the builder made AGAINST an initial analysis and then overturned by experiment. An early assessment returned a NO-GO on a pure-Rust core, on the assumption that governing live agents required the TypeScript Agent SDK. That conclusion was reversed by running a real `claude -p` agent against a real Rust MCP gate, denying a real forbidden write before it touched disk, and measuring the outcome (see `RUST_CORE_VERIFICATION.md` and `LIVE_RUN_VERIFICATION.md`). The architecture pivoted to all-Rust on that evidence. That is the signal worth more than any adjective: the human, not the model, made the load-bearing call, and changed it when an experiment said to. The same posture shows up in the project governing its own source in CI (`ENFORCEMENT.md`) and in stating exactly which rules are enforced versus not.
 
-- Architectural judgment: the choice to use deterministic gates rather than chain more LLM calls is a design decision with a clear rationale.
-- Systems thinking: the MCP gateway + LanguageCheckRunner combination addresses a structural property of LLMs, not a symptom.
-- Consumer orientation: the intake loop is not an afterthought bolted onto a developer tool.
-- Honest positioning: the caveats in this document are part of the pitch, not admissions against interest.
-
-The target audience for this artifact is a technical hiring manager or seed investor who can evaluate the architectural choices, not a demo audience looking for a product to buy today.
+The audience is a technical evaluator who can read the code and the verification docs, not a demo audience looking to buy a product today.

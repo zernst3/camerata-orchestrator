@@ -8,54 +8,24 @@
 gate (mechanically enforced rules, not prompt suggestions) over a fleet of AI coding
 agents.** Every agent action is allowed or denied BEFORE it executes, the result is
 auditable, and the gate is provider-neutral by construction (it does not bet on one
-model vendor). The gate is the core and the moat. It is exposed at two co-equal tiers,
-on one engine.
+model vendor). The gate is the core and the moat.
 
-## Two co-equal tiers, one engine
+It is exposed at two tiers on one engine, and they play different roles:
 
-Both tiers are first-class and built with equal priority.
-
-- **Tier 1, Enterprise governed orchestration (the defensible wedge).** A human
-  architect and a real Product Owner stay in the loop, collaborating through the
-  tracker they already use (Jira / Azure DevOps / GitHub). Stories flow in from their
-  board, governed role-scoped agents execute, and Camerata writes provenance, gate
-  results, PR links, and sign-off back onto their work items. Here governance is
-  INFRASTRUCTURE woven into an org's existing workflow, with audit and per-field
-  source-of-truth, not a feature bolted onto a chat box. See
+- **Tier 2 is what is proven in code today.** The small-business app builder: a
+  non-technical owner refines an app with an AI lead engineer, gets a working app they
+  own on their own cloud, and a standing AI maintenance routine keeps it alive. It is
+  built and tested end to end. It is the demonstration artifact and the larger-TAM
+  bet. See [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+- **Tier 1 is where the durable business is.** Enterprise governed orchestration: a
+  human architect and a real Product Owner collaborate through the tracker they
+  already use (Jira / Azure DevOps / GitHub), governed agents execute, and Camerata
+  writes provenance, gate results, PR links, and sign-off back onto their work items.
+  Governance here is infrastructure woven into an org's workflow, with switching cost
+  and a provider-neutrality an incumbent's guardrail checkbox cannot match. This is the
+  defensible wedge. The moat argument lives once, in
+  [`docs/POSITIONING.md`](docs/POSITIONING.md); the integration design is in
   [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
-- **Tier 2, Small-business app builder (the larger-TAM bet).** A non-technical owner
-  IS the Product Owner, with no developer or architect. They describe an app, refine
-  it with an AI lead engineer until both are confident, get a working app they own on
-  their own cloud, and a standing AI maintenance routine keeps it alive. This is the
-  bigger, riskier market and the recordable career artifact, riding the same engine.
-  See [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
-
-## Why this is defensible (the moat, honestly)
-
-The fair critique of Tier 2 is that "AI builds a bespoke app for a non-technical
-business" is a crowded category (Lovable, Bolt, v0, Replit, every vertical SaaS
-bolting on AI), and that governance, AS A CONSUMER FEATURE, gets absorbed the day a
-platform ships deterministic guardrails as a checkbox. That critique is correct, and
-it is exactly why the tiers are weighted equally and why Tier 1 is the defensible
-near-term wedge. A platform guardrail does NOT replace:
-
-- **Integration depth + switching cost.** A vendor guardrail governs one agent in its
-  own sandbox. It does not mirror your Jira/ADO board with per-field source-of-truth,
-  own your provenance / gate-results / sign-off trail and write it back onto your work
-  items, or roll up multi-repo PRs to one story. An org that wires this into its
-  tracker, repos, and audit does not rip it out because a model vendor shipped a toggle.
-- **Provider-neutrality.** A vendor's guardrail governs THAT vendor's agents, which is
-  vendor lock by definition. Camerata's gate is provider-neutral by construction (an
-  MCP gateway plus an agent-runtime seam), which is exactly what an enterprise that
-  refuses to bet its governance on one model vendor needs. The platform cannot ship
-  that without un-locking itself.
-- **The proven strength is the product here.** Tier 1 sells deterministic systems
-  architecture and governance as developer/team infrastructure, where that strength IS
-  the product, rather than racing consumer-codegen incumbents on design and distribution.
-
-Tier 2 is not abandoned; it is the TAM-expansion bet on the same engine and the
-artifact that demonstrates the engine end to end. The fundable, defensible near-term
-wedge is Tier 1. Full thesis in [`docs/POSITIONING.md`](docs/POSITIONING.md).
 
 ## Tier 2 in detail
 
