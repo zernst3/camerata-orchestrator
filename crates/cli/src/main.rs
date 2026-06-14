@@ -17,6 +17,8 @@ async fn main() -> anyhow::Result<()> {
         "build-demo" => camerata::build_demo::run_build_demo().await,
         "po-demo" => camerata::po_demo::run_po_demo().await,
         "worktracker-demo" => camerata::worktracker_demo::run_worktracker_demo().await,
+        "maintenance-demo" => camerata::maintenance_demo::run_maintenance_demo().await,
+        "deploy-demo" => camerata::deploy_demo::run_deploy_demo().await,
         "" | "help" | "--help" | "-h" => {
             println!("camerata orchestrator");
             println!("usage:");
@@ -27,6 +29,8 @@ async fn main() -> anyhow::Result<()> {
             println!("  camerata build-demo        run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");
             println!("  camerata po-demo           run PO-MODE end to end: intake form -> lead engineer -> governed fleet -> cargo");
             println!("  camerata worktracker-demo  Tier-1 enterprise flow: PO on their board, governed, provenance written back");
+            println!("  camerata maintenance-demo  Tier-2 standing ops agent: scan, approve, key rotation");
+            println!("  camerata deploy-demo       BYO-infra publish step: gate, local deploy, Azure plan");
             Ok(())
         }
         other => {

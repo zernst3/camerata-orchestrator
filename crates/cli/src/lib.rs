@@ -6,7 +6,9 @@
 
 pub mod acceptance;
 pub mod build_demo;
+pub mod deploy_demo;
 pub mod fleet_support;
 pub mod live_demo;
+pub mod maintenance_demo;
 pub mod po_demo;
 pub mod worktracker_demo;

@@ -23,10 +23,13 @@ camerata-checks = { path = "../checks" }
 camerata-rules = { path = "../rules" }
 camerata-fleet = { path = "../fleet" }
 camerata-worktracker = { path = "../worktracker" }
+camerata-maintenance = { path = "../maintenance" }
+camerata-deploy = { path = "../deploy" }
 anyhow.workspace = true
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
