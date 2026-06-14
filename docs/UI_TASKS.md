@@ -1,5 +1,7 @@
 # Camerata Orchestrator: UI_TASKS.md
 
+> _Historical planning record: predates the built Rust system (which is all Rust). Kept for context; where it describes a TypeScript stack or Phase-0 plan, that is point-in-time, since superseded._
+
 Status: V1 UI + Dashboard build plan. Additive to PHASE0_TASKS.md. This file EXTENDS the
 engine task graph (T0-T14, defined in PHASE0_TASKS.md, not restated here) with the tasks
 that build the V1 cockpit and dashboard against UI_DESIGN.md. Task numbering CONTINUES the
@@ -52,7 +54,7 @@ event surface) is the first UI task and gates everything after it. The full dash
 (T24+) is deliberately LAST, because a multi-feature roll-up over a single-Story P0 engine
 is the least thesis-critical surface and the most chorale-live-update-risky one.
 
-**Priority amendment (2026-06-13, VISION §3.5 / WORKTRACKER §0.5):** the async
+**Priority amendment (2026-06-13, VISION / WORKTRACKER §0.5):** the async
 CLARIFY-BRIDGE is pulled FORWARD into V1, slotted AFTER the minimal local cockpit (TIER M)
 and AHEAD of the full dashboard (TIER F tail). Rationale: the bridge (route product
 clarifying questions to a remote Product Owner as tracker comments, ingest the answers) is
@@ -170,7 +172,7 @@ layer-2 `gate_bounce` events.
 - **id:** T17
 - **title:** Mirror the TS entity shapes as Rust serde structs, generated so the enum cannot drift
 - **description:** Define the Rust serde structs at the BFF boundary mirroring the VISION
-  section 8 entities (Story, Investigation, Rule, RuleSet, Role, Task, Gate/Check,
+  entity shapes (Story, Investigation, Rule, RuleSet, Role, Task, Gate/Check,
   Provenance, FeatureStatus) and the section-1 event envelope. **Generate** the Rust types
   from a shared JSON Schema or a TS type export (typeshare-style step), NOT by hand, so the
   canonical 11-state FeatureStatus enum (`INTAKE, INVESTIGATING, AWAITING_CLARIFICATION,
@@ -256,7 +258,7 @@ flagged risk).
 - **id:** T20
 - **title:** IntakePanel + InvestigationPanel (findings, product questions, tech tradeoffs, RuleSet review)
 - **description:** Build `IntakePanel` (one input box, brownfield-default repo selector,
-  greyed tracker-issue affordance per VISION 18; Investigate POSTs the Story and flips to
+  greyed tracker-issue affordance per VISION; Investigate POSTs the Story and flips to
   INVESTIGATING) and the full `InvestigationPanel` (UI_DESIGN section 2.2): `CodebaseFindings`,
   the two side-by-side `ProductQuestionsPanel` (free-text + choice answers over
   `Investigation.product_questions[]`) and `TechTradeoffsPanel` (option/pros/cons/recommend
@@ -269,13 +271,13 @@ flagged risk).
   (Q5 downgrade), so the selected column renders multiple active rules. Render conflicts /
   gaps with the three resolution options (adopt+migrate / keep+exception / synthesize) and a
   "+ add rule" gap action (TECH_DESIGN Q6). The human edits and OWNS the final active
-  RuleSet (VISION 11); the picked tradeoff option persists on the Investigation.
+  RuleSet (VISION); the picked tradeoff option persists on the Investigation.
 - **depends_on:** T19, T10 (investigation driver), T1 (real rule index), T2 (three-state
   bucket classifier feeds the EnforcementBadge), T13 (brownfield conflicts/gaps feed the
   panel)
 - **estimate:** 4h
-- **advances:** UI_DESIGN sections 2.2, 2.3 (clarify loop) + VISION 1.1 front-loaded
-  judgment. Hypothesis: the human works only at architect altitude; no code until the
+- **advances:** UI_DESIGN sections 2.2, 2.3 (clarify loop) + VISION (front-loaded
+  judgment). Hypothesis: the human works only at architect altitude; no code until the
   RuleSet gate passes.
 
 ### T21: Plan panel (chorale master/detail over the Task DAG)
@@ -287,7 +289,7 @@ flagged risk).
   `depends_on`, and rule count; the `detail_renderer` expands to the scoped `rule_subset`
   (with enforcement badges), `allowed_tools`, and the path/hook boundaries. Show the
   contract handoff line (Backend emits `api-contract.ts` -> Frontend consumes via prompt
-  context, NOT a premature merge; VISION 12 / T7) and label execution SEQUENTIAL
+  context, NOT a premature merge; VISION / T7) and label execution SEQUENTIAL
   (TECH_DESIGN Q4). The DAG is the two-node Backend -> Frontend chain (PHASE0_TASKS
   out-of-scope: no DAG beyond this). The DB boundary renders as a RULE on the Frontend role
   (layer-1 hook deny `psql|pg_dump` -> `ROLE-PATH-BOUNDARY-FE-1`), NOT a third agent
@@ -329,7 +331,7 @@ flagged risk).
 - **title:** QaPanel: chorale RowCellRenderer over diff hunks, per-change provenance, honest surfaced-rules block
 - **description:** Build `QaPanel` (UI_DESIGN section 2.6): the governed diff rendered via
   a chorale grid with row-aware `RowCellRenderer` for per-hunk provenance and an action
-  column. Each hunk carries exactly the VISION section 8 Provenance line `{task_id, role,
+  column. Each hunk carries exactly the VISION Provenance line `{task_id, role,
   agent_session_id, rules_passed[], human_decision}` (one line per change, no audit store
   in V1; T11). Render the "SURFACED FOR YOUR JUDGMENT" block: `deterministic-declared` +
   `review-heuristic` rules SHOWN to the human, never claimed as auto-passed (the honesty
@@ -340,7 +342,7 @@ flagged risk).
 - **depends_on:** T19, T11 (provenance line), T12 (QA presentation semantics), T25 (chorale
   adapter for the diff grid)
 - **estimate:** 2.5h
-- **advances:** UI_DESIGN section 2.6 + VISION criterion 4 (governed diff presented with
+- **advances:** UI_DESIGN section 2.6 + VISION (governed diff presented with
   provenance). Hypothesis: the human owns the final accept, with honest enforcement
   surfacing.
 
@@ -448,13 +450,12 @@ question calls the orchestrator to post a formatted, @-mentioning comment with t
 (or the whole product set) onto the linked tracker item (the Jira/ADO/GitHub/native issue
 the Story is connected to). Technical tradeoffs and the RuleSet are never posted. The
 question row enters an `awaiting-PO` sub-state. Estimate: 2h per board adapter (net-new
-outbound use; the provider's comment auth is the precondition). BOARD-AXIS PRIORITY (VISION
-§3.5 / WORKTRACKER §3): the clarify-bridge targets the PRODUCT tracker where the PO lives, so
+outbound use; the provider's comment auth is the precondition). BOARD-AXIS PRIORITY (VISION / WORKTRACKER §3): the clarify-bridge targets the PRODUCT tracker where the PO lives, so
 the first shipping board adapters are **Jira and Azure DevOps Boards** (the two most-used
 enterprise story trackers), NOT GitHub Issues (deprioritized: underused as a formal board).
 GitHub Issues may serve as a cheap mechanical test-harness during development only. Note the
 board adapters are heavier than GitHub (Jira: OAuth 3LO + ~25-day webhook-refresh cron; ADO:
-Service Hooks, no HMAC), so budget accordingly. Advances: VISION §3.5 async collaboration;
+Service Hooks, no HMAC), so budget accordingly. Advances: VISION (async collaboration);
 the team-tool-without-cloud hypothesis. BUILD ORDER: before T24 (dashboard).
 
 ### T29: Async clarify-bridge, inbound (ingest the PO answer + provenance)
@@ -464,7 +465,7 @@ echo-suppression/idempotency (§4.2). A new PO comment of kind `answer` is norma
 matched to the open question by issue ref + thread, and folded into the Investigation
 answer; the Story leaves `AWAITING_CLARIFICATION` only once answered. The PO comment
 (id/url/author/timestamp) is recorded as the `human_decision` provenance source. Estimate:
-2.5h (webhook verification + match logic + the resume trigger). Advances: VISION §3.5;
+2.5h (webhook verification + match logic + the resume trigger). Advances: VISION (async collaboration);
 auditable external sign-off. BUILD ORDER: before T24 (dashboard).
 
 ### T30: Cockpit affordance + status for the bridge round-trip
@@ -473,7 +474,7 @@ Depends on: T28, T29. The `[ Ask in tracker ]` affordance on each product questi
 `awaiting-PO` row sub-state, and a clear surfaced timeline of the round-trip (posted ->
 awaiting -> answered) in the live-status panel, so the Architect sees the async loop without
 leaving the cockpit. No PO-facing Camerata UI (the PO's surface is their tracker). Estimate:
-1.5h. Advances: VISION §3.5 single-cockpit-for-the-Architect. BUILD ORDER: before T24.
+1.5h. Advances: VISION (single cockpit for the Architect). BUILD ORDER: before T24.
 
 ### T27: V1 cockpit + dashboard end-to-end acceptance run
 

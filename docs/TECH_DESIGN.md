@@ -1,6 +1,8 @@
 # Camerata Orchestrator: TECH_DESIGN.md
 
-Status: Phase 0 design. This document answers the six VISION section 16 investigation
+> _Historical planning record: predates the built Rust system (which is all Rust). Kept for context; where it describes a TypeScript stack or Phase-0 plan, that is point-in-time, since superseded._
+
+Status: Phase 0 design. This document answers the six VISION investigation
 questions, states the chosen architecture, gives the module layout for the
 TypeScript/Node orchestrator, and ends with an explicit "Unverified assumptions and
 open risks" register.
@@ -23,7 +25,7 @@ and could not be confirmed).
 |---|----------|----------|------------------------|
 | Q1 | Headless on Max subscription, no API key? | NO single free path. Two sanctioned paths behind the `session.ts` seam: (A, primary) metered `ANTHROPIC_API_KEY`, subscription Agent SDK credit auto-applies, overflow metered; (B, solo-dogfood alt) Claude Code CLI `claude -p` under the operator's own subscription OAuth. Post June 15 2026 both draw from the SAME monthly Agent SDK credit ($100/mo on the operator's Max 5x). | OAuth-in-a-product REFUTED; API-key primary + CLI-for-solo added |
 | Q2 | PreToolUse hooks as the real-time gate? | YES, behind a provider-neutral `GovernanceGateway` seam. Claude PreToolUse binding ships first (deny + `systemMessage`, not just `permissionDecisionReason`); the MCP tool-gateway binding is the model-agnostic path and closes the subagent gap. Phase 0 spawns NO subagents. | CONFIRMED with two corrections + agnostic seam added |
-| Q3 | Post-task structural checks mechanism | Pluggable per-language `CheckRunner` that shells to native linters first (reuse Agora's ESLint rule), ts-morph as TS fast path. | CONFIRMED |
+| Q3 | Post-task structural checks mechanism | Pluggable per-language `CheckRunner` that shells to native linters first (reuse the target's ESLint rule where it exists, install Camerata's canonical check otherwise), ts-morph as TS fast path. | CONFIRMED |
 | Q4 | Git worktree isolation flow | `git worktree add`, set SDK `cwd` (not `workingDirectory`) to the worktree, merge in dependency order, manual cleanup. Phase 0 runs the two agents SEQUENTIALLY, not in parallel. | CONFIRMED with two corrections |
 | Q5 | Rule index schema + mechanical-vs-review split | 6-field index derived mechanically from the TOML. Bucket on `enforcement` alone. Add a THIRD runtime state: mechanical-but-no-shipping-check degrades to review. | CONFIRMED core; one sub-claim REFUTED |
 | Q6 | Onboarding greenfield vs brownfield | Greenfield scaffolds rules from commit zero; brownfield maps + proposes the should-be RuleSet AND INSTALLS the governance scaffolding (lint config, CI gate steps, agent rules, hooks) as a human-approved diff. Onboarding installs what the repo SHOULD have, it does not merely detect what it has. New-rule synthesis deferred. | CONFIRMED + install scope clarified |
@@ -38,17 +40,17 @@ Two corrections ripple through the whole design and are stated once here:
    the subscriber driving the **Claude Code CLI (`claude -p`) for their own work** is
    permitted "ordinary use of Claude Code," and post June 15 2026 it draws from the same
    Agent SDK credit. So Phase 0 supports BOTH behind `agents/session.ts`: API-key
-   (primary, product-ready) and CLI-OAuth (solo-dogfood alternative). The operator is on
+   (primary, system-ready) and CLI-OAuth (solo-dogfood alternative). The operator is on
    **Max 5x = $100/mo credit** (not $200 Max 20x). Cost stays inside the credit for a
    thin-slice cadence but NOT a daily one (see Q1 cost model); the "cost-safe" spirit
-   holds at thin-slice scale. The single-free-path mechanism in VISION section 3 /
-   section 13 is wrong and is corrected below.
+   holds at thin-slice scale. The single-free-path mechanism described in VISION is wrong
+   and is corrected below.
 
-2. **The Agora ESLint rule that anchors the planted-violation gate runs locally but NOT
-   in CI today.** Verified directly: `.github/workflows/build-and-deploy-api.yml` runs
+2. **The ESLint rule that anchors the planted-violation gate runs locally but NOT
+   in CI today.** Verified directly against the target repo: the API build workflow runs
    only `npx tsc --noEmit` for its "Lint and Type Check" step (line 176-177); it never
    invokes ESLint. This does not break Phase 0 (the orchestrator invokes the linter
-   itself, it does not rely on Agora's CI), but it means the rule is NOT "enforced on
+   itself, it does not rely on the target's CI), but it means the rule is NOT "enforced on
    every PR" as some workstream prose claimed. A one-line CI fix is recommended
    separately and is not a Phase 0 dependency.
 
@@ -89,7 +91,7 @@ Three layers, one of which (the orchestrator) makes ZERO LLM calls.
 +--------------------------------------------------------------+
 ```
 
-The two-layer gate (VISION section 10):
+The two-layer gate (described in VISION):
 
 - **Layer 1, real-time:** Agent SDK `PreToolUse` hooks deny tool calls that breach a
   hard boundary (write outside `path_boundaries`, a raw DB command from the Frontend
@@ -98,7 +100,7 @@ The two-layer gate (VISION section 10):
   for its active mechanical rules (ESLint, ts-morph, build, tests). On any fail, the
   diff is bounced back to the agent with the specific violated rule id and message.
 
-Data model: VISION section 8 entities are adopted verbatim (Story, Investigation,
+Data model: the core entities described in VISION are adopted verbatim (Story, Investigation,
 Rule, RuleSet, Role, Task, Gate/Check, Provenance, FeatureStatus). The only schema
 refinement is on `Rule` (see Q5): the runtime needs a THIRD `enforcement_kind` state to
 distinguish "mechanical and a check exists" from "mechanical by declaration but no
@@ -116,8 +118,8 @@ sanctioned paths, chosen per run, not one.
 - **Path A (PRIMARY): metered `ANTHROPIC_API_KEY`** from the Anthropic console. The
   subscription's separate monthly Agent SDK credit auto-applies to API-key usage
   (effective June 15 2026); once the credit is exhausted, overflow bills at metered
-  rates. This is the only path that is also compliant for the eventual multi-user
-  product (per-user API keys), and it gives the orchestrator clean, programmatic
+  rates. This is the only path that is also compliant for eventual multi-user use
+  (per-user API keys), and it gives the orchestrator clean, programmatic
   per-role hooks via the SDK. Use it as the default.
 - **Path B (SOLO-DOGFOOD ALTERNATIVE): drive the Claude Code CLI headlessly
   (`claude -p`) under the operator's own subscription OAuth.** Permitted as "ordinary
@@ -129,8 +131,8 @@ sanctioned paths, chosen per run, not one.
   spawn a subprocess and parse `--output-format stream-json`, and the layer-1 gate is
   configured as `.claude/settings.json` hook shell-commands per worktree rather than as
   programmatic `PreToolUse` callbacks (less dynamic, harder to inject a per-role
-  `rule_subset`). It does NOT extend to the product: routing other users' work through
-  subscription credentials is explicitly prohibited (Consumer Terms; see Alternatives).
+  `rule_subset`). It does NOT extend to multi-user operation: routing other users' work
+  through subscription credentials is explicitly prohibited (Consumer Terms; see Alternatives).
 
 For Phase 0, run the two role agents **sequentially**, not concurrently, which sidesteps
 the entire rate-limit / lock-contention question for the thin slice regardless of path.
@@ -142,7 +144,7 @@ $100.
 
 ### Why
 
-The original VISION section 3 / section 13 thesis ("Agent SDK headless on Max
+The original VISION thesis ("Agent SDK headless on Max
 subscription OAuth, no metered API key") **did not survive verification** and is
 withdrawn. Confirmed against current Anthropic documentation and the June 2 2026
 billing announcement:
@@ -206,7 +208,7 @@ wrong plan and is corrected.
   to harden; unnecessary for a single-user Phase 0. Defer.
 - **Workload Identity Federation via an org service account.** Highest security
   posture, requires console org setup not available at Pro/Max self-service tier.
-  Defer to product stage.
+  Defer to a later phase.
 
 ---
 
@@ -244,7 +246,7 @@ Confirmed against the official Agent SDK hooks documentation:
 
 - A `PreToolUse` hook fires before the tool executes and `permissionDecision: "deny"`
   blocks the call unconditionally. Deny takes priority over all other hook decisions.
-  This is exactly the layer-1 behavior VISION section 10.1 needs: a Frontend agent
+  This is exactly the real-time layer-1 behavior described in VISION: a Frontend agent
   attempting a raw DB command hits the deny in real time and never executes it.
 
 Two corrections from verification, both folded into the recommendation:
@@ -352,7 +354,7 @@ Camerata OWNS this check and installs it, so it cannot be silently dropped by re
 The verification finding now MOTIVATES the should-be path rather than complicating it:
 this rule **does not run in Agora CI today** (the API workflow runs only `tsc --noEmit`).
 That is exactly the drift Camerata exists to fix. The orchestrator invokes the linter
-itself in the worktree at task completion (so Phase 0 never depends on Agora's CI), AND
+itself in the worktree at task completion (so Phase 0 never depends on the target repo's CI), AND
 onboarding (Q6 / T13) INSTALLS the missing CI gate step (`npm run lint`) as part of
 bringing the repo to the should-be state. So "Agora CI does not enforce this" is not a
 caveat to route around; it is the precise condition the onboarding install corrects.
@@ -399,9 +401,9 @@ express.
 
 ### Alternatives considered
 
-- **Reimplement layering in ts-morph from scratch.** Rejected for Agora: duplicates a
-  shipping rule, two checks that can diverge. ts-morph is the fast path for rules with
-  no native linter coverage, not the default.
+- **Reimplement layering in ts-morph from scratch.** Rejected where a native linter rule
+  already ships: duplicates a shipping rule, two checks that can diverge. ts-morph is
+  the fast path for rules with no native linter coverage, not the default.
 - **Run the full `npm run build` / test suite as the gate.** Too slow for a tight
   revision loop and conflates structural conformance with functional correctness. Build
   and tests run at integration, not as the per-rule structural check.
@@ -471,7 +473,7 @@ git worktree remove .claude/worktrees/task-frontend
 
 ### Alternatives considered
 
-- **Parallel worktree execution.** The eventual product shape, deferred from Phase 0
+- **Parallel worktree execution.** The eventual target architecture, deferred from Phase 0
   because of lock contention, an unverified rate-limit ceiling, and subprocess lifecycle
   complexity. Needs a rate-limit-aware scheduler before it is safe.
 - **Single shared checkout with branch switching.** Rejected: two agents would clobber
@@ -483,7 +485,7 @@ git worktree remove .claude/worktrees/task-frontend
 
 ### Recommendation
 
-Build the section 11 rule index as a 6-field compact record derived mechanically from
+Build the rule index as a 6-field compact record derived mechanically from
 the existing Camerata TOML. Bucket on the `enforcement` field alone. Add a THIRD runtime
 state so the gate never silently passes a rule that is mechanical-by-declaration but has
 no shipping check.
@@ -545,7 +547,7 @@ bucket(rule):
   driven by which checks the orchestrator can actually invoke.
 - `deterministic-declared`: mechanical by declaration, no shipping check yet. At
   runtime, **degrade to review-heuristic** (surface to the human) rather than silently
-  pass. This is the honest model VISION section 10 demands: the bucket must never claim
+  pass. This is the honest model the governance design demands: the bucket must never claim
   enforcement that does not exist.
 - `review-heuristic`: all 67 structured + 23 prose = 90 rules. Surfaced to the agent in
   its prompt and to the human at QA; not auto-gated in Phase 0. Structured rules are
@@ -607,8 +609,7 @@ does deterministic post-processing with NO LLM:
    unavailable), the rule degrades to `deterministic-declared` and the event carries the
    degraded kind, never a stale `active`.
 
-No embedding/retrieval in Phase 0: 106 lines fit in context (VISION section 11 "Later
-(scale)" is explicitly deferred).
+No embedding/retrieval in Phase 0: 106 lines fit in context (the "Later (scale)" path in VISION is explicitly deferred).
 
 ### Alternatives considered
 
@@ -638,7 +639,7 @@ should-be governance is in scope.
 
 ### Why
 
-Brownfield is the default and the product (Agora is the dogfood, every real team already
+Brownfield is the default case (Agora is the dogfood; every real team already
 has code). The Phase 0 minimal brownfield slice needs no SDK capability that the Q1-Q4
 corrections touch, so it carries no downgrade. It runs once at onboard time and produces
 a human-approvable proposal:
@@ -663,21 +664,20 @@ a human-approvable proposal:
 Greenfield is the simpler mode: the architect specifies the stack, the system recommends
 the corpus subset by domain/layer tags, and a generator scaffolds the directory
 structure, CLAUDE.md/CONVENTIONS.md seeded with the directives, and a lint config
-pre-populated with the selected mechanical rules. Greenfield is the easy demo; brownfield
-is the product.
+pre-populated with the selected mechanical rules. Greenfield is the easy demo; brownfield is the harder and more valuable path.
 
 ### Deferred (Phase 1+)
 
 Full AST-based convention extraction, rule synthesis from observed patterns, multi-repo
 RuleSet merging, and incremental adoption (baseline vs recommended tiers with a
-graduation path). VISION section 17 explicitly defers these; Phase 0 only proves "work
+graduation path). VISION explicitly defers these; Phase 0 only proves "work
 against an existing repo."
 
 ### Alternatives considered
 
-- **Full convention extraction in Phase 0.** Rejected as scope balloon; VISION section
-  17 defers it. The minimal slice (read docs + lint configs) is enough to seed a
-  credible baseline for Agora, which is clean.
+- **Full convention extraction in Phase 0.** Rejected as scope balloon; VISION defers it.
+  The minimal slice (read docs + lint configs) is enough to seed a credible baseline for
+  Agora, which is clean.
 - **All-or-nothing rule adoption.** Rejected: real brownfield teams adopt incrementally.
   The proposal separates auto-selected, recommended, and conflicting rules so adoption
   can be partial.
@@ -753,18 +753,18 @@ registered in a map. Adding a language is adding a runner, not editing the gate.
 
 ## 9. Unverified assumptions and open risks
 
-Per VISION section 16 ("flag any assumption it could not verify") and ORCH-TRAINING-CUTOFF.
+Per VISION ("flag any assumption it could not verify") and ORCH-TRAINING-CUTOFF.
 Honesty over confidence. Items are grouped by how they fared in verification.
 
 ### A. Claims that DID NOT survive verification (downgraded in this design)
 
-1. **Max-subscription OAuth headless, no metered API (VISION section 3 / 13).**
-   REFUTED. OAuth tokens may not be used with the Agent SDK in a third-party product
+1. **Max-subscription OAuth headless, no metered API (the original VISION assumption).**
+   REFUTED. OAuth tokens may not be used with the Agent SDK in a third-party tool
    (Consumer Terms). Design now uses an `ANTHROPIC_API_KEY`; the Max monthly Agent SDK
    credit ($100 Max 5x on the operator's plan, from June 15 2026) auto-applies to API-key
    usage. Cost outcome at thin-slice scale is preserved; the mechanism in VISION is wrong
    and is corrected. NOTE: the specific plan, credit figure, and model tier are
-   DOGFOOD-TESTING details only. The product is provider / tier / model AGNOSTIC behind the
+   DOGFOOD-TESTING details only. The system is provider / tier / model AGNOSTIC behind the
    `agents/session.ts` auth-and-model seam and the `GovernanceGateway` gate seam; a future
    binding to another model or billing model is a swap at those seams, not a redesign.
 2. **"Max 20x credit unlocks Tier 3 (2,000 RPM)."** NOT ESTABLISHED. Subscription credit
@@ -804,7 +804,7 @@ Honesty over confidence. Items are grouped by how they fared in verification.
     Max 5x = $100) and the "separate pool, API-key-drawn" mechanism are consistent across
     sources, but exact rollover, fail-closed-on-exhaustion behavior, and overflow opt-in
     details should be confirmed live in week 1 before any cadence heavier than the thin
-    slice. This is a dogfood-testing concern only; the product is billing-model agnostic.
+    slice. This is a dogfood-testing concern only; the system is billing-model agnostic.
 
 ### C. Assumptions that could NOT be checked and remain open
 

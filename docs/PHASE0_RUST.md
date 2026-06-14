@@ -1,5 +1,7 @@
 # PHASE0_RUST.md
 
+> _Historical planning record: predates the built Rust system (which is all Rust). Kept for context; where it describes a TypeScript stack or Phase-0 plan, that is point-in-time, since superseded._
+
 Re-map of the Phase-0 task plan (`PHASE0_TASKS.md`, T0-T14) onto the
 verified all-Rust architecture (`ARCHITECTURE.md`, `RUST_CORE_VERIFICATION.md`).
 
@@ -50,7 +52,7 @@ this slice first; dress the rest after T9 passes.
 | **T11** Provenance line per change | LANGUAGE-AGNOSTIC | `persistence` | `provenance/trail.ts` -> `camerata-persistence`. One record per change: `task_id`, `role`, `session_id`, `rules_passed[]`. Stored in SQLite (was "SQLite or flat file" in the TS plan; Rust nails it to SQLite via sqlx). |
 | **T12** Human-QA presentation | LANGUAGE-AGNOSTIC | `cli` | `cli/main.ts` QA output -> `crates/cli/src/main.rs`. Same content: governed diff, provenance line, `deterministic-declared` + `review-heuristic` rules surfaced for human attention. |
 | **T13** Brownfield onboarding | LANGUAGE-AGNOSTIC | `server`, `rules` | `onboarding/brownfield.ts` -> module in `camerata-server`. MAP + PROPOSE + INSTALL steps unchanged. The generated scaffolding (lint config, CI steps, agent rules, hooks) is identical. The install is still emitted as a human-approvable diff, never applied silently. |
-| **T14** End-to-end CLI wire-up | LANGUAGE-AGNOSTIC | `cli` | `cli/main.ts` -> `crates/cli/src/main.rs`. Full flow: Story intake -> brownfield onboarding (T13) -> investigation (T10) -> two-role sequential run (T7) -> planted-violation gate (T9 path) -> provenance (T11) -> QA (T12). One run on `ANTHROPIC_API_KEY` against Agora. |
+| **T14** End-to-end CLI wire-up | LANGUAGE-AGNOSTIC | `cli` | `cli/main.ts` -> `crates/cli/src/main.rs`. Full flow: Story intake -> brownfield onboarding (T13) -> investigation (T10) -> two-role sequential run (T7) -> planted-violation gate (T9 path) -> provenance (T11) -> QA (T12). One run on `ANTHROPIC_API_KEY` against a real brownfield codebase. |
 
 ---
 
@@ -103,5 +105,5 @@ this slice first; dress the rest after T9 passes.
    deferred.
 
 5. **SQLite is definite, not "SQLite-or-flat-file".** `camerata-persistence`
-   uses `sqlx`. The schema from VISION section 8 (Stories, RuleSets, Provenance,
+   uses `sqlx`. The schema from VISION (Stories, RuleSets, Provenance,
    FeatureStatus) is unchanged.

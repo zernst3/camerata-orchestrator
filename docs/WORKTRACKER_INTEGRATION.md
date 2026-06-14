@@ -1,9 +1,9 @@
-# Work-Tracker Integration (VISION §18 follow-up)
+# Work-Tracker Integration (VISION follow-up on the tracker-integration design)
 
 Status: design memo, decision-first. Phase 0 (the engine thin slice) stays the
 one input box (§2.1) and does not depend on this port. UPDATE 2026-06-13: one
 SLICE of this memo, the async CLARIFY-BRIDGE, is promoted to V1 collaboration
-architecture (VISION §3.5) and is NO LONGER purely post-Phase-0. See §0.5. The
+architecture (VISION: V1 collaboration) and is NO LONGER purely post-Phase-0. See §0.5. The
 rest (full status sync, multi-provider, the native tracker) remains a later
 expansion behind the same port.
 
@@ -48,7 +48,7 @@ host and product tracker are chosen independently per deployment.
 
 ## 0.5. V1 elevation: the async clarify-bridge (the reason a slice of this is not post-V1)
 
-Decision (2026-06-13, VISION §3.5). V1 collaboration runs with NO shared cloud: the Principal Architect
+Decision (2026-06-13, VISION: V1 collaboration). V1 collaboration runs with NO shared cloud: the Principal Architect
 is the single local node, and the tracker is the asynchronous bridge that carries the clarify loop to and
 from a non-technical Product Owner who never leaves their board. This promotes ONE slice of this memo into
 V1, ahead of the full status-sync / multi-provider / native-tracker work.
@@ -101,7 +101,7 @@ depends on. Core holds a `WorkItemProvider`; it never imports `jira`,
 `azure-devops`, `github`, or `native` code. The native tracker is just the
 in-process implementation of this same interface (see §6).
 
-Why: the central design tension (§18: is the tracker source-of-truth or a
+Why: the central design tension (is the tracker source-of-truth or a
 mirror?) is only tractable if the canonical Story vocabulary is defined ONCE,
 ours, and providers map to and from it. The provider variance (Jira ADF custom
 fields, Azure DevOps work-item fields, GitHub Projects v2 single-select option
@@ -217,7 +217,7 @@ Three notes fall straight out of the research:
 
 ## 2. Source-of-truth vs mirror
 
-Question (§18 central tension): is the external tracker the source of truth (we
+Question (central tension): is the external tracker the source of truth (we
 sync to it) or a mirror (our Story spine is canonical, the tracker is a
 projection)?
 
@@ -250,12 +250,12 @@ Why this and not a global "source of truth" flag: a per-field direction is the
 structural loop-breaker. A field that both sides could edit is impossible
 because each field has exactly one authoritative side, so neither side
 overwrites the other. A global flag cannot express "their status, our gate
-results," which is exactly the brownfield case §18 calls out.
+results," which is exactly the brownfield intake case.
 
 Alternatives rejected: (a) tracker is always source of truth. Rejected:
 provenance / RuleSet / Gate have no home in any tracker schema, so it is not
 even expressible. (b) we are always source of truth, tracker is write-only.
-Rejected: kills the brownfield "ingest a Story FROM Jira" direction (§18-A) and
+Rejected: kills the brownfield "ingest a Story FROM Jira" direction and
 ignores that enterprise teams will not abandon their board.
 
 Note on the per-provider lean (does not change the rule, informs the default
@@ -327,11 +327,11 @@ Verified GitHub caveat that shapes the dogfood: `projects_v2_item` webhooks are
 delivered only for ORGANIZATION-owned Projects v2; user-account projects do not
 emit them to a GitHub App, and the org "Projects" permission cannot even be
 granted on a personal account. The `issues` webhook, by contrast, fires on any
-repo (user or org). Consequence for a personally-owned Agora: the inbound
+repo (user or org). Consequence for a personally-owned repo: the inbound
 "human dragged a card / changed Projects status" path will NOT fire. The fix is
 either (a) treat GitHub Projects as WRITE-ONLY outbound (canonical inbound is
 the `issues` webhook + comments + labels, which all work on personal repos), or
-(b) move Agora's repos under a free GitHub org, which unlocks `projects_v2_item`
+(b) move the repos under a free GitHub org, which unlocks `projects_v2_item`
 and the full bidirectional Projects loop. Recommendation: (b) if a
 Projects-board-as-source-of-truth is ever desired; (a) is fine for the dogfood
 because intake-via-issue and status-via-comment/label are the load-bearing
@@ -339,7 +339,7 @@ channels anyway.
 
 ---
 
-## 4. The §18 open questions
+## 4. Open design questions
 
 ### 4.1 Webhook vs poll (plus reconciliation)
 
@@ -444,7 +444,7 @@ Why two guards and not one: per-field direction stops the "both sides own the
 field" war; echo suppression stops "our own write bounces back in as a new
 external edit." They cover different failure modes, so both are needed.
 
-### 4.3 Multi-repo -> single issue rollup (§17)
+### 4.3 Multi-repo -> single issue rollup
 
 Recommendation: a feature spanning N repos produces N PRs that roll up onto ONE
 tracker work item. `FeatureStatusReport.prLinks` is an array; `pushStatus`
@@ -489,11 +489,11 @@ approved.
 
 ## 5. Why the native tracker is not separate work
 
-Question (§18-B): is the in-built native Story board a second product to build?
+Question: is the in-built native Story board a second product to build?
 
 Recommendation: no. Direction B (the native Story board) IS the `native`
 implementation of the same `WorkItemProvider` port. It backs onto our own Story
-/ Provenance store (per VISION §14), raises events in-process (no webhook, no
+/ Provenance store (per VISION: the provenance store design), raises events in-process (no webhook, no
 signature path), and its `poll` reads our own store.
 
 Why this is not extra work, and actually de-risks the external adapters:
@@ -506,8 +506,8 @@ Why this is not extra work, and actually de-risks the external adapters:
   (every `SyncPolicy` field `ours`), which is the simplest configuration of the
   same machinery. The external providers are then just different `SyncPolicy`
   defaults plus an auth + webhook + field-mapping adapter.
-- It keeps the product self-sufficient (greenfield/solo) and keeps the canonical
-  Story / Provenance / RuleSet state ours, which §18-B explicitly wants.
+- It keeps the tool self-sufficient (greenfield/solo) and keeps the canonical
+  Story / Provenance / RuleSet state ours, which the native-board design goal explicitly wants.
 
 Alternatives rejected: a standalone native board built outside the port.
 Rejected: it would duplicate the Story lifecycle and let the canonical shapes
@@ -533,7 +533,7 @@ slice is working.
   first external slice because the code, PRs, and CI already live there.
 - Phase C: GitHub provider, INBOUND. `issues` webhook (HMAC verified) ingesting
   an issue as a Story, plus the reconciliation poll. Projects v2 mirroring
-  outbound via GraphQL; reconcile inbound only if Agora moves under an org
+  outbound via GraphQL; reconcile inbound only if the repo moves under an org
   (`projects_v2_item` is org-only). Add echo suppression + delivery-id
   idempotency here, where the first real two-way loop appears.
 - Phase D: Jira provider. Start on the API-token + Basic path (zero app
@@ -549,7 +549,7 @@ slice is working.
 
 Build order rationale: native de-risks the contract; GitHub is the dogfood
 provider and the cleanest auth; Jira and ADO follow because their auth and
-status-mapping friction is higher and they are not where the Agora code lives.
+status-mapping friction is higher and they are not where the code lives.
 
 ---
 
@@ -564,7 +564,7 @@ be verified. Treat each as a runtime check or a flagged assumption, not a fact.
   relied on the absence of a reversal. If GitHub silently shipped user-project
   webhooks, the personal-account inbound Projects loop might work. Re-verify
   before committing the bidirectional Projects loop on a personal account.
-- Whether Agora's repos currently sit under a GitHub org or a personal account.
+- Whether the repos currently sit under a GitHub org or a personal account.
   This determines whether the full Projects sync is available out of the box. If
   personal, the recommended unlock is a free org (zero cost).
 - Whether fine-grained GitHub PATs now cover the Projects v2 GraphQL API in

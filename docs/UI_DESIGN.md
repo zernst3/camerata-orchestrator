@@ -1,5 +1,7 @@
 # Camerata Orchestrator: UI_DESIGN.md
 
+> _Historical planning record: predates the built Rust system (which is all Rust). Kept for context; where it describes a TypeScript stack or Phase-0 plan, that is point-in-time, since superseded._
+
 Status: Phase 0 design (P3 target). This document designs the single-user cockpit and the
 status dashboard for Camerata Orchestrator (working name; "Conductor" is the candidate).
 It is decision-first: every choice is stated as Question, Recommendation, Why,
@@ -22,7 +24,7 @@ specifies. Where this document and VISION disagree, TECH_DESIGN's verified findi
 ## 0. Scope
 
 **V1 = the FULL single-user, local tool, with the cockpit UI and the status Dashboard
-included.** Not a CLI. The whole point (VISION section 2 close, section 5 P3) is to
+included.** Not a CLI. The whole point (VISION, the core design goal) is to
 replace the multi-window chat-orchestration setup the user lives in today with ONE
 steerable cockpit, and a CLI cannot test that hypothesis. The UI is core, not polish.
 
@@ -336,7 +338,7 @@ on that confirmation; ship `spent` now, label credit-remaining as an estimate.
 |  |  As an org admin I want to export the member directory to CSV    |  |
 |  |  so I can reconcile it against payroll.                          |  |
 |  +------------------------------------------------------------------+  |
-|  target repo: [ /Users/.../agora-mono (v) ]   (brownfield, default)    |
+|  target repo: [ /path/to/your-repo (v) ]   (brownfield, default)       |
 |  [ later: or reference a tracker issue  AZ-1423 (v) ]  (greyed in V1)  |
 |                                                                        |
 |                                   [ Investigate > ]  -> INVESTIGATING  |
@@ -575,7 +577,7 @@ an action column.
 +------------------------------------------------------------------------------------+
 ```
 
-The provenance line is exactly the VISION section 8 Provenance entity `{task_id, role,
+The provenance line is exactly the VISION Provenance entity `{task_id, role,
 agent_session_id, rules_passed[], human_decision}` (PHASE0_TASKS T11: one line per change,
 no audit store in V1). The "surfaced for your judgment" block is the honest-enforcement
 requirement: `deterministic-declared` + `review-heuristic` rules are SHOWN to the human,
@@ -617,7 +619,7 @@ Shared:
 
 ### Per-surface data-binding table
 
-| Cockpit surface | VISION section 8 entity.field(s) | Direction | Notes |
+| Cockpit surface | VISION entity.field(s) | Direction | Notes |
 |---|---|---|---|
 | TopBar status badge | `FeatureStatus` (roll-up) | read (WS) | 11 canonical states |
 | TopBar cost meter | engine cost telemetry (`cost_tick`) | read (WS) | Opus 4.8 $5/$25, Max credit pool (Q1) |
@@ -633,7 +635,7 @@ Shared:
 | EnforcementBadge | `Rule.enforcement_kind` (3 states) | read | active / declared / review (Q5) |
 | Conflicts/Gaps | RuleSet conflicts + gaps (Investigation output) | read + resolve (HTTP) | three options (Q6) |
 | PlanPanel grid | `Task.{id,role,description,depends_on,worktree,status}` + `Role.{path_boundaries,allowed_tools,rule_subset}` | read + approve (HTTP) | chorale master/detail; sequential |
-| Contract handoff line | coordinator artifact (api-contract.ts) | read | VISION 12 (coordination fact, not a section 8 entity) |
+| Contract handoff line | coordinator artifact (api-contract.ts) | read | VISION 12 (coordination fact, not a VISION entity) |
 | LiveStatus task card | `Task.{status,produced_diff,gate_results,worktree}` + `Provenance.agent_session_id` | read (WS) | per-task/per-agent |
 | LiveStatus layer-1 row | `Gate/Check.{rule_id,kind:hook,result,message}` | read (WS) | real-time deny; no diff |
 | LiveStatus layer-2 bounce | `Gate/Check.{rule_id,kind:post-task,result:fail,message}` | read (WS) | bounce-and-revise |
@@ -783,7 +785,7 @@ NEVER makes a model call; that invariant lives entirely in the orchestrator's
 `agents/session.ts`. This keeps the verified responsibility boundary intact: the front end
 is a pure client of the deterministic core.
 
-FeatureStatus is the spine that ties the flow to VISION section 8: every transition in the
+FeatureStatus is the spine that ties the flow to VISION: every transition in the
 left column is an event whose `to` field is one of the 11 canonical states, and the cockpit
 stage panel + dashboard status badge both render off that single roll-up.
 
@@ -905,7 +907,7 @@ confirm it before the role-agent view is finalized.
 
 ## 6. Data model and FeatureStatus mapping
 
-The cockpit and dashboard render VISION section 8 entities verbatim: Story, Investigation
+The cockpit and dashboard render VISION entities verbatim: Story, Investigation
 (codebase_findings, recommended_rule_set, product_questions[], tech_tradeoffs[] each
 {option, pros, cons, recommendation}), Rule, RuleSet, Role, Task (role, depends_on[],
 worktree, status, produced_diff, gate_results[]), Gate/Check (rule_id, kind, result,
@@ -1067,7 +1069,7 @@ could not be checked.
 11. **The TS core local HTTP API + event stream does not exist yet.** PHASE0_TASKS T0-T14
     are CLI-only. This is net-new orchestrator work (a small `node:http` / Express / Fastify
     server + an event emitter bridged to SSE/WS). It must preserve the "zero LLM calls in
-    orchestrator code" invariant (pure transport). Exact event granularity (which section 8
+    orchestrator code" invariant (pure transport). Exact event granularity (which entity
     deltas get pushed, how often) is not yet specified beyond the envelope in section 1 and
     must be pinned before the Live Status panel binds.
 12. **The Rust BFF + two-process local supervisor is net-new.** Spawn/handshake/port config

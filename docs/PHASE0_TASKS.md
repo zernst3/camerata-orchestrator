@@ -1,7 +1,9 @@
 # Camerata Orchestrator: PHASE0_TASKS.md
 
+> _Historical planning record: predates the built Rust system (which is all Rust). Kept for context; where it describes a TypeScript stack or Phase-0 plan, that is point-in-time, since superseded._
+
 Status: Phase 0 build plan. Ordered, dependency-aware, estimated task breakdown that
-satisfies the five VISION section 15 acceptance criteria, built against TECH_DESIGN.md.
+satisfies the five acceptance criteria in VISION, built against TECH_DESIGN.md.
 
 Estimates use AI-orchestrated-build calibration (agent-built, not human-paced). They are
 deliberately optimistic: an hour here is an hour of orchestrated agent work plus the
@@ -16,7 +18,7 @@ proposal land after the gate has already fired.
 
 ---
 
-## OUT OF SCOPE (VISION section 4, hard boundaries for Phase 0)
+## OUT OF SCOPE (hard boundaries for Phase 0, per VISION)
 
 Do NOT build any of these. They are the platform, not the thin slice.
 
@@ -48,7 +50,7 @@ Do NOT build any of these. They are the platform, not the thin slice.
   with Max credit auto-applied (TECH_DESIGN Q1, the refuted-thesis correction). Do not
   build an OAuth path.
 - **No greenfield scaffolding generator.** Greenfield is a stub in Phase 0; brownfield
-  (Agora) is the only onboarding mode exercised.
+  (a real brownfield codebase) is the only onboarding mode exercised.
 
 ---
 
@@ -115,8 +117,8 @@ isolation the moment T8 lands.
   `persistence/store.ts` (the Story spine) here:** a minimal SQLite-or-flat-file store for
   Stories, RuleSets, Provenance, and FeatureStatus (TECH_DESIGN section 8). It is
   foundational and read/written by T10, T11, T12, and T14, so it is built in T0 rather than
-  left implicit. Schema follows the VISION section 8 entities; no queryable audit store or
-  lineage graph (that is deferred platform scope).
+  left implicit. Schema follows the VISION entities; no queryable audit store or
+  lineage graph (that is deferred scope).
 - **depends_on:** none
 - **estimate:** 2.5h (adds the persistence store to the scaffold + auth smoke test)
 - **advances:** criterion 5
@@ -157,7 +159,7 @@ isolation the moment T8 lands.
 ### T3: CheckRunner interface, ESLint reuse, and the rule-id map (GATE ENGINE)
 
 - **id:** T3
-- **title:** Pluggable LanguageCheckRunner + TypeScriptCheckRunner shelling to Agora's ESLint
+- **title:** Pluggable LanguageCheckRunner + TypeScriptCheckRunner shelling to the target repo's ESLint
 - **description:** In `checks/CheckRunner.ts`, define the `LanguageCheckRunner` interface
   (`applies()` / `run()`) and a registry. In `checks/TypeScriptCheckRunner.ts`, shell
   `npx eslint . --format json` in a target worktree, parse the JSON, and surface
@@ -362,8 +364,8 @@ isolation the moment T8 lands.
   exception / synthesize variant). (2) **INSTALL (as a reviewable proposal, NEVER a silent
   rewrite).** Generate the governance scaffolding to bring the repo to the should-be state:
   the canonical lint config (the checks T3 will run), the CI/CD gate steps (teardown/rebuild
-  the workflow to run the linter + gates at build time, e.g. the missing `npm run lint` the
-  Agora API CI never ran), the AI-agent rule files (`.claude` rules / CONVENTIONS), and the
+  the workflow to run the linter + gates at build time, e.g. a missing `npm run lint` step
+  in the target repo's CI), the AI-agent rule files (`.claude` rules / CONVENTIONS), and the
   hooks. (3) **GOVERN THE INSTALL ITSELF.** Emit all of (2) as a human-approvable DIFF/PR
   that the architect reviews and commits; tearing down and rebuilding CI is powerful and
   destructive, so the onboarding changes are themselves proposed -> approved -> committed,
@@ -385,7 +387,7 @@ isolation the moment T8 lands.
   questions, spawn EXACTLY the two role agents sequentially in two worktrees (T7), exercise
   the planted-violation gate (T9 path), produce the governed diff with provenance (T11),
   and present it for human QA (T12). Run the whole thing on a single Story against the
-  Agora monorepo on the metered-key/Max-credit auth (T0). This is the integration task
+  target repo on the metered-key/Max-credit auth (T0). This is the integration task
   that proves all five criteria fire together in one run.
 - **depends_on:** T9, T10, T12, T13
 - **estimate:** 3h
@@ -423,8 +425,8 @@ enforcement first, dress the rest after.
 
 ## Definition of done
 
-Phase 0 is done when all five VISION section 15 acceptance criteria are satisfied by a
-single CLI run against the Agora monorepo, on metered-key/Max-credit auth.
+Phase 0 is done when all five acceptance criteria in VISION are satisfied by a
+single CLI run against the target repo, on metered-key/Max-credit auth.
 
 | # | Acceptance criterion | Satisfied by |
 |---|----------------------|--------------|

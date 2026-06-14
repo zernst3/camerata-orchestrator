@@ -7,7 +7,7 @@ Deciders: Zach (PO), Claude (architect)
 ## Context
 
 The consumer-mode artifacts (onboarding document, user stories, clarifications,
-product suggestions, refinement sessions) are the product's source of truth, and
+product suggestions, refinement sessions) are the app's source of truth, and
 Zach required that they persist to a database, update in real time as the user AND
 the AI edit, and carry full version history. The open questions were: SQLite or
 Postgres, and whether to use database-native temporal (system-versioned) tables.
