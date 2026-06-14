@@ -182,13 +182,9 @@ pub const CLARIFY_READY: &str =
 /// Used only as a fallback when no project is present; the live PlanReveal derives
 /// its prose from the real onboarding document (see `AppState::plan_prose`).
 pub const PLAN_PROSE: &str =
-    "Here's what I'll build for you: a warm, phone-friendly site for Riverside \
-     Pottery Studio. People can browse the weekly classes and book a seat; when a \
-     class is full they can join a waitlist, and a cancelled seat opens up on its \
-     own. You'll have a private place to add classes and prices, see your students, \
-     and check who's booked and who's paid — plus a small admin area to invite \
-     helpers and decide who can do what. Student emails stay visible only to you, \
-     and past classes stick around as history.";
+    "Here's what I'll build for you: a clean, phone-friendly app shaped around the \
+     things you track and what each person can do with them. You'll have a private \
+     place to manage your data, and everything passes the same rules as it's built.";
 
 // ---------------------------------------------------------------------------
 // Build screen — calm progress narrative. Human-readable stages only.
@@ -218,11 +214,11 @@ pub const BUILD_STAGES: &[BuildStage] = &[
         dwell_ms: 1900,
     },
     BuildStage {
-        label: "Wiring up booking and the waitlist",
+        label: "Wiring up the features",
         dwell_ms: 1700,
     },
     BuildStage {
-        label: "Adding your admin area",
+        label: "Adding the finishing touches",
         dwell_ms: 1500,
     },
     BuildStage {
@@ -252,7 +248,7 @@ pub fn mid_build_question() -> MidBuildQuestion {
     MidBuildQuestion {
         // Surfaces while creating the screens — a real fork that changes the build.
         after_stage: 2,
-        question: "Quick one while I build the booking list: when someone books, should they get a confirmation email, or is seeing it in the list enough?".into(),
+        question: "Quick one while I build the screens: when someone adds a new record, should they get a confirmation email, or is seeing it in the list enough?".into(),
         reason: "Either is easy, but it's the kind of thing that's awkward to add later, so I'd rather ask now than guess.".into(),
         chips: vec!["Send a confirmation".into(), "The list is enough".into()],
     }
@@ -293,19 +289,19 @@ pub const BUG_FIELDS: &[BugField] = &[
         key: "where",
         label: "Where did it happen?",
         hint: "Which screen or feature were you on?",
-        placeholder: "e.g. the class list, on my phone",
+        placeholder: "e.g. the main list screen, on my phone",
     },
     BugField {
         key: "did",
         label: "What did you do?",
         hint: "The steps you took, as best you remember.",
-        placeholder: "e.g. I tapped Book on the Thursday class",
+        placeholder: "e.g. I tapped the Add button on a record",
     },
     BugField {
         key: "expected",
         label: "What did you expect to happen?",
         hint: "What you thought you'd see.",
-        placeholder: "e.g. it would add me to the waitlist",
+        placeholder: "e.g. it would save and show in the list",
     },
     BugField {
         key: "happened",
