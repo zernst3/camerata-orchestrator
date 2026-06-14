@@ -10,6 +10,23 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+// ── Sub-modules ───────────────────────────────────────────────────────────────
+
+/// Injectable HTTP transport seam + `FakeTransport` test double + `ReqwestTransport`.
+pub mod http;
+
+/// Jira Cloud adapter (Phase D, API-token + Basic auth, JQL-polling inbound).
+pub mod jira;
+
+// ── Re-exports ────────────────────────────────────────────────────────────────
+
+pub use http::{FakeTransport, HttpResponse, HttpTransport, ReqwestTransport};
+pub use jira::{
+    adf_clarifying_questions, adf_comment, category_to_status, jql_updated_since, parse_issue,
+    parse_search_results, pick_transition, status_rollup_adf, status_to_category, JiraConfig,
+    JiraProvider, JiraTransition,
+};
+
 // ── Feature status ────────────────────────────────────────────────────────────
 
 /// The lifecycle status of a story in Camerata's canonical vocabulary.
