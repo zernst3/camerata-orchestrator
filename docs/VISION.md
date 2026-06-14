@@ -199,8 +199,32 @@ are NOT a scope limit: V1 is the complete tool the user runs, interface and all.
   for V1, not optional. Reuse Camerata's existing Dioxus UI for consistency; consider dogfooding chorale
   for the dashboard tables.
 - **P4** Provenance / audit trail, surfaced in the UI.
-- **V1 = P0 through P4, shipped as one coherent tool.**
-- **Later (product stage, beyond V1)** Multi-user, metered API economics at scale, teams, hosted.
+- **P5 (the second abstraction level, V1-SCOPED).** The Product-Owner mode (see below). The same governed
+  engine, fronted by a structured intake form and an AI lead-engineer clarify loop instead of the
+  architect cockpit, generating a bespoke app that deploys to the user's OWN cloud (bring-your-own-infra).
+- **V1 = P0 through P5, with TWO abstraction levels (see below), shipped as one coherent tool.**
+- **Later (product stage, beyond V1)** Multi-user, metered API economics at scale, teams, hosted; and the
+  consumer PaaS where Camerata owns the infrastructure (section 20).
+
+### V1 has two abstraction levels (one engine, two altitudes for the human)
+
+V1 ships both of these on the same governance engine. They differ only in where the human stands and who
+owns the infrastructure:
+
+1. **Architect mode (the user is the principal architect).** The cockpit (P3): the user steers
+   investigation, answers clarifying questions, approves the plan, and QAs the governed diff. This is the
+   enterprise tool and the high-leverage artifact.
+2. **Product-Owner mode (the user fills out forms).** The user is a Product Owner, not an architect. A
+   thorough intake form captures story-level requirements; on submit, an AI evaluates the project as the
+   lead engineer and converses back and forth to clarify; the governed engine then builds the bespoke app
+   (CRUD-class: frontend, backend, database). The principal-architect role is abstracted away for
+   simple-enough apps.
+
+   In V1 the generated app deploys to the **user's own cloud account (bring-your-own-infra)**, which is the
+   solo-achievable prototype of the consumer vision. The full consumer PaaS, where Camerata owns and
+   manages all the infrastructure so a non-technical person can build a bespoke budgeting app from a form
+   on their phone, is the funded, company-scale endgame (section 20), not V1. V1 proves the abstraction;
+   the PaaS productizes it.
 
 ---
 
