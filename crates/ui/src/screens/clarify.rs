@@ -16,9 +16,13 @@
 //! All mocked: tapping a chip (or Send) accepts the canned answer for that turn
 //! and advances. The point is the rhythm and the feel.
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
-use camerata_intake::{StoryId, UserStory};
+use camerata_intake::{
+    DesignReference, InMemoryDesignCorpus, StoryId, StubRefinementReviewer, UserStory,
+};
 
 use crate::app_state::AppState;
 use crate::data::{self, TurnKind};
@@ -188,12 +192,22 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
 /// confidence (distinct from the scripted conversation score above).
 #[component]
 fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
+    // The shared design corpus (opt-in flywheel) and a place to hold any historical
+    // matches we fetch for display.
+    let corpus = use_context::<Arc<InMemoryDesignCorpus>>();
+    let mut historical = use_signal(Vec::<DesignReference>::new);
+
     // Snapshot the real state for rendering.
     let stories: Vec<UserStory> = app
         .read()
         .as_ref()
         .map(|s| s.active_stories().to_vec())
         .unwrap_or_default();
+    let (share_on, hist_on) = app
+        .read()
+        .as_ref()
+        .map(|s| (s.project.sharing.contribute_design, s.project.sharing.use_historical))
+        .unwrap_or((false, false));
     let (phase_label, ctx_label, session_conf) = match app.read().as_ref() {
         Some(s) => (
             format!("{:?}", s.phase()),
@@ -287,6 +301,88 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
                     }
                 },
                 "+ Add a story"
+            }
+
+            // ── Refinement controls: a real AI review turn + the shared-design opt-ins ──
+            div { class: "refine-controls",
+                button {
+                    class: "btn-quiet review-btn",
+                    onclick: move |_| {
+                        // Snapshot, run one real review turn off the UI thread, write back.
+                        let mut app = app;
+                        spawn(async move {
+                            let mut snap = app.peek().clone();
+                            if let Some(state) = snap.as_mut() {
+                                let _ = state.run_review_turn(&StubRefinementReviewer::new()).await;
+                            }
+                            app.set(snap);
+                        });
+                    },
+                    "Have the engineer review your stories"
+                }
+
+                label { class: "opt-in",
+                    input {
+                        r#type: "checkbox",
+                        checked: share_on,
+                        onclick: {
+                            let corpus = corpus.clone();
+                            move |_| {
+                                let on = !share_on;
+                                let mut app = app;
+                                if let Some(state) = app.write().as_mut() {
+                                    state.project.sharing.contribute_design = on;
+                                }
+                                if on {
+                                    let corpus = corpus.clone();
+                                    spawn(async move {
+                                        let snap = app.peek().clone();
+                                        if let Some(state) = &snap {
+                                            let _ = state.contribute_if_consented(&*corpus).await;
+                                        }
+                                    });
+                                }
+                            }
+                        },
+                    }
+                    span { "Share my design to help improve future apps (only the shape, never your data)" }
+                }
+
+                label { class: "opt-in",
+                    input {
+                        r#type: "checkbox",
+                        checked: hist_on,
+                        onclick: {
+                            let corpus = corpus.clone();
+                            move |_| {
+                                let on = !hist_on;
+                                let mut app = app;
+                                if let Some(state) = app.write().as_mut() {
+                                    state.project.sharing.use_historical = on;
+                                }
+                                if on {
+                                    let corpus = corpus.clone();
+                                    spawn(async move {
+                                        let snap = app.peek().clone();
+                                        if let Some(state) = &snap {
+                                            let refs = state.historical_references(&*corpus).await;
+                                            historical.set(refs);
+                                        }
+                                    });
+                                } else {
+                                    historical.set(vec![]);
+                                }
+                            }
+                        },
+                    }
+                    span { "Use proven designs from similar apps to speed up setup" }
+                }
+
+                if !historical().is_empty() {
+                    p { class: "historical-note",
+                        "Found {historical().len()} similar design(s) you can draw on."
+                    }
+                }
             }
         }
     }

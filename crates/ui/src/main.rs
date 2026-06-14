@@ -17,9 +17,12 @@ mod data;
 mod screens;
 mod style;
 
+use std::sync::Arc;
+
 use dioxus::prelude::*;
 
 use app_state::AppState;
+use camerata_intake::InMemoryDesignCorpus;
 use camerata_persistence::SqliteStore;
 
 /// The screens of the consumer journey, plus the simple navigation state. One
@@ -55,6 +58,10 @@ fn App() -> Element {
     // refinement screen reads and edits it.
     let mut app = use_signal(|| Option::<AppState>::None);
     use_context_provider(|| app);
+
+    // The shared design corpus (the opt-in learning flywheel), app-wide and
+    // sharable into async tasks. In-memory for the prototype.
+    use_context_provider(|| Arc::new(InMemoryDesignCorpus::new()));
 
     // Persistence. One SQLite store, opened once and held for the whole session,
     // so versions accumulate (an in-memory store recreated per flush would lose

@@ -717,4 +717,32 @@ html, body {
   color: var(--accent-ink);
 }
 .add-story { margin-top: 14px; }
+
+/* Refinement controls: review button + the shared-design opt-ins */
+.refine-controls {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.review-btn { align-self: flex-start; }
+.opt-in {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.opt-in input { margin-top: 3px; accent-color: var(--accent); }
+.historical-note {
+  font-size: 13px;
+  color: var(--accent-ink);
+  background: var(--accent-wash);
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  margin: 0;
+}
 "#;
