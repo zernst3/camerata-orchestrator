@@ -3,4 +3,22 @@ name = "camerata-ui"
 edition.workspace = true
 version = "0.0.0"
 
+# The consumer-mode prototype: a runnable Dioxus DESKTOP app that walks a
+# non-technical person through Intake -> Clarify -> Build -> Live.
+# Mocked data only (no engine wiring yet); the goal is to nail the look,
+# the motion, and the flow per docs/CONSUMER_UX.md.
+#
+# Target: desktop. Chosen over web to avoid the wasm toolchain for an
+# artifact whose whole point is "build it, run it, screen-record it".
+# Dioxus 0.7 matches the family version (rust-portfolio, rust-chorale).
+
+[[bin]]
+name = "camerata-ui"
+path = "src/main.rs"
+
 [dependencies]
+dioxus = { version = "0.7", features = ["desktop"] }
+# Only `time`, for the calm stage-by-stage dwell in the Build narrative. The
+# desktop renderer already runs on a Tokio runtime, so `tokio::time::sleep`
+# drives the progress beats from inside `use_future` without a second runtime.
+tokio = { version = "1", features = ["time"] }

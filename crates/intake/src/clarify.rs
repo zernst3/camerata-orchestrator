@@ -25,7 +25,7 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::engine::{LeadEngineer, LeadEngineerError};
+use crate::engine::{LeadEngineer, LeadEngineerError, LeadEngineerResponse};
 use crate::form::IntakeForm;
 use crate::plan::Plan;
 
@@ -160,6 +160,10 @@ impl AnswerSource for SequentialAnswerSource {
 // ─── outcome ─────────────────────────────────────────────────────────────────
 
 /// The final outcome of a clarify loop run.
+///
+/// Every variant carries the [`LeadEngineerResponse`] captured at termination so
+/// the UI always has the checklist, confidence score, and suggestions regardless
+/// of how the loop ended.
 #[derive(Debug, Clone)]
 pub enum ClarifyOutcome {
     /// The lead engineer produced a plan within the turn cap.
@@ -169,6 +173,8 @@ pub enum ClarifyOutcome {
         /// How many clarify turns were needed before a plan was produced.
         /// 0 means the first `evaluate` call returned `Ready` immediately.
         clarify_turns: usize,
+        /// The full staff-engineer response at the point of resolution.
+        response: LeadEngineerResponse,
     },
     /// The turn cap was exhausted without reaching a plan.
     Unresolved {
@@ -176,6 +182,24 @@ pub enum ClarifyOutcome {
         turns_attempted: usize,
         /// The questions still outstanding after the final turn.
         last_questions: Vec<String>,
+        /// The staff-engineer response at the point of giving up.
+        response: LeadEngineerResponse,
+    },
+    /// The lead engineer determined the app needs a human architect in the loop.
+    /// Surfaced honestly rather than silently falling back to a best-effort plan.
+    NeedsArchitect {
+        /// Plain-language reason for the PO.
+        reason: String,
+        /// The staff-engineer response captured at the point of the verdict.
+        response: LeadEngineerResponse,
+    },
+    /// The lead engineer determined the request is beyond Camerata's reach.
+    /// Plain decline rather than confidently building something fragile.
+    TooComplex {
+        /// Plain-language reason for the PO.
+        reason: String,
+        /// The staff-engineer response captured at the point of the verdict.
+        response: LeadEngineerResponse,
     },
 }
 
@@ -184,13 +208,32 @@ impl ClarifyOutcome {
     pub fn plan(&self) -> Option<&Plan> {
         match self {
             ClarifyOutcome::Resolved { plan, .. } => Some(plan),
-            ClarifyOutcome::Unresolved { .. } => None,
+            _ => None,
         }
     }
 
     /// Whether the loop resolved to a plan.
     pub fn is_resolved(&self) -> bool {
         matches!(self, ClarifyOutcome::Resolved { .. })
+    }
+
+    /// Whether the loop ended with an honest decline (architect needed or too
+    /// complex). These are NOT failures — they are trust features.
+    pub fn is_honest_decline(&self) -> bool {
+        matches!(
+            self,
+            ClarifyOutcome::NeedsArchitect { .. } | ClarifyOutcome::TooComplex { .. }
+        )
+    }
+
+    /// The [`LeadEngineerResponse`] regardless of which variant this is.
+    pub fn response(&self) -> &LeadEngineerResponse {
+        match self {
+            ClarifyOutcome::Resolved { response, .. } => response,
+            ClarifyOutcome::Unresolved { response, .. } => response,
+            ClarifyOutcome::NeedsArchitect { response, .. } => response,
+            ClarifyOutcome::TooComplex { response, .. } => response,
+        }
     }
 
     /// How many clarify turns were needed (0 if resolved on the first call).
@@ -200,6 +243,8 @@ impl ClarifyOutcome {
             ClarifyOutcome::Unresolved {
                 turns_attempted, ..
             } => *turns_attempted,
+            // Honest declines happen at the first evaluation; 0 turns.
+            ClarifyOutcome::NeedsArchitect { .. } | ClarifyOutcome::TooComplex { .. } => 0,
         }
     }
 }
@@ -252,6 +297,10 @@ impl<'a> ClarifyDriver<'a> {
     ///
     /// The `form` is cloned internally so the caller's original is unmodified;
     /// clarifications are accumulated on the internal copy only.
+    ///
+    /// Honest-limits variants (`RecommendArchitect` / `TooComplex`) are surfaced
+    /// immediately as [`ClarifyOutcome::NeedsArchitect`] /
+    /// [`ClarifyOutcome::TooComplex`] — the driver never silently ignores them.
     pub async fn run(&self, form: &IntakeForm) -> Result<ClarifyOutcome, ClarifyError> {
         let mut working = form.clone();
         let mut clarify_turns = 0usize;
@@ -265,17 +314,29 @@ impl<'a> ClarifyDriver<'a> {
 
         loop {
             match intake {
-                Intake::Ready(plan) => {
+                Intake::Ready { plan, response } => {
                     return Ok(ClarifyOutcome::Resolved {
                         plan,
                         clarify_turns,
+                        response,
                     });
                 }
-                Intake::NeedsClarification(ref questions) => {
+                // Honest limits: surface immediately, do not try to clarify past them.
+                Intake::RecommendArchitect { reason, response } => {
+                    return Ok(ClarifyOutcome::NeedsArchitect { reason, response });
+                }
+                Intake::TooComplex { reason, response } => {
+                    return Ok(ClarifyOutcome::TooComplex { reason, response });
+                }
+                Intake::NeedsClarification {
+                    ref questions,
+                    ref response,
+                } => {
                     if clarify_turns >= self.max_turns {
                         return Ok(ClarifyOutcome::Unresolved {
                             turns_attempted: clarify_turns,
                             last_questions: questions.clone(),
+                            response: response.clone(),
                         });
                     }
 
@@ -308,7 +369,10 @@ impl<'a> ClarifyDriver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::StubLeadEngineer;
+    use crate::engine::{
+        ChecklistItem, ConfidenceScore, HonestyVerdict, LeadEngineerError, LeadEngineerResponse,
+        StubLeadEngineer,
+    };
     use crate::form::{
         ClarificationRound, EntityDefinition, EntityField, EntityCapabilities,
         FieldType, IntakeForm, ViewKind, ViewSpec,
@@ -317,6 +381,30 @@ mod tests {
     use async_trait::async_trait;
 
     // ─── helpers ──────────────────────────────────────────────────────────────
+
+    fn minimal_response() -> LeadEngineerResponse {
+        LeadEngineerResponse {
+            checklist: vec![],
+            confidence: ConfidenceScore::new(90),
+            suggestions: vec![],
+            verdict: HonestyVerdict::Proceed,
+            questions: vec![],
+        }
+    }
+
+    fn clarify_response(questions: Vec<String>) -> LeadEngineerResponse {
+        LeadEngineerResponse {
+            checklist: questions
+                .iter()
+                .enumerate()
+                .map(|(i, q)| ChecklistItem::open(format!("item_{i}"), q, "needs answer"))
+                .collect(),
+            confidence: ConfidenceScore::new(40),
+            suggestions: vec![],
+            verdict: HonestyVerdict::Proceed,
+            questions: questions.clone(),
+        }
+    }
 
     /// A lead engineer that returns NeedsClarification exactly `n` times, then
     /// yields a fixed plan.
@@ -349,9 +437,16 @@ mod tests {
                 .unwrap_or(0);
 
             if remaining > 0 {
-                Ok(Intake::NeedsClarification(self.questions_each_turn.clone()))
+                let qs = self.questions_each_turn.clone();
+                Ok(Intake::NeedsClarification {
+                    questions: qs.clone(),
+                    response: clarify_response(qs),
+                })
             } else {
-                Ok(Intake::Ready(self.final_plan.clone()))
+                Ok(Intake::Ready {
+                    plan: self.final_plan.clone(),
+                    response: minimal_response(),
+                })
             }
         }
     }
@@ -400,6 +495,8 @@ mod tests {
         let outcome = driver.run(&underspecified_form()).await.unwrap();
         assert!(outcome.is_resolved());
         assert_eq!(outcome.clarify_turns(), 0);
+        // Response is surfaced even on immediate Ready.
+        assert_eq!(outcome.response().confidence.value(), 90);
     }
 
     #[tokio::test]
@@ -449,6 +546,7 @@ mod tests {
             ClarifyOutcome::Unresolved {
                 turns_attempted,
                 last_questions,
+                ..
             } => {
                 assert_eq!(turns_attempted, 3);
                 assert_eq!(last_questions, questions);
@@ -471,14 +569,20 @@ mod tests {
                 let n = self.called.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n == 0 {
                     // First call: ask a question.
-                    Ok(Intake::NeedsClarification(vec!["Currency?".to_string()]))
+                    Ok(Intake::NeedsClarification {
+                        questions: vec!["Currency?".to_string()],
+                        response: clarify_response(vec!["Currency?".to_string()]),
+                    })
                 } else {
                     // Second call: verify the clarification was folded in.
                     assert_eq!(form.clarifications.len(), 1, "expected 1 folded round");
                     let round = &form.clarifications[0];
                     assert_eq!(round.questions, vec!["Currency?".to_string()]);
                     assert_eq!(round.answers, vec!["EUR".to_string()]);
-                    Ok(Intake::Ready(self.final_plan.clone()))
+                    Ok(Intake::Ready {
+                        plan: self.final_plan.clone(),
+                        response: minimal_response(),
+                    })
                 }
             }
         }
@@ -506,6 +610,151 @@ mod tests {
         let outcome = driver.run(&underspecified_form()).await.unwrap();
         assert!(!outcome.is_resolved());
         assert_eq!(outcome.clarify_turns(), 1);
+    }
+
+    // ─── new staff-engineer behavior tests (ORCH-NEW-PATH-TESTS-1) ───────────
+
+    #[tokio::test]
+    async fn driver_surfaces_recommend_architect_honestly() {
+        struct ArchitectEngineer;
+        #[async_trait]
+        impl LeadEngineer for ArchitectEngineer {
+            async fn evaluate(&self, _form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
+                Ok(Intake::RecommendArchitect {
+                    reason: "needs distributed state machine".to_string(),
+                    response: LeadEngineerResponse {
+                        checklist: vec![],
+                        confidence: ConfidenceScore::new(30),
+                        suggestions: vec![],
+                        verdict: HonestyVerdict::RecommendArchitect {
+                            reason: "needs distributed state machine".to_string(),
+                        },
+                        questions: vec![],
+                    },
+                })
+            }
+        }
+
+        let engineer = ArchitectEngineer;
+        let answers = StubAnswerSource::uniform(vec![]);
+        let driver = ClarifyDriver::new(&engineer, &answers, 3);
+        let outcome = driver.run(&underspecified_form()).await.unwrap();
+
+        assert!(!outcome.is_resolved());
+        assert!(outcome.is_honest_decline());
+        assert!(matches!(outcome, ClarifyOutcome::NeedsArchitect { .. }));
+        assert_eq!(outcome.clarify_turns(), 0);
+    }
+
+    #[tokio::test]
+    async fn driver_surfaces_too_complex_honestly() {
+        struct ComplexEngineer;
+        #[async_trait]
+        impl LeadEngineer for ComplexEngineer {
+            async fn evaluate(&self, _form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
+                Ok(Intake::TooComplex {
+                    reason: "requires a custom ML inference pipeline".to_string(),
+                    response: LeadEngineerResponse {
+                        checklist: vec![],
+                        confidence: ConfidenceScore::new(10),
+                        suggestions: vec![],
+                        verdict: HonestyVerdict::TooComplex {
+                            reason: "requires a custom ML inference pipeline".to_string(),
+                        },
+                        questions: vec![],
+                    },
+                })
+            }
+        }
+
+        let engineer = ComplexEngineer;
+        let answers = StubAnswerSource::uniform(vec![]);
+        let driver = ClarifyDriver::new(&engineer, &answers, 3);
+        let outcome = driver.run(&underspecified_form()).await.unwrap();
+
+        assert!(!outcome.is_resolved());
+        assert!(outcome.is_honest_decline());
+        assert!(matches!(outcome, ClarifyOutcome::TooComplex { .. }));
+    }
+
+    #[tokio::test]
+    async fn stub_engineer_produces_checklist_and_confidence() {
+        let form = IntakeForm::sample_app();
+        let engineer = StubLeadEngineer::new();
+        let answers = StubAnswerSource::uniform(vec![]);
+        let driver = ClarifyDriver::new(&engineer, &answers, 3);
+        let outcome = driver.run(&form).await.unwrap();
+
+        assert!(outcome.is_resolved());
+        let response = outcome.response();
+        // Stub always produces confidence 90 and a non-empty checklist.
+        assert_eq!(response.confidence.value(), 90);
+        assert!(!response.checklist.is_empty());
+        // All checklist items are pre-resolved in the stub.
+        assert!(response.checklist.iter().all(|i| i.resolved));
+        // Verdict is Proceed.
+        assert!(matches!(response.verdict, HonestyVerdict::Proceed));
+    }
+
+    #[tokio::test]
+    async fn stub_engineer_emits_suggestions_for_owner_role() {
+        // The sample_app has an "Owner" role, triggering the admin suggestion.
+        let form = IntakeForm::sample_app();
+        let response = StubLeadEngineer::response_for(&form);
+        assert!(
+            response.suggestions.iter().any(|s| s.id == "admin_users"),
+            "expected an admin_users suggestion for a form with an Owner role"
+        );
+    }
+
+    #[tokio::test]
+    async fn stub_engineer_emits_soft_delete_suggestion_for_removable_entities() {
+        let form = IntakeForm::sample_app();
+        let response = StubLeadEngineer::response_for(&form);
+        // sample_app Expense has can_remove = true.
+        assert!(
+            response.suggestions.iter().any(|s| s.id == "soft_delete"),
+            "expected a soft_delete suggestion for entities with can_remove"
+        );
+    }
+
+    #[tokio::test]
+    async fn confidence_score_clamped_at_100() {
+        let score = ConfidenceScore::new(200);
+        assert_eq!(score.value(), 100);
+        assert!(score.is_build_ready());
+    }
+
+    #[tokio::test]
+    async fn confidence_score_below_80_is_not_build_ready() {
+        let score = ConfidenceScore::new(79);
+        assert!(!score.is_build_ready());
+    }
+
+    #[tokio::test]
+    async fn checklist_item_open_and_resolved_states() {
+        let open = ChecklistItem::open("id", "Question?", "reason");
+        let resolved = ChecklistItem::resolved("id2", "Q2?", "r2");
+        assert!(!open.resolved);
+        assert!(resolved.resolved);
+    }
+
+    #[tokio::test]
+    async fn lead_engineer_response_counts_resolved_and_open() {
+        let response = LeadEngineerResponse {
+            checklist: vec![
+                ChecklistItem::resolved("a", "q1", "r1"),
+                ChecklistItem::open("b", "q2", "r2"),
+                ChecklistItem::open("c", "q3", "r3"),
+            ],
+            confidence: ConfidenceScore::new(60),
+            suggestions: vec![],
+            verdict: HonestyVerdict::Proceed,
+            questions: vec![],
+        };
+        assert_eq!(response.resolved_count(), 1);
+        assert_eq!(response.open_count(), 2);
+        assert!(!response.checklist_complete());
     }
 
     #[test]

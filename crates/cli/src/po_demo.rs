@@ -113,6 +113,7 @@ async fn run_clarify_loop(
         Ok(ClarifyOutcome::Resolved {
             plan,
             clarify_turns,
+            ..
         }) => {
             if clarify_turns > 0 {
                 println!(
@@ -124,6 +125,7 @@ async fn run_clarify_loop(
         Ok(ClarifyOutcome::Unresolved {
             turns_attempted,
             last_questions,
+            ..
         }) => {
             let reason = format!(
                 "live lead engineer still unresolved after {turns_attempted} clarify \
@@ -136,6 +138,16 @@ async fn run_clarify_loop(
                 Some(reason),
             )
         }
+        Ok(ClarifyOutcome::NeedsArchitect { reason, .. }) => (
+            StubLeadEngineer::plan_for(form),
+            PlanSource::StubFallback,
+            Some(format!("lead engineer recommends a human architect: {reason}")),
+        ),
+        Ok(ClarifyOutcome::TooComplex { reason, .. }) => (
+            StubLeadEngineer::plan_for(form),
+            PlanSource::StubFallback,
+            Some(format!("lead engineer: request too complex for Camerata alone: {reason}")),
+        ),
         Err(e) => (
             StubLeadEngineer::plan_for(form),
             PlanSource::StubFallback,
@@ -493,7 +505,20 @@ mod tests {
         // multi-turn fold: the scripted answer source supplies the answer, the
         // driver folds it into the form, and the second evaluate yields Ready.
         use async_trait::async_trait;
-        use camerata_intake::{Intake, LeadEngineer, LeadEngineerError};
+        use camerata_intake::{
+            ConfidenceScore, HonestyVerdict, Intake, LeadEngineer, LeadEngineerError,
+            LeadEngineerResponse,
+        };
+
+        fn minimal_response() -> LeadEngineerResponse {
+            LeadEngineerResponse {
+                checklist: vec![],
+                confidence: ConfidenceScore::new(90),
+                suggestions: vec![],
+                verdict: HonestyVerdict::Proceed,
+                questions: vec![],
+            }
+        }
 
         struct OneQuestionEngineer {
             asked: std::sync::atomic::AtomicBool,
@@ -507,9 +532,19 @@ mod tests {
                 {
                     // Second call: the answer must have been folded in.
                     assert_eq!(form.clarifications.len(), 1);
-                    Ok(Intake::Ready(StubLeadEngineer::plan_for(form)))
+                    Ok(Intake::Ready {
+                        plan: StubLeadEngineer::plan_for(form),
+                        response: minimal_response(),
+                    })
                 } else {
-                    Ok(Intake::NeedsClarification(vec!["Which currency?".into()]))
+                    Ok(Intake::NeedsClarification {
+                        questions: vec!["Which currency?".into()],
+                        response: LeadEngineerResponse {
+                            questions: vec!["Which currency?".into()],
+                            confidence: ConfidenceScore::new(40),
+                            ..minimal_response()
+                        },
+                    })
                 }
             }
         }
@@ -531,13 +566,25 @@ mod tests {
         // must fall back to the deterministic stub plan and report the reason,
         // never a faked success.
         use async_trait::async_trait;
-        use camerata_intake::{Intake, LeadEngineer, LeadEngineerError};
+        use camerata_intake::{
+            ConfidenceScore, HonestyVerdict, Intake, LeadEngineer, LeadEngineerError,
+            LeadEngineerResponse,
+        };
 
         struct AlwaysAsksEngineer;
         #[async_trait]
         impl LeadEngineer for AlwaysAsksEngineer {
             async fn evaluate(&self, _form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
-                Ok(Intake::NeedsClarification(vec!["Still need info?".into()]))
+                Ok(Intake::NeedsClarification {
+                    questions: vec!["Still need info?".into()],
+                    response: LeadEngineerResponse {
+                        checklist: vec![],
+                        confidence: ConfidenceScore::new(30),
+                        suggestions: vec![],
+                        verdict: HonestyVerdict::Proceed,
+                        questions: vec!["Still need info?".into()],
+                    },
+                })
             }
         }
 
