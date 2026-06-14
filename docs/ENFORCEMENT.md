@@ -44,11 +44,12 @@ Rules currently implemented in `RULE_REGISTRY` (layer-1, mechanical):
 | Rule ID | Keys off | What it denies |
 |---|---|---|
 | `GOV-1` | path | Writes whose path contains the substring `forbidden`. |
+| `SEC-NO-PATH-ESCAPE-1` | path | Writes whose path escapes the workspace via a `..` traversal segment, or targets version-control / SSH internals (a `.git` or `.ssh` directory component). Matches on path *segments* (split on `/` and `\`), so `foo.git/` or `release..md` is not a false positive. |
 | `SEC-NO-HARDCODED-SECRETS-1` | content | Content containing a hardcoded credential literal: GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`github_pat_`), Slack tokens (`xox[baprs]-`), AWS access keys (`AKIA…`), OpenAI/Stripe `sk-` keys, Google API keys (`AIza…`), PEM private-key headers. |
 | `SEC-NO-RAW-SQL-CONCAT-1` | content | Content that builds SQL via string concatenation (`" +`) or format interpolation (`{}`) on a line with a SQL keyword. Heuristic; complements (not replaces) a parameterised-query lint. |
 | `ARCH-NO-SECRETS-IN-URL-1` | content | A URL carrying a secret in its query string (`api_key`/`apikey`/`token`/`secret`/`password`/`access_token`). |
 
-All four share one evaluator and one registry; adding a rule is one `check_*`
+All five share one evaluator and one registry; adding a rule is one `check_*`
 function plus one `RuleEntry`. Unknown rule ids are a **safe no-op** — the gate
 is permissive about rules it has not implemented, never about calls. The gate is
 sub-millisecond even over a 71-rule subset (see latency below).
@@ -102,13 +103,15 @@ The per-session rule-subset is selected from the corpus by
 requested domains), then delivered as data to the gateway via
 `CAMERATA_RULES_FILE`. In the live `Backend` role that subset is **71 rules**.
 
-**Of those 71, exactly two corpus-adjacent gate rules have executable layer-1
-enforcement, plus two have layer-2 enforcement:**
+**Of those 71, five gate rules have executable layer-1 enforcement, plus two
+have layer-2 enforcement. All five layer-1 rules ride along in every live/fleet
+subset** (via `enforced_gate_rules()`, derived from the registry, so a newly added
+arm is applied everywhere with no edit):
 
 | Lane | Enforced rule ids | Status |
 |---|---|---|
-| Layer-1 (gateway) | `GOV-1`, `SEC-NO-HARDCODED-SECRETS-1` | **Live in the demo subset and enforced.** |
-| Layer-1 (gateway, available) | `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented + unit-tested; `ARCH-NO-SECRETS-IN-URL-1` rides in the live subset and would fire on matching content; `SEC-NO-RAW-SQL-CONCAT-1` is in the registry and fires when present in a subset. |
+| Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers. |
+| Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY` | Enforced via `cargo fmt`/`cargo clippy` in the coordinator's bounce-and-revise. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
 use camerata_checks::RustCheckRunner;
 use camerata_core::{CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
-use camerata_gateway::{gov1_rule, sec_no_hardcoded_secrets_1_rule};
+use camerata_gateway::enforced_gate_rules;
 use camerata_intake::{Plan, PlanTask, TaskKind};
 use camerata_rules::role_from_corpus;
 pub use camerata_rules::DEFAULT_CORPUS_PATH;
@@ -51,14 +51,15 @@ impl CheckRunner for NoopChecks {
 // ─── governed_role ────────────────────────────────────────────────────────────
 
 /// Build a governed role from the real corpus, named `role_name`, and ensure
-/// the gateway-enforced gate rules (GOV-1 plus the hardcoded-secret rule) are
-/// in the delivered subset so the per-session governance is genuinely active,
-/// the same honest blend the live single-agent demo uses.
+/// EVERY gateway-enforced gate rule is in the delivered subset so the per-session
+/// governance is genuinely active, the same honest blend the live single-agent
+/// demo uses. The enforced set comes from [`enforced_gate_rules`], so a rule added
+/// to the gateway registry is automatically applied here with no edit.
 pub async fn governed_role(role_name: &str) -> anyhow::Result<Role> {
     let corpus = Path::new(DEFAULT_CORPUS_PATH);
     let mut role = role_from_corpus(corpus, role_name, FLEET_DOMAINS, &[]).await?;
 
-    for gate_rule in [sec_no_hardcoded_secrets_1_rule(), gov1_rule()] {
+    for gate_rule in enforced_gate_rules() {
         if !role.rule_subset.contains(&gate_rule) {
             role.rule_subset.insert(0, gate_rule);
         }

@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
 use camerata_core::{AgentDriver, Role};
-use camerata_gateway::{gov1_rule, sec_no_hardcoded_secrets_1_rule};
+use camerata_gateway::enforced_gate_rules;
 use camerata_rules::{role_from_corpus, DEFAULT_CORPUS_PATH};
 
 /// A SYNTHETIC, obviously-fake GitHub-style token used ONLY to exercise the
@@ -57,12 +57,13 @@ async fn backend_role() -> anyhow::Result<Role> {
     let corpus = Path::new(DEFAULT_CORPUS_PATH);
     let mut role = role_from_corpus(corpus, "Backend", BACKEND_DOMAINS, &[]).await?;
 
-    // Ensure the gateway's enforced gate rules ride along so the live denies are
-    // real. role_from_corpus already sorts the subset; these gate ids are
-    // prepended. Subset order only affects which rule "wins" a deny when more
-    // than one would fire; each rule fires independently on its own input
-    // (GOV-1 on path, SEC-NO-HARDCODED-SECRETS-1 on content).
-    for gate_rule in [sec_no_hardcoded_secrets_1_rule(), gov1_rule()] {
+    // Ensure ALL of the gateway's enforced gate rules ride along so the live
+    // denies are real. role_from_corpus already sorts the subset; these gate ids
+    // are prepended. Subset order only affects which rule "wins" a deny when more
+    // than one would fire; each rule fires independently on its own input (e.g.
+    // GOV-1 / SEC-NO-PATH-ESCAPE-1 on path, SEC-NO-HARDCODED-SECRETS-1 on
+    // content). This demo's forbidden-path write triggers GOV-1.
+    for gate_rule in enforced_gate_rules() {
         if !role.rule_subset.contains(&gate_rule) {
             role.rule_subset.insert(0, gate_rule);
         }

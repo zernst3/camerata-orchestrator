@@ -69,6 +69,11 @@ pub fn arch_no_secrets_in_url_1_rule() -> RuleId {
     RuleId("ARCH-NO-SECRETS-IN-URL-1".to_string())
 }
 
+/// The id of the "no path escape / no writes to protected dirs" rule.
+pub fn sec_no_path_escape_1_rule() -> RuleId {
+    RuleId("SEC-NO-PATH-ESCAPE-1".to_string())
+}
+
 // ─── public rule registry ─────────────────────────────────────────────────────
 
 /// A pure rule-arm function: `Ok(())` = allow, `Err(reason)` = deny.
@@ -124,6 +129,13 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
                       query string (api_key, token, secret, password, access_token).",
         arm: arm_arch_no_secrets_in_url_1,
     },
+    RuleEntry {
+        id: "SEC-NO-PATH-ESCAPE-1",
+        description: "Deny writes whose path escapes the workspace via a `..` \
+                      traversal segment, or targets version-control / SSH internals \
+                      (a `.git` or `.ssh` directory component).",
+        arm: arm_sec_no_path_escape_1,
+    },
 ];
 
 /// Look up the arm function for `rule_id`, or `None` when the id is not
@@ -133,6 +145,20 @@ pub fn lookup_arm(rule_id: &str) -> Option<RuleArmFn> {
         .iter()
         .find(|e| e.id == rule_id)
         .map(|e| e.arm)
+}
+
+/// Every rule that has a real enforcement arm today, as [`RuleId`]s.
+///
+/// This is the single source of truth for "which gate rules genuinely fire", so
+/// callers that need the whole enforced set (the fleet, the live demo) ride along
+/// with ALL of them instead of hand-listing a subset that silently drifts out of
+/// date as arms are added. Derived from [`RULE_REGISTRY`] so adding a rule there
+/// automatically propagates here.
+pub fn enforced_gate_rules() -> Vec<RuleId> {
+    RULE_REGISTRY
+        .iter()
+        .map(|e| RuleId(e.id.to_string()))
+        .collect()
 }
 
 // ─── reusable rule-evaluation (pure) ─────────────────────────────────────────
@@ -217,6 +243,40 @@ fn arm_gov1(path: &str, _content: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+// ── SEC-NO-PATH-ESCAPE-1 ──────────────────────────────────────────────────────
+
+/// SEC-NO-PATH-ESCAPE-1: deny writes that escape the workspace via a `..`
+/// traversal segment, or that target version-control / SSH internals (a `.git`
+/// or `.ssh` directory component).
+///
+/// Unlike GOV-1's substring guard, this matches on path *segments* (splitting on
+/// both `/` and `\`), so a directory legitimately named `foo.git` or a file like
+/// `notes..md` is not a false positive, while a write into an actual `.git`
+/// directory or a `../` climb out of the sandbox is denied. A file-writing agent
+/// has no business rewriting VCS internals, planting SSH keys/config, or climbing
+/// out of its workspace; all three are unambiguous and deterministic to catch.
+fn arm_sec_no_path_escape_1(path: &str, _content: &str) -> Result<(), String> {
+    for segment in path.split(['/', '\\']) {
+        match segment {
+            ".." => {
+                return Err(format!(
+                    "SEC-NO-PATH-ESCAPE-1: write path contains a `..` traversal \
+                     segment, which can escape the workspace (path={path})"
+                ));
+            }
+            ".git" | ".ssh" => {
+                return Err(format!(
+                    "SEC-NO-PATH-ESCAPE-1: write targets a protected `{segment}` \
+                     directory (version-control or SSH internals are off-limits) \
+                     (path={path})"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // ── SEC-NO-HARDCODED-SECRETS-1 ────────────────────────────────────────────────
@@ -534,6 +594,67 @@ mod tests {
         assert!(matches!(evaluate_call(&subset, &call), Decision::Allow));
     }
 
+    // ── SEC-NO-PATH-ESCAPE-1 ──────────────────────────────────────────────────
+
+    #[test]
+    fn path_escape_denies_dotdot_traversal() {
+        let subset = vec![sec_no_path_escape_1_rule()];
+        let d = evaluate_call(&subset, &write_call("crates/../../etc/passwd"));
+        match d {
+            Decision::Deny { rule, reason } => {
+                assert_eq!(rule, sec_no_path_escape_1_rule());
+                assert!(reason.contains("traversal"), "reason was: {reason}");
+            }
+            Decision::Allow => panic!("expected SEC-NO-PATH-ESCAPE-1 deny for `..` traversal"),
+        }
+    }
+
+    #[test]
+    fn path_escape_denies_git_internals() {
+        let subset = vec![sec_no_path_escape_1_rule()];
+        let d = evaluate_call(&subset, &write_call("crates/core/.git/config"));
+        match d {
+            Decision::Deny { rule, reason } => {
+                assert_eq!(rule, sec_no_path_escape_1_rule());
+                assert!(reason.contains(".git"), "reason was: {reason}");
+            }
+            Decision::Allow => panic!("expected deny for a write into .git/"),
+        }
+    }
+
+    #[test]
+    fn path_escape_denies_ssh_internals() {
+        let subset = vec![sec_no_path_escape_1_rule()];
+        let d = evaluate_call(&subset, &write_call(".ssh/authorized_keys"));
+        assert!(
+            matches!(d, Decision::Deny { .. }),
+            "expected deny for a write into .ssh/"
+        );
+    }
+
+    #[test]
+    fn path_escape_allows_clean_path() {
+        let subset = vec![sec_no_path_escape_1_rule()];
+        let d = evaluate_call(&subset, &write_call("crates/core/src/lib.rs"));
+        assert!(matches!(d, Decision::Allow));
+    }
+
+    #[test]
+    fn path_escape_does_not_false_positive_on_segment_substring() {
+        // A directory literally named `foo.git` (or a `..`-containing filename)
+        // is NOT a `.git` directory component / traversal segment, so it must be
+        // allowed. This is the case GOV-1's substring matching would get wrong.
+        let subset = vec![sec_no_path_escape_1_rule()];
+        assert!(matches!(
+            evaluate_call(&subset, &write_call("mirrors/foo.git/readme.md")),
+            Decision::Allow
+        ));
+        assert!(matches!(
+            evaluate_call(&subset, &write_call("notes/release..md")),
+            Decision::Allow
+        ));
+    }
+
     // ── SEC-NO-HARDCODED-SECRETS-1 ────────────────────────────────────────────
 
     #[test]
@@ -782,12 +903,13 @@ mod tests {
     // ── registry ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn registry_covers_all_four_rules() {
+    fn registry_covers_all_enforced_rules() {
         let ids: Vec<&str> = RULE_REGISTRY.iter().map(|e| e.id).collect();
         assert!(ids.contains(&"GOV-1"));
         assert!(ids.contains(&"SEC-NO-HARDCODED-SECRETS-1"));
         assert!(ids.contains(&"SEC-NO-RAW-SQL-CONCAT-1"));
         assert!(ids.contains(&"ARCH-NO-SECRETS-IN-URL-1"));
+        assert!(ids.contains(&"SEC-NO-PATH-ESCAPE-1"));
     }
 
     #[test]
@@ -796,6 +918,7 @@ mod tests {
         assert!(lookup_arm("SEC-NO-HARDCODED-SECRETS-1").is_some());
         assert!(lookup_arm("SEC-NO-RAW-SQL-CONCAT-1").is_some());
         assert!(lookup_arm("ARCH-NO-SECRETS-IN-URL-1").is_some());
+        assert!(lookup_arm("SEC-NO-PATH-ESCAPE-1").is_some());
     }
 
     #[test]

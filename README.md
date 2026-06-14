@@ -60,11 +60,13 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
    denies bad agent actions before they execute, and an out-of-process structural
    check bounces violations back for revision. Binary pass/fail, not "the model
    thinks this looks right." The architecture is the differentiator, not the rule
-   count: today the gate enforces four rules (one a path-substring guard, three regex
-   heuristics; no AST analysis yet), and the broader corpus is catalogued and selected
-   but not yet given executable enforcement arms. The point this repo proves is the
-   *seam* (deny-before-execute, provider-neutral, fail-closed); deepening the rule set
-   behind it is incremental, not architectural.
+   count: today the gate enforces five rules (a path-segment guard against `..`
+   traversal and writes into `.git`/`.ssh`, a forbidden-path guard, and three regex
+   content heuristics for secrets / raw-SQL-concat / secrets-in-URLs; no AST analysis
+   yet), and the broader corpus is catalogued and selected but not yet given executable
+   enforcement arms. The point this repo proves is the *seam* (deny-before-execute,
+   provider-neutral, fail-closed); deepening the rule set behind it is incremental, not
+   architectural.
 3. **A standing maintenance/ops agent.** A published app is alive: upgrades, security
    patches, key rotation, all run through the same governed loop, with calm
    plain-language recommendations. The owner gets the maintenance a real team would
@@ -94,7 +96,8 @@ because the intended reader is exactly the person who will run the code and chec
   transcript, and `cargo test` exercises the gate against a fake in-process
   `EchoDriver`, not a live model. The live denial is reproducible by running the
   `live-demo` binary; it is not re-run by the test suite (a live agent in CI spends
-  tokens on every push).
+  tokens on every push). The gate's five enforced rules and the pure verdict
+  function ARE covered by the suite against synthetic tool calls.
 - **The Tier-2 data-and-flow spine, end to end:** typed intake + style kit, the
   refinement session, versioned persistence with full revision history (durable
   on-disk across launches), the shared corpus, and the post-build bug loop, composed
