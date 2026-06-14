@@ -20,10 +20,10 @@
 use chrono::{DateTime, Utc};
 
 use camerata_intake::{
-    abstract_design, BugReport, DesignCorpus, DesignReference, EntityCapabilities,
-    EntityDefinition, EntityField, FieldType, IntakeForm, Phase, Project, RefinementContext,
-    RefinementReviewer, RefinementSession, ReviewError, StoryId, StylePreferences, UserRole,
-    UserStory, ViewKind, ViewSpec,
+    abstract_design, BugReport, ClarificationRound, DesignCorpus, DesignReference,
+    EntityCapabilities, EntityDefinition, EntityField, FieldType, IntakeForm, Phase, ProductSuggestion,
+    Project, RefinementContext, RefinementReviewer, RefinementSession, ReviewError, StoryId,
+    StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
 };
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, PersistenceError, RevisionOp,
@@ -449,6 +449,33 @@ impl AppState {
     /// runner (`camerata_fleet::build_from_plan`).
     pub fn build_plan(&self) -> camerata_intake::Plan {
         camerata_intake::StubLeadEngineer::plan_for(&self.project.onboarding)
+    }
+
+    /// The product suggestions accumulated in the active session (raised by AI
+    /// review turns). Returns an empty list when there is no active session.
+    pub fn active_suggestions(&self) -> Vec<ProductSuggestion> {
+        self.project
+            .active_session()
+            .map(|s| s.suggestions.clone())
+            .unwrap_or_default()
+    }
+
+    /// Fold the user's answers to the current open questions into the active
+    /// session. Each answer is matched to the corresponding open question (by
+    /// position); if there are no open questions this is a no-op. Queues a
+    /// versioned revision for the clarification round so it is persisted.
+    pub fn answer_open_questions(&mut self, answers: Vec<String>) {
+        let questions: Vec<String> = self
+            .project
+            .active_session()
+            .map(|s| s.open_questions().to_vec())
+            .unwrap_or_default();
+        if questions.is_empty() {
+            return;
+        }
+        if let Some(session) = self.project.active_session_mut() {
+            session.answer(ClarificationRound { questions, answers });
+        }
     }
 }
 
@@ -946,5 +973,76 @@ mod tests {
             .similar(&intake_form_from_inputs(&sample_inputs()))
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_suggestions_returns_suggestions_from_session() {
+        let mut state = AppState::from_intake("p", &sample_inputs());
+        // No suggestions before any review.
+        assert!(state.active_suggestions().is_empty());
+
+        // Run one review turn: StubRefinementReviewer raises the admin suggestion
+        // when the form has owner-style roles (sample_inputs has "Owner").
+        let reviewer = camerata_intake::StubRefinementReviewer::new();
+        let ran = state.run_review_turn(&reviewer).await.unwrap();
+        assert!(ran);
+
+        let suggestions = state.active_suggestions();
+        // The stub raises "admin_users" on the first turn when login is implied.
+        assert!(
+            suggestions.iter().any(|s| s.id == "admin_users"),
+            "expected admin_users suggestion, got {suggestions:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn answer_open_questions_folds_answers_and_clears_open() {
+        let mut state = AppState::from_intake("p", &sample_inputs());
+
+        // Run a review turn to seed open questions.
+        let reviewer = camerata_intake::StubRefinementReviewer::new();
+        state.run_review_turn(&reviewer).await.unwrap();
+
+        let open_before = state
+            .active_session()
+            .map(|s| s.open_questions().len())
+            .unwrap_or(0);
+        // The stub produces one question per turn while below the ready bar.
+        assert!(open_before >= 1, "expected at least one open question");
+
+        // Answer the open questions.
+        let answers = vec!["Yes, please".to_string(); open_before];
+        state.answer_open_questions(answers.clone());
+
+        // After answering, the session should have NO remaining open questions
+        // (the round is now answered).
+        let open_after = state
+            .active_session()
+            .map(|s| s.open_questions().len())
+            .unwrap_or(0);
+        assert_eq!(open_after, 0, "answers should clear all open questions");
+
+        // The session's clarification history should have recorded the round.
+        let n_rounds = state
+            .active_session()
+            .map(|s| s.clarifications.len())
+            .unwrap_or(0);
+        assert!(n_rounds >= 1, "a clarification round should be recorded");
+    }
+
+    #[tokio::test]
+    async fn answer_open_questions_is_noop_when_no_open_questions() {
+        let mut state = AppState::from_intake("p", &sample_inputs());
+        // No review run yet: no open questions.
+        let before = state
+            .active_session()
+            .map(|s| s.clarifications.len())
+            .unwrap_or(0);
+        state.answer_open_questions(vec!["anything".to_string()]);
+        let after = state
+            .active_session()
+            .map(|s| s.clarifications.len())
+            .unwrap_or(0);
+        assert_eq!(before, after, "no-op when there are no open questions");
     }
 }

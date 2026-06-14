@@ -13,19 +13,19 @@
 //!    the score showing honestly what's being traded off,
 //!  - and an ending PLAN shown as BOTH prose AND a simple visual entity/action map.
 //!
-//! All mocked: tapping a chip (or Send) accepts the canned answer for that turn
-//! and advances. The point is the rhythm and the feel.
+//! The transcript is driven by the real RefinementSession: questions and
+//! suggestions come from StubRefinementReviewer, confidence is read from the
+//! live AppState.confidence(), and every answer is folded back into the session.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use camerata_intake::{
-    DesignReference, InMemoryDesignCorpus, StoryId, StubRefinementReviewer, UserStory,
-};
+use camerata_intake::{DesignReference, InMemoryDesignCorpus, StoryId, StubRefinementReviewer, UserStory};
 
 use crate::app_state::AppState;
-use crate::data::{self, TurnKind};
+use crate::data;
 use crate::Screen;
 
 /// One entry in the running transcript.
@@ -33,76 +33,186 @@ use crate::Screen;
 enum Entry {
     /// The engineer's warm opening line, before the first question.
     Opener,
-    Engineer {
-        turn: data::ClarifyTurn,
-    },
-    User {
-        text: String,
-    },
+    /// A clarifying question from the reviewer.
+    Question(String),
+    /// A proactive product suggestion from the reviewer.
+    Suggestion { text: String, rationale: String },
+    /// The user's free-text answer.
+    User(String),
+    /// A spinner shown while the AI review is running.
+    Thinking,
 }
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Trigger one async review turn. Extracts any new suggestions and the next
+/// open question from the updated session and pushes them into the transcript.
+/// Sets `planned` to true when the reviewer has no more questions.
+fn trigger_review(
+    mut app: Signal<Option<AppState>>,
+    mut transcript: Signal<Vec<Entry>>,
+    mut current_q: Signal<Vec<String>>,
+    mut answered_count: Signal<usize>,
+    mut pending_answers: Signal<Vec<String>>,
+    mut reviewing: Signal<bool>,
+    mut planned: Signal<bool>,
+    mut seen_suggestions: Signal<HashSet<String>>,
+) {
+    // Show a thinking indicator while the review runs.
+    transcript.write().push(Entry::Thinking);
+    reviewing.set(true);
+
+    spawn(async move {
+        // Clone, mutate, set back (Dioxus pattern for async AppState mutation).
+        let mut snap = app.peek().clone();
+        if let Some(state) = snap.as_mut() {
+            let reviewer = StubRefinementReviewer::new();
+            let _ = state.run_review_turn(&reviewer).await;
+        }
+
+        // Extract new suggestions and open questions from the updated state.
+        let new_suggestions: Vec<(String, String, String)> = snap
+            .as_ref()
+            .map(|s| s.active_suggestions())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (s.id, s.suggestion, s.rationale))
+            .collect();
+        let open: Vec<String> = snap
+            .as_ref()
+            .and_then(|s| s.active_session())
+            .map(|sess| sess.open_questions().to_vec())
+            .unwrap_or_default();
+
+        app.set(snap);
+
+        // Remove the Thinking entry; add new suggestions (first-time only).
+        let mut t = transcript.peek().clone();
+        if t.last() == Some(&Entry::Thinking) {
+            t.pop();
+        }
+        let mut seen = seen_suggestions.peek().clone();
+        for (id, text, rationale) in new_suggestions {
+            if !seen.contains(&id) {
+                seen.insert(id);
+                t.push(Entry::Suggestion { text, rationale });
+            }
+        }
+
+        // Show the first open question (the rest come after each answer).
+        if !open.is_empty() {
+            t.push(Entry::Question(open[0].clone()));
+        }
+
+        transcript.set(t);
+        seen_suggestions.set(seen);
+        current_q.set(open.clone());
+        answered_count.set(0);
+        pending_answers.set(vec![]);
+        reviewing.set(false);
+
+        if open.is_empty() {
+            // The reviewer has no more questions: the session is ready.
+            planned.set(true);
+        }
+    });
+}
+
+// ─── the screen ──────────────────────────────────────────────────────────────
 
 #[component]
 pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
-    let turns = use_signal(data::clarify_turns);
-    let total = turns().len();
+    let mut app = use_context::<Signal<Option<AppState>>>();
 
-    // The real, editable user stories — the source of truth, built by intake and
-    // persisted on every edit. Rendered alongside the conversation.
-    let app = use_context::<Signal<Option<AppState>>>();
-
-    // The transcript, the index of the turn we're currently asking, the live
-    // confidence score, and whether the plan has been revealed.
+    // Transcript state.
     let mut transcript = use_signal(Vec::<Entry>::new);
-    let mut turn_idx = use_signal(|| 0usize);
-    let mut confidence = use_signal(|| data::CONFIDENCE_START);
     let mut draft = use_signal(String::new);
     let mut planned = use_signal(|| false);
+    let reviewing = use_signal(|| false);
 
-    // Seed the transcript with the opener + the first question, once.
+    // Per-round question tracking: the questions from the latest review turn
+    // and how many of them the user has answered so far.
+    let current_q = use_signal(Vec::<String>::new);
+    let mut answered_count = use_signal(|| 0usize);
+    let mut pending_answers = use_signal(Vec::<String>::new);
+
+    // Track which suggestion ids have already been added to the transcript so
+    // they are never duplicated across review turns.
+    let seen_suggestions = use_signal(HashSet::<String>::new);
+
+    // On mount: push the opener and kick off the first review turn.
     use_hook(|| {
-        let first = turns()[0].clone();
         transcript.write().push(Entry::Opener);
-        transcript.write().push(Entry::Engineer { turn: first });
+        if app.peek().is_some() {
+            trigger_review(
+                app,
+                transcript,
+                current_q,
+                answered_count,
+                pending_answers,
+                reviewing,
+                planned,
+                seen_suggestions,
+            );
+        }
     });
 
-    // Accept an answer for the current turn: record it, bump confidence, then
-    // either pose the next question or reveal the plan.
+    // Accept the user's answer to the current question.
     let mut accept = move |answer: String| {
-        if planned() {
+        if planned() || reviewing() || answer.trim().is_empty() {
             return;
         }
-        let idx = turn_idx();
-        let gain = turns()[idx].confidence_gain;
-        transcript.write().push(Entry::User { text: answer });
-        confidence.set((confidence() + gain).min(98));
+        // Record the user's reply in the transcript.
+        transcript.write().push(Entry::User(answer.clone()));
         draft.set(String::new());
 
-        let next = idx + 1;
-        if next < total {
-            turn_idx.set(next);
-            let nxt = turns()[next].clone();
-            transcript.write().push(Entry::Engineer { turn: nxt });
+        // Add to the answer buffer.
+        pending_answers.write().push(answer);
+        let next = answered_count() + 1;
+        answered_count.set(next);
+
+        let qs = current_q();
+        if next < qs.len() {
+            // More questions in this round: show the next one.
+            transcript.write().push(Entry::Question(qs[next].clone()));
         } else {
-            planned.set(true);
+            // All questions in this round answered: fold them in, then review.
+            let answers = pending_answers();
+            if let Some(state) = app.write().as_mut() {
+                state.answer_open_questions(answers);
+            }
+            trigger_review(
+                app,
+                transcript,
+                current_q,
+                answered_count,
+                pending_answers,
+                reviewing,
+                planned,
+                seen_suggestions,
+            );
         }
     };
 
-    // The bypass: stop here and go to the plan with whatever confidence we have.
+    // Bypass: converge the session at whatever confidence we have and go to plan.
     let bypass = move |_| {
         if !planned() {
+            if let Some(state) = app.write().as_mut() {
+                if let Some(sess) = state.project.active_session_mut() {
+                    sess.converge();
+                }
+            }
             planned.set(true);
         }
     };
 
-    let conf = confidence();
-    let answered = turn_idx() + usize::from(planned());
-    let answered = answered.min(total);
+    // Confidence from the real session (climbs as questions are answered + reviewed).
+    let conf = app.read().as_ref().map(|s| s.confidence()).unwrap_or(0);
 
     rsx! {
         div { class: "clarify",
-            // The "still working through it" header: the checklist progress and
-            // the live confidence score, the honest signal of readiness.
-            ConfidenceHeader { confidence: conf, answered, total }
+            // The live confidence header: reads from the real session.
+            ConfidenceHeader { confidence: conf }
 
             // The real, editable source of truth: the user stories.
             StoriesPanel { app }
@@ -119,10 +229,38 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
                                 p { class: "q-text", "{data::CLARIFY_OPENER}" }
                             }
                         },
-                        Entry::Engineer { turn } => rsx! { EngineerBubble { turn } },
-                        Entry::User { text } => rsx! {
+                        Entry::Question(text) => rsx! {
+                            div { class: "bubble bubble-eng",
+                                div { class: "who",
+                                    span { class: "who-avatar", "LE" }
+                                    span { "Lead engineer" }
+                                }
+                                p { class: "q-text", "{text}" }
+                            }
+                        },
+                        Entry::Suggestion { text, rationale } => rsx! {
+                            div { class: "bubble bubble-eng suggestion",
+                                div { class: "who",
+                                    span { class: "who-avatar", "LE" }
+                                    span { "Lead engineer · a suggestion" }
+                                }
+                                div { class: "suggestion-flag", "An idea you didn't ask for" }
+                                p { class: "q-text", "{text}" }
+                                p { class: "q-reason", "{rationale}" }
+                            }
+                        },
+                        Entry::User(text) => rsx! {
                             div { class: "bubble bubble-user",
                                 div { class: "answer", "{text}" }
+                            }
+                        },
+                        Entry::Thinking => rsx! {
+                            div { class: "bubble bubble-eng bubble-thinking",
+                                div { class: "who",
+                                    span { class: "who-avatar", "LE" }
+                                    span { "Lead engineer" }
+                                }
+                                p { class: "q-text thinking-dots", "..." }
                             }
                         },
                     }
@@ -131,55 +269,61 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
 
             if planned() {
                 PlanReveal { screen }
-            } else {
-                // The input dock: quick-reply chips for the current turn, a free-text
-                // box (free text is primary), and the always-available bypass.
-                {
-                    let current = turns()[turn_idx()].clone();
-                    rsx! {
-                        div { class: "dock",
-                            div { class: "chips dock-chips",
-                                for chip in current.chips.clone() {
-                                    button {
-                                        class: "chip",
-                                        onclick: {
-                                            let chip = chip.clone();
-                                            move |_| accept(chip.clone())
-                                        },
-                                        "{chip}"
-                                    }
-                                }
+            } else if !reviewing() && !current_q().is_empty() {
+                // Show the input dock when there is an open question to answer.
+                div { class: "dock",
+                    div { class: "chips dock-chips",
+                        // Generic quick-reply chips that work for any yes/no question.
+                        for chip in ["Yes", "No", "Not sure yet", "Tell me more"] {
+                            button {
+                                class: "chip",
+                                onclick: {
+                                    let chip = chip.to_string();
+                                    move |_| accept(chip.clone())
+                                },
+                                "{chip}"
                             }
-                            div { class: "dock-row",
-                                input {
-                                    class: "dock-input",
-                                    value: "{draft}",
-                                    placeholder: "…or tell me in your own words",
-                                    oninput: move |e| draft.set(e.value()),
-                                    onkeydown: move |e| {
-                                        if e.key() == Key::Enter && !draft().trim().is_empty() {
-                                            let text = draft().trim().to_string();
-                                            accept(text);
-                                        }
-                                    },
+                        }
+                    }
+                    div { class: "dock-row",
+                        input {
+                            class: "dock-input",
+                            value: "{draft}",
+                            placeholder: "…or tell me in your own words",
+                            oninput: move |e| draft.set(e.value()),
+                            onkeydown: move |e| {
+                                if e.key() == Key::Enter && !draft().trim().is_empty() {
+                                    accept(draft().trim().to_string());
                                 }
-                                button {
-                                    class: "dock-send",
-                                    onclick: move |_| {
-                                        let text = draft().trim().to_string();
-                                        let fallback = current.answer.clone();
-                                        accept(if text.is_empty() { fallback } else { text });
-                                    },
-                                    "Send"
+                            },
+                        }
+                        button {
+                            class: "dock-send",
+                            onclick: move |_| {
+                                let text = draft().trim().to_string();
+                                if !text.is_empty() {
+                                    accept(text);
                                 }
-                            }
-                            div { class: "bypass-row",
-                                button {
-                                    class: "btn-quiet",
-                                    onclick: bypass,
-                                    "I have what I need — just build it"
-                                }
-                            }
+                            },
+                            "Send"
+                        }
+                    }
+                    div { class: "bypass-row",
+                        button {
+                            class: "btn-quiet",
+                            onclick: bypass,
+                            "I have what I need — just build it"
+                        }
+                    }
+                }
+            } else if !reviewing() {
+                // No open questions and no plan yet: offer bypass only.
+                div { class: "dock",
+                    div { class: "bypass-row",
+                        button {
+                            class: "btn-quiet",
+                            onclick: bypass,
+                            "I have what I need — just build it"
                         }
                     }
                 }
@@ -188,20 +332,17 @@ pub fn ClarifyScreen(screen: Signal<Screen>) -> Element {
     }
 }
 
+// ─── sub-components ──────────────────────────────────────────────────────────
+
 /// The editable user-story list: the living source of truth the user and the AI
 /// both shape. Each story is the consumer-abstracted unit (who it is for + a plain
-/// list of wants). Adding or removing a story mutates the real `RefinementSession`
-/// and queues a versioned revision (the App effect persists it). A small status
-/// line shows the real lifecycle phase, the session context, and the session's own
-/// confidence (distinct from the scripted conversation score above).
+/// list of wants). Adding or removing a story mutates the real RefinementSession
+/// and queues a versioned revision (the App effect persists it).
 #[component]
 fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
-    // The shared design corpus (opt-in flywheel) and a place to hold any historical
-    // matches we fetch for display.
     let corpus = use_context::<Arc<InMemoryDesignCorpus>>();
     let mut historical = use_signal(Vec::<DesignReference>::new);
 
-    // Snapshot the real state for rendering.
     let stories: Vec<UserStory> = app
         .read()
         .as_ref()
@@ -256,9 +397,6 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
                                         onclick: {
                                             let story = story.clone();
                                             move |_| {
-                                                // A real edit: pin the story as a
-                                                // must-have. Upserting records a new
-                                                // version (the user changed it).
                                                 let mut edited = story.clone();
                                                 if edited.so_that.is_none() {
                                                     edited.so_that = Some("this one matters to me".to_string());
@@ -312,24 +450,8 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
                 "+ Add a story"
             }
 
-            // ── Refinement controls: a real AI review turn + the shared-design opt-ins ──
+            // ── Shared-design opt-ins ─────────────────────────────────────────
             div { class: "refine-controls",
-                button {
-                    class: "btn-quiet review-btn",
-                    onclick: move |_| {
-                        // Snapshot, run one real review turn off the UI thread, write back.
-                        let mut app = app;
-                        spawn(async move {
-                            let mut snap = app.peek().clone();
-                            if let Some(state) = snap.as_mut() {
-                                let _ = state.run_review_turn(&StubRefinementReviewer::new()).await;
-                            }
-                            app.set(snap);
-                        });
-                    },
-                    "Have the engineer review your stories"
-                }
-
                 label { class: "opt-in",
                     input {
                         r#type: "checkbox",
@@ -351,7 +473,6 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
                                         }
                                     });
                                 } else {
-                                    // Opt-out: actually delete the shared data.
                                     let corpus = corpus.clone();
                                     spawn(async move {
                                         let snap = app.peek().clone();
@@ -406,11 +527,10 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
     }
 }
 
-/// The checklist + confidence header. The score is a calm bar plus a number; it
-/// climbs as the checklist fills, and the label softens the trade-off of stopping
-/// early ("ready to build well" vs "I could build this now").
+/// The confidence header: a calm bar plus the percentage and a plain-language
+/// read of where we are. The score climbs as the reviewer gains certainty.
 #[component]
-fn ConfidenceHeader(confidence: u8, answered: usize, total: usize) -> Element {
+fn ConfidenceHeader(confidence: u8) -> Element {
     let pct = confidence as i32;
     let read = if confidence >= 90 {
         "Ready to build this well"
@@ -423,7 +543,6 @@ fn ConfidenceHeader(confidence: u8, answered: usize, total: usize) -> Element {
         div { class: "conf",
             div { class: "conf-top",
                 span { class: "conf-read", "{read}" }
-                span { class: "conf-count", "{answered} of {total} settled" }
             }
             div { class: "conf-bar",
                 div { class: "conf-fill", style: "width: {pct}%;" }
@@ -432,32 +551,6 @@ fn ConfidenceHeader(confidence: u8, answered: usize, total: usize) -> Element {
                 span { class: "conf-pct", "{confidence}% confident" }
                 span { class: "conf-note", "this climbs as we settle things" }
             }
-        }
-    }
-}
-
-/// An engineer turn rendered as a bubble. A suggestion gets a warmer frame (a
-/// labelled card) than a plain question, so the moment the engineer offers an idea
-/// the user didn't think of reads as exactly that.
-#[component]
-fn EngineerBubble(turn: data::ClarifyTurn) -> Element {
-    let is_suggestion = turn.kind == TurnKind::Suggestion;
-    let outer = if is_suggestion {
-        "bubble bubble-eng suggestion"
-    } else {
-        "bubble bubble-eng"
-    };
-    rsx! {
-        div { class: "{outer}",
-            div { class: "who",
-                span { class: "who-avatar", "LE" }
-                span { if is_suggestion { "Lead engineer · a suggestion" } else { "Lead engineer" } }
-            }
-            if is_suggestion {
-                div { class: "suggestion-flag", "An idea you didn't ask for" }
-            }
-            p { class: "q-text", "{turn.question}" }
-            p { class: "q-reason", "{turn.reason}" }
         }
     }
 }

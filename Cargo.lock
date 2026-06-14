@@ -325,10 +325,14 @@ dependencies = [
  "camerata-agent",
  "camerata-checks",
  "camerata-core",
+ "camerata-deploy",
  "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
+ "camerata-maintenance",
  "camerata-rules",
+ "camerata-worktracker",
+ "chrono",
  "serde_json",
  "tokio",
 ]
@@ -479,8 +483,10 @@ name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "camerata-deploy",
  "camerata-fleet",
  "camerata-intake",
+ "camerata-maintenance",
  "camerata-persistence",
  "chrono",
  "dioxus",
