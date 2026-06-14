@@ -12,6 +12,9 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 
+use camerata_intake::BugReport;
+
+use crate::app_state::AppState;
 use crate::data;
 use crate::Screen;
 
@@ -25,6 +28,7 @@ enum Phase {
 #[component]
 pub fn BugScreen(screen: Signal<Screen>) -> Element {
     let fields = data::BUG_FIELDS;
+    let mut app = use_context::<Signal<Option<AppState>>>();
 
     // One signal per strict field, keyed by the field's `key`.
     let mut answers = use_signal(|| {
@@ -35,6 +39,8 @@ pub fn BugScreen(screen: Signal<Screen>) -> Element {
     });
 
     let mut phase = use_signal(|| Phase::Form);
+    // The symptom we hand to the fix loop (location + what happened).
+    let mut symptom = use_signal(String::new);
 
     // The report is only sendable once every strict field has something in it —
     // the forcing function that keeps "it's broken" out.
@@ -67,7 +73,23 @@ pub fn BugScreen(screen: Signal<Screen>) -> Element {
                     button {
                         class: "btn-primary",
                         disabled: !complete(),
-                        onclick: move |_| phase.set(Phase::Fixing),
+                        onclick: move |_| {
+                            // Build the structured report (fields are ordered
+                            // where / did / expected / happened) and file it: this
+                            // opens a real post-build refinement session.
+                            let a = answers();
+                            let report = BugReport::new(
+                                a[0].1.clone(),
+                                a[1].1.clone(),
+                                a[2].1.clone(),
+                                a[3].1.clone(),
+                            );
+                            symptom.set(format!("{}: {}", a[0].1, a[3].1));
+                            if let Some(state) = app.write().as_mut() {
+                                state.file_bug(report);
+                            }
+                            phase.set(Phase::Fixing);
+                        },
                         "Send it to the engineer"
                     }
                     button {
@@ -81,7 +103,7 @@ pub fn BugScreen(screen: Signal<Screen>) -> Element {
                 }
             }
         },
-        Phase::Fixing => rsx! { FixingView { screen } },
+        Phase::Fixing => rsx! { FixingView { screen, symptom: symptom() } },
     }
 }
 
@@ -89,17 +111,27 @@ pub fn BugScreen(screen: Signal<Screen>) -> Element {
 /// quiet hand-back to QA to re-test. Reuses the build look so a fix feels like the
 /// same trustworthy machinery, just smaller.
 #[component]
-fn FixingView(screen: Signal<Screen>) -> Element {
+fn FixingView(screen: Signal<Screen>, symptom: String) -> Element {
     let stages = data::FIX_STAGES;
     let mut done = use_signal(|| 0usize);
+    let mut app = use_context::<Signal<Option<AppState>>>();
 
     let _driver = use_future(move || {
         let stages = stages;
+        let symptom = symptom.clone();
         async move {
             loop {
                 let i = done();
                 if i >= stages.len() {
                     tokio::time::sleep(Duration::from_millis(900)).await;
+                    // Record the fix into the project history (with consent it
+                    // later enriches the shared corpus).
+                    if let Some(state) = app.write().as_mut() {
+                        state.record_fix(
+                            symptom.clone(),
+                            "Made the change and re-checked it against your rules",
+                        );
+                    }
                     screen.set(Screen::Qa);
                     break;
                 }
