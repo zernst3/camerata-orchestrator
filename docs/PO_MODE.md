@@ -38,17 +38,17 @@ The engine underneath is identical. PO mode is a different FRONT DOOR onto the
 same governed fleet, not a different engine.
 
 ```
-architect mode:  human ── investigation ── approve plan ── governed fleet ── QA diff
-PO mode:         human ── intake form ──── lead engineer ── governed fleet ── (managed)
-                                            (AI plays architect)
+architect mode:  human ── investigation ── approve plan ─────── governed fleet ── QA diff
+PO mode:         human ── intake form ──── lead engineer ⇄ clarify ── governed fleet ── (managed)
+                                            (AI plays architect)  loop
 ```
 
 ---
 
 ## 2. The intake → lead-engineer → governed-fleet pipeline
 
-PO mode is implemented as three bounded contexts in `crates/intake` plus a thin
-wiring subcommand (`po-demo`) in `crates/cli`.
+PO mode is implemented as four bounded contexts in `crates/intake` (form, plan,
+engine, clarify) plus a thin wiring subcommand (`po-demo`) in `crates/cli`.
 
 ### Stage 1 — the intake form (`crates/intake/src/form.rs`)
 
@@ -89,6 +89,38 @@ plus an ORDERED list of `PlanTask`s (role, `TaskKind`, precise description). Thi
 is intentionally the SAME shape the governed fleet already consumes. PO mode's
 only real work is turning a story-level form into this engineering plan.
 
+### Stage 2.5 — the multi-turn clarify loop (`crates/intake/src/clarify.rs`)
+
+A single `evaluate` call is one shot: the engineer either has enough to plan or
+it does not. A real PO conversation is iterative, so the `ClarifyDriver` closes
+the loop. It wraps a `LeadEngineer` and an `AnswerSource` and drives repeated
+`evaluate` calls: when the engineer returns `Intake::NeedsClarification(questions)`,
+the driver asks the `AnswerSource` for the PO's answers, folds the Q&A into the
+form's `clarifications` field as a `ClarificationRound`, and re-evaluates. The
+fold is append-only and fully transparent: every subsequent `evaluate` sees the
+cumulative Q&A history rendered verbatim into `IntakeForm::brief`, so the engineer
+reads the conversation like a transcript with no hidden state. The loop terminates
+on the first `Intake::Ready(plan)` or when `max_turns` clarification rounds are
+exhausted, returning a `ClarifyOutcome` (`Resolved { plan, clarify_turns }` or
+`Unresolved { turns_attempted, last_questions }`).
+
+`AnswerSource` is a trait, which is what makes the loop testable without a network
+or interactive stdin. Two deterministic test doubles ship: `StubAnswerSource`
+(fixed answers) and `SequentialAnswerSource` (turn-aware, returns round N's
+scripted answers on the Nth clarify turn). `po-demo` injects a
+`SequentialAnswerSource` with plausible scripted answers (currency, categories,
+single-user, no recurring expenses, `f64` amounts) so the demo run is fully
+deterministic end to end while genuinely exercising the multi-turn fold. The
+production CLI front door implements the same trait over stdin.
+
+`po-demo` feeds the clarify loop a DELIBERATELY UNDERSPECIFIED form
+(`IntakeForm::sample_underspecified_app` — one `Expense` entity with only an
+`amount` field, vague description) precisely so a discerning live lead engineer
+will ask questions and the multi-turn path is exercised, not bypassed. If the
+live loop stays `Unresolved` after the 3-turn cap, or any live call errors,
+`po-demo` falls back to the deterministic `StubLeadEngineer` and SAYS SO (an
+honest fallback, never a faked success).
+
 ### Stage 3 — the governed fleet (`crates/core/src/fleet.rs`, wired in `crates/cli/src/po_demo.rs`)
 
 The plan's tasks are mapped one-to-one onto governed `FleetStage`s over a fresh
@@ -98,16 +130,34 @@ temp cargo library crate (the shared worktree). Each task becomes one governed
 overwrites `src/lib.rs`; each later agent is told to READ what exists and EXTEND
 it while preserving prior code. Every write passes through the in-process Rust
 gate (GOV-1 path rule + SEC-NO-HARDCODED-SECRETS-1 content rule ride along in
-each session's rule-subset). Finally `cargo build` + `cargo test` judge the
-result. The fleet machinery is shared with `build-demo` via
-`crates/cli/src/fleet_support.rs`, so the two demos run ONE governed path.
+each session's rule-subset).
+
+On top of that real-time gate, `po-demo` runs a REAL LAYER-2 STRUCTURAL CHECK per
+fleet stage. The `FleetCoordinator` is given a `camerata_checks::RustCheckRunner`
+(fmt + clippy), so after each governed agent's write the coordinator runs the
+Rust gate against the shared worktree; a dirty stage bounces-and-revises once,
+citing the violated rule id (`RUST-FMT` / `RUST-CLIPPY`) verbatim in the revise
+task, before the next stage runs. This is meaningful mid-fleet because each
+governed agent writes a COMPLETE, self-contained `lib.rs` (it reads the prior
+stage's file and rewrites it preserving the existing code), so the crate compiles
+at every stage boundary and clippy has something real to judge. Earlier the demo
+used a no-op check runner and let only the final cargo run judge; now the build is
+genuinely gated per stage. The same `RustCheckRunner`-in-a-fleet path is proven
+deterministically (a real fmt violation caught and bounced mid-fleet, with later
+stages still running) by `crates/core/tests/fleet_real_check.rs`.
+
+Finally `cargo build` + `cargo test` judge the overall result. The fleet machinery
+is shared with `build-demo` via `crates/cli/src/fleet_support.rs`, so the two
+demos run ONE governed path.
 
 ```
-IntakeForm ──▶ LeadEngineer::evaluate ──▶ Intake::Ready(Plan)
-                  (live claude -p,              │
-                   ungoverned planning)         │  plan.tasks (ordered)
+IntakeForm ──▶ ClarifyDriver { LeadEngineer + AnswerSource } ──▶ Intake::Ready(Plan)
+                  │  evaluate → NeedsClarification(qs)              │
+                  │     ↑ fold Q&A into form ← AnswerSource.answer  │  plan.tasks (ordered)
+                  └──── re-evaluate (≤ max_turns) ─────────────────┘
                                                 ▼
                               FleetCoordinator over a temp worktree
+                              (layer-2 gate per stage: RustCheckRunner, bounce-once)
                               stage 1: governed agent (Implementer) ─┐
                               stage 2: governed agent (Tester) ──────┤ shared src/lib.rs
                                                                      ▼
@@ -159,6 +209,17 @@ deploy/ownership surface changes: the user's cloud (V1) vs. Camerata's cloud
 Run with `camerata po-demo` (requires a built `camerata-gateway` binary and the
 `claude` CLI on PATH). This is a REAL run: one live `claude -p` lead-engineer
 call plus two live governed `claude -p` build agents through the Rust gate.
+
+> **Note — this capture predates two wiring changes described in section 2.** It
+> was taken from the fully-specified `sample_budgeting_app` form (so the lead
+> engineer answered in one shot and no clarify turns appear), and from the
+> earlier no-op layer-2 runner (so no per-stage `RustCheckRunner` line appears).
+> The current `po-demo` drives the multi-turn clarify loop over the deliberately
+> underspecified form and gates each stage with the real `RustCheckRunner`; its
+> summary now additionally prints `clarify loop: resolved after N Q&A turn(s)`,
+> a per-stage `layer-2:` line, and `per-stage layer-2 bounces` / `fleet ended
+> clean` rows. The end-to-end shape (form → lead engineer → governed fleet →
+> cargo PASS) is unchanged.
 
 ```text
 == Camerata PO-MODE pipeline (intake → lead engineer → governed fleet → cargo) ==
@@ -255,31 +316,29 @@ PO-DEMO: PASS (a Product-Owner form was evaluated by the lead engineer into a pl
 
 ## 5. Remaining work for PO mode (prioritized)
 
-1. **Multi-turn clarify loop.** Consume `Intake::NeedsClarification`: surface the
-   lead engineer's questions to the PO, collect answers, fold them back into the
-   form, and re-evaluate until `Ready`. Today `po-demo` falls back to the stub if
-   the live engineer asks for clarification rather than driving the loop. This is
-   the single biggest PO-mode gap and the most PO-shaped one.
-2. **BYO-infra deploy adapter.** Take the governed, tested worktree and deploy it
+> **Recently landed (off this list):** the **multi-turn clarify loop**
+> (`crates/intake/src/clarify.rs`, wired into `po-demo` with a scripted,
+> deterministic `AnswerSource`) and **layer-2 structural checks during the fleet**
+> (`po-demo` now runs a real `RustCheckRunner` per stage with bounce-and-revise,
+> proven by `crates/core/tests/fleet_real_check.rs`). Both are described in
+> sections 2 (Stage 2.5) and 2 (Stage 3) above.
+
+1. **BYO-infra deploy adapter.** Take the governed, tested worktree and deploy it
    to the user's own cloud (the V1 deploy target). Today the pipeline stops at
    the cargo gate. This is what makes PO mode produce a RUNNING app, not just a
    crate.
-3. **Plan↔builder dependency contract + richer entity→schema codegen.** Close the
+2. **Plan↔builder dependency contract + richer entity→schema codegen.** Close the
    tension surfaced in the live run: let the plan declare a dependency set the
    governed builder is allowed to use, and grow the codegen from "structs in one
    `lib.rs`" toward real schema/migrations, a repository layer, and the
    frontend/database task kinds the plan already models but the demo does not yet
    build.
-4. **Real frontend + database stages.** The `Plan` already carries
+3. **Real frontend + database stages.** The `Plan` already carries
    `TaskKind::Frontend` and `TaskKind::Database`; the demo exercises only
    backend + test. Wire governed stages (and per-kind path scoping + rule-subsets)
    for the other two layers so a full CRUD app (frontend + backend + database)
    is generated, not just a domain module.
-5. **Layer-2 checks during the fleet, not just final cargo.** `po-demo` uses a
-   no-op `CheckRunner` and lets the final cargo gate judge. Per-stage structural
-   checks (the bounce-and-revise path the coordinator already supports) would
-   catch violations earlier and exercise the revise loop in PO mode.
-6. **Form validation + a real intake UI.** The schema is typed but unvalidated
+4. **Form validation + a real intake UI.** The schema is typed but unvalidated
    (e.g. a `ViewSpec.entity` that names no `Entity`). Validate the form before
    evaluation, and put a real form UI in front of it (the cockpit's PO-mode
    front door).

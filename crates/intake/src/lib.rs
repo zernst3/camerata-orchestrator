@@ -9,26 +9,37 @@
 //! builds the plan's tasks under the gate. See `docs/PO_MODE.md` and VISION
 //! sections 5 (P5), the "two abstraction levels" subsection, and 20.
 //!
-//! This crate makes NO orchestration decisions and runs NO checks. It owns three
+//! This crate makes NO orchestration decisions and runs NO checks. It owns four
 //! bounded contexts (RUST-DOMAIN-1), one module each:
 //!
 //! - [`form`] — the PO intake schema (the form a Product Owner fills out).
 //! - [`plan`] — the lead engineer's structured output (a buildable plan).
 //! - [`engine`] — the [`engine::LeadEngineer`] seam + a real ([`engine::ClaudeLeadEngineer`])
 //!   and a deterministic-fallback ([`engine::StubLeadEngineer`]) implementation.
+//! - [`clarify`] — the multi-turn clarify loop ([`clarify::ClarifyDriver`]) that
+//!   drives a [`engine::LeadEngineer`] through Q&A rounds until it yields a plan
+//!   or a turn cap is hit. The [`clarify::AnswerSource`] trait makes the loop
+//!   testable without network or stdin; [`clarify::StubAnswerSource`] and
+//!   [`clarify::SequentialAnswerSource`] are the deterministic test doubles.
 //!
 //! The [`Intake`] enum models the clarify-loop state: a freshly-evaluated form is
 //! either [`Intake::Ready`] (the lead engineer produced a plan) or
-//! [`Intake::NeedsClarification`] (it has questions for the PO first). V1's
-//! `po-demo` exercises the `Ready` arm; the multi-turn clarify loop that
-//! consumes `NeedsClarification` is the next increment (see `docs/PO_MODE.md`).
+//! [`Intake::NeedsClarification`] (it has questions for the PO first). The
+//! multi-turn clarify loop in [`clarify::ClarifyDriver`] consumes
+//! `NeedsClarification` rounds, folding each Q&A into the form's
+//! `clarifications` field and re-evaluating, until the engineer is satisfied.
 
+pub mod clarify;
 pub mod engine;
 pub mod form;
 pub mod plan;
 
+pub use clarify::{
+    AnswerSource, ClarifyDriver, ClarifyError, ClarifyOutcome, SequentialAnswerSource,
+    StubAnswerSource,
+};
 pub use engine::{ClaudeLeadEngineer, LeadEngineer, LeadEngineerError, StubLeadEngineer};
-pub use form::{Entity, Field, FieldKind, IntakeForm, ViewKind, ViewSpec};
+pub use form::{ClarificationRound, Entity, Field, FieldKind, IntakeForm, ViewKind, ViewSpec};
 pub use plan::{Plan, PlanTask, TaskKind};
 
 use serde::{Deserialize, Serialize};

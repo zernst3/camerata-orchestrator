@@ -124,11 +124,49 @@ impl ViewSpec {
     }
 }
 
+/// One round of clarification from the multi-turn clarify loop: the lead
+/// engineer's questions and the Product Owner's answers for that round.
+///
+/// Stored in [`IntakeForm::clarifications`] so subsequent `evaluate` calls
+/// see the full Q&A history via [`IntakeForm::brief`]. Defined here (in
+/// `form`) rather than `clarify` because it is part of the form's persistent
+/// state, not the driver's logic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClarificationRound {
+    /// The questions the lead engineer asked in this round.
+    pub questions: Vec<String>,
+    /// The PO's answers, indexed parallel to `questions`.
+    pub answers: Vec<String>,
+}
+
+impl ClarificationRound {
+    /// Render this round as a human/LLM-readable Q&A block for inclusion in
+    /// a form brief.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (i, q) in self.questions.iter().enumerate() {
+            let answer = self
+                .answers
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("(no answer)");
+            out.push_str(&format!("  Q: {q}\n  A: {answer}\n"));
+        }
+        out
+    }
+}
+
 /// The complete Product-Owner intake form for one bespoke app.
 ///
 /// This is the whole structured-requirements payload a PO submits. It is
 /// story-level (what the app is, what it tracks, what screens it has) and
 /// carries no engineering decisions — those are the lead engineer's job.
+///
+/// The `clarifications` field accumulates Q&A rounds produced by the
+/// multi-turn clarify loop ([`crate::clarify::ClarifyDriver`]). It starts
+/// empty; each clarification turn appends one [`ClarificationRound`]. The
+/// lead engineer sees the full history on every subsequent `evaluate` call
+/// via [`IntakeForm::brief`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntakeForm {
     /// The app's name (kebab/snake friendly, e.g. `budget-tracker`).
@@ -139,6 +177,12 @@ pub struct IntakeForm {
     pub entities: Vec<Entity>,
     /// The views (screens) the app should present.
     pub views: Vec<ViewSpec>,
+    /// Accumulated Q&A rounds from the multi-turn clarify loop. Empty on
+    /// initial submission; each clarify turn appends one round. The clarify
+    /// driver manages this field; callers constructing a fresh form should
+    /// leave it as `vec![]`.
+    #[serde(default)]
+    pub clarifications: Vec<ClarificationRound>,
 }
 
 impl IntakeForm {
@@ -164,12 +208,33 @@ impl IntakeForm {
                 ],
             }],
             views: vec![ViewSpec::new("Expense", ViewKind::List)],
+            clarifications: vec![],
+        }
+    }
+
+    /// A minimal, deliberately underspecified form for demonstrating the
+    /// clarify loop: one entity with only an `amount` field and no description
+    /// of business rules, so a discerning lead engineer would ask questions.
+    pub fn sample_underspecified_app() -> Self {
+        Self {
+            app_name: "budget-tracker".to_string(),
+            description: "track my money".to_string(),
+            entities: vec![Entity {
+                name: "Expense".to_string(),
+                fields: vec![Field::required("amount", FieldKind::Decimal)],
+            }],
+            views: vec![ViewSpec::new("Expense", ViewKind::List)],
+            clarifications: vec![],
         }
     }
 
     /// Render the form as a compact, deterministic human/LLM-readable brief. This
     /// is what the lead engineer is handed; keeping it as one method makes the
     /// real-call and the stub see EXACTLY the same input.
+    ///
+    /// If the form has accumulated clarification rounds (from the multi-turn
+    /// clarify loop), they are appended as a "Clarifications" section so the
+    /// lead engineer sees the full Q&A history on every subsequent evaluation.
     pub fn brief(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("App: {}\n", self.app_name));
@@ -189,6 +254,13 @@ impl IntakeForm {
         out.push_str("Views:\n");
         for view in &self.views {
             out.push_str(&format!("  - {} {}\n", view.entity, view.kind.label()));
+        }
+        if !self.clarifications.is_empty() {
+            out.push_str("Clarifications (prior Q&A rounds):\n");
+            for (i, round) in self.clarifications.iter().enumerate() {
+                out.push_str(&format!("  Round {}:\n", i + 1));
+                out.push_str(&round.render());
+            }
         }
         out
     }
