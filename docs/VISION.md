@@ -1,12 +1,34 @@
 # Camerata Orchestrator (working name; "Conductor" is a candidate, fits the Camerata/Chorale musical theme)
 
-A governed multi-agent development environment. The human stays at Product-Owner / Principal-Architect
-altitude. Camerata acts as the staff engineer that investigates, clarifies, plans, leads a team of
-role-scoped agents, and enforces the rules. Thesis: execution is cheap, judgment is not, so the tool
-elevates the human to the judgment and mechanizes the rest.
+**Camerata is a TWO-TIER product over one governed engine.**
 
-Status: design / Phase 0. This is a background build (orchestrated under a governance bar) that rides
-BEHIND the job search, not in front of it.
+- **Tier 1, Enterprise orchestration.** A human architect plus a REAL Product Owner
+  stay in the loop, collaborating through the work tracker they already use (Jira /
+  Azure DevOps): the PO's tickets and replies flow in, the architect steers, and a
+  fleet of governed role-scoped agents executes under mechanically enforced rules.
+  This is the general-purpose governed-orchestration tool for a developer or a team
+  (see `WORKTRACKER_INTEGRATION.md` for the Jira/ADO async bridge).
+- **Tier 2, Small-business app builder (the consumer headline).** A non-technical
+  small-business owner IS the Product Owner, with no developer and no architect in the
+  loop. They describe an app in a form, refine it with an AI lead engineer until both
+  are confident, get a working app they own on their own cloud, and a standing AI
+  maintenance routine keeps it alive. Camerata is the all-in service. See
+  `CONSUMER_UX.md` for the flow and `POSITIONING.md` for the small-business thesis.
+
+Both tiers run on the same deterministic governance gate, which is the invisible
+engine that makes the output trustworthy, NOT the product itself. The human stays at
+Product-Owner / Principal-Architect altitude (a real one in Tier 1, the owner-as-PO in
+Tier 2); Camerata acts as the staff engineer that investigates, clarifies, plans,
+leads the agents, and mechanically enforces the rules. Thesis: execution is cheap,
+judgment is not, so the tool elevates the human to the judgment and mechanizes the
+rest. The "general-purpose developer tool" framing below predates the two-tier reframe;
+read it as the description of Tier 1, not the whole product. The two tiers map to the
+two abstraction levels in section 5 and the two-tier product model in section 20.
+
+Status: a working, tested all-Rust system (ten crates, 260+ passing tests, the full
+Product-Owner flow built and composed into a Dioxus UI, the governance gate verified
+denying a live `claude -p` agent end to end). This is a background build (orchestrated
+under a governance bar) that rides BEHIND the job search, not in front of it.
 
 **V1 scope = the FULL single-user tool, UI and Dashboard INCLUDED, not a CLI.** This is a personal,
 agent-built project with no external deadline and no stakeholder to answer to, so it is NOT scoped like a
