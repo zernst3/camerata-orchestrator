@@ -31,6 +31,20 @@ No current tool occupies both. The consumer tools are moving toward clarificatio
 
 ---
 
+## Target Audience: the Small-Business Middle
+
+The intended customer is NOT the individual making a to-do app, and NOT the enterprise. It is the **small business that needs a bespoke operational app and has no in-house dev team**. The complexity target sits squarely in the middle: more than a personal toy (real roles and per-role permissions, several related entities, genuine business rules, light third-party integration), and less than an enterprise system (no extreme scale, no heavy compliance regime, no bespoke ML). That middle band is exactly where a governed CRUD-class generator excels, and the lead engineer's "honest about limits / recommend a human architect" behavior is what draws the upper boundary so the product never over-promises into enterprise territory.
+
+This audience choice is what makes the economics work, and the two reinforce each other:
+
+- **The buyer has a budget and a real problem.** A small business limping along on mismatched spreadsheets and SaaS that does not quite fit will pay a few hundred dollars a month for an app shaped to how they actually work. The realistic alternatives are a $100k+ agency build, a full-time developer hire, or a fractional dev retainer, all of which are multiples more expensive. A few hundred a month is the cheap option for them, where the same price is a non-starter for an individual.
+- **Governance matters more here, not less.** A business's data integrity, its security posture, and keeping the app alive over time are real stakes, not nice-to-haves. The deterministic gate and the standing maintenance/ops agent (upgrades, security patches, key rotation, the maintenance a real team would provide) are worth far more to a business with no engineers than to a hobbyist. The thing that is hard to copy is also the thing this buyer values most.
+- **It de-risks the unit economics.** A small business paying a few hundred a month is a healthy account; an individual balking at a monthly fee is not. Paired with BYO-infra (the business deploys to its own cloud and Camerata charges for the orchestration, governance, and ops rather than carrying their infra bill), the cost structure stays clean and does not scale punishingly with usage.
+
+In one line: Camerata is for the business that needs the app a real dev team would build, at a price that is a fraction of hiring one, kept alive and safe by governance instead of staff.
+
+---
+
 ## 3. The Differentiator and the Moat
 
 ### The wedge
