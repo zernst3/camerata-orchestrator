@@ -79,3 +79,6 @@ pub trait CheckRunner: Send + Sync {
     async fn check(&self, role: &Role, worktree: &std::path::Path)
         -> anyhow::Result<Vec<RuleId>>;
 }
+
+pub mod coordinator;
+pub use coordinator::{Coordinator, CoordinatorError, RunReport};

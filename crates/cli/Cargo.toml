@@ -3,6 +3,23 @@ name = "camerata"
 edition.workspace = true
 version = "0.0.0"
 
+[lib]
+name = "camerata"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camerata"
+path = "src/main.rs"
+
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-gateway = { path = "../gateway" }
+camerata-agent = { path = "../agent" }
+camerata-checks = { path = "../checks" }
 anyhow.workspace = true
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,4 +1,58 @@
-fn main() -> anyhow::Result<()> {
-    println!("camerata orchestrator (skeleton)");
-    Ok(())
+//! camerata orchestrator binary.
+//!
+//! Subcommands:
+//! - `acceptance` — run the in-process, no-network planted-violation acceptance
+//!   scenario and print the gate's verdict. Exit 0 if the gate denied the
+//!   planted violation and allowed the control write; exit 1 otherwise.
+
+use camerata::acceptance::{run_acceptance, AcceptanceResult};
+use camerata_core::Decision;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cmd = std::env::args().nth(1).unwrap_or_default();
+    match cmd.as_str() {
+        "acceptance" => run_acceptance_cmd().await,
+        "" | "help" | "--help" | "-h" => {
+            println!("camerata orchestrator");
+            println!("usage:");
+            println!("  camerata acceptance   run the planted-violation acceptance scenario");
+            Ok(())
+        }
+        other => {
+            eprintln!("unknown subcommand: {other}");
+            std::process::exit(2);
+        }
+    }
+}
+
+async fn run_acceptance_cmd() -> anyhow::Result<()> {
+    let result: AcceptanceResult = run_acceptance().await?;
+
+    println!("== Camerata planted-violation acceptance run ==");
+    println!("agent session (fake/echo driver): {}", result.agent_session_id);
+    println!("role allowedTools: {}", result.allowed_tools.join(" "));
+
+    match &result.planted_violation_decision {
+        Decision::Deny { rule, reason } => {
+            println!("planted forbidden write -> DENIED [{}]: {}", rule.0, reason);
+        }
+        Decision::Allow => {
+            println!("planted forbidden write -> ALLOWED  (UNEXPECTED — gate not wired)");
+        }
+    }
+    match &result.clean_control_decision {
+        Decision::Allow => println!("clean control write     -> ALLOWED  (expected)"),
+        Decision::Deny { rule, reason } => {
+            println!("clean control write     -> DENIED [{}]: {}  (UNEXPECTED)", rule.0, reason);
+        }
+    }
+
+    if result.passed() {
+        println!("ACCEPTANCE: PASS");
+        Ok(())
+    } else {
+        eprintln!("ACCEPTANCE: FAIL");
+        std::process::exit(1);
+    }
 }

@@ -6,6 +6,8 @@
 //! locked to ONLY this server's `gated_write` tool; every write the agent
 //! attempts routes through Rust code that applies the rule before acting.
 
+use camerata_core::{Decision, ToolCall};
+use camerata_gateway::{evaluate_call, gov1_rule};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -38,13 +40,18 @@ impl Gateway {
     }
 
     /// The data-driven governance rule. In the real orchestrator this is the
-    /// per-session role's rule-subset, looked up by session id. Here: a single
-    /// rule, GOV-1 (no writes to paths containing "forbidden").
+    /// per-session role's rule-subset, looked up by session id. Here we apply a
+    /// single-rule subset (GOV-1) through the SHARED evaluation function in
+    /// `camerata_gateway::evaluate_call`, so this transport and the in-process
+    /// `GovernedGateway` enforce byte-for-byte identical logic.
     fn evaluate(path: &str) -> Result<(), String> {
-        if path.contains("forbidden") {
-            Err("GOV-1: writes to forbidden paths are denied".to_string())
-        } else {
-            Ok(())
+        let call = ToolCall {
+            tool: "gated_write".to_string(),
+            input: serde_json::json!({ "path": path }),
+        };
+        match evaluate_call(&[gov1_rule()], &call) {
+            Decision::Allow => Ok(()),
+            Decision::Deny { reason, .. } => Err(reason),
         }
     }
 }
