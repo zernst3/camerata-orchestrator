@@ -12,13 +12,32 @@
 
 use dioxus::prelude::*;
 
+use crate::app_state::AppState;
 use crate::data;
 use crate::Screen;
 
 #[component]
 pub fn QaScreen(screen: Signal<Screen>) -> Element {
-    let classes = use_signal(data::preview_classes);
-    let checks = use_signal(data::qa_checklist);
+    let app = use_context::<Signal<Option<AppState>>>();
+    // The preview + checklist are derived from the REAL project, so they adapt to
+    // whatever app the user described (not a hardcoded example).
+    let (app_name, entity, cta, rows, checklist) = app
+        .read()
+        .as_ref()
+        .map(|s| {
+            let (entity, cta, rows) = s.qa_preview();
+            (s.qa_app_name(), entity, cta, rows, s.qa_checklist())
+        })
+        .unwrap_or_else(|| {
+            (
+                "Your app".to_string(),
+                "Items".to_string(),
+                "Open".to_string(),
+                Vec::new(),
+                vec!["Does the app do what you described?".to_string()],
+            )
+        });
+    let checks = use_signal(move || checklist);
 
     // Which "does it do this?" items the user has confirmed. Pure UI delight: the
     // user can tick them off as they verify, and the publish action warms up.
@@ -33,33 +52,24 @@ pub fn QaScreen(screen: Signal<Screen>) -> Element {
             p { class: "lede", "{data::QA_INTRO}" }
 
             div { class: "qa-grid",
-                // Left: the mocked preview of the generated app, in a phone frame.
+                // Left: a preview of the generated app, derived from the real
+                // project (the first listable entity, with sample rows), in a phone frame.
                 div { class: "qa-preview",
                     div { class: "phone",
                         div { class: "phone-notch" }
                         div { class: "phone-screen",
                             div { class: "app-bar",
-                                span { class: "app-bar-title", "Riverside Pottery" }
+                                span { class: "app-bar-title", "{app_name}" }
                                 span { class: "app-bar-dot" }
                             }
                             div { class: "app-body",
-                                p { class: "app-h", "This week's classes" }
-                                for c in classes() {
+                                p { class: "app-h", "Your {entity} list" }
+                                for row in rows {
                                     div { class: "app-card",
-                                        div { class: "app-card-top",
-                                            span { class: "app-card-title", "{c.title}" }
-                                            span { class: "app-card-price", "{c.price}" }
+                                        for line in row {
+                                            div { class: "app-card-meta", "{line}" }
                                         }
-                                        div { class: "app-card-meta",
-                                            span { "{c.when}" }
-                                            span { class: "dotsep", "·" }
-                                            span { "{c.seats}" }
-                                        }
-                                        if c.full {
-                                            button { class: "app-cta waitlist", "Join the waitlist" }
-                                        } else {
-                                            button { class: "app-cta", "Book a seat" }
-                                        }
+                                        button { class: "app-cta", "{cta}" }
                                     }
                                 }
                             }

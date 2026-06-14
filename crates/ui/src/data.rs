@@ -263,59 +263,9 @@ pub fn mid_build_question() -> MidBuildQuestion {
 // generated app the user clicks around, plus the honest "is this what you meant?"
 // ---------------------------------------------------------------------------
 
-/// One row in the mocked preview of the generated app's class list, so the QA
-/// screen shows a believable working app rather than a placeholder rectangle.
-#[derive(Clone, PartialEq)]
-pub struct PreviewClass {
-    pub title: String,
-    pub when: String,
-    pub price: String,
-    /// e.g. "5 of 8 booked" — human, not a raw count.
-    pub seats: String,
-    /// True once the class is full, so the preview can show the waitlist state
-    /// the user asked for and confirm the rule actually landed.
-    pub full: bool,
-}
-
-pub fn preview_classes() -> Vec<PreviewClass> {
-    vec![
-        PreviewClass {
-            title: "Wheel throwing — beginners".into(),
-            when: "Tue 6:30pm".into(),
-            price: "$45".into(),
-            seats: "5 of 8 booked".into(),
-            full: false,
-        },
-        PreviewClass {
-            title: "Hand-building bowls".into(),
-            when: "Thu 7:00pm".into(),
-            price: "$40".into(),
-            seats: "8 of 8 booked".into(),
-            full: true,
-        },
-        PreviewClass {
-            title: "Glazing workshop".into(),
-            when: "Sat 10:00am".into(),
-            price: "$55".into(),
-            seats: "3 of 10 booked".into(),
-            full: false,
-        },
-    ]
-}
-
-/// The things the user asked for, restated as checkable claims, so QA is honest:
-/// "here's what you wanted — does it actually do each one?" These are folded back
-/// from the intake + clarify decisions.
-pub fn qa_checklist() -> Vec<&'static str> {
-    vec![
-        "Browse the weekly classes and book a seat",
-        "A full class offers a waitlist instead of blocking",
-        "A cancelled seat frees up on its own",
-        "Only you can see a student's email",
-        "Past classes stay visible as history",
-        "An admin area to invite helpers and set who can do what",
-    ]
-}
+// The QA preview (the generated-app mock) and the "does it do what you asked for?"
+// checklist are now derived from the REAL project in `AppState::qa_preview` /
+// `qa_checklist`, so they adapt to whatever app the user described.
 
 /// The honest framing line at the top of QA: this is a draft you verify, not a
 /// finished thing dropped on you.

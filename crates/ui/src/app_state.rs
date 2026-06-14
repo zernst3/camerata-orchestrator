@@ -229,6 +229,32 @@ fn slug(s: &str) -> String {
         .collect()
 }
 
+/// A type-appropriate placeholder value for the QA preview's sample rows. `i` makes
+/// successive rows differ. This is mock display data for the draft preview, not real
+/// generated-app data.
+fn sample_value(t: &FieldType, i: usize) -> String {
+    match t {
+        FieldType::Money | FieldType::Decimal => format!("${}", i * 25),
+        FieldType::Number | FieldType::Integer => (i * 3).to_string(),
+        FieldType::YesNo => {
+            if i.is_multiple_of(2) {
+                "Yes".to_string()
+            } else {
+                "No".to_string()
+            }
+        }
+        FieldType::Date => format!("Jun {}", i + 9),
+        FieldType::DateTime => format!("Jun {} 6:30pm", i + 9),
+        FieldType::Email => format!("person{i}@example.com"),
+        FieldType::Url => format!("https://example.com/{i}"),
+        FieldType::Choice(opts) if !opts.is_empty() => opts[(i - 1) % opts.len()].clone(),
+        FieldType::LinkTo(target) if !target.is_empty() => format!("{target} #{i}"),
+        FieldType::LinkTo(_) => format!("Linked #{i}"),
+        FieldType::LongText => "A short note here".to_string(),
+        _ => format!("Sample {i}"),
+    }
+}
+
 // ─── the app state (the live Project the screens render + edit) ──────────────
 
 /// The consumer app's live state: a [`Project`] plus a queue of unflushed
@@ -503,6 +529,63 @@ impl AppState {
             n = f.entities.len(),
             list = entities.join(", "),
         )
+    }
+
+    /// The app name to show in the QA preview's title bar.
+    pub fn qa_app_name(&self) -> String {
+        self.project.onboarding.app_name.clone()
+    }
+
+    /// The QA checklist: the user's OWN story wants, restated as the "does it do
+    /// what you asked for?" claims they tick off. Falls back to a generic prompt
+    /// when there are no stories.
+    pub fn qa_checklist(&self) -> Vec<String> {
+        let items: Vec<String> = self
+            .active_stories()
+            .iter()
+            .flat_map(|s| s.wants.iter().cloned())
+            .collect();
+        if items.is_empty() {
+            vec!["Does the app do what you described?".to_string()]
+        } else {
+            items
+        }
+    }
+
+    /// A believable QA preview of the generated app, derived from the real
+    /// onboarding: the first listable entity becomes the list the app shows, with a
+    /// few sample rows built from its fields (type-appropriate placeholder values).
+    /// Returns `(entity_label, cta_label, rows)` where each row is a list of
+    /// "Field: value" lines.
+    pub fn qa_preview(&self) -> (String, String, Vec<Vec<String>>) {
+        let f = &self.project.onboarding;
+        let entity = f
+            .entities
+            .iter()
+            .find(|e| e.capabilities.can_list)
+            .or_else(|| f.entities.first());
+        match entity {
+            Some(e) => {
+                let cta = if e.capabilities.can_add {
+                    format!("Add a {}", e.name)
+                } else {
+                    "Open".to_string()
+                };
+                let rows: Vec<Vec<String>> = (1..=3)
+                    .map(|i| {
+                        e.fields
+                            .iter()
+                            .take(3)
+                            .map(|fld| {
+                                format!("{}: {}", fld.name, sample_value(&fld.field_type, i))
+                            })
+                            .collect()
+                    })
+                    .collect();
+                (e.name.clone(), cta, rows)
+            }
+            None => ("Items".to_string(), "Open".to_string(), Vec::new()),
+        }
     }
 
     /// The product suggestions accumulated in the active session (raised by AI
