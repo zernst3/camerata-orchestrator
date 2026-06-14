@@ -27,6 +27,9 @@ pub use session::{
     MCP_SERVER_KEY, RULES_FILE_ENV,
 };
 
+pub mod generic;
+pub use generic::GenericCliDriver;
+
 // ─── crate-local error type (RUST-DOMAIN-4 / RUST-DOMAIN-6) ───────────────────
 
 #[derive(Debug, Error)]

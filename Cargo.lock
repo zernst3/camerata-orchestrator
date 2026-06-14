@@ -363,7 +363,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-agent",
  "camerata-checks",
+ "camerata-gateway",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

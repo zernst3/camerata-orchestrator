@@ -22,3 +22,8 @@ tokio = { workspace = true }
 # cycle (checks depends on core normally); Cargo permits cycles that exist
 # only through dev-dependencies, so the normal build graph stays acyclic.
 camerata-checks = { path = "../checks" }
+# Provider-neutrality proof: GenericCliDriver (from agent) + evaluate_call (from
+# gateway) let the integration test assert that the coordinator and gateway
+# operate identically regardless of which concrete driver or model is in use.
+camerata-agent = { path = "../agent" }
+camerata-gateway = { path = "../gateway" }
