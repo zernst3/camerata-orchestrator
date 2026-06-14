@@ -6,6 +6,12 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-14_worktracker_port_architecture.md** — Tier 1: one `WorkItemProvider`
+  port (core imports no provider); our Story spine is canonical, the tracker is a
+  mirror configurable per field (provenance/gate/PR/sign-off always ours); two
+  independent loop-avoidance guards (per-field direction + echo suppression); map to
+  stable status categories never user names; native-first build order then board /
+  code-host axes. Native + Jira + ADO + GitHub adapters built; live execution pending.
 - **2026-06-14_refinement_session_primitive.md** — the refinement session as ONE
   back-and-forth primitive reused across three contexts (pre-build, mid-build
   escalation, post-build bugs); user/bug stories as the source of truth; the
