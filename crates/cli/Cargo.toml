@@ -18,6 +18,7 @@ camerata-gateway = { path = "../gateway" }
 camerata-agent = { path = "../agent" }
 camerata-checks = { path = "../checks" }
 camerata-rules = { path = "../rules" }
+camerata-fleet = { path = "../fleet" }
 anyhow.workspace = true
 tokio = { workspace = true }
 async-trait = { workspace = true }

@@ -1,21 +1,23 @@
 //! `po-demo` — the LIVE Product-Owner-mode pipeline, end to end.
 //!
-//! This is the second abstraction level (VISION P5 / the "two abstraction levels"
-//! subsection) driven all the way through:
+//! This is the second abstraction level (VISION P5 / the "two abstraction
+//! levels" subsection) driven all the way through:
 //!
 //!   1. Take a DELIBERATELY UNDERSPECIFIED [`IntakeForm`] (a minimal budgeting
-//!      app: just an `Expense` entity with an `amount` field, vague description).
-//!      This stands in for a PO who did not fill in enough detail.
+//!      app: just an `Expense` entity with an `amount` field, vague
+//!      description). This stands in for a PO who did not fill in enough detail.
 //!   2. Run the MULTI-TURN CLARIFY LOOP over it: the [`ClarifyDriver`] calls
 //!      [`ClaudeLeadEngineer`] repeatedly; when the engineer asks questions,
-//!      scripted [`SequentialAnswerSource`] answers are folded back into the form
-//!      and the engineer is re-evaluated (up to 3 turns). If the live call fails
-//!      at any turn, we FALL BACK to [`StubLeadEngineer`] and say so. The
-//!      fallback is honest, not a fake success.
-//!   3. Hand the plan's tasks to the GOVERNED [`FleetCoordinator`] to build into a
-//!      temp worktree — each task becomes one governed `claude -p` agent locked to
-//!      the Rust gateway's gated-write tool (identical governance to `build-demo`).
-//!   4. `cargo build` + `cargo test` the produced crate.
+//!      scripted [`SequentialAnswerSource`] answers are folded back into the
+//!      form and the engineer is re-evaluated (up to 3 turns). If the live call
+//!      fails at any turn, we FALL BACK to [`StubLeadEngineer`] and say so.
+//!      The fallback is honest, not a fake success.
+//!   3. Hand the plan's tasks to the GOVERNED [`camerata_fleet::build_from_plan`]
+//!      runner, which builds a governed fleet over a temp worktree: each task
+//!      becomes one governed `claude -p` agent locked to the Rust gateway's
+//!      gated-write tool (identical governance to `build-demo`).
+//!   4. `cargo build` + `cargo test` the produced crate (done inside
+//!      `build_from_plan`).
 //!   5. Print a PO-DEMO summary: the plan, where it came from, how many clarify
 //!      turns were needed, and whether the governed build compiled + tested.
 //!
@@ -25,27 +27,20 @@
 
 use std::time::Instant;
 
-use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
-use camerata_core::{FleetCoordinator, FleetStage, Role};
+use camerata_fleet::{describe_task_kind, locate_gateway_bin, BuildEvent, FLEET_DOMAINS};
 use camerata_intake::{
-    ClarifyDriver, ClarifyOutcome, ClaudeLeadEngineer, IntakeForm, Plan, PlanTask,
+    ClarifyDriver, ClarifyOutcome, ClaudeLeadEngineer, IntakeForm, Plan,
     SequentialAnswerSource, StubLeadEngineer, TaskKind,
 };
 
-use camerata_checks::RustCheckRunner;
-
-use crate::fleet_support::{
-    governed_role, locate_gateway_bin, run_cargo, scaffold_crate, tail_lines, FLEET_DOMAINS,
-};
-
-/// Where the plan the governed fleet built came from. Surfaced in the summary so
-/// a stub fallback is never mistaken for a live evaluation.
+/// Where the plan the governed fleet built came from. Surfaced in the summary
+/// so a stub fallback is never mistaken for a live evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanSource {
     /// The live `ClaudeLeadEngineer` resolved (possibly after clarify turns).
     LiveLeadEngineer,
-    /// The live call failed or was unresolvable; the deterministic stub produced
-    /// the plan.
+    /// The live call failed or was unresolvable; the deterministic stub
+    /// produced the plan.
     StubFallback,
 }
 
@@ -61,9 +56,10 @@ impl PlanSource {
 /// Scripted answers for the PO-demo's clarify loop.
 ///
 /// These are plausible answers to common clarifying questions a lead engineer
-/// might ask about an underspecified budgeting app. The `SequentialAnswerSource`
-/// returns round 0 on the first clarify turn, round 1 on the second, etc.
-/// The loop is capped at 3 turns so the demo always terminates.
+/// might ask about an underspecified budgeting app. The
+/// `SequentialAnswerSource` returns round 0 on the first clarify turn, round
+/// 1 on the second, etc. The loop is capped at 3 turns so the demo always
+/// terminates.
 fn demo_answer_source() -> SequentialAnswerSource {
     SequentialAnswerSource::new(vec![
         // Turn 1: answer questions about currency, category types, time range.
@@ -101,7 +97,8 @@ async fn lead_engineer_plan(form: &IntakeForm) -> (Plan, PlanSource, Option<Stri
 /// testable without a live `claude -p` call. [`lead_engineer_plan`] is the
 /// production wrapper that injects the live [`ClaudeLeadEngineer`] and the
 /// scripted [`demo_answer_source`]; tests inject a [`StubLeadEngineer`] (or a
-/// custom engineer that drives clarify turns) and a deterministic answer source.
+/// custom engineer that drives clarify turns) and a deterministic answer
+/// source.
 async fn run_clarify_loop(
     engineer: &dyn camerata_intake::LeadEngineer,
     answers: &dyn camerata_intake::AnswerSource,
@@ -146,7 +143,9 @@ async fn run_clarify_loop(
         Ok(ClarifyOutcome::TooComplex { reason, .. }) => (
             StubLeadEngineer::plan_for(form),
             PlanSource::StubFallback,
-            Some(format!("lead engineer: request too complex for Camerata alone: {reason}")),
+            Some(format!(
+                "lead engineer: request too complex for Camerata alone: {reason}"
+            )),
         ),
         Err(e) => (
             StubLeadEngineer::plan_for(form),
@@ -156,49 +155,9 @@ async fn run_clarify_loop(
     }
 }
 
-/// Convert ONE plan task into a precise governed-fleet task instruction.
-///
-/// The plan's `description` is the engineering intent; here we wrap it with the
-/// concrete governed-write contract (the agent's ONLY mutation path is the gated
-/// tool, written once to the shared `lib.rs`). Earlier stages' writes are visible
-/// to later ones because the worktree is shared — so a test stage is told to READ
-/// the implementer's file first.
-fn stage_task_for(task: &PlanTask, lib_path_display: &str, is_first: bool) -> String {
-    let tool = GATED_WRITE_TOOL;
-    let shared_note = if is_first {
-        format!(
-            "You are the FIRST agent. OVERWRITE the file at {lib_path_display} with \
-             a complete, self-contained Rust library module."
-        )
-    } else {
-        format!(
-            "An earlier agent has already written {lib_path_display} in this same \
-             crate. FIRST read {lib_path_display} to see what exists, then rewrite \
-             it to ADD your contribution while PRESERVING the existing code exactly."
-        )
-    };
-
-    format!(
-        "You are a governed agent in a Product-Owner-mode build fleet. Your ONLY \
-         way to write files is the `{tool}` tool; use it exactly once.\n\n\
-         {shared_note}\n\n\
-         Your task ({kind}): {description}\n\n\
-         Hard constraints: the file must be valid Rust that compiles as a library \
-         crate on its own; do NOT use `unsafe`; do NOT add external dependencies \
-         (the crate has none); derive `Debug`, `Clone`, `PartialEq` on structs. \
-         Use `f64` for decimal/money fields and `String` for dates (keep it \
-         dependency-free). Call `{tool}` with the path {lib_path_display} and the \
-         FULL file content, then report the tool's result.",
-        tool = tool,
-        shared_note = shared_note,
-        kind = task.kind.label(),
-        description = task.description,
-    )
-}
-
 /// Run the full PO-mode pipeline and report PASS / PARTIAL.
 pub async fn run_po_demo() -> anyhow::Result<()> {
-    println!("== Camerata PO-MODE pipeline (intake → lead engineer → governed fleet → cargo) ==");
+    println!("== Camerata PO-MODE pipeline (intake -> lead engineer -> governed fleet -> cargo) ==");
     println!();
 
     // ── 1. The sample Product-Owner intake form ──────────────────────────────
@@ -212,9 +171,12 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     print!("{}", form.brief());
     println!();
 
-    // ── 2. Lead engineer evaluates the form → Plan (with clarify loop) ──────
+    // ── 2. Lead engineer evaluates the form -> Plan (with clarify loop) ──────
     println!("── 2. LEAD ENGINEER evaluation (multi-turn clarify loop, max 3 turns) ──");
-    println!("  attempting LIVE ClaudeLeadEngineer ({}) ...", camerata_intake::engine::DEFAULT_LEAD_ENGINEER_MODEL);
+    println!(
+        "  attempting LIVE ClaudeLeadEngineer ({}) ...",
+        camerata_intake::engine::DEFAULT_LEAD_ENGINEER_MODEL
+    );
     let t_le = Instant::now();
     let (plan, plan_source, fallback_reason) = lead_engineer_plan(&form).await;
     let le_wall = t_le.elapsed();
@@ -227,8 +189,8 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     print!("{}", plan.render());
     println!();
 
-    // The plan must be buildable to continue (the stub guarantees this, so this
-    // is defensive against a future live plan that arrives empty).
+    // The plan must be buildable to continue (the stub guarantees this, so
+    // this is defensive against a future live plan that arrives empty).
     if !plan.is_buildable() {
         eprintln!("PO-DEMO: PARTIAL (lead engineer produced an empty plan — nothing to build)");
         std::process::exit(1);
@@ -238,184 +200,148 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     let gateway_bin = locate_gateway_bin()?;
     eprintln!("[po-demo] gateway binary: {}", gateway_bin.display());
 
-    let root = std::env::temp_dir().join(format!("camerata-po-{}", std::process::id()));
-    let worktree = root.join("crate");
-    let crate_name = "po_demo_crate";
-    let _ = std::fs::remove_dir_all(&root);
-    scaffold_crate(&worktree, crate_name)?;
-    let lib_path = worktree.join("src").join("lib.rs");
-    let lib_path_display = lib_path.display().to_string();
+    let root =
+        std::env::temp_dir().join(format!("camerata-po-{}", std::process::id()));
 
     println!("── 3. GOVERNED FLEET BUILD ──");
-    println!("  governed tool (agents locked to this): {GATED_WRITE_TOOL}");
-    println!("  shared worktree (cargo lib crate):     {}", worktree.display());
     println!("  corpus domains:                        {FLEET_DOMAINS:?}");
-    println!("  fleet stages (one governed agent each): {}", plan.tasks.len());
-
-    // Build a governed role + per-session driver for each plan task, then a
-    // FleetStage. We must hold the roles + session-spawns + drivers alive for the
-    // duration of the fleet run, so collect them into owned vectors first.
-    let mut roles: Vec<Role> = Vec::with_capacity(plan.tasks.len());
-    for (i, task) in plan.tasks.iter().enumerate() {
-        // Per-aggregate role naming: use the plan's role name, de-duplicated by
-        // stage index so two tasks with the same role name get distinct sessions.
-        let role_name = format!("{}-{}", task.role, i + 1);
-        let role = governed_role(&role_name).await?;
-        roles.push(role);
-    }
-
-    // Per-session governed drivers (each agent its own session: own rules.json +
-    // mcp-config, all bound to the shared worktree).
-    let mut spawns = Vec::with_capacity(plan.tasks.len());
-    for (i, role) in roles.iter().enumerate() {
-        let session_dir = root.join(format!("session-{}", i + 1));
-        let spawn = prepare_session(&session_dir, &gateway_bin, role)?;
-        spawns.push(spawn);
-    }
-    let drivers: Vec<_> = spawns
-        .iter()
-        .map(|spawn| spawn.driver.clone().with_worktree(&worktree))
-        .collect();
-
-    // Build the stage list. First task overwrites; later tasks read-then-extend.
-    let mut stages: Vec<FleetStage> = Vec::with_capacity(plan.tasks.len());
-    for (i, task) in plan.tasks.iter().enumerate() {
-        let stage_task = stage_task_for(task, &lib_path_display, i == 0);
-        stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
-        println!(
-            "    stage {}: role={} kind={} ({})",
-            i + 1,
-            roles[i].name,
-            task.kind.label(),
-            describe_task_kind(task.kind),
-        );
-    }
+    println!(
+        "  fleet stages (one governed agent each): {}",
+        plan.tasks.len()
+    );
     println!();
 
-    // LAYER-2 DURING THE FLEET: each stage's governed write is structurally
-    // checked by the REAL Rust gate (fmt + clippy) before the next stage runs,
-    // and a dirty stage bounces-and-revises once citing the violated rule id.
-    // This is the same `RustCheckRunner` the fleet integration test exercises;
-    // wiring it here (instead of a no-op) means the governed build is genuinely
-    // gated per stage, not just judged by the final cargo run. Because each
-    // governed agent writes a complete, self-contained `lib.rs`, the crate
-    // compiles at each stage boundary, so clippy is meaningful mid-fleet.
-    let checks = RustCheckRunner::new();
-    let fleet = FleetCoordinator::new(&checks, &worktree);
-
-    println!(
-        "  layer-2 gate (per stage):              RustCheckRunner (fmt + clippy, bounce-and-revise once)"
-    );
-    println!(
-        "  Running governed fleet: {} live `claude -p` agent(s) through the gate ...",
-        stages.len()
-    );
+    // ── 4. Run the governed build via camerata_fleet::build_from_plan ─────────
     let t0 = Instant::now();
-    let report = fleet.run(&stages).await?;
+    let outcome = camerata_fleet::build_from_plan(
+        &plan,
+        &root,
+        &gateway_bin,
+        &|event| match event {
+            BuildEvent::Scaffolding => {
+                println!("  [fleet] scaffolding worktree ...");
+            }
+            BuildEvent::StageStarted {
+                index,
+                total,
+                role,
+                kind,
+            } => {
+                println!(
+                    "    stage {}/{}: role={} kind={} ({})",
+                    index + 1,
+                    total,
+                    role,
+                    kind,
+                    describe_task_kind(match kind.as_str() {
+                        "database" => TaskKind::Database,
+                        "backend" => TaskKind::Backend,
+                        "frontend" => TaskKind::Frontend,
+                        _ => TaskKind::Test,
+                    }),
+                );
+            }
+            BuildEvent::StageFinished {
+                index,
+                total,
+                clean,
+                bounced,
+                session_id,
+            } => {
+                println!(
+                    "    stage {}/{} done: session={} clean={} bounced={}",
+                    index + 1,
+                    total,
+                    session_id,
+                    clean,
+                    bounced,
+                );
+            }
+            BuildEvent::Verifying => {
+                println!("── 4. VERIFY (cargo build + test on the governed-built crate) ──");
+            }
+            BuildEvent::Done {
+                compiled,
+                tests_passed,
+            } => {
+                println!("  cargo build success: {compiled}");
+                println!("  cargo test success:  {tests_passed}");
+            }
+        },
+    )
+    .await?;
     let fleet_wall = t0.elapsed();
     println!("  fleet wall: {:.2}s", fleet_wall.as_secs_f64());
     println!();
 
-    let mut all_agents_ran = true;
-    for (i, stage) in report.stages.iter().enumerate() {
-        let r = &stage.report;
-        println!("  ── stage {}: {} ──", i + 1, stage.role_name);
-        println!("    session_id: {}", r.initial_outcome.session_id);
-        if let Some(cost) = r.initial_outcome.cost_usd {
-            println!("    cost_usd:   {cost:.6}");
-        }
-        // Layer-2 result for this stage: what the REAL Rust gate found on the
-        // first pass, whether it bounced, and whether it ended clean.
-        if r.initial_violations.is_empty() {
-            println!("    layer-2:    clean on first pass (no fmt/clippy violations)");
-        } else {
-            let ids: Vec<&str> = r.initial_violations.iter().map(|v| v.0.as_str()).collect();
-            println!(
-                "    layer-2:    initial violations [{}] → bounced: {} → final clean: {}",
-                ids.join(", "),
-                yesno(r.bounced),
-                yesno(r.final_violations.is_empty()),
-            );
-        }
-        println!(
-            "    agent said: {}",
-            tail_lines(&r.initial_outcome.result.replace('\n', " "), 1)
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        );
-        if r.initial_outcome.session_id.is_empty() {
-            all_agents_ran = false;
-        }
-    }
-    println!();
-
-    // The filesystem is the source of truth that the gate actually wrote.
-    let produced = std::fs::read_to_string(&lib_path).unwrap_or_default();
-    let wrote_through_gate = lib_path.exists() && !produced.trim_start().starts_with("// placeholder");
     println!("  ── produced src/lib.rs ──");
-    println!("    path:  {}", lib_path.display());
-    println!("    bytes: {}", produced.len());
-    println!("    wrote through gate (non-placeholder): {wrote_through_gate}");
-    println!();
-
-    // ── 4. cargo build + test the produced crate ─────────────────────────────
-    println!("── 4. VERIFY (cargo build + test on the governed-built crate) ──");
-    let build = run_cargo(&worktree, "build").await?;
-    println!("  cargo build success: {}", build.success);
-    if !build.success {
-        println!("  --- cargo build stderr (tail) ---");
-        for line in tail_lines(&build.stderr, 20) {
-            println!("  {line}");
-        }
-    }
-
-    let test = if build.success {
-        let test = run_cargo(&worktree, "test").await?;
-        println!("  cargo test success:  {}", test.success);
-        println!("  --- cargo test stdout (tail) ---");
-        for line in tail_lines(&test.stdout, 10) {
-            println!("  {line}");
-        }
-        Some(test)
-    } else {
-        println!("  (skipping cargo test — build failed)");
-        None
-    };
+    println!("    path:  {}", outcome.produced_path.display());
+    println!("    bytes: {}", outcome.produced_bytes);
+    println!(
+        "    wrote through gate (non-placeholder): {}",
+        outcome.wrote_through_gate
+    );
     println!();
 
     // ── 5. PO-DEMO summary ────────────────────────────────────────────────────
-    let compiled = build.success;
-    let tests_passed = test.as_ref().map(|t| t.success).unwrap_or(false);
-
     println!("── PO-DEMO SUMMARY ──");
-    println!("  intake form:                              {} ({} entity, {} view)", form.app_name, form.entities.len(), form.views.len());
+    println!(
+        "  intake form:                              {} ({} entity, {} view)",
+        form.app_name,
+        form.entities.len(),
+        form.views.len()
+    );
     println!("  plan source:                              {}", plan_source.label());
-    println!("  plan tasks (governed fleet stages):       {}", plan.task_count());
+    println!(
+        "  plan tasks (governed fleet stages):       {}",
+        plan.task_count()
+    );
     println!("  layer-2 gate during fleet:                RustCheckRunner (fmt + clippy)");
-    println!("  per-stage layer-2 bounces:                {}", report.total_bounces());
-    println!("  fleet ended clean (no residual layer-2):  {}", yesno(report.is_clean()));
-    println!("  all governed agents ran live:             {}", yesno(all_agents_ran));
-    println!("  produced code through the gate:           {}", yesno(wrote_through_gate));
-    println!("  governed build compiled:                  {}", yesno(compiled));
-    println!("  governed build tests passed:              {}", yesno(tests_passed));
+    println!(
+        "  per-stage layer-2 bounces:                {}",
+        outcome.total_bounces
+    );
+    println!(
+        "  fleet ended clean (no residual layer-2):  {}",
+        yesno(outcome.fleet_clean)
+    );
+    println!(
+        "  all governed agents ran live:             {}",
+        yesno(outcome.all_agents_ran)
+    );
+    println!(
+        "  produced code through the gate:           {}",
+        yesno(outcome.wrote_through_gate)
+    );
+    println!(
+        "  governed build compiled:                  {}",
+        yesno(outcome.compiled)
+    );
+    println!(
+        "  governed build tests passed:              {}",
+        yesno(outcome.tests_passed)
+    );
     println!();
 
-    if all_agents_ran && wrote_through_gate && compiled && tests_passed {
+    if outcome.all_agents_ran && outcome.wrote_through_gate && outcome.compiled && outcome.tests_passed {
         println!(
             "PO-DEMO: PASS (a Product-Owner form was evaluated by the lead engineer \
              into a plan, and the governed fleet built it into a compiling, passing \
              crate through the Rust gate)"
         );
         Ok(())
-    } else if all_agents_ran && wrote_through_gate {
+    } else if outcome.all_agents_ran && outcome.wrote_through_gate {
         println!(
-            "PO-DEMO: PARTIAL (the full PO pipeline ran — form → {src} → governed \
-             fleet → cargo — and produced real files through the gate, but the \
+            "PO-DEMO: PARTIAL (the full PO pipeline ran — form -> {src} -> governed \
+             fleet -> cargo — and produced real files through the gate, but the \
              governed build did not {what} first try. Honest engine-quality signal, \
              NOT a harness failure.)",
             src = plan_source.label(),
-            what = if !compiled { "compile" } else { "pass tests" },
+            what = if !outcome.compiled {
+                "compile"
+            } else {
+                "pass tests"
+            },
         );
         Ok(())
     } else {
@@ -427,28 +353,16 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
     }
 }
 
-/// A one-liner describing what a task kind contributes, for the stage list.
-fn describe_task_kind(kind: TaskKind) -> &'static str {
-    match kind {
-        TaskKind::Database => "persistence/schema",
-        TaskKind::Backend => "domain types / API",
-        TaskKind::Frontend => "views/screens",
-        TaskKind::Test => "tests over the produced code",
-    }
-}
-
 /// "YES"/"NO" for the summary table.
 fn yesno(b: bool) -> &'static str {
-    if b {
-        "YES"
-    } else {
-        "NO"
-    }
+    if b { "YES" } else { "NO" }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camerata_fleet::stage_task_for;
+    use camerata_agent::GATED_WRITE_TOOL;
     use camerata_intake::{Plan, PlanTask, TaskKind};
 
     #[test]
@@ -562,9 +476,9 @@ mod tests {
 
     #[tokio::test]
     async fn clarify_loop_falls_back_to_stub_when_turn_cap_exhausted() {
-        // An engineer that never stops asking exhausts the 3-turn cap; the demo
-        // must fall back to the deterministic stub plan and report the reason,
-        // never a faked success.
+        // An engineer that never stops asking exhausts the 3-turn cap; the
+        // demo must fall back to the deterministic stub plan and report the
+        // reason, never a faked success.
         use async_trait::async_trait;
         use camerata_intake::{
             ConfidenceScore, HonestyVerdict, Intake, LeadEngineer, LeadEngineerError,
@@ -603,6 +517,8 @@ mod tests {
         // RustCheckRunner (fmt + clippy), not a no-op. The fleet-level proof
         // that this runner actually bounces a violation mid-fleet lives in
         // crates/core/tests/fleet_real_check.rs.
+        use camerata_checks::RustCheckRunner;
+        use camerata_core::FleetCoordinator;
         let checks = RustCheckRunner::new();
         let _fleet = FleetCoordinator::new(&checks, std::env::temp_dir());
     }

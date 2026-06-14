@@ -8,6 +8,7 @@ members = [
     "crates/rules",       # rule corpus loader, enforcement_kind, rule-subset selection
     "crates/persistence", # SQLite state + JSON provenance
     "crates/checks",      # layer-2 post-task gate: CheckRunner + ESLint subprocess
+    "crates/fleet",       # reusable governed-fleet build logic (used by CLI + UI)
     "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process)

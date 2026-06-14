@@ -319,6 +319,7 @@ dependencies = [
  "camerata-agent",
  "camerata-checks",
  "camerata-core",
+ "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
  "camerata-rules",
@@ -360,6 +361,21 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "camerata-fleet"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "camerata-agent",
+ "camerata-checks",
+ "camerata-core",
+ "camerata-gateway",
+ "camerata-intake",
+ "camerata-rules",
  "tokio",
 ]
 
