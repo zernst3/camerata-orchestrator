@@ -7,6 +7,19 @@ architecture (VISION §3.5) and is NO LONGER purely post-Phase-0. See §0.5. The
 rest (full status sync, multi-provider, the native tracker) remains a later
 expansion behind the same port.
 
+> **Implementation status (2026-06-14):** this is now partly BUILT, not just
+> designed. The `camerata-worktracker` crate implements the canonical shapes, the
+> `WorkItemProvider` port, the `native` provider (Phase A), and the Jira, Azure
+> DevOps Boards, and GitHub adapters (Phases B-E) with the mapping + request/response
+> logic behind an injectable HTTP transport seam (tested with a fake client; the live
+> `reqwest` transport is real and type-checked). The async clarify-bridge and the two
+> loop-avoidance guards (per-field `SyncPolicy` enforcement + echo suppression) are
+> built and tested, with an end-to-end Tier-1 flow test. What REMAINS is live
+> execution against real boards: per-provider auth (Jira OAuth 3LO / the ~25-day
+> webhook refresh, ADO PAT/Entra, GitHub App), webhook ingress (the opt-in upgrade
+> over the poll default), and field-discovery against live projects. The shapes and
+> mappings below are the spec those live integrations fulfill.
+
 Researched against current (2026-06-13) provider docs. Every load-bearing
 claim below was adversarially verified; see "Unverified assumptions and open
 risks" for what was NOT confirmed.
