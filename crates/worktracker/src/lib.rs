@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 
 // ── Sub-modules ───────────────────────────────────────────────────────────────
 
+/// Loop-avoidance engine: per-field source-of-truth enforcement (Guard 1) plus
+/// echo suppression via an expected-revision table (Guard 2). Together these two
+/// independent guards let Camerata mirror an enterprise board without sync loops.
+pub mod sync;
+pub use sync::{
+    apply_inbound, updatable_fields, ExpectedEcho, ExpectedEchoTable, InboundDisposition,
+};
+
 /// The async clarify-bridge: post the lead engineer's questions to the PO's board,
 /// poll for the PO's answer. Provider-agnostic.
 pub mod clarify_bridge;
