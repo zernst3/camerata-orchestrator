@@ -309,7 +309,10 @@ impl<'a> ClarifyDriver<'a> {
 mod tests {
     use super::*;
     use crate::engine::StubLeadEngineer;
-    use crate::form::{ClarificationRound, Entity, Field, FieldKind, IntakeForm, ViewKind, ViewSpec};
+    use crate::form::{
+        ClarificationRound, EntityDefinition, EntityField, EntityCapabilities,
+        FieldType, IntakeForm, ViewKind, ViewSpec,
+    };
     use crate::plan::{Plan, PlanTask, TaskKind};
     use async_trait::async_trait;
 
@@ -369,10 +372,18 @@ mod tests {
         IntakeForm {
             app_name: "budget-tracker".to_string(),
             description: "track my money".to_string(),
-            entities: vec![Entity {
+            roles: vec![],
+            entities: vec![EntityDefinition {
                 name: "Expense".to_string(),
-                fields: vec![Field::required("amount", FieldKind::Decimal)],
+                description: String::new(),
+                fields: vec![EntityField::required("amount", FieldType::Money)],
+                capabilities: EntityCapabilities {
+                    can_add: true,
+                    can_list: true,
+                    ..Default::default()
+                },
             }],
+            constraints: String::new(),
             views: vec![ViewSpec::new("Expense", ViewKind::List)],
             clarifications: vec![],
         }

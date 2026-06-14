@@ -303,12 +303,12 @@ mod tests {
 
     #[tokio::test]
     async fn stub_produces_a_buildable_plan_for_the_sample_form() {
-        let form = IntakeForm::sample_budgeting_app();
+        let form = IntakeForm::sample_app();
         let intake = StubLeadEngineer::new().evaluate(&form).await.unwrap();
         assert!(intake.is_ready());
         let plan = intake.plan().unwrap();
         assert!(plan.is_buildable());
-        assert_eq!(plan.app_name, "budget-tracker");
+        assert_eq!(plan.app_name, "expense-tracker");
         // Backend task then test task.
         assert_eq!(plan.tasks.len(), 2);
         assert!(plan.tasks[0].description.contains("Expense"));
@@ -317,9 +317,9 @@ mod tests {
 
     #[test]
     fn prompt_inlines_the_brief_and_demands_json() {
-        let form = IntakeForm::sample_budgeting_app();
+        let form = IntakeForm::sample_app();
         let prompt = ClaudeLeadEngineer::build_prompt(&form);
-        assert!(prompt.contains("budget-tracker"));
+        assert!(prompt.contains("expense-tracker"));
         assert!(prompt.contains("Expense"));
         assert!(prompt.contains("\"tasks\""));
         assert!(prompt.contains("LEAD ENGINEER"));

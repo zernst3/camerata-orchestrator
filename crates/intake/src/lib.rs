@@ -39,7 +39,15 @@ pub use clarify::{
     StubAnswerSource,
 };
 pub use engine::{ClaudeLeadEngineer, LeadEngineer, LeadEngineerError, StubLeadEngineer};
-pub use form::{ClarificationRound, Entity, Field, FieldKind, IntakeForm, ViewKind, ViewSpec};
+pub use form::{
+    ClarificationRound,
+    // new open-ended types
+    EntityDefinition, EntityCapabilities, EntityField, FieldType, UserRole,
+    // legacy backward-compat types (kept for CLI + existing code)
+    Entity, Field, FieldKind, ViewKind, ViewSpec,
+    // the main form
+    IntakeForm,
+};
 pub use plan::{Plan, PlanTask, TaskKind};
 
 use serde::{Deserialize, Serialize};
