@@ -16,15 +16,17 @@ async fn main() -> anyhow::Result<()> {
         "live-demo" => camerata::live_demo::run_live_demo().await,
         "build-demo" => camerata::build_demo::run_build_demo().await,
         "po-demo" => camerata::po_demo::run_po_demo().await,
+        "worktracker-demo" => camerata::worktracker_demo::run_worktracker_demo().await,
         "" | "help" | "--help" | "-h" => {
             println!("camerata orchestrator");
             println!("usage:");
             println!(
-                "  camerata acceptance   run the in-process planted-violation acceptance scenario"
+                "  camerata acceptance        run the in-process planted-violation acceptance scenario"
             );
-            println!("  camerata live-demo    spawn a REAL claude -p twice; prove gateway deny + allow live");
-            println!("  camerata build-demo   run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");
-            println!("  camerata po-demo      run PO-MODE end to end: intake form -> lead engineer -> governed fleet -> cargo");
+            println!("  camerata live-demo         spawn a REAL claude -p twice; prove gateway deny + allow live");
+            println!("  camerata build-demo        run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");
+            println!("  camerata po-demo           run PO-MODE end to end: intake form -> lead engineer -> governed fleet -> cargo");
+            println!("  camerata worktracker-demo  Tier-1 enterprise flow: PO on their board, governed, provenance written back");
             Ok(())
         }
         other => {
