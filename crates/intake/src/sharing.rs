@@ -68,8 +68,32 @@ pub const USE_HISTORICAL_BENEFIT: &str =
 
 // ─── an abstracted, shareable design ─────────────────────────────────────────
 
+/// A bug that was reported and fixed, recorded so future similar bugs benefit.
+/// The `symptom` is what went wrong, in plain language; the `fix` is what changed
+/// to resolve it. These travel WITH a shared design (when the user opts in), so the
+/// corpus carries fix knowledge, not just app shapes: the next person hitting a
+/// similar bug starts from a known remedy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedBug {
+    /// What went wrong, in plain language (abstracted from the bug report).
+    pub symptom: String,
+    /// What changed to fix it, in plain language.
+    pub fix: String,
+}
+
+impl ResolvedBug {
+    /// Construct a resolved-bug record.
+    pub fn new(symptom: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self {
+            symptom: symptom.into(),
+            fix: fix.into(),
+        }
+    }
+}
+
 /// A consented, abstracted prior design the corpus can offer the next user as a
-/// reference. It carries the SHAPE of an app, not its data.
+/// reference. It carries the SHAPE of an app, not its data, plus the fix history so
+/// future similar apps inherit hard-won bug knowledge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesignReference {
     /// A short, generalized label for the kind of app (e.g. "rental payment app").
@@ -78,6 +102,18 @@ pub struct DesignReference {
     pub summary: String,
     /// The abstracted user stories (structure + plain wants; specifics removed).
     pub stories: Vec<UserStory>,
+    /// Bugs that were reported and fixed in this design, abstracted so the next
+    /// builder of a similar app inherits the fix. Empty when there is no fix history.
+    #[serde(default)]
+    pub resolved_bugs: Vec<ResolvedBug>,
+}
+
+impl DesignReference {
+    /// Attach a fix history (the resolved bugs from the project). Builder form.
+    pub fn with_resolved_bugs(mut self, bugs: Vec<ResolvedBug>) -> Self {
+        self.resolved_bugs = bugs;
+        self
+    }
 }
 
 /// Abstract a form + its stories into a shareable [`DesignReference`]. Strips the
@@ -118,6 +154,9 @@ pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignRefere
         app_kind,
         summary,
         stories,
+        // Fix history is attached by the caller (it lives on the Project, not the
+        // form), via `DesignReference::with_resolved_bugs`.
+        resolved_bugs: Vec::new(),
     }
 }
 
@@ -265,5 +304,38 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let back: SharingPreferences = serde_json::from_str(&json).unwrap();
         assert_eq!(back, prefs);
+    }
+
+    #[test]
+    fn resolved_bugs_travel_with_a_shared_design() {
+        let design = abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![
+            ResolvedBug::new(
+                "A booking could be made past the seat limit",
+                "Added a check that rejects a booking when the class is full",
+            ),
+        ]);
+        assert_eq!(design.resolved_bugs.len(), 1);
+        // Fix knowledge round-trips and carries no private specifics.
+        let json = serde_json::to_string(&design).unwrap();
+        let back: DesignReference = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.resolved_bugs[0].fix, design.resolved_bugs[0].fix);
+        assert!(!json.contains("PRIVATE"));
+    }
+
+    #[tokio::test]
+    async fn corpus_carries_fix_knowledge_to_the_next_user() {
+        let corpus = InMemoryDesignCorpus::new();
+        let shared = abstract_design(&rental_form(), &[]).with_resolved_bugs(vec![
+            ResolvedBug::new("Late fee applied twice", "Made the late-fee job idempotent"),
+        ]);
+        corpus.contribute(shared).await;
+
+        let mut second = IntakeForm::sample_app();
+        second.entities[0].name = "Tenant".into();
+        let hits = corpus.similar(&second).await;
+        assert_eq!(hits.len(), 1);
+        // The next builder inherits the prior fix.
+        assert_eq!(hits[0].resolved_bugs.len(), 1);
+        assert!(hits[0].resolved_bugs[0].fix.contains("idempotent"));
     }
 }

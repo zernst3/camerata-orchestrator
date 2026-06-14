@@ -71,8 +71,8 @@ pub use review::{
     StubRefinementReviewer,
 };
 pub use sharing::{
-    abstract_design, DesignCorpus, DesignReference, InMemoryDesignCorpus, SharingPreferences,
-    CONTRIBUTE_BENEFIT, USE_HISTORICAL_BENEFIT,
+    abstract_design, DesignCorpus, DesignReference, InMemoryDesignCorpus, ResolvedBug,
+    SharingPreferences, CONTRIBUTE_BENEFIT, USE_HISTORICAL_BENEFIT,
 };
 pub use story::{StoryId, StoryOrigin, UserStory};
 

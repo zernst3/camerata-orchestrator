@@ -400,7 +400,10 @@ impl AppState {
     /// contribution was made.
     pub async fn contribute_if_consented(&self, corpus: &dyn DesignCorpus) -> bool {
         if self.project.sharing.is_contributing() {
-            let design = abstract_design(&self.project.onboarding, self.active_stories());
+            // Attach the project's fix history so the corpus carries bug knowledge,
+            // not just app shapes.
+            let design = abstract_design(&self.project.onboarding, self.active_stories())
+                .with_resolved_bugs(self.project.resolved_bugs.clone());
             corpus.contribute(design).await;
             true
         } else {
@@ -713,5 +716,22 @@ mod tests {
         };
         assert!(state.contribute_if_consented(&corpus).await);
         assert!(!corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn contributed_design_carries_the_projects_fix_history() {
+        let corpus = InMemoryDesignCorpus::new();
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        state.project.record_fix("A class could be overbooked", "Reject bookings when full");
+        state.project.sharing = SharingPreferences {
+            contribute_design: true,
+            use_historical: false,
+        };
+        assert!(state.contribute_if_consented(&corpus).await);
+
+        let hits = corpus.similar(&intake_form_from_inputs(&sample_inputs())).await;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].resolved_bugs.len(), 1);
+        assert!(hits[0].resolved_bugs[0].fix.contains("Reject bookings"));
     }
 }

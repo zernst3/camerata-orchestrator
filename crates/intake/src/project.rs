@@ -112,6 +112,11 @@ pub struct Project {
     /// See [`crate::sharing`].
     #[serde(default)]
     pub sharing: crate::sharing::SharingPreferences,
+    /// Bugs that were reported and fixed over this app's life. Shared (abstracted)
+    /// with the design when the user opts in, so future similar apps inherit the
+    /// fixes. See [`crate::sharing::ResolvedBug`].
+    #[serde(default)]
+    pub resolved_bugs: Vec<crate::sharing::ResolvedBug>,
 }
 
 impl Project {
@@ -127,7 +132,20 @@ impl Project {
             executions: 0,
             phase: Phase::Onboarding,
             sharing: crate::sharing::SharingPreferences::default(),
+            resolved_bugs: Vec::new(),
         }
+    }
+
+    /// Record a fixed bug in the project's history (symptom + what changed). Called
+    /// when a post-build bug session's fix is built and accepted. This is the fix
+    /// knowledge that, with consent, enriches the shared corpus.
+    pub fn record_fix(
+        &mut self,
+        symptom: impl Into<String>,
+        fix: impl Into<String>,
+    ) {
+        self.resolved_bugs
+            .push(crate::sharing::ResolvedBug::new(symptom, fix));
     }
 
     /// Set the project's sharing consents (builder form), e.g. from the
@@ -443,6 +461,16 @@ mod tests {
         let mut p = Project::new("p1", onboarding());
         let err = p.finish_execution().unwrap_err();
         assert_eq!(err, LifecycleError::WrongPhase { actual: Phase::Onboarding });
+    }
+
+    #[test]
+    fn record_fix_accumulates_bug_history() {
+        let mut p = Project::new("p1", onboarding());
+        assert!(p.resolved_bugs.is_empty());
+        p.record_fix("Booking allowed past the seat limit", "Reject when full");
+        p.record_fix("Cancelled seat did not free up", "Free the seat on cancel");
+        assert_eq!(p.resolved_bugs.len(), 2);
+        assert_eq!(p.resolved_bugs[1].fix, "Free the seat on cancel");
     }
 
     #[test]

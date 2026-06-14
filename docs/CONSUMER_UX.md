@@ -266,8 +266,10 @@ Inside the refinement session the user is offered two independent, opt-in choice
 - **Share my design to help future apps.** If a user opts in, their design documents
   and stories are contributed (ABSTRACTED, never the business's data or private
   notes) to a corpus Camerata draws on when the NEXT person builds a similar app. The
-  copy says plainly: opting in helps Camerata build better, more consistent apps for
-  everyone, and only the shape of the app is shared.
+  shared design includes the **bug stories AND their fixes** (what went wrong and what
+  changed to resolve it), so future similar apps inherit hard-won fix knowledge, not
+  just app shapes. The copy says plainly: opting in helps Camerata build better, more
+  consistent apps for everyone, and only the shape of the app is shared.
 - **Use historical data to influence my design.** If a user opts in, Camerata seeds
   their refinement from prior consented designs for similar apps (a second person
   building a rental-payment app starts from the shape of one that already exists). The
