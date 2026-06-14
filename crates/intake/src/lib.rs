@@ -35,6 +35,7 @@ pub mod form;
 pub mod plan;
 pub mod project;
 pub mod refinement;
+pub mod review;
 pub mod story;
 
 pub use clarify::{
@@ -59,6 +60,10 @@ pub use project::{LifecycleError, Phase, Project};
 pub use refinement::{
     Actor, BugReport, Escalation, RefinementContext, RefinementReview, RefinementSession,
     RefinementTurn, SessionState,
+};
+pub use review::{
+    ClaudeRefinementReviewer, RefineOutcome, RefinementDriver, RefinementReviewer, ReviewError,
+    StubRefinementReviewer,
 };
 pub use story::{StoryId, StoryOrigin, UserStory};
 

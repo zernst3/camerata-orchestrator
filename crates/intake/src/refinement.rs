@@ -206,6 +206,7 @@ pub struct RefinementReview {
     #[serde(default)]
     pub suggestions: Vec<ProductSuggestion>,
     /// The AI's updated confidence after this review.
+    #[serde(default)]
     pub confidence: ConfidenceScore,
     /// The honesty verdict at this point (may flip to architect/too-complex).
     #[serde(default)]
@@ -329,10 +330,20 @@ impl RefinementSession {
         self.user_turn("Edited a story");
     }
 
-    /// USER answers the latest open questions, folding a clarification round in.
-    /// Records a user turn and moves to `AwaitingReview`.
+    /// USER answers the latest open questions. If the last clarification round is
+    /// open (the AI posed questions but they are unanswered), this FILLS that
+    /// round's answers in place; otherwise it appends a new round. Either way it
+    /// records a user turn and moves to `AwaitingReview`. Filling-in-place keeps
+    /// the transcript one-round-per-exchange (the AI asks, the user answers the
+    /// same round) rather than doubling it.
     pub fn answer(&mut self, round: ClarificationRound) {
-        self.clarifications.push(round);
+        match self.clarifications.last_mut() {
+            Some(last) if last.answers.is_empty() => {
+                last.questions = round.questions;
+                last.answers = round.answers;
+            }
+            _ => self.clarifications.push(round),
+        }
         self.user_turn("Answered clarifications");
     }
 
