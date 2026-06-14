@@ -12,6 +12,7 @@ members = [
     "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process)
+    "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
 ]
 
 [workspace.lints.rust]
