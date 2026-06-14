@@ -745,4 +745,38 @@ html, body {
   border-radius: var(--r-sm);
   margin: 0;
 }
+
+/* Intake style picker: palette swatches + selectable chips */
+.chip.selected {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-ink);
+}
+.swatch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.swatch {
+  font: inherit;
+  text-align: left;
+  background: var(--surface);
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.swatch:hover { box-shadow: var(--shadow-card); }
+.swatch.selected { border-color: var(--accent); box-shadow: var(--shadow-card); }
+.swatch-chips { display: flex; gap: 5px; }
+.swatch-chip {
+  width: 22px; height: 22px; border-radius: 6px; display: inline-block;
+}
+.swatch-name { font-weight: 600; font-size: 14px; color: var(--ink); }
+.swatch-desc { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
 "#;

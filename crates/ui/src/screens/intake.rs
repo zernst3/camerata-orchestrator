@@ -8,6 +8,8 @@
 
 use dioxus::prelude::*;
 
+use camerata_intake::{ButtonStyle, FontChoice, StylePreferences, SHIPPED_PALETTES};
+
 use crate::app_state::{AppState, EntityInput, FieldInput, IntakeInputs, RoleInput};
 use crate::data;
 use crate::Screen;
@@ -20,6 +22,7 @@ enum Section {
     People,
     Things,
     Constraints,
+    Style,
 }
 
 #[component]
@@ -39,13 +42,16 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
 
     let roles = use_signal(data::seed_roles);
     let entities = use_signal(data::seed_entities);
+    // The look-and-feel selections (the shipped style kit), default = no preference.
+    let style = use_signal(StylePreferences::default);
 
     let advance = move |_| {
         let next = match section() {
             Section::About => Some(Section::People),
             Section::People => Some(Section::Things),
             Section::Things => Some(Section::Constraints),
-            Section::Constraints => None,
+            Section::Constraints => Some(Section::Style),
+            Section::Style => None,
         };
         match next {
             Some(s) => section.set(s),
@@ -74,8 +80,7 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                             features: e.features,
                         })
                         .collect(),
-                    // The style picker UI section is a later pass; default for now.
-                    style: Default::default(),
+                    style: style(),
                 };
                 app.set(Some(AppState::from_intake("project_1", &inputs)));
                 screen.set(Screen::Clarify);
@@ -83,7 +88,7 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
         }
     };
 
-    let is_last = section() == Section::Constraints;
+    let is_last = section() == Section::Style;
     let primary_label = if is_last { "Talk to the engineer" } else { "Next" };
 
     rsx! {
@@ -109,6 +114,7 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                         on_change: move |v| constraints.set(v),
                     }
                 },
+                Section::Style => rsx! { StyleSection { style } },
             }
 
             div { class: "actions",
@@ -122,6 +128,7 @@ pub fn IntakeScreen(screen: Signal<Screen>) -> Element {
                                 Section::People => Section::About,
                                 Section::Things => Section::People,
                                 Section::Constraints => Section::Things,
+                                Section::Style => Section::Constraints,
                             };
                             section.set(prev);
                         },
@@ -211,6 +218,80 @@ fn ThingsSection(entities: Signal<Vec<data::Entity>>) -> Element {
                         }
                         span { class: "field-name", "{field.name}" }
                         span { class: "type-label", "{field.type_label}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn StyleSection(mut style: Signal<StylePreferences>) -> Element {
+    let current = style();
+    let selected_palette = current.palette_id.clone();
+    let button_style = current.button_style;
+    let font = current.font;
+
+    rsx! {
+        h1 { class: "h1", "What should it look like?" }
+        p { class: "lede", "Pick a look you like. These are starting points the engineer will build from; you can change any of it later. There is no wrong answer." }
+
+        p { class: "section-label", "Color palette" }
+        div { class: "swatch-grid",
+            for palette in SHIPPED_PALETTES.iter() {
+                {
+                    let id = palette.id.to_string();
+                    let is_sel = selected_palette.as_deref() == Some(palette.id);
+                    let cls = if is_sel { "swatch selected" } else { "swatch" };
+                    rsx! {
+                        button {
+                            class: "{cls}",
+                            onclick: move |_| {
+                                style.write().palette_id = Some(id.clone());
+                            },
+                            div { class: "swatch-chips",
+                                span { class: "swatch-chip", style: "background: {palette.background};" }
+                                span { class: "swatch-chip", style: "background: {palette.surface}; border:1px solid #0001;" }
+                                span { class: "swatch-chip", style: "background: {palette.accent};" }
+                                span { class: "swatch-chip", style: "background: {palette.ink};" }
+                            }
+                            span { class: "swatch-name", "{palette.name}" }
+                            span { class: "swatch-desc", "{palette.description}" }
+                        }
+                    }
+                }
+            }
+        }
+
+        p { class: "section-label", "Buttons" }
+        div { class: "chips",
+            for opt in [ButtonStyle::Rounded, ButtonStyle::Pill, ButtonStyle::Blocky] {
+                {
+                    let is_sel = button_style == opt;
+                    let cls = if is_sel { "chip selected" } else { "chip" };
+                    rsx! {
+                        button {
+                            class: "{cls}",
+                            onclick: move |_| { style.write().button_style = opt; },
+                            "{opt.label()}"
+                        }
+                    }
+                }
+            }
+        }
+
+        p { class: "section-label", "Font" }
+        div { class: "chips",
+            for opt in [FontChoice::System, FontChoice::Serif, FontChoice::Geometric, FontChoice::Mono] {
+                {
+                    let is_sel = font == opt;
+                    let cls = if is_sel { "chip selected" } else { "chip" };
+                    rsx! {
+                        button {
+                            class: "{cls}",
+                            onclick: move |_| { style.write().font = opt; },
+                            "{opt.label()}"
+                        }
                     }
                 }
             }
