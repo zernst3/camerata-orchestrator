@@ -8,7 +8,7 @@
   fleet of governed role-scoped agents executes under mechanically enforced rules.
   This is the general-purpose governed-orchestration tool for a developer or a team
   (see `WORKTRACKER_INTEGRATION.md` for the Jira/ADO async bridge).
-- **Tier 2, Small-business app builder (the consumer headline).** A non-technical
+- **Tier 2, Small-business app builder (the larger-TAM bet, on the same engine).** A non-technical
   small-business owner IS the Product Owner, with no developer and no architect in the
   loop. They describe an app in a form, refine it with an AI lead engineer until both
   are confident, get a working app they own on their own cloud, and a standing AI

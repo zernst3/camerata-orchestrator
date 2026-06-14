@@ -73,7 +73,19 @@ This combination is proven in the prototype. A live agent attempted a real secur
 
 ### Why this is a moat
 
-LLMs are probabilistic and cannot reliably verify themselves. This is not a fixable prompt problem; it is a property of the architecture. Deterministic out-of-process checks give a binary result that no amount of model scaling eliminates the need for. The moat is not the intake UI — incumbents can copy an intake. The moat is the **depth of the curated rule corpus** plus the **deterministic gate** plus the design polish required to make the governed path feel effortless. That combination takes years to tune.
+LLMs are probabilistic and cannot reliably verify themselves. This is not a fixable prompt problem; it is a property of the architecture. Deterministic out-of-process checks give a binary result that no amount of model scaling eliminates the need for. The moat is not the intake UI; incumbents can copy an intake. The moat is the **depth of the curated rule corpus** plus the **deterministic gate** plus the design polish required to make the governed path feel effortless. That combination takes years to tune.
+
+### "When the platform ships guardrails as a checkbox, what's left?" (the strongest objection)
+
+This is the sharpest VC objection, and it is correct ABOUT TIER 2. As a consumer feature, "deterministic guardrails" gets absorbed the day Anthropic or a codegen incumbent ships a guardrails toggle, and "depth of corpus + design polish" is a thin moat against a company with 1000x the distribution. We concede this directly. It is the central reason the two tiers carry equal weight and Tier 1 is named the defensible near-term wedge.
+
+What a platform-shipped guardrail does NOT replace, and what Tier 1 is:
+
+1. **Integration depth + switching cost.** A vendor guardrail governs one agent inside that vendor's sandbox. It does not mirror an enterprise's Jira/ADO board with per-field source-of-truth, own the provenance / gate-results / sign-off trail and write it back onto their work items, or roll up multi-repo PRs to a single story. An org that has woven Camerata into its tracker, its repos, and its audit trail does not rip that out because a model vendor shipped a toggle. That is infrastructure switching cost, not a feature comparison.
+2. **Provider-neutrality is structurally un-shippable by the platform.** A model vendor's guardrail governs THAT vendor's agents; it is vendor lock by construction. Camerata's gate is provider-neutral by design (an MCP tool-gateway plus an agent-runtime seam, so a non-Claude model swaps in without touching the gate). An enterprise that refuses to bet its governance and audit posture on a single model vendor needs exactly the neutral layer, and the platform cannot ship neutrality without un-locking its own platform. The incumbent's distribution advantage does not help it build the one thing its business model forbids.
+3. **The proven builder strength is the product in Tier 1.** Selling the governed gate as developer/team infrastructure puts deterministic systems architecture (the demonstrated strength) at the center, rather than racing consumer-codegen incumbents on design and go-to-market (muscles not yet demonstrated). The honest read from two cold investor passes: the more fundable near-term wedge is the developer/team infrastructure one, not the consumer race.
+
+So the moat for Tier 1 is not "corpus depth + polish." It is integration depth, audit/provenance ownership, switching cost, and a provider-neutrality the platform is structurally unable to match. Tier 2 remains the larger-TAM bet and the end-to-end demonstration artifact, on the same engine; it is not where the near-term defensibility lives, and this document no longer pretends otherwise.
 
 ---
 

@@ -4,50 +4,73 @@
 > theme: Camerata writes the rules, Chorale renders the tables, the Conductor leads
 > the ensemble.
 
-**Camerata builds and maintains a bespoke software application for a small business
-that has no engineering team, from a form and a conversation, and the business owns
-the result.** A non-technical owner describes what they need, refines it with an AI
-lead engineer until both are confident, watches a governed agent team build it, tries
-it, and publishes it live, never seeing a line of code or an error message. Then a
-standing AI maintenance routine keeps it alive: dependency upgrades, security
-patches, key rotation, the operational care a real team would provide.
+**Camerata is a governed multi-agent engineering platform: a deterministic governance
+gate (mechanically enforced rules, not prompt suggestions) over a fleet of AI coding
+agents.** Every agent action is allowed or denied BEFORE it executes, the result is
+auditable, and the gate is provider-neutral by construction (it does not bet on one
+model vendor). The gate is the core and the moat. It is exposed at two co-equal tiers,
+on one engine.
 
-Underneath that simple surface is the hard part, and the moat: every agent action
-passes through a **deterministic governance gate** (mechanically enforced rules, not
-prompt suggestions). The governance is the reason a non-technical person can trust a
-generated, evolving app at all. It is the invisible engine, not the product.
+## Two co-equal tiers, one engine
 
-## Who it is for
+Both tiers are first-class and built with equal priority.
 
-The small-business middle, NOT individuals making to-do apps, and NOT enterprises.
-The customer is a business whose process fits no off-the-shelf vertical SaaS (a
-studio that rents kilns by the hour AND sells clay by weight AND runs a membership)
-and is currently held together by spreadsheets and email. A few hundred dollars a
-month for an app shaped to exactly how they work, kept alive by governance instead of
-staff, is the cheap option against an agency build or a developer hire. See
-[`docs/POSITIONING.md`](docs/POSITIONING.md) for the full thesis, including the answer
-to "why not just use an established app" and "why doesn't the platform eat this."
-
-## Two tiers, one governed engine
-
-Camerata is explicitly a two-tier product:
-
-- **Tier 1, Enterprise orchestration.** A human architect AND a real Product Owner
-  stay in the loop, collaborating through the work tracker they already use (Jira /
-  Azure DevOps): the PO's tickets and replies flow in, the architect steers, and a
-  fleet of governed role-scoped agents executes. This is the general-purpose
-  governed-orchestration tool for a developer or team, and the foundation the
-  consumer tier is built on. See
+- **Tier 1, Enterprise governed orchestration (the defensible wedge).** A human
+  architect and a real Product Owner stay in the loop, collaborating through the
+  tracker they already use (Jira / Azure DevOps / GitHub). Stories flow in from their
+  board, governed role-scoped agents execute, and Camerata writes provenance, gate
+  results, PR links, and sign-off back onto their work items. Here governance is
+  INFRASTRUCTURE woven into an org's existing workflow, with audit and per-field
+  source-of-truth, not a feature bolted onto a chat box. See
   [`docs/WORKTRACKER_INTEGRATION.md`](docs/WORKTRACKER_INTEGRATION.md).
-- **Tier 2, Small-business app builder (the consumer headline).** A non-technical
-  owner IS the Product Owner, with no developer or architect in the loop. They fill a
-  structured intake form (including a shipped style kit), then work a **refinement
-  session** with an AI lead engineer: an editable list of plain-language user
-  stories, a climbing confidence score, proactive product suggestions, and honest
-  limits. The same refinement loop runs before the build, during it (escalations),
-  and after it (QA + structured bug reports). Camerata is the all-in service,
-  including the standing AI maintenance routine. The whole flow is the artifact. See
-  [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+- **Tier 2, Small-business app builder (the larger-TAM bet).** A non-technical owner
+  IS the Product Owner, with no developer or architect. They describe an app, refine
+  it with an AI lead engineer until both are confident, get a working app they own on
+  their own cloud, and a standing AI maintenance routine keeps it alive. This is the
+  bigger, riskier market and the recordable career artifact, riding the same engine.
+  See [`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+
+## Why this is defensible (the moat, honestly)
+
+The fair critique of Tier 2 is that "AI builds a bespoke app for a non-technical
+business" is a crowded category (Lovable, Bolt, v0, Replit, every vertical SaaS
+bolting on AI), and that governance, AS A CONSUMER FEATURE, gets absorbed the day a
+platform ships deterministic guardrails as a checkbox. That critique is correct, and
+it is exactly why the tiers are weighted equally and why Tier 1 is the defensible
+near-term wedge. A platform guardrail does NOT replace:
+
+- **Integration depth + switching cost.** A vendor guardrail governs one agent in its
+  own sandbox. It does not mirror your Jira/ADO board with per-field source-of-truth,
+  own your provenance / gate-results / sign-off trail and write it back onto your work
+  items, or roll up multi-repo PRs to one story. An org that wires this into its
+  tracker, repos, and audit does not rip it out because a model vendor shipped a toggle.
+- **Provider-neutrality.** A vendor's guardrail governs THAT vendor's agents, which is
+  vendor lock by definition. Camerata's gate is provider-neutral by construction (an
+  MCP gateway plus an agent-runtime seam), which is exactly what an enterprise that
+  refuses to bet its governance on one model vendor needs. The platform cannot ship
+  that without un-locking itself.
+- **The proven strength is the product here.** Tier 1 sells deterministic systems
+  architecture and governance as developer/team infrastructure, where that strength IS
+  the product, rather than racing consumer-codegen incumbents on design and distribution.
+
+Tier 2 is not abandoned; it is the TAM-expansion bet on the same engine and the
+artifact that demonstrates the engine end to end. The fundable, defensible near-term
+wedge is Tier 1. Full thesis in [`docs/POSITIONING.md`](docs/POSITIONING.md).
+
+## Tier 2 in detail
+
+A non-technical owner IS the Product Owner, with no developer or architect in the
+loop. They fill a structured intake form (including a shipped style kit), then work a
+**refinement session** with an AI lead engineer: an editable list of plain-language
+user stories, a climbing confidence score, proactive product suggestions, and honest
+limits. The same refinement loop runs before the build, during it (escalations), and
+after it (QA + structured bug reports). Camerata is the all-in service, including the
+standing AI maintenance routine. The whole flow is the artifact. See
+[`docs/CONSUMER_UX.md`](docs/CONSUMER_UX.md).
+
+The small-business target (NOT individuals making to-do apps, NOT enterprises) and
+the "real competitor is the spreadsheet, not Buildium" thesis are detailed in
+[`docs/POSITIONING.md`](docs/POSITIONING.md).
 
 ## What makes it different
 
