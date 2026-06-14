@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use dioxus::prelude::*;
 
-use camerata_intake::{DesignReference, InMemoryDesignCorpus, StoryId, StubRefinementReviewer, UserStory};
+use camerata_intake::{
+    DesignReference, InMemoryDesignCorpus, StoryId, StubRefinementReviewer, UserStory,
+};
 
 use crate::app_state::AppState;
 use crate::data;
@@ -48,6 +50,11 @@ enum Entry {
 /// Trigger one async review turn. Extracts any new suggestions and the next
 /// open question from the updated session and pushes them into the transcript.
 /// Sets `planned` to true when the reviewer has no more questions.
+///
+/// Threads the clarify screen's reactive signals (all `Copy` Dioxus signals);
+/// grouping them into a struct would not improve clarity here, so the arg count is
+/// allowed for this one render helper.
+#[allow(clippy::too_many_arguments)]
 fn trigger_review(
     mut app: Signal<Option<AppState>>,
     mut transcript: Signal<Vec<Entry>>,

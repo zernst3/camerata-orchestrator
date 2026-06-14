@@ -21,9 +21,9 @@ use chrono::{DateTime, Utc};
 
 use camerata_intake::{
     abstract_design, BugReport, ClarificationRound, DesignCorpus, DesignReference,
-    EntityCapabilities, EntityDefinition, EntityField, FieldType, IntakeForm, Phase, ProductSuggestion,
-    Project, RefinementContext, RefinementReviewer, RefinementSession, ReviewError, StoryId,
-    StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
+    EntityCapabilities, EntityDefinition, EntityField, FieldType, IntakeForm, Phase,
+    ProductSuggestion, Project, RefinementContext, RefinementReviewer, RefinementSession,
+    ReviewError, StoryId, StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
 };
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, PersistenceError, RevisionOp,
