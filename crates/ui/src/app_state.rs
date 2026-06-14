@@ -20,9 +20,10 @@
 use chrono::{DateTime, Utc};
 
 use camerata_intake::{
-    abstract_design, DesignCorpus, DesignReference, EntityCapabilities, EntityDefinition,
-    EntityField, FieldType, IntakeForm, Phase, Project, RefinementReviewer, RefinementSession,
-    ReviewError, StoryId, StylePreferences, UserRole, UserStory, ViewKind, ViewSpec,
+    abstract_design, BugReport, DesignCorpus, DesignReference, EntityCapabilities,
+    EntityDefinition, EntityField, FieldType, IntakeForm, Phase, Project, RefinementContext,
+    RefinementReviewer, RefinementSession, ReviewError, StoryId, StylePreferences, UserRole,
+    UserStory, ViewKind, ViewSpec,
 };
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, PersistenceError, RevisionOp,
@@ -420,6 +421,23 @@ impl AppState {
     pub async fn withdraw_from_corpus(&self, corpus: &dyn DesignCorpus) {
         corpus.withdraw(&self.project.id).await;
     }
+
+    /// File a structured bug after QA: opens a POST-BUILD refinement session seeded
+    /// with the report (which becomes a first-class bug story), so the fix runs
+    /// through the same governed loop as a feature. The session id is derived from
+    /// how many sessions have run.
+    pub fn file_bug(&mut self, report: BugReport) {
+        let session_id = format!("session_{}", self.project.session_count() + 1);
+        self.project
+            .begin_session(session_id, RefinementContext::PostBuild { bugs: vec![report] });
+    }
+
+    /// Record that a reported bug was fixed (symptom + what changed) into the
+    /// project's history. With the user's consent this later enriches the shared
+    /// corpus so future similar apps inherit the fix.
+    pub fn record_fix(&mut self, symptom: impl Into<String>, fix: impl Into<String>) {
+        self.project.record_fix(symptom, fix);
+    }
 }
 
 // ─── persistence bridge (every edit becomes a versioned revision) ────────────
@@ -761,5 +779,33 @@ mod tests {
         // Opt out at any time: the shared data is deleted from the corpus.
         state.withdraw_from_corpus(&corpus).await;
         assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+    }
+
+    #[test]
+    fn filing_a_bug_opens_a_post_build_session_with_a_bug_story() {
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        let sessions_before = state.project.session_count();
+        state.file_bug(BugReport::new(
+            "Class list",
+            "tapped Book on a full class",
+            "to join a waitlist",
+            "nothing happened",
+        ));
+        assert_eq!(state.project.session_count(), sessions_before + 1);
+        let session = state.active_session().unwrap();
+        assert_eq!(session.context.label(), "post_build");
+        // The report became a first-class bug story.
+        assert!(session
+            .stories
+            .iter()
+            .any(|s| s.origin == camerata_intake::StoryOrigin::BugReport));
+    }
+
+    #[test]
+    fn recording_a_fix_feeds_the_project_history() {
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+        state.record_fix("Overbooking was possible", "Reject bookings when full");
+        assert_eq!(state.project.resolved_bugs.len(), 1);
+        assert_eq!(state.project.resolved_bugs[0].fix, "Reject bookings when full");
     }
 }
