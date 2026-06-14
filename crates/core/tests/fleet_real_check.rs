@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! End-to-end proof that LAYER-2 fires INSIDE THE FLEET against a REAL check.
 //!
 //! The unit tests in `src/fleet.rs` drive the per-stage bounce loop with a

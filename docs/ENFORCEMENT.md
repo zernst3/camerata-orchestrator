@@ -241,19 +241,23 @@ every push and pull request, by `.github/workflows/ci.yml`:
 - **Zero warnings.** CI runs `cargo clippy --workspace --all-targets -- -D warnings`.
   Any clippy or rustc warning fails the build. This is the standard serious-Rust
   bar, enforced, not assumed.
+- **`unwrap_used = "deny"`**, workspace-wide. Set in `[workspace.lints.clippy]` in
+  `Cargo.toml`. `clippy.toml` sets `allow-unwrap-in-tests = true` so `#[test]`
+  functions and `#[cfg(test)]` modules are exempt. Integration tests under
+  `crates/*/tests/` carry a file-level `#![allow(clippy::unwrap_used)]` for the
+  same reason. The non-test production path is enforced, not promised.
 - **Formatting.** `cargo fmt --all -- --check` gates every change.
 - **Tests.** `cargo test --workspace --locked` must pass.
 
 What is TRACKED but not yet denied, stated plainly in the same honest spirit as the
 rest of this document (the project does not claim enforcement it does not have):
 
-- **`unwrap`/`expect`/`panic` removal.** There are roughly 220 `.unwrap()`/`.expect()`
-  call sites in non-test code (many legitimate, e.g. mutex locks). Denying
-  `clippy::unwrap_used` workspace-wide is the goal, but it is a real cleanup, so it
-  is surfaced today by the NON-BLOCKING `strict-frontier` CI job (which also runs
-  `clippy::pedantic`) rather than fake-denied. The frontier is visible and tracked;
-  the blocking gate above is real and green. When the cleanup lands, `unwrap_used`
-  moves from the informational job into the blocking lint table.
+- **`expect`/`panic` removal.** `.expect()` with a meaningful reason string is the
+  current approved pattern for sites that cannot propagate errors (e.g. mutex
+  locks, compile-time constants). Denying `clippy::expect_used` and
+  `clippy::panic` workspace-wide is the next frontier, surfaced today by the
+  NON-BLOCKING `strict-frontier` CI job along with `clippy::pedantic`. When that
+  cleanup lands, both move from the informational job into the blocking lint table.
 
 The point is the same one this whole document makes about the agents: the bar that
 matters is the one a machine enforces, not the one a human promises. Camerata now

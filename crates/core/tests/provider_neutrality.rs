@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Provider-neutrality proof: the coordinator, gateway, and check runner govern
 //! identically regardless of which concrete agent driver is in use.
 //!

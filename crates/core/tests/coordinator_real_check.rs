@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! End-to-end proof of LAYER-2 bounce-and-revise with a REAL check.
 //!
 //! The unit tests in `src/coordinator.rs` drive the bounce loop with a

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Integration test for the REAL layer-2 fmt subprocess path.
 //!
 //! Unlike the unit tests in `src/parse.rs` (which feed static fixture strings

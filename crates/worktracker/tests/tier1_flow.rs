@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Tier-1 end-to-end composition test: a real Product Owner participates from their
 //! board through the WorkItemProvider port, the same way for any provider.
 //!

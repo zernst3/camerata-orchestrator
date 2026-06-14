@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 //! Integration-level acceptance test (ORCH-NEW-PATH-TESTS-1).
 //!
 //! The "planted-violation acceptance run" proving the engine is wired: it

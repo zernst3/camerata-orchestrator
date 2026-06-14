@@ -39,9 +39,12 @@ jobs:
         run: cargo test --workspace --locked
 
   # A non-blocking informational pass that surfaces the STRICTER bar Camerata is
-  # working toward (unwrap/expect/panic removal, pedantic), without failing the
-  # build today. Honest staging, in the same spirit as docs/ENFORCEMENT.md: the
+  # working toward (expect/panic removal, pedantic), without failing the build
+  # today. Honest staging, in the same spirit as docs/ENFORCEMENT.md: the
   # blocking gate above is real; this is the tracked, not-yet-denied frontier.
+  #
+  # Note: unwrap_used is NO LONGER in this job. It is now denied in the blocking
+  # gate via [workspace.lints.clippy] unwrap_used = "deny" in Cargo.toml.
   strict-frontier:
     name: Strict frontier (informational, non-blocking)
     runs-on: ubuntu-latest
@@ -55,6 +58,5 @@ jobs:
         run: >
           cargo clippy --workspace --all-targets --
           -W clippy::pedantic
-          -W clippy::unwrap_used
           -W clippy::expect_used
           -W clippy::panic

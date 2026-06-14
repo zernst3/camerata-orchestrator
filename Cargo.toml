@@ -21,9 +21,12 @@ members = [
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-# The bar is "no warnings" (enforced via -D warnings in CI). The restriction
-# lints below are tracked-but-not-yet-denied (e.g. unwrap_used across ~222 sites);
-# do NOT add them as deny/warn here, it would break the -D warnings gate.
+# unwrap_used is now denied workspace-wide. clippy.toml sets allow-unwrap-in-tests = true
+# so #[test] fns and #[cfg(test)] modules are exempt. Integration tests under
+# crates/*/tests/ carry a file-level #![allow(clippy::unwrap_used)] for the same reason.
+# The remaining frontier (pedantic, expect_used, panic) is tracked in the strict-frontier
+# CI job but is not yet denied here.
+unwrap_used = "deny"
 
 [workspace.package]
 edition = "2021"
