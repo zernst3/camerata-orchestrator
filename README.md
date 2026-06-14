@@ -66,16 +66,26 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
 
 This is not a design folder. It is a compiling, tested, all-Rust workspace:
 
-- Ten crates, the full Product-Owner flow built end to end (intake, refinement, the
-  reviewer, versioned persistence, the shared corpus, the post-build bug loop),
-  composed into a Dioxus consumer UI.
-- 260+ passing tests, zero warnings, no `todo!`/`unimplemented!` stubs.
+- A 14-crate workspace, 500+ passing tests, zero warnings, no
+  `todo!`/`unimplemented!` stubs, governing its OWN source in CI (unsafe forbidden,
+  clippy `-D warnings`, fmt, tests; see [`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
+- **Tier 2 (proven in code):** the full Product-Owner flow end to end (intake +
+  style kit, refinement, the reviewer, versioned persistence, the shared corpus, the
+  post-build bug loop), composed into a Dioxus UI, with the build screen wired to the
+  real governed fleet and publish wired to a deploy seam.
+- **Tier 1 (built out):** the `WorkItemProvider` port with a native provider plus
+  Jira, Azure DevOps, and GitHub adapters; the async clarify-bridge; and SyncPolicy
+  per-field source-of-truth + echo suppression (loop avoidance), with an end-to-end
+  flow test.
 - The governance gate is verified denying a real `claude -p` agent's tool call end to
-  end (see [`docs/LIVE_RUN_VERIFICATION.md`](docs/LIVE_RUN_VERIFICATION.md) and
-  [`docs/RUST_CORE_VERIFICATION.md`](docs/RUST_CORE_VERIFICATION.md)).
+  end ([`docs/LIVE_RUN_VERIFICATION.md`](docs/LIVE_RUN_VERIFICATION.md),
+  [`docs/RUST_CORE_VERIFICATION.md`](docs/RUST_CORE_VERIFICATION.md)), and
+  provider-neutrality is proven with a second non-Claude driver
+  ([`docs/PROVIDER_NEUTRALITY.md`](docs/PROVIDER_NEUTRALITY.md)).
 
-Still ahead: wiring the build screen to live agent generation in-app, a
-bring-your-own-infra deploy adapter, and the standing maintenance agent (spec'd).
+Still ahead: live execution wiring for the external worktracker adapters (OAuth /
+webhooks), the Azure deploy adapter's live execution (BYO-infra credentials), and
+closing the tracked unwrap-cleanup frontier into the blocking lint bar.
 
 ## Read in this order
 
