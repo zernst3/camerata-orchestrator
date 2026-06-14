@@ -438,6 +438,14 @@ impl AppState {
     pub fn record_fix(&mut self, symptom: impl Into<String>, fix: impl Into<String>) {
         self.project.record_fix(symptom, fix);
     }
+
+    /// The build plan for this project: derived deterministically from the frozen
+    /// onboarding document (the same `Plan` shape the governed fleet builds, the
+    /// same the CLI po-demo uses). The Build screen hands this to the governed fleet
+    /// runner (`camerata_fleet::build_from_plan`).
+    pub fn build_plan(&self) -> camerata_intake::Plan {
+        camerata_intake::StubLeadEngineer::plan_for(&self.project.onboarding)
+    }
 }
 
 // ─── persistence bridge (every edit becomes a versioned revision) ────────────
@@ -799,6 +807,16 @@ mod tests {
             .stories
             .iter()
             .any(|s| s.origin == camerata_intake::StoryOrigin::BugReport));
+    }
+
+    #[test]
+    fn build_plan_is_derived_and_buildable() {
+        let state = AppState::from_intake("proj_1", &sample_inputs());
+        let plan = state.build_plan();
+        assert!(plan.is_buildable());
+        // The plan names the app and references its entity (Class).
+        assert_eq!(plan.app_name, "Riverside Pottery");
+        assert!(plan.tasks.iter().any(|t| t.description.contains("Class")));
     }
 
     #[test]

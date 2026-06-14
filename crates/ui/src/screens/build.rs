@@ -1,58 +1,124 @@
 //! Screen 3 — BUILD. Calm, governed construction, narrated as a single slow
 //! progress story (CONSUMER_UX.md §3). No logs, no terminal, no jitter, no
-//! percentages — just human-readable stages completing one by one with a quiet
+//! percentages, just human-readable stages completing one by one with a quiet
 //! check, the way a well-made product reassures you that something is handled.
 //!
-//! The lead engineer stays reachable: one genuine mid-build question surfaces
-//! once, calmly, and the progress quietly waits on the user's answer (never an
-//! error, just the engineer still listening). When the gate bounces an agent
-//! underneath, a stage would simply take a little longer — here that's mocked as
-//! the hand-tuned dwell on each stage.
+//! Two modes share this screen:
 //!
-//! The motion is driven by a single `use_future` that walks the stage list with
-//! `tokio::time::sleep`. The desktop renderer runs on Tokio, so the sleep just
-//! works; the future pauses itself on the question and resumes when answered.
+//! - DEFAULT (the recordable demo): a calm MOCKED staged narrative with one genuine
+//!   mid-build question. Always fast, always smooth, no environment required. This
+//!   is what you screen-record.
+//! - LIVE (set `CAMERATA_LIVE_BUILD=1`): the screen derives the real `Plan` from the
+//!   project and runs the REAL governed fleet via `build_run::run_build` (gateway +
+//!   `claude -p` agents), streaming its `BuildEvent`s into the same calm stage list.
+//!   Gated behind an env var because a live agent build is slow and spends tokens, so
+//!   it is opt-in, not the default demo path. If the live build errors (no gateway
+//!   built, `claude` unavailable), the screen still ends calmly into QA, never an
+//!   error message.
+//!
+//! The motion is driven by a single `use_future`. The desktop renderer runs on
+//! Tokio, so the `tokio::time::sleep` cadence (demo mode) and the awaited live build
+//! both just work.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dioxus::prelude::*;
 
+use crate::app_state::AppState;
+use crate::build_run::{self, BuildEvent};
 use crate::data;
 use crate::Screen;
 
 #[component]
 pub fn BuildScreen(screen: Signal<Screen>) -> Element {
+    let app = use_context::<Signal<Option<AppState>>>();
+    // Opt-in live build: only run the real governed fleet when explicitly asked.
+    let live_mode = std::env::var("CAMERATA_LIVE_BUILD").is_ok();
+
+    // ── demo (mocked) state ──
     let stages = data::BUILD_STAGES;
     let mid_q = use_signal(data::mid_build_question);
-
-    // How many stages have completed. `active` is `done`, and `done == len` means
-    // the build is finished and we can move the user to QA.
     let mut done = use_signal(|| 0usize);
-    // When `Some`, the build is paused on the mid-build question and waits for an
-    // answer before continuing past `after_stage`.
     let mut pending_q = use_signal(|| false);
     let answered_q = use_signal(|| false);
 
-    // The single driver: advance one stage at a time on a calm cadence, pausing
-    // when the mid-build question is due until the user has answered it.
+    // ── live state ──
+    let mut live_stages = use_signal(Vec::<(String, bool)>::new);
+
     let _driver = use_future(move || {
         let stages = stages;
         let after = mid_q().after_stage;
         async move {
+            // LIVE: derive the plan and run the real governed fleet. The build's
+            // progress callback must be Send+Sync (it may run off-thread), but a
+            // Dioxus signal is not Sync, so the callback pushes events into a shared
+            // buffer and THIS future (on the UI side) drains the buffer into the
+            // signal.
+            if live_mode {
+                let plan = app.peek().as_ref().map(|s| s.build_plan());
+                if let Some(plan) = plan {
+                    let buffer: Arc<Mutex<Vec<BuildEvent>>> = Arc::new(Mutex::new(Vec::new()));
+                    let done_flag = Arc::new(AtomicBool::new(false));
+
+                    // Run the real governed build off in its own task.
+                    {
+                        let buffer = buffer.clone();
+                        let done_flag = done_flag.clone();
+                        spawn(async move {
+                            let on_event = move |ev: BuildEvent| {
+                                if let Ok(mut b) = buffer.lock() {
+                                    b.push(ev);
+                                }
+                            };
+                            // Best-effort: an error (no gateway/claude) ends calmly.
+                            let _ = build_run::run_build(&plan, &on_event).await;
+                            done_flag.store(true, Ordering::SeqCst);
+                        });
+                    }
+
+                    // Drain the buffer into the visible stage list until the build
+                    // finishes, mapping each event to a calm label.
+                    let drain = move |live_stages: &mut Signal<Vec<(String, bool)>>| {
+                        let evs: Vec<BuildEvent> =
+                            buffer.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
+                        for ev in evs {
+                            if let Some(last) = live_stages.write().last_mut() {
+                                last.1 = true;
+                            }
+                            if let Some(label) = build_run::event_label(&ev) {
+                                live_stages.write().push((label, false));
+                            }
+                        }
+                    };
+                    loop {
+                        drain(&mut live_stages);
+                        if done_flag.load(Ordering::SeqCst) {
+                            drain(&mut live_stages); // final events
+                            if let Some(last) = live_stages.write().last_mut() {
+                                last.1 = true;
+                            }
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                screen.set(Screen::Qa);
+                return;
+            }
+
+            // DEMO: the calm mocked narrative, pausing on the one genuine question.
             loop {
                 let i = done();
                 if i >= stages.len() {
-                    // Finished. A short, settled beat, then hand off to QA.
                     tokio::time::sleep(Duration::from_millis(900)).await;
                     screen.set(Screen::Qa);
                     break;
                 }
-                // If the genuine question is due after this stage and unanswered,
-                // surface it and wait. The progress holds calmly, not as an error.
                 if i == after + 1 && !answered_q() {
                     pending_q.set(true);
-                    // Poll gently until the user answers; cheap, and keeps the
-                    // driver as the single source of motion.
                     loop {
                         tokio::time::sleep(Duration::from_millis(120)).await;
                         if answered_q() {
@@ -66,6 +132,30 @@ pub fn BuildScreen(screen: Signal<Screen>) -> Element {
             }
         }
     });
+
+    if live_mode {
+        let live = live_stages();
+        return rsx! {
+            div { class: "page build",
+                p { class: "eyebrow", "Building" }
+                h1 { class: "h1", "Putting it together" }
+                p { class: "lede", "I'm building your app for real and checking every piece against your rules as I go." }
+                div { class: "build-list",
+                    for (label , is_done) in live.iter().cloned() {
+                        div { class: if is_done { "build-stage done" } else { "build-stage active" },
+                            span { class: "stage-mark",
+                                if is_done { "✓" } else { span { class: "spinner" } }
+                            }
+                            span { class: "stage-text", "{label}" }
+                        }
+                    }
+                }
+                if live.is_empty() {
+                    p { class: "build-caption", "Setting things up." }
+                }
+            }
+        };
+    }
 
     let total = stages.len();
     let done_n = done();
@@ -81,10 +171,7 @@ pub fn BuildScreen(screen: Signal<Screen>) -> Element {
                     {
                         let cls = if i < done_n {
                             "build-stage done"
-                        } else if i == done_n && !pending_q() {
-                            "build-stage active"
-                        } else if i == done_n && pending_q() {
-                            // Held at the current stage while the question is open.
+                        } else if i == done_n {
                             "build-stage active"
                         } else {
                             "build-stage pending"
@@ -126,8 +213,6 @@ fn MidBuildQuestion(q: data::MidBuildQuestion, answered: Signal<bool>) -> Elemen
     let mut chosen = use_signal(|| Option::<String>::None);
 
     if let Some(text) = chosen() {
-        // Once answered, show the exchange settled, then it folds away as the
-        // build resumes.
         return rsx! {
             div { class: "midq settled",
                 div { class: "midq-answer", "✓ " "{text}" }

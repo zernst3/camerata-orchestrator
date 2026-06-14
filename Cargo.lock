@@ -445,6 +445,8 @@ version = "0.0.0"
 name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "camerata-fleet",
  "camerata-intake",
  "camerata-persistence",
  "chrono",

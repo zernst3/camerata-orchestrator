@@ -13,6 +13,7 @@
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
 
 mod app_state;
+mod build_run;
 mod data;
 mod screens;
 mod style;
