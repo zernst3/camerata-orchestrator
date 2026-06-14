@@ -18,8 +18,17 @@ pub mod http;
 /// Jira Cloud adapter (Phase D, API-token + Basic auth, JQL-polling inbound).
 pub mod jira;
 
+/// Azure DevOps Boards adapter (Phase E, PAT + Basic auth, WIQL-polling inbound).
+pub mod azure_devops;
+
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use azure_devops::{
+    category_to_status as ado_category_to_status, clarifying_questions_body, comment_body,
+    default_state_for_category, json_patch_state, parse_wiql_workitems, parse_workitem,
+    status_rollup_text, status_to_category as ado_status_to_category, wiql_changed_since,
+    AdoConfig, AdoParsedWorkItem, AdoProvider,
+};
 pub use http::{FakeTransport, HttpResponse, HttpTransport, ReqwestTransport};
 pub use jira::{
     adf_clarifying_questions, adf_comment, category_to_status, jql_updated_since, parse_issue,
