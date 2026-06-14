@@ -341,11 +341,20 @@ fn StoriesPanel(mut app: Signal<Option<AppState>>) -> Element {
                                             let _ = state.contribute_if_consented(&*corpus).await;
                                         }
                                     });
+                                } else {
+                                    // Opt-out: actually delete the shared data.
+                                    let corpus = corpus.clone();
+                                    spawn(async move {
+                                        let snap = app.peek().clone();
+                                        if let Some(state) = &snap {
+                                            state.withdraw_from_corpus(&*corpus).await;
+                                        }
+                                    });
                                 }
                             }
                         },
                     }
-                    span { "Share my design to help improve future apps (only the shape, never your data)" }
+                    span { "Share my design to help improve future apps (only the shape, never your data). You can turn this off anytime, and your shared design is deleted." }
                 }
 
                 label { class: "opt-in",

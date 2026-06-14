@@ -400,15 +400,25 @@ impl AppState {
     /// contribution was made.
     pub async fn contribute_if_consented(&self, corpus: &dyn DesignCorpus) -> bool {
         if self.project.sharing.is_contributing() {
-            // Attach the project's fix history so the corpus carries bug knowledge,
-            // not just app shapes.
+            // Attach the project's id (so it is withdrawable) and its fix history
+            // (so the corpus carries bug knowledge, not just app shapes).
             let design = abstract_design(&self.project.onboarding, self.active_stories())
+                .with_id(self.project.id.clone())
                 .with_resolved_bugs(self.project.resolved_bugs.clone());
             corpus.contribute(design).await;
             true
         } else {
             false
         }
+    }
+
+    /// Withdraw this project's contribution from the corpus (the opt-out /
+    /// right-to-be-forgotten path). Removes the design and every derived vector row
+    /// stamped with this project's id. Called when the user toggles sharing OFF, so
+    /// opting out actually deletes the shared data rather than just stopping future
+    /// shares.
+    pub async fn withdraw_from_corpus(&self, corpus: &dyn DesignCorpus) {
+        corpus.withdraw(&self.project.id).await;
     }
 }
 
@@ -733,5 +743,23 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].resolved_bugs.len(), 1);
         assert!(hits[0].resolved_bugs[0].fix.contains("Reject bookings"));
+    }
+
+    #[tokio::test]
+    async fn opting_out_withdraws_the_contribution() {
+        let corpus = InMemoryDesignCorpus::new();
+        let mut state = AppState::from_intake("proj_1", &sample_inputs());
+
+        // Opt in and contribute.
+        state.project.sharing = SharingPreferences {
+            contribute_design: true,
+            use_historical: false,
+        };
+        assert!(state.contribute_if_consented(&corpus).await);
+        assert!(!corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
+
+        // Opt out at any time: the shared data is deleted from the corpus.
+        state.withdraw_from_corpus(&corpus).await;
+        assert!(corpus.similar(&intake_form_from_inputs(&sample_inputs())).await.is_empty());
     }
 }

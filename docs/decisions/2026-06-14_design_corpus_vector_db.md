@@ -48,9 +48,30 @@ private-by-default; the search index is fuzzy, cross-tenant, and consent-gated. 
 have different correctness, privacy, and durability requirements, so they are
 different stores behind different seams (`ArtifactStore` vs `DesignCorpus`).
 
+## Opt-out is deletion, keyed by id (right to be forgotten)
+
+The user can opt out at ANY time, and opting out must DELETE their data from the
+corpus and its vector index, not merely stop future shares. This requires an id
+reference from the contribution to the index rows:
+
+- Every `DesignReference` carries an `id` (the owning project's id), and that id is
+  stamped on EVERY derived row in the search index (each design, story, and bug-fix
+  vector). It is the foreign key from "a user's contribution" to "the rows that
+  represent it."
+- `DesignCorpus::withdraw(id)` is the opt-out path: it removes the design and, in the
+  vector-DB implementation, every row `WHERE owner_id = id`. `contribute` upserts by
+  the same id, so re-sharing replaces rather than duplicating, and there is never a
+  stale copy a withdrawal could miss.
+- `AppState::withdraw_from_corpus` calls it when the user toggles sharing off, so the
+  UI opt-out actually deletes.
+
+This is why the contribution id is load-bearing, not cosmetic: without it there is no
+way to find and delete a specific user's vectors, and "opt out" would be a lie.
+
 ## Privacy (unchanged, reaffirmed)
 
 Only abstracted shapes ever enter the corpus or its vector index: `abstract_design`
 strips description, constraints, look-and-feel, field values, and story motivations.
 Resolved bugs are shared as plain-language symptom/fix, abstracted the same way.
-Nothing enters the cross-project index without the user's explicit opt-in.
+Nothing enters the cross-project index without the user's explicit opt-in, and the
+user can withdraw it all at any time by id.

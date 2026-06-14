@@ -96,6 +96,13 @@ impl ResolvedBug {
 /// future similar apps inherit hard-won bug knowledge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesignReference {
+    /// The contribution id: the owning project's id, stamped on this design AND
+    /// on every derived row (each design / story / bug-fix vector) in the search
+    /// index. It is the handle that makes opt-out deletable: withdrawing this id
+    /// removes every trace of the contribution from the corpus and its vector DB.
+    /// Empty for an un-contributed, in-flight abstraction.
+    #[serde(default)]
+    pub id: String,
     /// A short, generalized label for the kind of app (e.g. "rental payment app").
     pub app_kind: String,
     /// A one-line, non-identifying summary of the shape.
@@ -112,6 +119,13 @@ impl DesignReference {
     /// Attach a fix history (the resolved bugs from the project). Builder form.
     pub fn with_resolved_bugs(mut self, bugs: Vec<ResolvedBug>) -> Self {
         self.resolved_bugs = bugs;
+        self
+    }
+
+    /// Stamp the contribution id (the owning project's id). Builder form. Required
+    /// before contributing if the design is ever to be withdrawable.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
         self
     }
 }
@@ -151,11 +165,12 @@ pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignRefere
         .collect();
 
     DesignReference {
+        // Id + fix history are attached by the caller (they live on the Project,
+        // not the form), via `with_id` / `with_resolved_bugs`.
+        id: String::new(),
         app_kind,
         summary,
         stories,
-        // Fix history is attached by the caller (it lives on the Project, not the
-        // form), via `DesignReference::with_resolved_bugs`.
         resolved_bugs: Vec::new(),
     }
 }
@@ -172,8 +187,15 @@ pub fn abstract_design(form: &IntakeForm, stories: &[UserStory]) -> DesignRefere
 pub trait DesignCorpus: Send + Sync {
     /// Prior consented designs similar to `form`, best first.
     async fn similar(&self, form: &IntakeForm) -> Vec<DesignReference>;
-    /// Contribute one abstracted design to the corpus.
+    /// Contribute one abstracted design. Upserts by [`DesignReference::id`]: a
+    /// re-contribution from the same project replaces its prior entry rather than
+    /// duplicating it (so the corpus never accumulates stale copies of one app).
     async fn contribute(&self, design: DesignReference);
+    /// Withdraw a contribution by its id (the owning project's id). This is the
+    /// opt-out / right-to-be-forgotten path: it removes the design AND, in a real
+    /// implementation, every derived vector row stamped with that id. Removing a
+    /// missing id is a no-op.
+    async fn withdraw(&self, id: &str);
 }
 
 /// An in-memory [`DesignCorpus`] for tests and the prototype. Similarity is a naive
@@ -221,10 +243,23 @@ impl DesignCorpus for InMemoryDesignCorpus {
     }
 
     async fn contribute(&self, design: DesignReference) {
+        let mut designs = self.designs.lock().expect("corpus mutex poisoned");
+        // Upsert by id: a re-contribution replaces the project's prior entry. An
+        // empty id (un-stamped) always appends (it is not withdrawable).
+        if !design.id.is_empty() {
+            designs.retain(|d| d.id != design.id);
+        }
+        designs.push(design);
+    }
+
+    async fn withdraw(&self, id: &str) {
+        if id.is_empty() {
+            return;
+        }
         self.designs
             .lock()
             .expect("corpus mutex poisoned")
-            .push(design);
+            .retain(|d| d.id != id);
     }
 }
 
@@ -283,6 +318,38 @@ mod tests {
         let hits = corpus.similar(&second).await;
         assert_eq!(hits.len(), 1);
         assert!(hits[0].app_kind.contains("tenant"));
+    }
+
+    #[tokio::test]
+    async fn contribute_upserts_by_id_no_duplicates() {
+        let corpus = InMemoryDesignCorpus::new();
+        let base = abstract_design(&rental_form(), &[]).with_id("proj_42");
+        corpus.contribute(base.clone()).await;
+        // Re-contribute the same project (e.g. after an edit): replaces, not dupes.
+        corpus.contribute(base.with_resolved_bugs(vec![ResolvedBug::new("x", "y")])).await;
+
+        let mut second = IntakeForm::sample_app();
+        second.entities[0].name = "Tenant".into();
+        let hits = corpus.similar(&second).await;
+        assert_eq!(hits.len(), 1, "re-contribution must replace, not duplicate");
+        assert_eq!(hits[0].resolved_bugs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn withdraw_deletes_the_contribution_by_id() {
+        let corpus = InMemoryDesignCorpus::new();
+        corpus
+            .contribute(abstract_design(&rental_form(), &[]).with_id("proj_42"))
+            .await;
+        let mut second = IntakeForm::sample_app();
+        second.entities[0].name = "Tenant".into();
+        assert_eq!(corpus.similar(&second).await.len(), 1);
+
+        // Opt out: withdraw by id removes it entirely.
+        corpus.withdraw("proj_42").await;
+        assert!(corpus.similar(&second).await.is_empty());
+        // Withdrawing an unknown id is a harmless no-op.
+        corpus.withdraw("never_existed").await;
     }
 
     #[tokio::test]

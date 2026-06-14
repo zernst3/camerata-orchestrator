@@ -269,7 +269,11 @@ Inside the refinement session the user is offered two independent, opt-in choice
   shared design includes the **bug stories AND their fixes** (what went wrong and what
   changed to resolve it), so future similar apps inherit hard-won fix knowledge, not
   just app shapes. The copy says plainly: opting in helps Camerata build better, more
-  consistent apps for everyone, and only the shape of the app is shared.
+  consistent apps for everyone, and only the shape of the app is shared. **The user
+  can opt out at any time, and opting out DELETES their shared design from the corpus
+  and its search index.** This is a true right-to-be-forgotten, not just a stop on
+  future shares: every contribution is stamped with the owning project's id, so a
+  withdrawal removes the design and every derived vector row carrying that id.
 - **Use historical data to influence my design.** If a user opts in, Camerata seeds
   their refinement from prior consented designs for similar apps (a second person
   building a rental-payment app starts from the shape of one that already exists). The
