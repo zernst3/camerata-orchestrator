@@ -92,15 +92,98 @@ impl StubRefinementReviewer {
         Self
     }
 
-    /// The derived question pool, in plain language. The stub asks these in order,
-    /// one per turn, until confident.
-    fn question_pool() -> [&'static str; 4] {
-        [
-            "When something fills up or runs out, should people still be able to join a waitlist, or is it simply unavailable?",
-            "If someone cancels, should their spot free up automatically for the next person?",
-            "Who should be able to see personal details like an email: just you, or everyone?",
-            "Should old or finished items drop off the list on their own, or stay visible as history?",
-        ]
+    /// Smart, FORM-DERIVED clarifying questions, in plain language, referencing the
+    /// user's actual entity names. A real staff engineer reads the shape of the app
+    /// and asks about the gaps it implies (money needs a currency, emails imply a
+    /// privacy line, removable things imply soft-delete, links imply referential
+    /// behavior, dates imply history). Capped at 4 so the loop stays tight. This is
+    /// what makes the hero screen feel like a real engineer, deterministically.
+    fn derived_questions(form: &IntakeForm) -> Vec<String> {
+        use crate::form::FieldType;
+        let mut qs: Vec<String> = Vec::new();
+
+        // No roles declared at all: pin down who uses it first.
+        if form.roles.is_empty() {
+            qs.push(
+                "Who are the kinds of people who use this, and what should each be able to do?"
+                    .to_string(),
+            );
+        }
+
+        // A money field needs a currency.
+        if let Some(e) = form.entities.iter().find(|e| {
+            e.fields
+                .iter()
+                .any(|f| matches!(f.field_type, FieldType::Money | FieldType::Decimal))
+        }) {
+            qs.push(format!(
+                "What currency should the money amounts on {} be in?",
+                e.name
+            ));
+        }
+
+        // An email (or any contact detail) implies a privacy line.
+        if let Some(e) = form.entities.iter().find(|e| {
+            e.fields
+                .iter()
+                .any(|f| matches!(f.field_type, FieldType::Email))
+        }) {
+            qs.push(format!(
+                "Who should be able to see the email on a {}: just you, or everyone?",
+                e.name
+            ));
+        }
+
+        // A removable thing implies a soft-delete decision.
+        if let Some(e) = form.entities.iter().find(|e| e.capabilities.can_remove) {
+            qs.push(format!(
+                "When a {} is removed, should it be gone for good, or hidden but recoverable?",
+                e.name
+            ));
+        }
+
+        // A link between entities implies referential behavior.
+        if let Some((e, target)) = form.entities.iter().find_map(|e| {
+            e.fields.iter().find_map(|f| match &f.field_type {
+                FieldType::LinkTo(t) => Some((e, t.clone())),
+                _ => None,
+            })
+        }) {
+            let target = if target.trim().is_empty() {
+                "linked item".to_string()
+            } else {
+                target
+            };
+            qs.push(format!(
+                "When a {target} is removed, what should happen to the {} records that point to it?",
+                e.name
+            ));
+        }
+
+        // A date implies a history-vs-drop-off decision.
+        if qs.len() < 4 {
+            if let Some(e) = form.entities.iter().find(|e| {
+                e.fields
+                    .iter()
+                    .any(|f| matches!(f.field_type, FieldType::Date | FieldType::DateTime))
+            }) {
+                qs.push(format!(
+                    "Should past {} records drop off the list on their own, or stay visible as history?",
+                    e.name
+                ));
+            }
+        }
+
+        // Always have at least one question so the conversation has substance.
+        if qs.is_empty() {
+            qs.push(
+                "Is there anything specific about how this should behave that I should pin down before building?"
+                    .to_string(),
+            );
+        }
+
+        qs.truncate(4);
+        qs
     }
 }
 
@@ -111,21 +194,30 @@ impl RefinementReviewer for StubRefinementReviewer {
         session: &RefinementSession,
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
-        // Confidence is a pure function of how many rounds have been answered.
+        // Confidence + readiness are driven by the form-derived checklist: ask one
+        // smart question per turn until every derived question is answered.
         let answered = session
             .clarifications
             .iter()
             .filter(|r| !r.answers.is_empty())
             .count();
-        let raw = STUB_CONFIDENCE_START as usize + STUB_CONFIDENCE_PER_ROUND as usize * answered;
-        let confidence = ConfidenceScore::new(raw.min(96) as u8);
+        let pool = Self::derived_questions(form);
 
-        // Ask the next pooled question only while still below the ready bar.
-        let questions = if confidence.value() < STUB_CONFIDENCE_READY {
-            let pool = Self::question_pool();
-            vec![pool[answered.min(pool.len() - 1)].to_string()]
+        let questions = if answered < pool.len() {
+            vec![pool[answered].clone()]
         } else {
             vec![]
+        };
+
+        // Confidence climbs as questions are answered; once the checklist is clear
+        // it settles at a confident value (a real engineer is sure once the gaps
+        // are closed).
+        let base = (STUB_CONFIDENCE_START as usize + STUB_CONFIDENCE_PER_ROUND as usize * answered)
+            .min(96);
+        let confidence = if questions.is_empty() {
+            ConfidenceScore::new(base.max(92) as u8)
+        } else {
+            ConfidenceScore::new(base as u8)
         };
 
         // On the very first turn, raise an admin suggestion when the form implies
@@ -154,6 +246,7 @@ impl RefinementReviewer for StubRefinementReviewer {
             }
         }
 
+        let ready = questions.is_empty();
         Ok(RefinementReview {
             upserted_stories: vec![],
             removed_story_ids: vec![],
@@ -161,7 +254,7 @@ impl RefinementReviewer for StubRefinementReviewer {
             suggestions,
             confidence,
             verdict: HonestyVerdict::Proceed,
-            note: if confidence.value() >= STUB_CONFIDENCE_READY {
+            note: if ready {
                 "I have what I need. I'm confident I can build this well.".to_string()
             } else {
                 "Reviewed your stories. A couple of things to pin down.".to_string()
@@ -501,6 +594,20 @@ mod tests {
         let r2 = reviewer.review(&session, &form_with_owner()).await.unwrap();
         assert_eq!(r1.confidence, r2.confidence);
         assert_eq!(r1.questions, r2.questions);
+    }
+
+    #[tokio::test]
+    async fn stub_asks_form_specific_questions_naming_the_entity() {
+        // sample_app has an Expense entity with a Money field and can_remove, so the
+        // first derived question is about currency and names the real entity.
+        let reviewer = StubRefinementReviewer::new();
+        let session = RefinementSession::open("s", RefinementContext::PreBuild, vec![]);
+        let review = reviewer.review(&session, &form_with_owner()).await.unwrap();
+        let q = &review.questions[0];
+        assert!(
+            q.to_lowercase().contains("currency") && q.contains("Expense"),
+            "expected a form-specific currency question naming Expense, got: {q}"
+        );
     }
 
     #[tokio::test]
