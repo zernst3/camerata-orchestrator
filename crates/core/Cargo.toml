@@ -14,3 +14,8 @@ anyhow.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Dev-only: the end-to-end coordinator integration test drives the REAL
+# layer-2 RustCheckRunner against a temp worktree. This is a dev-dependency
+# cycle (checks depends on core normally); Cargo permits cycles that exist
+# only through dev-dependencies, so the normal build graph stays acyclic.
+camerata-checks = { path = "../checks" }

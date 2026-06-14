@@ -131,10 +131,17 @@ impl Gateway {
     /// Evaluate a write against the active rule-subset through the SHARED
     /// [`evaluate_call`], so this transport and the in-process `GovernedGateway`
     /// enforce byte-for-byte identical logic.
-    fn evaluate(&self, path: &str) -> Result<(), String> {
+    ///
+    /// BOTH `path` and `content` are forwarded into the `ToolCall.input`: path
+    /// rules (GOV-1) key off `path`, and content rules
+    /// (SEC-NO-HARDCODED-SECRETS-1, SEC-NO-RAW-SQL-CONCAT-1,
+    /// ARCH-NO-SECRETS-IN-URL-1) key off `content`. Omitting `content` here
+    /// would silently disable every content rule over the live transport — the
+    /// gate would load them, report them, and never enforce them.
+    fn evaluate(&self, path: &str, content: &str) -> Result<(), String> {
         let call = ToolCall {
             tool: "gated_write".to_string(),
-            input: serde_json::json!({ "path": path }),
+            input: serde_json::json!({ "path": path, "content": content }),
         };
         match evaluate_call(&self.rule_subset, &call) {
             Decision::Allow => Ok(()),
@@ -160,7 +167,7 @@ impl Gateway {
         let t0 = Instant::now();
         let WriteArgs { path, content } = args.0;
 
-        let decision = match self.evaluate(&path) {
+        let decision = match self.evaluate(&path, &content) {
             Err(rule) => format!("DENIED [{rule}] path={path}"),
             Ok(()) => match std::fs::write(&path, content.as_bytes()) {
                 Ok(()) => format!("ALLOWED: wrote {} bytes to {path}", content.len()),

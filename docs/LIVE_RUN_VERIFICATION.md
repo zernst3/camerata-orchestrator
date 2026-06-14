@@ -9,6 +9,17 @@ delivered per session (not hard-coded).**
 Confidence: HIGH — real subprocesses, real model inference, filesystem-checked,
 rule-subset loaded from the on-disk corpus.
 
+> **STATUS UPDATE (2026-06-13):** The live demo now also proves a REAL security
+> rule. A live agent's write whose content contained a (synthetic, fake)
+> hardcoded credential was DENIED by `SEC-NO-HARDCODED-SECRETS-1` before any
+> filesystem touch, alongside the original `GOV-1` path deny and a clean allow.
+> The authoritative, current account of what is enforced through which lane —
+> layer-1 mechanical gate, layer-2 `CheckRunner` bounce-and-revise, and prose
+> via `AGENTS.md` — including which corpus rules are executable vs. no-op today
+> and the captured secret-denial proof + gate latency, now lives in
+> [`docs/ENFORCEMENT.md`](./ENFORCEMENT.md). The corpus-derived subset described
+> below is now 71 rules (GOV-1 + SEC-NO-HARDCODED-SECRETS-1 prepended).
+
 This closes the gap `RUST_CORE_VERIFICATION.md` left open: that slice proved a
 Rust MCP server *could* gate one hard-coded rule; this run drives the production
 seams (`camerata_rules::role_from_corpus` → `prepare_session` → generated
