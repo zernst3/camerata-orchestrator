@@ -121,18 +121,48 @@ Privilege split: **product** questions route outward to the respondent via the
 tracker; **technical** tradeoffs and the RuleSet stay with the Architect, local. The
 respondent can answer and sign off, never execute. The Architect is the gatekeeper.
 
-## Decision 6: the respondent model (do NOT depend on a tracker "PO" field)
+## Decision 6: "respondent" is just an addressee picker, NOT a PO role
 
-The hard problem: who do we mention? The naive answer ("read the PO off the ticket")
-breaks on real teams. Many teams have no PO at all; stories get reassigned constantly
-and mentioned to people with no prior history on the ticket. So we cannot depend on
-the tracker carrying a clean, reliable "product owner" field.
+The hard problem: who do we @-mention on the comment? The naive answer ("read the PO
+off the ticket") breaks on real teams. Many teams have no PO at all; stories get
+reassigned constantly and mentioned to people with no prior history on the ticket. So
+we cannot depend on the tracker carrying a clean, reliable "product owner" field.
 
-Decision: **the respondent is a Camerata-side, per-story concept, not a tracker
-field.** The canonical Story carries an optional `respondent` (who the clarify-bridge
-should tag for product questions), set by the Architect when adopting the story and
-changeable any time. Because it lives on our spine and is per-story, it survives the
-tracker tossing assignment around.
+Decision: there is **no PO role in the product**. The "respondent" is nothing heavier
+than the **addressee of a specific question**, a to-field the Architect fills in per
+question, defaulting to a smart guess and always overridable. It is chosen at the
+moment of asking, not assigned once as a role, so it survives the tracker tossing
+assignment around (you pick who actually owns this answer, this time).
+
+The composer, when an agent question is ready:
+
+```
+┌─ NEEDS YOU · story CAM-142 (GitHub #142) ─────────────────┐
+│  The investigation needs an answer before building:       │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │ Should the CSV export include archived members, or  │ │  ← editable
+│  │ only currently active ones?                         │ │
+│  └─────────────────────────────────────────────────────┘ │
+│                                                           │
+│  Ask:  [ @maria-pm ▾ ]   ← addressee picker, scoped to    │
+│        suggested from issue #142:        this ticket      │
+│          • @maria-pm   (assignee)        ← default guess  │
+│          • @jdoe       (reporter)                         │
+│          • you         (architect)                        │
+│          • + type a handle…                              │
+│                                                           │
+│  Posts as a comment on GitHub #142, @-mentioning your     │
+│  pick. They reply in GitHub; the answer returns here.     │
+│                                                           │
+│        [ Post to GitHub ]        [ Answer it myself ]     │
+└───────────────────────────────────────────────────────────┘
+```
+
+The picker is pre-populated with the people Camerata pulled off THIS ticket, plus
+"you," plus free-type. The default is the best guess; you override. That is the whole
+"respondent" concept. It is optionally remembered per story as a convenience (so the
+next question on the same story pre-fills the same addressee), but nothing requires a
+stable owner.
 
 - **Seed, do not depend.** When a story is adopted, Camerata suggests a respondent,
   ranked from whatever the tracker happens to offer: (1) an explicit custom field if
@@ -146,10 +176,10 @@ tracker tossing assignment around.
   fails, post the comment WITHOUT a mention and raise it in NEEDS YOU so the Architect
   pings the person through their normal channel. Mention resolution is best-effort,
   never a gate on getting the question posted.
-- **No-PO teams (the common case).** The Architect simply sets the respondent to
-  whoever currently owns the answer (possibly themselves, possibly a rotating
-  teammate), per story, at adopt time. This is the honest design for teams where the
-  tracker has no reliable owner metadata.
+- **No-PO teams (the common case).** Because the addressee is picked per question,
+  the Architect simply asks whoever currently owns the answer (themselves, a rotating
+  teammate, a stakeholder), at the moment of asking. There is no "PO" to configure and
+  no dependency on the tracker carrying reliable owner metadata.
 
 ## Provider capability matrix
 

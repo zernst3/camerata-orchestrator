@@ -74,6 +74,15 @@ Two properties are load-bearing and architectural, not incidental:
   `(rule_subset, tool_call)` always yields the same decision, and an unparseable or
   empty rule configuration fails closed onto the verified default rather than
   opening the gate. That is a property no probabilistic verifier can offer.
+- **The gate is intent-blind.** It evaluates the write, not the why. It does not care
+  whether a violation came from the model being lazy, the model hallucinating, or a
+  human explicitly ordering it. That is the whole difference between enforcement and
+  convention: convention (prompting, system prompts, the model's manners) is
+  intent-sensitive and probabilistic, so you can talk a model into almost anything;
+  the gate is intent-blind and deterministic, so you cannot talk it out of the rule.
+  The sharpest proof of this is the commanded-violation demo
+  ([`DEMO_COMMANDED_VIOLATION.md`](DEMO_COMMANDED_VIOLATION.md)): order the violation
+  out loud, and the gate denies it anyway.
 - **Provider neutrality by construction.** The gate sits at the MCP tool boundary and
   the agent runtime sits behind a seam, so a non-Claude model swaps in without
   touching the gate. This is a structural consequence of where the gate lives, not a

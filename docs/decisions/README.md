@@ -6,6 +6,13 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-15_brownfield_onboarding_flow.md** — onboarding an EXISTING repo: the
+  engine reviews the repo, proposes a RuleSet (corpus + synthesized + conflicts
+  flagged), then INSTALLS governance as one reviewable PR (CONVENTIONS.md/AGENTS.md +
+  an enforced CI workflow + the gate's rule-subset config), so the rules are
+  mechanical, not just prose. Same commitment as the greenfield genesis harness,
+  pointed at brownfield. Design only; not built. Rides the code-host axis (GitHub
+  Actions first, ADO Pipelines next).
 - **2026-06-15_cockpit_story_view_ux.md** — how the cockpit's story-view behaves over
   a real (messy) tracker: a governed working SET the Architect adopts into, never a
   mirror of the board (no whole-board polling); provider-neutral across ADO / Jira /
@@ -55,6 +62,8 @@ written down, so the trail is navigable, not just buried in commit messages.
 | Why deterministic governance, and the design rationale | `RATIONALE.md` |
 | Two interaction surfaces on one engine, BYO-infra | `VISION.md` |
 | Cockpit story-view UX + tracker working set + respondent model | ADR `cockpit_story_view_ux`; `WORKTRACKER_INTEGRATION.md` |
+| Brownfield onboarding (install governance into an existing repo) | ADR `brownfield_onboarding_flow`; `VISION.md` (onboarding axis) |
+| The commanded-violation demo + intent-blind enforcement | `DEMO_COMMANDED_VIOLATION.md`; `RATIONALE.md` |
 | The governance gate + enforcement | `RATIONALE.md`; `ENFORCEMENT.md`; `RUST_CORE_VERIFICATION.md` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |
 
