@@ -425,6 +425,9 @@ pub fn parse_issue(json: &str) -> anyhow::Result<CanonicalStory> {
         description,
         status,
         created_by,
+        // Build targets are assigned later (decomposition / adoption), not derived
+        // from the source issue. The source repo lives on external_ref.container.
+        targets: vec![],
     })
 }
 

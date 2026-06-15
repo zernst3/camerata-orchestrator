@@ -35,6 +35,7 @@ fn seeded_story() -> CanonicalStory {
         description: "The finance team wants to export the monthly report.".to_string(),
         status: FeatureStatus::Intake,
         created_by: "po@example.com".to_string(),
+        targets: vec![],
     }
 }
 

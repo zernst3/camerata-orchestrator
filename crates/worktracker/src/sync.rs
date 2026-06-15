@@ -294,6 +294,7 @@ mod tests {
             description: "Original description.".to_string(),
             status: FeatureStatus::Intake,
             created_by: "test-user".to_string(),
+            targets: vec![],
         }
     }
 

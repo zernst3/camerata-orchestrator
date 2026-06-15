@@ -15,8 +15,8 @@
 use camerata_worktracker::{
     apply_inbound, updatable_fields, CanonicalStory, ClarifyBridge, ExpectedEchoTable, ExternalRef,
     FeatureStatus, FeatureStatusReport, GateOutcome, GateResult, InboundDisposition, InboundKind,
-    InboundWorkItemEvent, NativeProvider, PrLink, PrStatus, Provider, SignOff, SyncPolicy,
-    WorkItemProvider,
+    InboundWorkItemEvent, NativeProvider, PrLink, PrStatus, Provider, RepoTarget, SignOff,
+    SyncPolicy, WorkItemProvider,
 };
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -43,6 +43,13 @@ pub fn demo_story() -> CanonicalStory {
             .to_string(),
         status: FeatureStatus::Intake,
         created_by: "po@enterprise.example".to_string(),
+        // SSO spans two repos: the front-end portal and the auth service. The
+        // story is SOURCED from one tracker item but TARGETS two repos — the
+        // source/build-target split made concrete.
+        targets: vec![
+            RepoTarget::with_role("enterprise/admin-portal", "frontend"),
+            RepoTarget::with_role("enterprise/auth-service", "api"),
+        ],
     }
 }
 
@@ -104,6 +111,23 @@ pub async fn run_worktracker_demo() -> anyhow::Result<()> {
     let ingested = provider.ingest_story(&demo_ref()).await?;
     println!("  ingested:   \"{}\"", ingested.title);
     println!("  status:     {:?}", ingested.status);
+    // Surface the source/build-target split: tracked in one place, built in many.
+    if let Some(src) = ingested.external_ref.as_ref() {
+        println!("  source:     {:?} {}", src.provider, src.external_id);
+    }
+    if ingested.targets.is_empty() {
+        println!("  targets:    (none assigned yet)");
+    } else {
+        let rendered: Vec<String> = ingested
+            .targets
+            .iter()
+            .map(|t| match &t.role {
+                Some(role) => format!("{} ({role})", t.repo),
+                None => t.repo.clone(),
+            })
+            .collect();
+        println!("  targets:    {}", rendered.join(", "));
+    }
     println!();
 
     // ── 2. CLARIFY-BRIDGE: the PO participates from their board ──────────────

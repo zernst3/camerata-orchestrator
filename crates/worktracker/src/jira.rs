@@ -463,6 +463,7 @@ pub fn parse_issue(json: &str) -> anyhow::Result<CanonicalStory> {
         description,
         status,
         created_by,
+        targets: vec![],
     })
 }
 

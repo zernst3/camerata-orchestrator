@@ -88,6 +88,7 @@ pub fn to_story(parent_id: &str, child: &ProposedChild) -> CanonicalStory {
         description: child.description.clone(),
         status: FeatureStatus::Intake,
         created_by: "architect".to_string(),
+        targets: vec![],
     }
 }
 
@@ -130,6 +131,7 @@ mod tests {
             description: "Export the member directory.".to_string(),
             status: FeatureStatus::Intake,
             created_by: "architect".to_string(),
+            targets: vec![],
         }
     }
 

@@ -206,7 +206,9 @@ impl std::fmt::Display for RepoCoord {
 pub struct CanonicalStory {
     /// Camerata's own story id (canonical spine id, not the tracker's id).
     pub id: String,
-    /// The linked tracker item, if any. Absent for native-only stories.
+    /// The linked tracker item, if any. Absent for native-only stories. This is
+    /// the story's SOURCE — where it is tracked (an Issue, a Projects card, an
+    /// ADO/Jira work item). Independent of where its code lands ([`Self::targets`]).
     pub external_ref: Option<ExternalRef>,
     /// Story title.
     pub title: String,
@@ -216,6 +218,47 @@ pub struct CanonicalStory {
     pub status: FeatureStatus,
     /// The user or agent that created the story.
     pub created_by: String,
+    /// The story's BUILD TARGETS — the repos where this story's code will land.
+    /// Independent of the SOURCE ([`Self::external_ref`]): a story tracked on a
+    /// Projects board can target several repos, an Issue-sourced story targets
+    /// the repo it was filed in but may grow to span more, and a freshly-adopted
+    /// story may have none assigned yet. Empty means "not scoped to any repo
+    /// yet." `PrLink`s roll up from these targets onto the single source item.
+    #[serde(default)]
+    pub targets: Vec<RepoTarget>,
+}
+
+/// One build target for a story: a repository the story's code will land in,
+/// with an optional role hint for the agent that owns it (multi-repo features
+/// commonly split by role, e.g. a `frontend` repo and an `api` repo). The repo
+/// is an `owner/repo` coordinate, the same shape as [`ExternalRef::container`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoTarget {
+    /// The target repository as `owner/repo`.
+    pub repo: String,
+    /// Optional role hint for the agent/work that targets this repo (e.g.
+    /// `"frontend"`, `"api"`, `"infra"`). `None` when the story does not split
+    /// the repo by role.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+impl RepoTarget {
+    /// A target repo with no role hint.
+    pub fn new(repo: impl Into<String>) -> Self {
+        Self {
+            repo: repo.into(),
+            role: None,
+        }
+    }
+
+    /// A target repo with a role hint (e.g. `"frontend"`).
+    pub fn with_role(repo: impl Into<String>, role: impl Into<String>) -> Self {
+        Self {
+            repo: repo.into(),
+            role: Some(role.into()),
+        }
+    }
 }
 
 // ── PR links ──────────────────────────────────────────────────────────────────
@@ -678,6 +721,7 @@ impl InMemoryStoryStore {
                     .into(),
                 status: FeatureStatus::Executing,
                 created_by: "architect".into(),
+                targets: vec![],
             },
             CanonicalStory {
                 id: "CAM-2".into(),
@@ -687,6 +731,7 @@ impl InMemoryStoryStore {
                     .into(),
                 status: FeatureStatus::SignedOff,
                 created_by: "architect".into(),
+                targets: vec![],
             },
             CanonicalStory {
                 id: "CAM-3".into(),
@@ -696,6 +741,7 @@ impl InMemoryStoryStore {
                     .into(),
                 status: FeatureStatus::Blocked,
                 created_by: "architect".into(),
+                targets: vec![],
             },
         ];
         if let Ok(mut guard) = store.stories.lock() {
@@ -783,6 +829,61 @@ mod tests {
         assert_eq!(parsed.container, None);
     }
 
+    // ── RepoTarget + the source/build-target split ─────────────────────────
+
+    #[test]
+    fn repo_target_builders() {
+        let t = RepoTarget::new("org/repo");
+        assert_eq!(t.repo, "org/repo");
+        assert_eq!(t.role, None);
+        let t2 = RepoTarget::with_role("org/repo", "frontend");
+        assert_eq!(t2.role.as_deref(), Some("frontend"));
+    }
+
+    #[test]
+    fn story_carries_targets_independent_of_source() {
+        // A story sourced from ONE tracker item can target MANY repos.
+        let story = CanonicalStory {
+            id: "S-1".to_string(),
+            external_ref: Some(native_ref("S-1")),
+            title: "multi-repo feature".to_string(),
+            description: String::new(),
+            status: FeatureStatus::Intake,
+            created_by: "architect".to_string(),
+            targets: vec![
+                RepoTarget::with_role("org/frontend", "ui"),
+                RepoTarget::with_role("org/backend", "api"),
+            ],
+        };
+        assert_eq!(story.targets.len(), 2);
+        // Source and targets are independent axes.
+        assert!(story.external_ref.is_some());
+        assert_eq!(story.targets[0].repo, "org/frontend");
+    }
+
+    #[test]
+    fn story_targets_serde_round_trip_and_legacy_default() {
+        let story = CanonicalStory {
+            id: "S-2".to_string(),
+            external_ref: None,
+            title: "t".to_string(),
+            description: String::new(),
+            status: FeatureStatus::Intake,
+            created_by: "u".to_string(),
+            targets: vec![RepoTarget::new("o/r")],
+        };
+        let json = serde_json::to_string(&story).unwrap();
+        let back: CanonicalStory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.targets, story.targets);
+
+        // A legacy story payload without a `targets` field deserializes to empty
+        // (serde default), so old persisted stories keep loading.
+        let legacy = r#"{"id":"old","external_ref":null,"title":"t",
+            "description":"","status":"intake","created_by":"u"}"#;
+        let parsed: CanonicalStory = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.targets.is_empty());
+    }
+
     // Helper: build a minimal ExternalRef pointing at the native provider.
     fn native_ref(id: &str) -> ExternalRef {
         ExternalRef {
@@ -803,6 +904,7 @@ mod tests {
             description: "A test story.".to_string(),
             status: FeatureStatus::Intake,
             created_by: "test-user".to_string(),
+            targets: vec![],
         }
     }
 
@@ -1127,6 +1229,7 @@ mod tests {
             description: "As a user I want CSV exports.".to_string(),
             status: FeatureStatus::Planned,
             created_by: "alice".to_string(),
+            targets: vec![],
         };
         let json = serde_json::to_string(&story).unwrap();
         let back: CanonicalStory = serde_json::from_str(&json).unwrap();

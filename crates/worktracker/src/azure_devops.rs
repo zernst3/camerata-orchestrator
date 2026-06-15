@@ -559,6 +559,7 @@ impl<T: HttpTransport> WorkItemProvider for AdoProvider<T> {
             description: parsed.description,
             status: parsed.status,
             created_by: parsed.created_by,
+            targets: vec![],
         })
     }
 
