@@ -897,6 +897,40 @@ html, body {
 .topbar-brand { font-weight: 700; font-size: 13px; color: var(--ink); }
 .topbar-story { font-size: 13px; color: var(--ink-soft); }
 .topbar-status { margin-left: auto; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 3px 9px; border-radius: 6px; }
+/* Stage tabs: now clickable buttons, not inert spans. */
+.stage-tab { cursor: pointer; background: none; border: none; font: inherit; }
+.stage-tab.view { box-shadow: inset 0 -2px 0 var(--accent); }
+.fleet-idle { font-size: 12px; color: var(--ink-faint); }
+.gate-tally.idle { color: var(--ink-faint); }
+.stage-name { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); margin: 2px 0 8px; }
+.stage-not-reached { font-size: 12px; color: var(--ink-faint); margin-top: 10px; font-style: italic; }
+.stage-not-reached-now { font-weight: 700; font-style: normal; }
+
+/* Onboard view. */
+.onboard { max-width: 760px; margin: 0 auto; padding: 28px 24px; }
+.onboard-head { margin-bottom: 18px; }
+.onboard-title { font-size: 19px; font-weight: 700; color: var(--ink); }
+.onboard-sub { font-size: 13px; color: var(--ink-soft); margin-top: 5px; line-height: 1.5; }
+.onboard-paths { display: flex; gap: 12px; margin-bottom: 16px; }
+.onboard-path { flex: 1; text-align: left; cursor: pointer; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+.onboard-path.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.onboard-path-h { font-weight: 700; font-size: 13px; color: var(--ink); }
+.onboard-path-d { font-size: 12px; color: var(--ink-soft); }
+.onboard-gate { display: flex; gap: 10px; align-items: flex-start; background: #fff7ed; border: 1px solid #f0c89a; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+.onboard-gate-dot { width: 8px; height: 8px; border-radius: 50%; background: #b06a2e; margin-top: 5px; flex: none; }
+.onboard-gate-h { font-weight: 700; font-size: 13px; color: #8a4f1d; }
+.onboard-gate-b { font-size: 12px; color: #8a4f1d; margin-top: 3px; line-height: 1.5; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.onboard-repo { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
+.onboard-repo-input { flex: 1; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 13px; }
+.onboard-cta { padding: 9px 16px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+.onboard-cta:disabled { background: var(--line); color: var(--ink-faint); cursor: not-allowed; }
+.onboard-steps { display: flex; flex-direction: column; gap: 12px; }
+.onboard-step { display: flex; gap: 12px; align-items: flex-start; }
+.onboard-step-n { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.onboard-step-h { font-weight: 700; font-size: 13px; color: var(--ink); }
+.onboard-step-b { font-size: 12px; color: var(--ink-soft); margin-top: 2px; line-height: 1.5; }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }

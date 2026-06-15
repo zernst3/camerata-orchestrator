@@ -76,10 +76,14 @@ impl AppState {
         state
     }
 
-    /// Seeded spine plus the provider selected from the environment: GitHub when
-    /// `CAMERATA_GITHUB_TOKEN` + `CAMERATA_GITHUB_REPO` are set, native otherwise.
+    /// The REAL runtime state: a CLEAN SLATE (no seeded stories, clarifications,
+    /// or routines) plus the provider selected from the environment (GitHub when
+    /// `CAMERATA_GITHUB_TOKEN` is set, native otherwise). This is what `serve`
+    /// uses, so the running app starts empty and fills only from real activity
+    /// (adopting a tracker story, onboarding a repo) — nothing fake to mislead a
+    /// connection test. `seeded()` remains for tests and the canned demos.
     pub fn from_env() -> Self {
-        let mut state = Self::seeded();
+        let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
         state.provider = ProviderHandle::from_env();
         state
     }

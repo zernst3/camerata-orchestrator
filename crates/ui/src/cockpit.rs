@@ -48,6 +48,25 @@ async fn fetch_rules() -> Option<Vec<CockpitRule>> {
         .ok()
 }
 
+/// The active work-tracker connection as the BFF reports it (`GET /api/provider`).
+#[derive(serde::Deserialize, Clone, PartialEq)]
+struct ProviderView {
+    /// Human label, e.g. "native (in-process)" or "github (token; …)".
+    provider: String,
+    /// True when a real external tracker (GitHub) is wired.
+    live: bool,
+}
+
+/// Fetch the active provider/connection from the BFF.
+async fn fetch_provider() -> Option<ProviderView> {
+    reqwest::get(format!("{}/api/provider", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<ProviderView>()
+        .await
+        .ok()
+}
+
 /// A run as the BFF reports it (`GET /api/runs/:id`): status plus the REAL gate
 /// verdicts produced so far.
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -217,38 +236,6 @@ async fn fetch_children(story_id: &str) -> Option<Vec<CanonicalStory>> {
         .ok()
 }
 
-/// One agent in the governed fleet, as the status strip renders it.
-#[derive(Clone, PartialEq)]
-struct FleetAgent {
-    role: &'static str,
-    /// Plain-language state for the strip.
-    state: &'static str,
-    /// CSS modifier: "gated" (passed), "exec" (running), "pending".
-    state_class: &'static str,
-}
-
-/// The fleet for the active (Executing) story: Backend gated, Frontend running,
-/// Integrate pending. Representative until the live execution stream lands (Phase 3).
-fn seed_fleet() -> Vec<FleetAgent> {
-    vec![
-        FleetAgent {
-            role: "Backend",
-            state: "gated",
-            state_class: "gated",
-        },
-        FleetAgent {
-            role: "Frontend",
-            state: "executing",
-            state_class: "exec",
-        },
-        FleetAgent {
-            role: "Integrate",
-            state: "pending",
-            state_class: "pending",
-        },
-    ]
-}
-
 /// Map a canonical status to a short label + a badge CSS modifier.
 fn status_badge(status: FeatureStatus) -> (&'static str, &'static str) {
     match status {
@@ -285,7 +272,13 @@ const STAGE_TABS: &[&str] = &["INTAKE", "INVESTIGATION", "PLAN", "STATUS", "QA"]
 /// (it's an architect tool), reached via the cockpit's own nav, not a top-level app.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CockpitView {
+    /// The control surface: the story spine + center stage + inspector.
     Stories,
+    /// Onboard a repo into governance (brownfield: install rules into an
+    /// existing repo; greenfield: scaffold a new one). The ENTRY POINT for a
+    /// repo new to Camerata — distinct from a story's Investigation phase.
+    Onboard,
+    /// The scheduled-routine dashboard.
     Routines,
 }
 
@@ -294,25 +287,27 @@ enum CockpitView {
 #[component]
 fn CockpitNav(view: Signal<CockpitView>) -> Element {
     let mut view = view;
-    let stories_cls = if view() == CockpitView::Stories {
-        "cockpit-nav-tab on"
-    } else {
-        "cockpit-nav-tab"
-    };
-    let routines_cls = if view() == CockpitView::Routines {
-        "cockpit-nav-tab on"
-    } else {
-        "cockpit-nav-tab"
+    let cls = |v: CockpitView| {
+        if view() == v {
+            "cockpit-nav-tab on"
+        } else {
+            "cockpit-nav-tab"
+        }
     };
     rsx! {
         div { class: "cockpit-nav",
             button {
-                class: "{stories_cls}",
+                class: cls(CockpitView::Stories),
                 onclick: move |_| view.set(CockpitView::Stories),
                 "Control surface"
             }
             button {
-                class: "{routines_cls}",
+                class: cls(CockpitView::Onboard),
+                onclick: move |_| view.set(CockpitView::Onboard),
+                "Onboard a repo"
+            }
+            button {
+                class: cls(CockpitView::Routines),
                 onclick: move |_| view.set(CockpitView::Routines),
                 "Routines"
             }
@@ -330,10 +325,14 @@ pub fn CockpitApp() -> Element {
     // the cockpit mounts; the embedded server (see main.rs) is up by then.
     let stories_res = use_resource(fetch_stories);
     let rules_res = use_resource(fetch_rules);
+    // The active connection (native vs GitHub), shown honestly in the topbar.
+    let provider_res = use_resource(fetch_provider);
 
-    let fleet = use_signal(seed_fleet);
     let mut selected = use_signal(|| 0usize);
     let mut selected_rule = use_signal(|| 0usize);
+    // Which stage tab the user is previewing. `None` follows the selected story's
+    // actual lifecycle stage; clicking a tab overrides it so the tabs navigate.
+    let mut viewed_stage = use_signal(|| Option::<usize>::None);
     // The live run for the selected story, if one has been started. Polled to
     // completion; its gate events are REAL verdicts from the BFF run engine.
     let mut active_run = use_signal(|| Option::<RunView>::None);
@@ -352,8 +351,19 @@ pub fn CockpitApp() -> Element {
     // A resolved-but-None fetch means the BFF was unreachable / returned junk.
     let errored = matches!(&stories_loaded, Some(None)) || matches!(&rules_loaded, Some(None));
 
-    // Routines live inside the cockpit (an architect tool). All hooks above have run,
-    // so branching here is safe.
+    // Routines + Onboard live inside the cockpit (architect tools). All hooks above
+    // have run, so branching here is safe.
+    if view() == CockpitView::Onboard {
+        let conn = provider_res.read().clone().flatten();
+        return rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    OnboardView { connection: conn }
+                }
+            }
+        };
+    }
     if view() == CockpitView::Routines {
         return rsx! {
             div { class: "cockpit",
@@ -377,11 +387,24 @@ pub fn CockpitApp() -> Element {
             }
             let current = story_list[selected().min(story_list.len() - 1)].clone();
             let active_stage = active_stage_index(current.status);
+            // The tabs navigate: an explicit click overrides; otherwise we follow
+            // the story's real lifecycle stage.
+            let effective_stage = viewed_stage().unwrap_or(active_stage);
+            let conn = provider_res.read().clone().flatten();
+            // Gate tallies derived from the live run's REAL verdicts (not fixtures).
+            // No active run for this story -> no tallies (None), shown as "idle".
+            let gate_tally: Option<(usize, usize)> = match active_run() {
+                Some(ref r) if r.story_id == current.id => Some((
+                    r.events.iter().filter(|e| e.verdict == "deny").count(),
+                    r.events.iter().filter(|e| e.verdict == "allow").count(),
+                )),
+                _ => None,
+            };
 
             rsx! {
                 div { class: "cockpit",
                     CockpitNav { view }
-                    CockpitTopBar { story: current.clone() }
+                    CockpitTopBar { story: current.clone(), connection: conn.clone() }
 
                     div { class: "cockpit-body",
                         // ── LEFT: story spine (from /api/stories) + NEEDS YOU queue ──
@@ -447,8 +470,18 @@ pub fn CockpitApp() -> Element {
                             div { class: "stage-tabs",
                                 for (i , tab) in STAGE_TABS.iter().enumerate() {
                                     {
-                                        let cls = if i == active_stage { "stage-tab on" } else { "stage-tab" };
-                                        rsx! { span { class: "{cls}", "{tab}" } }
+                                        // "on" = the story's real stage; "view" = the tab the
+                                        // user is previewing. Clicking a tab previews that stage.
+                                        let mut cls = String::from("stage-tab");
+                                        if i == active_stage { cls.push_str(" on"); }
+                                        if i == effective_stage && effective_stage != active_stage { cls.push_str(" view"); }
+                                        rsx! {
+                                            button {
+                                                class: "{cls}",
+                                                onclick: move |_| viewed_stage.set(Some(i)),
+                                                "{tab}"
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -483,12 +516,15 @@ pub fn CockpitApp() -> Element {
                                     }
                                 }
 
-                                // While a run for THIS story is live, show it; otherwise
-                                // the representative panel for the story's status.
+                                // A live run for THIS story (when the user is on its actual
+                                // stage) shows the real gate stream; otherwise the panel for
+                                // whichever stage tab is being previewed.
                                 {
                                     match active_run() {
-                                        Some(r) if r.story_id == current.id => rsx! { LiveRunPanel { run: r } },
-                                        _ => rsx! { StagePanel { story: current.clone(), fleet: fleet() } },
+                                        Some(r) if r.story_id == current.id && viewed_stage().is_none() => {
+                                            rsx! { LiveRunPanel { run: r } }
+                                        }
+                                        _ => rsx! { StagePanel { story: current.clone(), stage: effective_stage } },
                                     }
                                 }
 
@@ -503,29 +539,36 @@ pub fn CockpitApp() -> Element {
 
                             div { class: "status-strip",
                                 div { class: "strip-fleet",
-                                    for (i , a) in fleet().iter().enumerate() {
-                                        {
-                                            let arrow = i + 1 < fleet().len();
+                                    match active_run() {
+                                        Some(ref r) if r.story_id == current.id => {
+                                            let (label, badge_cls) = run_status_badge(&r.status);
                                             rsx! {
-                                                span { class: "fleet-pill {a.state_class}",
-                                                    span { class: "fleet-role", "{a.role}" }
-                                                    span { class: "fleet-state", "{a.state}" }
-                                                }
-                                                if arrow {
-                                                    span { class: "fleet-arrow", "→" }
+                                                span { class: "fleet-pill {badge_cls}",
+                                                    span { class: "fleet-role", "run" }
+                                                    span { class: "fleet-state", "{label}" }
                                                 }
                                             }
                                         }
+                                        _ => rsx! {
+                                            span { class: "fleet-idle", "No active run — press Run this story to start the governed fleet." }
+                                        },
                                     }
                                 }
                                 div { class: "strip-gates",
-                                    span { class: "gate-tally",
-                                        span { class: "gate-num", "1" }
-                                        " layer-1 deny"
-                                    }
-                                    span { class: "gate-tally",
-                                        span { class: "gate-num", "1" }
-                                        " layer-2 bounce"
+                                    match gate_tally {
+                                        Some((deny, allow)) => rsx! {
+                                            span { class: "gate-tally",
+                                                span { class: "gate-num", "{deny}" }
+                                                " gate denials"
+                                            }
+                                            span { class: "gate-tally",
+                                                span { class: "gate-num", "{allow}" }
+                                                " allowed writes"
+                                            }
+                                        },
+                                        None => rsx! {
+                                            span { class: "gate-tally idle", "gate: idle" }
+                                        },
                                     }
                                 }
                             }
@@ -601,8 +644,8 @@ fn CockpitNotice(kind: String) -> Element {
             "The Camerata server isn't responding on localhost:8787. It starts with the app; if this persists, restart the app.",
         ),
         _ => (
-            "No stories yet",
-            "Adopt a story to start steering. (Story adoption from a tracker lands in a later phase.)",
+            "No stories yet — clean slate",
+            "Nothing is seeded. Connect GitHub, then onboard a repo (the \u{201c}Onboard a repo\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
         ),
     };
     rsx! {
@@ -613,9 +656,140 @@ fn CockpitNotice(kind: String) -> Element {
     }
 }
 
+/// Which onboarding path the user is setting up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnboardPath {
+    /// Install governance into an EXISTING repo (scan → propose → audit → arm).
+    Brownfield,
+    /// Scaffold a NEW repo with the rules baked in from commit zero.
+    Greenfield,
+}
+
+/// The repo-onboarding ENTRY POINT: bring a repo new to Camerata under
+/// governance. Brownfield (existing repo) and greenfield (new repo) are the two
+/// paths. This is distinct from a story's Investigation phase — onboarding sets
+/// up the REPO's rules + CI gate; Investigation is per-STORY refinement.
+///
+/// Connection-gated and honest: the scan/audit/arm engine runs against GitHub, so
+/// the actionable steps light up once a GitHub token is connected. Until then it
+/// explains exactly what each step will do.
 #[component]
-fn CockpitTopBar(story: CanonicalStory) -> Element {
+fn OnboardView(connection: Option<ProviderView>) -> Element {
+    let mut path = use_signal(|| OnboardPath::Brownfield);
+    let mut repo = use_signal(String::new);
+    let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
+
+    let brownfield_cls = if path() == OnboardPath::Brownfield { "onboard-path on" } else { "onboard-path" };
+    let greenfield_cls = if path() == OnboardPath::Greenfield { "onboard-path on" } else { "onboard-path" };
+
+    // The flow steps differ slightly by path; both are gated on a connection.
+    let steps: &[(&str, &str)] = match path() {
+        OnboardPath::Brownfield => &[
+            ("Point at the repo", "Name an existing owner/repo your token can reach."),
+            ("Scan + propose a starter ruleset", "Camerata maps the stack and conventions and proposes a starting RuleSet — you review, you don't author from scratch."),
+            ("Approve / edit", "Adjust and approve the rules. You own the final set."),
+            ("Audit", "Scan the existing code against the approved rules and list what's already wrong (the 5-minute payoff). Secret/SQL content rules audit today; AST architecture rules follow."),
+            ("Arm", "Generate ONE governance PR: CONVENTIONS.md/AGENTS.md, an enforced CI workflow, and the gate's rule-subset config. Merge it and new violations are stopped at the gate."),
+        ],
+        OnboardPath::Greenfield => &[
+            ("Name the new repo", "Camerata scaffolds it with the rules baked in from commit zero."),
+            ("Pick the starter ruleset", "Start from the corpus defaults for your stack; edit and approve."),
+            ("Scaffold + arm", "Create the repo with CONVENTIONS.md/AGENTS.md, the CI gate, and the gate config already in place — governed from the first commit."),
+        ],
+    };
+
+    rsx! {
+        div { class: "onboard",
+            div { class: "onboard-head",
+                p { class: "onboard-title", "Onboard a repo into governance" }
+                p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
+            }
+
+            // Path chooser.
+            div { class: "onboard-paths",
+                button {
+                    class: "{brownfield_cls}",
+                    onclick: move |_| path.set(OnboardPath::Brownfield),
+                    span { class: "onboard-path-h", "Brownfield" }
+                    span { class: "onboard-path-d", "Install governance into an existing repo." }
+                }
+                button {
+                    class: "{greenfield_cls}",
+                    onclick: move |_| path.set(OnboardPath::Greenfield),
+                    span { class: "onboard-path-h", "Greenfield" }
+                    span { class: "onboard-path-d", "Scaffold a new repo, governed from commit zero." }
+                }
+            }
+
+            // Connection gate.
+            if !connected {
+                div { class: "onboard-gate",
+                    span { class: "onboard-gate-dot" }
+                    div {
+                        p { class: "onboard-gate-h", "Connect GitHub to begin" }
+                        p { class: "onboard-gate-b",
+                            "Set "
+                            span { class: "mono", "CAMERATA_GITHUB_TOKEN" }
+                            " (and restart the app) so Camerata can read the repo. The steps below activate once a token is connected. See "
+                            span { class: "mono", "docs/USER_GUIDE.md" }
+                            "."
+                        }
+                    }
+                }
+            }
+
+            // Repo input.
+            div { class: "onboard-repo",
+                label { class: "onboard-repo-label", "Repository" }
+                input {
+                    class: "onboard-repo-input",
+                    r#type: "text",
+                    placeholder: "owner/repo",
+                    value: "{repo}",
+                    oninput: move |e| repo.set(e.value()),
+                }
+                button {
+                    class: "onboard-cta",
+                    disabled: !connected || repo().trim().is_empty(),
+                    // The scan/scaffold engine runs against GitHub; it activates with
+                    // a connected token. Wired to the onboarding endpoint as that lands.
+                    onclick: move |_| {},
+                    {
+                        match path() {
+                            OnboardPath::Brownfield => "Scan repo",
+                            OnboardPath::Greenfield => "Scaffold repo",
+                        }
+                    }
+                }
+            }
+
+            // The flow.
+            div { class: "onboard-steps",
+                for (i , (h , b)) in steps.iter().enumerate() {
+                    div { class: "onboard-step",
+                        span { class: "onboard-step-n", "{i + 1}" }
+                        div {
+                            p { class: "onboard-step-h", "{h}" }
+                            p { class: "onboard-step-b", "{b}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CockpitTopBar(story: CanonicalStory, connection: Option<ProviderView>) -> Element {
     let (badge, badge_cls) = status_badge(story.status);
+
+    // Real connection status from /api/provider — the thing that matters when
+    // wiring GitHub. No fabricated cost meter / agent counts.
+    let (conn_cls, conn_label) = match &connection {
+        Some(p) if p.live => ("conn-ok", format!("● {}", p.provider)),
+        Some(p) => ("conn-warn", format!("● {} (no GitHub token)", p.provider)),
+        None => ("conn-warn", "● connecting…".to_string()),
+    };
 
     // SOURCE (where it's tracked) vs BUILD TARGETS (where its code lands) — the
     // two independent axes from the credential-delegated-scope decision.
@@ -652,99 +826,61 @@ fn CockpitTopBar(story: CanonicalStory) -> Element {
                 span { class: "topbar-axis-val", "{targets}" }
             }
             div { class: "topbar-line2",
-                span { class: "topbar-meter", "spent: $4.10 ",
-                    span { class: "meter-est", "(~$100 Max 5x est)" }
-                }
-                span { class: "topbar-sep", "·" }
-                span { "agents: 1 live" }
-                span { class: "topbar-sep", "·" }
-                span { class: "conn-ok", "● Connected" }
-                span { class: "topbar-sep", "·" }
-                span { class: "conn-warn", "gate: 1 layer-1 deny · 1 layer-2 bounce" }
+                span { class: "topbar-axis-label", "tracker:" }
+                span { class: "{conn_cls}", "{conn_label}" }
             }
         }
     }
 }
 
-/// The center-stage body, swapped by the selected story's status.
+/// The center-stage body for one lifecycle stage of the selected story. Driven by
+/// the (clickable) stage tab index, NOT by fabricated fixtures: it describes what
+/// happens at each stage for THIS story, marks stages the story hasn't reached
+/// yet, and never invents gate events, diffs, or provenance. Real run activity
+/// shows in `LiveRunPanel` once a run is started.
 #[component]
-fn StagePanel(story: CanonicalStory, fleet: Vec<FleetAgent>) -> Element {
-    match story.status {
-        FeatureStatus::Executing | FeatureStatus::Gating => rsx! {
-            div { class: "panel-exec",
-                p { class: "panel-h", "{story.title}" }
-                p { class: "panel-sub", "The governed fleet is executing. Each role works in an isolated worktree; every write passes the gate before integration." }
-                div { class: "exec-agents",
-                    for a in fleet.iter() {
-                        div { class: "exec-agent {a.state_class}",
-                            div { class: "exec-agent-head",
-                                span { class: "exec-role", "{a.role}" }
-                                span { class: "exec-state", "{a.state}" }
-                            }
-                            p { class: "exec-note",
-                                {
-                                    match a.state_class {
-                                        "gated" => "Diff produced and passed the gate. Ready to integrate.",
-                                        "exec" => "Writing the member-export endpoint and view.",
-                                        _ => "Waiting on the upstream API contract.",
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                div { class: "gate-activity",
-                    p { class: "gate-activity-h", "Gate activity" }
-                    div { class: "gate-event",
-                        span { class: "gate-layer l1", "LAYER 1 · DENY" }
-                        p { class: "gate-event-text",
-                            "Frontend tried to write a hardcoded API token into the export config. "
-                            span { class: "gate-rule", "SEC-NO-HARDCODED-SECRETS-1" }
-                            " denied the write before it reached disk. The architect never had to catch it."
-                        }
-                    }
-                    div { class: "gate-event",
-                        span { class: "gate-layer l2", "LAYER 2 · BOUNCE" }
-                        p { class: "gate-event-text",
-                            "Backend's first diff built a SQL query by string concatenation. "
-                            span { class: "gate-rule", "SEC-NO-RAW-SQL-CONCAT-1" }
-                            " bounced it post-task; it revised and passed on the next attempt."
-                        }
-                    }
-                }
-            }
-        },
-        FeatureStatus::SignedOff | FeatureStatus::Done => rsx! {
-            div { class: "panel-done",
-                p { class: "panel-h", "{story.title}" }
-                p { class: "panel-sub", "Signed off and ready to ship. Full provenance is attached." }
-                div { class: "prov-line",
-                    span { class: "prov-k", "diff" }
-                    span { class: "prov-v", "3 files, +84 / -12, all gates passed" }
-                }
-                div { class: "prov-line",
-                    span { class: "prov-k", "rules passed" }
-                    span { class: "prov-v", "SEC-NO-HARDCODED-SECRETS-1 · SEC-NO-PATH-ESCAPE-1 · RUST-FMT · RUST-CLIPPY · RUST-TEST" }
-                }
-                div { class: "prov-line",
-                    span { class: "prov-k", "sign-off" }
-                    span { class: "prov-v", "architect, after QA" }
-                }
-            }
-        },
-        FeatureStatus::Blocked => rsx! {
-            div { class: "panel-blocked",
-                p { class: "panel-h", "{story.title}" }
-                p { class: "panel-sub blocked", "Blocked, waiting on a decision." }
-                p { class: "blocked-reason", "The invite flow needs a product decision: should an expired invite be re-sendable, or must the admin issue a fresh one? Routed to the requirements owner; execution is paused until they answer." }
-            }
-        },
-        _ => rsx! {
-            div { class: "panel-generic",
-                p { class: "panel-h", "{story.title}" }
+fn StagePanel(story: CanonicalStory, stage: usize) -> Element {
+    let actual = active_stage_index(story.status);
+    let reached = stage <= actual;
+    let (name, body) = match stage {
+        0 => (
+            "Intake",
+            "The story is in the spine. From here the architect investigates it, asks the requirements owner any clarifying questions, decomposes it, and runs the governed fleet.",
+        ),
+        1 => (
+            "Investigation",
+            "The lead engineer reads the story against repo context and raises clarifying questions via the bridge below. Answers come back from the requirements owner before any code is written.",
+        ),
+        2 => (
+            "Plan",
+            "The story is decomposed into component child stories per the team's practice (use the panel below). Each child is independently governable and targets its own repo.",
+        ),
+        3 => (
+            "Execution & gating",
+            "The governed fleet runs the work in isolated worktrees; every write passes the gate (deny-before-execute), and each task is re-checked after. Press \u{201c}Run this story\u{201d} above to start it and watch the real verdicts stream in.",
+        ),
+        4 => (
+            "QA & sign-off",
+            "Review the produced diff and the gate results, then sign off to ship. Provenance (PR links, gate verdicts, sign-off) is written back to the tracker item.",
+        ),
+        _ => ("Stage", ""),
+    };
+    rsx! {
+        div { class: "panel-generic",
+            p { class: "panel-h", "{story.title}" }
+            p { class: "stage-name", "{name}" }
+            if !story.description.is_empty() {
                 p { class: "panel-sub", "{story.description}" }
             }
-        },
+            p { class: "panel-sub", "{body}" }
+            if !reached {
+                p { class: "stage-not-reached",
+                    "This stage hasn't been reached yet — the story is currently at "
+                    span { class: "stage-not-reached-now", "{STAGE_TABS[actual]}" }
+                    "."
+                }
+            }
+        }
     }
 }
 
