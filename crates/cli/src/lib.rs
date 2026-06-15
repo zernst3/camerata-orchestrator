@@ -11,5 +11,6 @@ pub mod fleet_support;
 pub mod live_demo;
 pub mod maintenance_demo;
 pub mod po_demo;
+pub mod projects_live;
 pub mod worktracker_demo;
 pub mod worktracker_live;

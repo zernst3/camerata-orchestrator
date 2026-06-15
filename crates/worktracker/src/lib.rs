@@ -38,6 +38,12 @@ pub mod azure_devops;
 /// poll-inbound).
 pub mod github;
 
+/// GitHub Projects v2 story SOURCE (board axis, GraphQL). Reads a board whose
+/// items span many repos and maps them to canonical stories, each with its own
+/// source container + initial build target. Distinct from `github` (per-item
+/// Issues REST); this is the board-spans-repos source (Phase C).
+pub mod github_projects;
+
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use azure_devops::{
@@ -50,6 +56,10 @@ pub use github::{
     clarifying_questions_md, issues_since_path, markdown_comment,
     parse_issue as github_parse_issue, parse_issues, status_closes_issue, status_rollup_md,
     status_to_labels, GithubConfig, GithubProvider,
+};
+pub use github_projects::{
+    parse_project_items, project_items_query, GithubProjectConfig, GithubProjectsSource,
+    ProjectOwnerKind, ProjectPage,
 };
 pub use http::{FakeTransport, HttpResponse, HttpTransport, ReqwestTransport};
 pub use jira::{

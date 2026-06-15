@@ -59,6 +59,34 @@ Confirm the wiring with `GET /api/provider` (it reports `"live": true` and the
 pulls a real issue, and posting a clarification on a story that has a GitHub ref also
 posts a real comment on the issue.
 
+## GitHub Projects v2 (board that spans repos)
+
+A Projects v2 board sits ABOVE the repo: one board lists items from many repos
+plus repo-less drafts. `camerata projects-live` reads a real board over GraphQL
+and prints each item as a story with its SOURCE repo and BUILD TARGETS, so a
+board drawing from several repos shows several distinct source repos in one
+listing (the board-spans-repos capability).
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `CAMERATA_GITHUB_TOKEN` | yes | PAT with **read:project** (or `project`) scope plus repo read. Projects v2 needs the project scope on top of Issues. |
+| `CAMERATA_GITHUB_PROJECT_OWNER` | yes | The user/org login that owns the board. |
+| `CAMERATA_GITHUB_PROJECT_NUMBER` | yes | The project NUMBER (the integer in the project URL, e.g. `.../projects/3` → `3`), not the node id. |
+| `CAMERATA_GITHUB_PROJECT_KIND` | no | `user` (default) or `org`. GraphQL roots the board under `user(login:)` vs `organization(login:)`. |
+
+```
+CAMERATA_GITHUB_TOKEN=ghp_xxx \
+CAMERATA_GITHUB_PROJECT_OWNER=you \
+CAMERATA_GITHUB_PROJECT_NUMBER=1 \
+cargo run -p camerata -- projects-live
+```
+
+Expected: it lists every item on the board, each with its source (`Issue/PR <n>
+in owner/repo`, or `draft (board-only)`) and its initial target repo, then prints
+the count of DISTINCT source repos on the one board. Note: a classic PAT needs
+the `project` scope; a fine-grained PAT needs the **Projects** permission, and
+the board must be visible to the token's owner.
+
 ## What is verified vs what the token proves
 
 - Verified now (no token): every adapter request SHAPE (method, URL, body) against the

@@ -20,6 +20,7 @@ async fn main() -> anyhow::Result<()> {
         "maintenance-demo" => camerata::maintenance_demo::run_maintenance_demo().await,
         "deploy-demo" => camerata::deploy_demo::run_deploy_demo().await,
         "worktracker-live" => camerata::worktracker_live::run_worktracker_live().await,
+        "projects-live" => camerata::projects_live::run_projects_live().await,
         "" | "help" | "--help" | "-h" => {
             println!("camerata orchestrator");
             println!("usage:");
@@ -33,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
             println!("  camerata maintenance-demo  Tier-2 standing ops agent: scan, approve, key rotation");
             println!("  camerata deploy-demo       BYO-infra publish step: gate, local deploy, Azure plan");
             println!("  camerata worktracker-live  LIVE GitHub round-trip (needs CAMERATA_GITHUB_* env; see docs/GITHUB_SETUP.md)");
+            println!("  camerata projects-live     LIVE GitHub Projects v2 board listing across repos (needs CAMERATA_GITHUB_PROJECT_* env)");
             Ok(())
         }
         other => {
