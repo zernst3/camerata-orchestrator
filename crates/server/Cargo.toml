@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -29,7 +29,12 @@ anyhow = { workspace = true }
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }
 camerata-worktracker = { path = "../worktracker" }
+# The run engine evaluates planted tool calls through the REAL gate (deterministic,
+# token-free), so a cockpit "run" shows genuine deny/allow verdicts, not narration.
+camerata-core = { path = "../core" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# test-util gives start_paused so the run executor's sleeps resolve instantly in tests.
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }

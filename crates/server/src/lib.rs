@@ -13,13 +13,15 @@
 //! Execution endpoints (run a governed fleet on a story) and a live-status stream
 //! land in later phases, behind the same router.
 
+pub mod run;
+
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::Serialize;
@@ -27,18 +29,24 @@ use serde::Serialize;
 use camerata_gateway::RULE_REGISTRY;
 use camerata_worktracker::{CanonicalStory, InMemoryStoryStore, StoryStore};
 
+use crate::run::{execute_run, Run, RunStore};
+
 /// Shared server state. Holds the backend contracts behind trait objects so the
 /// in-memory impls used now can be swapped for persistent / cloud impls later
 /// without touching the handlers.
 #[derive(Clone)]
 pub struct AppState {
     stories: Arc<dyn StoryStore>,
+    runs: RunStore,
 }
 
 impl AppState {
     /// Build state from an explicit story store.
     pub fn new(stories: Arc<dyn StoryStore>) -> Self {
-        Self { stories }
+        Self {
+            stories,
+            runs: RunStore::new(),
+        }
     }
 
     /// Build state seeded with the representative spine, for local/demo runs.
@@ -63,6 +71,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/rules", get(rules))
         .route("/api/stories", get(stories))
+        .route("/api/stories/:id/run", post(start_run))
+        .route("/api/runs/:id", get(get_run))
         .with_state(state)
 }
 
@@ -99,6 +109,32 @@ async fn rules() -> Json<Vec<RuleDto>> {
 async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStory>>, AppError> {
     let list = state.stories.list().await.map_err(AppError)?;
     Ok(Json(list))
+}
+
+/// Start a governed run for a story. Returns the run id immediately; the run walks
+/// to completion on a background task, driving planted tool calls through the REAL
+/// gate (deterministic, token-free). Poll `GET /api/runs/:id` for status + verdicts.
+async fn start_run(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let run_id = state.runs.create(&story_id);
+    let store = state.runs.clone();
+    let rid = run_id.clone();
+    tokio::spawn(async move { execute_run(store, rid).await });
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id }))
+}
+
+/// The current state of a run: its status plus the real gate verdicts so far.
+async fn get_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Run>, AppError> {
+    state
+        .runs
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

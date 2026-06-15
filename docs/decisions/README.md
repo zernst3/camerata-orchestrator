@@ -6,6 +6,19 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-15_routine_dashboard.md** — a management surface (table) over scheduled,
+  governed agent routines: name, schedule/fire time, prompt, permission scope,
+  enabled, status + run history, with create/edit/enable/run-now. A routine is a
+  scheduled governed run (same engine + gate + provenance), so the dashboard is a
+  scheduler + a view, not a new orchestrator. Presupposes the run model (Phase 3).
+  Design only; not built.
+- **2026-06-15_story_decomposition_by_practice.md** — ingest a parent work item and
+  propose the component child stories per the org's CONFIGURABLE practice (Feature ->
+  UI/API stories, Story -> tasks, whatever the org runs), grounded in repo context +
+  story templates, human-reviewed before it commits. Children link to the parent on
+  the spine and each is independently governable; they sync back as child work items.
+  An upstream enrichment step before execution; pairs with the clarify-bridge. Design
+  only; needs a parent/child spine relation + a decomposition engine.
 - **2026-06-15_cross_agent_integration_gate.md** — a THIRD enforcement tier. Layers 1
   and 2 are per-agent, so any invariant spanning agents can drift while each agent's
   gates pass green. The cross-agent integration gate runs once on the assembled tree,
@@ -79,6 +92,8 @@ written down, so the trail is navigable, not just buried in commit messages.
 | The commanded-violation demo + intent-blind enforcement | `DEMO_COMMANDED_VIOLATION.md`; `RATIONALE.md` |
 | The governance gate + enforcement | `RATIONALE.md`; `ENFORCEMENT.md`; `RUST_CORE_VERIFICATION.md` |
 | Cross-agent / integration gate (third tier, contract enforcement) | ADR `cross_agent_integration_gate`; `ENFORCEMENT.md` |
+| Story decomposition (parent -> component stories by practice) | ADR `story_decomposition_by_practice` |
+| Routine dashboard (manage scheduled governed routines) | ADR `routine_dashboard` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |
 
 ## Convention

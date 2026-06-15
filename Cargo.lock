@@ -536,6 +536,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "camerata-core",
  "camerata-gateway",
  "camerata-worktracker",
  "http-body-util",
