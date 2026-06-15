@@ -296,38 +296,44 @@ async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
     Json(crate::connections::probe().await)
 }
 
-/// Request to scan a repo for the brownfield audit.
+/// Request to scan repo(s) for the brownfield audit. Accepts a SET of repos (a
+/// brownfield onboarding spans inter-related repos); a single `repo` is also
+/// accepted for convenience.
 #[derive(serde::Deserialize)]
 struct ScanReq {
-    /// `owner/repo` to scan.
-    repo: String,
+    /// `owner/repo` entries to scan together.
+    #[serde(default)]
+    repos: Vec<String>,
+    /// Convenience single repo (folded into `repos`).
+    #[serde(default)]
+    repo: Option<String>,
 }
 
-/// Brownfield scan: audit an existing repo against the content rules and propose a
-/// starter ruleset. Gated on the GitHub token — without it, returns a gated report
-/// (no scan) so the UI shows "connect GitHub". The audit reuses the gate's own
-/// arms, so it reports exactly what the gate would deny on a new write.
+/// Brownfield scan: audit a SET of existing repos against the content rules and
+/// propose a starter ruleset, aggregating across all of them. Gated on the GitHub
+/// token — without it, returns a gated report (no scan) so the UI shows "connect
+/// GitHub". The audit reuses the gate's own arms, so it reports exactly what the
+/// gate would deny on a new write.
 async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanReport> {
-    let Some((owner, repo)) = req.repo.split_once('/') else {
-        let mut r = crate::onboard::ScanReport::gated(&req.repo);
-        r.message = Some("Repository must be `owner/repo`.".to_string());
+    let mut repos = req.repos;
+    if let Some(r) = req.repo {
+        repos.push(r);
+    }
+    repos.retain(|r| !r.trim().is_empty());
+    if repos.is_empty() {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.message = Some("Name at least one `owner/repo` to scan.".to_string());
         return Json(r);
-    };
+    }
+
     let token = std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
         .filter(|v| !v.is_empty());
     let Some(token) = token else {
-        return Json(crate::onboard::ScanReport::gated(&req.repo));
+        return Json(crate::onboard::ScanReport::gated(&repos));
     };
-    match crate::onboard::scan_repo(owner, repo, &token).await {
-        Ok(report) => Json(report),
-        Err(e) => {
-            let mut r = crate::onboard::ScanReport::gated(&req.repo);
-            r.gated = false;
-            r.message = Some(format!("Scan failed: {e}"));
-            Json(r)
-        }
-    }
+    Json(crate::onboard::scan_repos(&repos, &token).await)
 }
 
 /// Query for draining the notification feed: only items newer than `since`.

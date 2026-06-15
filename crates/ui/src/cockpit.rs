@@ -668,6 +668,8 @@ fn CockpitNotice(kind: String) -> Element {
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct FindingView {
+    #[serde(default)]
+    repo: String,
     path: String,
     line: usize,
     rule_id: String,
@@ -682,6 +684,12 @@ struct ProposedRuleView {
     id: String,
     title: String,
     kind: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    placement: String,
     finding_count: usize,
     #[allow(dead_code)]
     recommended: bool,
@@ -689,7 +697,8 @@ struct ProposedRuleView {
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ScanReportView {
-    repo: String,
+    #[serde(default)]
+    repos: Vec<String>,
     files_scanned: usize,
     findings: Vec<FindingView>,
     proposed_rules: Vec<ProposedRuleView>,
@@ -698,10 +707,10 @@ struct ScanReportView {
     message: Option<String>,
 }
 
-async fn scan_repo(repo: &str) -> Option<ScanReportView> {
+async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
     reqwest::Client::new()
         .post(format!("{}/api/onboard/scan", crate::BFF_URL))
-        .json(&serde_json::json!({ "repo": repo }))
+        .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
         .ok()?
@@ -715,6 +724,12 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
         .with("high", BadgeVariant::new("High", "red"))
         .with("medium", BadgeVariant::new("Medium", "yellow"));
     vec![
+        ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
+            CellValue::Text(f.repo.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(180.0),
         ColumnDef::new(ColumnId("severity"), "Severity", |f: &FindingView| {
             CellValue::Text(f.severity.clone())
         })
@@ -744,23 +759,44 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
     let kind = BadgeVariantMap::new()
         .with("mechanical", BadgeVariant::new("Mechanical", "green"))
         .with("review", BadgeVariant::new("Review", "yellow"));
+    let scope = BadgeVariantMap::new()
+        .with("repo-local", BadgeVariant::new("Repo-local", "blue"))
+        .with("cross-repo", BadgeVariant::new("Cross-repo", "purple"))
+        .with("process", BadgeVariant::new("Process", "gray"));
     vec![
         ColumnDef::new(ColumnId("id"), "Rule", |r: &ProposedRuleView| {
             CellValue::Text(r.id.clone())
         })
         .sortable()
         .filter(FilterKind::Text)
-        .initial_width(250.0),
-        ColumnDef::new(ColumnId("title"), "What it enforces", |r: &ProposedRuleView| {
-            CellValue::Text(r.title.clone())
+        .initial_width(230.0),
+        ColumnDef::new(ColumnId("scope"), "Scope", |r: &ProposedRuleView| {
+            CellValue::Text(r.scope.clone())
         })
-        .initial_width(430.0),
+        .sortable()
+        .render_kind(RenderKind::Badge(scope))
+        .initial_width(130.0),
+        ColumnDef::new(ColumnId("repos"), "Applies to", |r: &ProposedRuleView| {
+            CellValue::Text(if r.repos.is_empty() {
+                "—".to_string()
+            } else if r.repos.len() <= 2 {
+                r.repos.join(", ")
+            } else {
+                format!("{} repos", r.repos.len())
+            })
+        })
+        .filter(FilterKind::Text)
+        .initial_width(180.0),
+        ColumnDef::new(ColumnId("placement"), "Gate placement", |r: &ProposedRuleView| {
+            CellValue::Text(r.placement.clone())
+        })
+        .initial_width(300.0),
         ColumnDef::new(ColumnId("kind"), "Kind", |r: &ProposedRuleView| {
             CellValue::Text(r.kind.clone())
         })
         .sortable()
         .render_kind(RenderKind::Badge(kind))
-        .initial_width(130.0),
+        .initial_width(120.0),
         ColumnDef::new(
             ColumnId("count"),
             "Existing violations",
@@ -769,7 +805,7 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Number)
         .alignment(Alignment::Right)
-        .initial_width(160.0),
+        .initial_width(150.0),
     ]
 }
 
@@ -881,28 +917,34 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                 }
             }
 
-            // Repo input.
-            div { class: "onboard-repo",
-                label { class: "onboard-repo-label", "Repository" }
-                input {
-                    class: "onboard-repo-input",
-                    r#type: "text",
-                    placeholder: "owner/repo",
+            // Repo input — a SET of repos (a brownfield onboarding spans
+            // inter-related repos), one owner/repo per line.
+            div { class: "onboard-repo-block",
+                label { class: "onboard-repo-label", "Repositories — one owner/repo per line (a feature often spans several)" }
+                textarea {
+                    class: "onboard-repos-input",
+                    rows: "4",
+                    placeholder: "acme/api\nacme/worker\nacme/web",
                     value: "{repo}",
                     oninput: move |e| repo.set(e.value()),
                 }
                 button {
                     class: "onboard-cta",
                     disabled: !connected || repo().trim().is_empty() || scanning(),
-                    // Brownfield scans the repo (audit + propose rules) via the gated
-                    // /api/onboard/scan; greenfield scaffolding is the next build.
+                    // Brownfield scans the whole repo SET (audit + propose rules) via
+                    // the gated /api/onboard/scan; greenfield scaffolding is next.
                     onclick: move |_| {
                         if path() != OnboardPath::Brownfield { return; }
-                        let r = repo();
-                        if r.trim().is_empty() { return; }
+                        let repos: Vec<String> = repo()
+                            .lines()
+                            .flat_map(|l| l.split(','))
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if repos.is_empty() { return; }
                         scanning.set(true);
                         spawn(async move {
-                            scan.set(scan_repo(&r).await);
+                            scan.set(scan_repos(&repos).await);
                             scanning.set(false);
                         });
                     },
@@ -910,7 +952,7 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         match (path(), scanning()) {
                             (OnboardPath::Greenfield, _) => "Scaffold repo",
                             (_, true) => "Scanning…",
-                            (_, false) => "Scan repo",
+                            (_, false) => "Scan repos",
                         }
                     }
                 }
@@ -955,13 +997,17 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
 #[component]
 fn ScanResults(report: ScanReportView) -> Element {
     let high = report.findings.iter().filter(|f| f.severity == "high").count();
-    let table_key = format!("{}-{}", report.repo, report.findings.len());
+    let table_key = format!("{}-{}", report.repos.join(","), report.findings.len());
     rsx! {
         div { class: "scan-results",
             if let Some(msg) = report.message.clone() {
                 p { class: "scan-note", "{msg}" }
             }
             div { class: "scan-summary",
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n", "{report.repos.len()}" }
+                    " repos"
+                }
                 span { class: "scan-stat",
                     span { class: "scan-stat-n", "{report.findings.len()}" }
                     " findings"

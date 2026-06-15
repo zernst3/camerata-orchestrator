@@ -26,6 +26,9 @@ pub const AUDIT_RULES: &[&str] = &[
 /// One violation already present in the repo.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Finding {
+    /// Which repo this finding is in (`owner/repo`). Lets a multi-repo scan group
+    /// and filter findings by repo.
+    pub repo: String,
     /// File path within the repo.
     pub path: String,
     /// 1-based line number.
@@ -40,8 +43,8 @@ pub struct Finding {
     pub detail: String,
 }
 
-/// One rule proposed for the starter ruleset, with how many existing violations it
-/// already catches in this repo.
+/// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
+/// brownfielding decides, up front, where each rule and its mechanical gate live.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProposedRule {
     /// The rule id.
@@ -50,40 +53,54 @@ pub struct ProposedRule {
     pub title: String,
     /// `mechanical` (deterministic check exists) | `review` (human-judged).
     pub kind: String,
+    /// Scope: `repo-local` (applies within each repo), `cross-repo` (spans the
+    /// repo set, e.g. API contracts), or `process` (VCS-workflow, per account).
+    pub scope: String,
+    /// Which gate enforces it: `content` (Layer 1/2), `integration` (cross-agent
+    /// tier), or `vcs-action` (commit/PR metadata).
+    pub enforcement_point: String,
+    /// The repos this rule binds to (repo-local) or spans (cross-repo); the full
+    /// set for process rules.
+    pub repos: Vec<String>,
+    /// Where the mechanical gate is installed — the placement decision.
+    pub placement: String,
     /// How many existing violations this rule found in the scan.
     pub finding_count: usize,
-    /// Whether it is recommended for the starter set (all content rules are).
+    /// Whether it is recommended for the starter set.
     pub recommended: bool,
 }
 
-/// The full scan result for a repo.
+/// The full scan result across one or more repos. Brownfield onboarding treats a
+/// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
+/// one unit: findings and the proposed ruleset aggregate across all of them, each
+/// finding tagged with its repo.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
-    /// `owner/repo`.
-    pub repo: String,
-    /// Number of files scanned (after filtering/capping).
+    /// The repos scanned (`owner/repo`).
+    pub repos: Vec<String>,
+    /// Number of files scanned across all repos.
     pub files_scanned: usize,
-    /// Every violation already in the repo.
+    /// Every violation found, across all repos (each tagged with its repo).
     pub findings: Vec<Finding>,
-    /// The proposed starter ruleset.
+    /// The proposed starter ruleset (aggregated over all repos).
     pub proposed_rules: Vec<ProposedRule>,
     /// True when no scan was performed because GitHub is not connected.
     pub gated: bool,
-    /// A human message (e.g. the connect-GitHub gate, or a cap notice).
+    /// A human message (e.g. the connect-GitHub gate, a per-repo error, or a cap).
     pub message: Option<String>,
 }
 
 impl ScanReport {
     /// The connect-GitHub gate result: no scan performed.
-    pub fn gated(repo: &str) -> Self {
+    pub fn gated(repos: &[String]) -> Self {
         Self {
-            repo: repo.to_string(),
+            repos: repos.to_vec(),
             files_scanned: 0,
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
             message: Some(
-                "Connect GitHub (set CAMERATA_GITHUB_TOKEN) so Camerata can read the repo."
+                "Connect GitHub (set CAMERATA_GITHUB_TOKEN) so Camerata can read the repo(s)."
                     .to_string(),
             ),
         }
@@ -108,8 +125,8 @@ fn title_for(rule_id: &str) -> String {
 }
 
 /// Audit one file's content against the content rules, line by line, reusing the
-/// gate's own arms. A line the gate would deny becomes a finding.
-pub fn audit_content(path: &str, content: &str) -> Vec<Finding> {
+/// gate's own arms. A line the gate would deny becomes a finding tagged with `repo`.
+pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (i, line) in content.lines().enumerate() {
         for rule_id in AUDIT_RULES {
@@ -119,6 +136,7 @@ pub fn audit_content(path: &str, content: &str) -> Vec<Finding> {
             if let Err(detail) = arm(path, line) {
                 let snippet: String = line.trim().chars().take(160).collect();
                 findings.push(Finding {
+                    repo: repo.to_string(),
                     path: path.to_string(),
                     line: i + 1,
                     rule_id: rule_id.to_string(),
@@ -132,35 +150,95 @@ pub fn audit_content(path: &str, content: &str) -> Vec<Finding> {
     findings
 }
 
-/// Propose the starter ruleset from the audit: every content rule, each annotated
-/// with how many existing violations it already catches in this repo.
-pub fn propose_rules(findings: &[Finding]) -> Vec<ProposedRule> {
-    AUDIT_RULES
-        .iter()
-        .map(|&id| {
-            let finding_count = findings.iter().filter(|f| f.rule_id == id).count();
-            ProposedRule {
-                id: id.to_string(),
-                title: title_for(id),
-                kind: "mechanical".to_string(),
-                finding_count,
-                recommended: true,
-            }
-        })
-        .collect()
+/// Propose the starter ruleset from the audit, classified at ALL levels so
+/// placement is decided in the brownfield phase. Three tiers: repo-local content
+/// rules (mechanical; the CI gate + config installed in each repo, bound to the
+/// repos that have the violation); a cross-repo contract rule (only for a
+/// multi-repo set; spans all repos at the integration tier, review-tier until the
+/// integration gate is built); and a process rule (account-level, the VCS-action
+/// gate across all repos' commits/PRs).
+pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule> {
+    let mut out = Vec::new();
+
+    // 1. Content rules: repo-local, mechanical, the gate lives in each repo.
+    for &id in AUDIT_RULES {
+        let finding_count = findings.iter().filter(|f| f.rule_id == id).count();
+        let mut bound: Vec<String> = findings
+            .iter()
+            .filter(|f| f.rule_id == id)
+            .map(|f| f.repo.clone())
+            .collect();
+        bound.sort();
+        bound.dedup();
+        let repos_for_rule = if bound.is_empty() {
+            repos.to_vec()
+        } else {
+            bound
+        };
+        out.push(ProposedRule {
+            id: id.to_string(),
+            title: title_for(id),
+            kind: "mechanical".to_string(),
+            scope: "repo-local".to_string(),
+            enforcement_point: "content".to_string(),
+            repos: repos_for_rule,
+            placement: "CI gate + gate config installed in each repo".to_string(),
+            finding_count,
+            recommended: true,
+        });
+    }
+
+    // 2. Cross-repo contract rule: only meaningful when the set has >1 repo.
+    if repos.len() > 1 {
+        out.push(ProposedRule {
+            id: "INTEGRATION-API-CONTRACT-1".to_string(),
+            title: "Consumers match producer contracts across the repo set (shapes, \
+                    status codes, events)."
+                .to_string(),
+            // Deterministic enforcement needs the integration gate (designed, not
+            // built), so it is review-tier until that lands.
+            kind: "review".to_string(),
+            scope: "cross-repo".to_string(),
+            enforcement_point: "integration".to_string(),
+            repos: repos.to_vec(),
+            placement: "Integration gate, pre-PR, run across the assembled repo set".to_string(),
+            finding_count: 0,
+            recommended: true,
+        });
+    }
+
+    // 3. Process rule: account-level, all repos' commits/PRs.
+    out.push(ProposedRule {
+        id: "PROCESS-CONVENTIONAL-COMMIT-1".to_string(),
+        title: "Commit subject follows conventional-commits (type: subject).".to_string(),
+        kind: "mechanical".to_string(),
+        scope: "process".to_string(),
+        enforcement_point: "vcs-action".to_string(),
+        repos: repos.to_vec(),
+        placement: "VCS-action gate at commit/PR (per account, all repos)".to_string(),
+        finding_count: 0,
+        recommended: false,
+    });
+
+    out
 }
 
-/// Audit a whole repo (already-fetched files) and build the report. Pure: the same
-/// files always produce the same report.
-pub fn audit_repo(repo: &str, files: &[(String, String)]) -> ScanReport {
+/// Audit one repo's already-fetched files into a flat finding list (each tagged
+/// with `repo`). Pure.
+pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (path, content) in files {
-        findings.extend(audit_content(path, content));
+        findings.extend(audit_content(repo, path, content));
     }
-    let proposed_rules = propose_rules(&findings);
+    findings
+}
+
+/// Build a report from already-aggregated findings across `repos`. Pure.
+pub fn build_report(repos: Vec<String>, files_scanned: usize, findings: Vec<Finding>) -> ScanReport {
+    let proposed_rules = propose_rules(&findings, &repos);
     ScanReport {
-        repo: repo.to_string(),
-        files_scanned: files.len(),
+        repos,
+        files_scanned,
         findings,
         proposed_rules,
         gated: false,
@@ -272,20 +350,47 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
     Ok((files, truncated))
 }
 
-/// Scan a repo end to end: download + audit the WHOLE repo, and build the report.
-/// The token is required (the caller gates on it and returns
-/// [`ScanReport::gated`] when absent).
-pub async fn scan_repo(owner: &str, repo: &str, token: &str) -> anyhow::Result<ScanReport> {
-    let repo_full = format!("{owner}/{repo}");
-    let (files, truncated) = fetch_repo_files(owner, repo, token).await?;
-    let mut report = audit_repo(&repo_full, &files);
-    if truncated {
-        report.message = Some(format!(
-            "This repo has more than {HARD_CAP_FILES} auditable files; the scan was \
-             truncated at that safety limit."
-        ));
+/// Scan a SET of repos end to end: download and audit each whole repo, then
+/// aggregate the findings and proposed ruleset across all of them (each finding
+/// tagged with its repo). Brownfield onboarding of inter-related repos (an API, a
+/// worker, a frontend) is one scan. A per-repo failure (bad name, no access) is
+/// noted in the report message and does not abort the others; the scan returns
+/// what it could read. The token is required (the caller gates on it).
+pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
+    let mut all_findings = Vec::new();
+    let mut files_total = 0usize;
+    let mut repos_ok = Vec::new();
+    let mut notes = Vec::new();
+
+    for spec in specs {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let Some((owner, repo)) = spec.split_once('/') else {
+            notes.push(format!("{spec}: not `owner/repo`, skipped"));
+            continue;
+        };
+        match fetch_repo_files(owner, repo, token).await {
+            Ok((files, truncated)) => {
+                files_total += files.len();
+                all_findings.extend(audit_files(spec, &files));
+                repos_ok.push(spec.to_string());
+                if truncated {
+                    notes.push(format!(
+                        "{spec}: more than {HARD_CAP_FILES} files; truncated at the safety limit"
+                    ));
+                }
+            }
+            Err(e) => notes.push(format!("{spec}: scan failed ({e})")),
+        }
     }
-    Ok(report)
+
+    let mut report = build_report(repos_ok, files_total, all_findings);
+    if !notes.is_empty() {
+        report.message = Some(notes.join(" · "));
+    }
+    report
 }
 
 #[cfg(test)]
@@ -336,12 +441,13 @@ mod tests {
     }
 
     #[test]
-    fn audit_flags_a_hardcoded_secret_with_line_and_severity() {
+    fn audit_flags_a_hardcoded_secret_with_line_severity_and_repo() {
         // A GitHub PAT literal is exactly what SEC-NO-HARDCODED-SECRETS-1 denies.
         let content = "let cfg = load();\nconst TOKEN = \"ghp_0123456789012345678901234567890123456\";\nok();";
-        let findings = audit_content("src/config.rs", content);
+        let findings = audit_content("me/api", "src/config.rs", content);
         assert_eq!(findings.len(), 1, "one secret -> one finding: {findings:?}");
         let f = &findings[0];
+        assert_eq!(f.repo, "me/api", "finding tagged with its repo");
         assert_eq!(f.line, 2, "finding on the right line");
         assert_eq!(f.rule_id, "SEC-NO-HARDCODED-SECRETS-1");
         assert_eq!(f.severity, "high");
@@ -351,47 +457,72 @@ mod tests {
     #[test]
     fn audit_is_clean_on_clean_content() {
         let content = "fn add(a: i32, b: i32) -> i32 { a + b }\n// nothing to see here";
-        assert!(audit_content("src/math.rs", content).is_empty());
+        assert!(audit_content("me/api", "src/math.rs", content).is_empty());
     }
 
     #[test]
-    fn propose_rules_counts_findings_per_rule() {
+    fn propose_rules_classifies_by_scope_and_placement() {
         let content =
             "const T = \"ghp_0123456789012345678901234567890123456\";\nconst U = \"ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\";";
-        let findings = audit_content("a.rs", content);
-        let rules = propose_rules(&findings);
-        // All content rules proposed; the secrets rule carries the count.
-        assert_eq!(rules.len(), AUDIT_RULES.len());
-        let secrets = rules
+        let findings = audit_content("me/api", "a.rs", content);
+        // Single repo: content rules (repo-local) + a process rule, no cross-repo.
+        let single = propose_rules(&findings, &["me/api".to_string()]);
+        let secrets = single
             .iter()
             .find(|r| r.id == "SEC-NO-HARDCODED-SECRETS-1")
             .unwrap();
         assert_eq!(secrets.finding_count, findings.len());
-        assert!(secrets.recommended);
-        assert_eq!(secrets.kind, "mechanical");
+        assert_eq!(secrets.scope, "repo-local");
+        assert_eq!(secrets.enforcement_point, "content");
+        assert_eq!(secrets.repos, vec!["me/api".to_string()], "bound to the repo with the violation");
+        assert!(secrets.placement.contains("each repo"));
+        assert!(single.iter().any(|r| r.scope == "process"));
+        assert!(
+            !single.iter().any(|r| r.scope == "cross-repo"),
+            "no cross-repo rule for a single repo"
+        );
+
+        // Multi-repo: a cross-repo contract rule appears, spanning the set.
+        let multi = propose_rules(&findings, &["me/api".to_string(), "me/web".to_string()]);
+        let xrepo = multi
+            .iter()
+            .find(|r| r.scope == "cross-repo")
+            .expect("multi-repo set proposes a cross-repo rule");
+        assert_eq!(xrepo.enforcement_point, "integration");
+        assert_eq!(xrepo.repos.len(), 2, "spans both repos");
     }
 
     #[test]
-    fn audit_repo_aggregates_across_files() {
-        let files = vec![
-            (
+    fn build_report_aggregates_findings_across_repos() {
+        // Two repos: a secret in one, clean in the other -> one finding, tagged.
+        let mut findings = audit_files(
+            "me/api",
+            &[(
                 "a.rs".to_string(),
                 "const T = \"ghp_0123456789012345678901234567890123456\";".to_string(),
-            ),
-            ("b.rs".to_string(), "fn ok() {}".to_string()),
-        ];
-        let report = audit_repo("me/proj", &files);
-        assert_eq!(report.files_scanned, 2);
+            )],
+        );
+        findings.extend(audit_files(
+            "me/web",
+            &[("b.tsx".to_string(), "export const ok = () => 1;".to_string())],
+        ));
+        let report = build_report(
+            vec!["me/api".to_string(), "me/web".to_string()],
+            2,
+            findings,
+        );
+        assert_eq!(report.repos.len(), 2);
         assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].path, "a.rs");
+        assert_eq!(report.findings[0].repo, "me/api");
         assert!(!report.gated);
     }
 
     #[test]
     fn gated_report_has_no_findings_and_a_message() {
-        let r = ScanReport::gated("me/proj");
+        let r = ScanReport::gated(&["me/api".to_string(), "me/web".to_string()]);
         assert!(r.gated);
         assert!(r.findings.is_empty());
+        assert_eq!(r.repos.len(), 2);
         assert!(r.message.unwrap().contains("CAMERATA_GITHUB_TOKEN"));
     }
 }

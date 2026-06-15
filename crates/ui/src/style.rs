@@ -941,9 +941,10 @@ html, body {
 .onboard-gate-h { font-weight: 700; font-size: 13px; color: #8a4f1d; }
 .onboard-gate-b { font-size: 12px; color: #8a4f1d; margin-top: 3px; line-height: 1.5; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
-.onboard-repo { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+.onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
-.onboard-repo-input { flex: 1; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 13px; }
+.onboard-repos-input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; }
+.onboard-cta { align-self: flex-start; }
 .onboard-cta { padding: 9px 16px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
 .onboard-cta:disabled { background: var(--line); color: var(--ink-faint); cursor: not-allowed; }
 .onboard-steps { display: flex; flex-direction: column; gap: 12px; }

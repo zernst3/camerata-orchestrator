@@ -95,6 +95,31 @@ This rides the **code-host axis** (where the CI and the repo live): GitHub Actio
 first (PoC, since GitHub is also the board axis there), ADO Pipelines for the ADO
 code host. It is independent of which board a team uses for stories.
 
+## Multi-repo and rule placement (added 2026-06-15)
+
+Brownfield onboarding operates on a **SET of inter-related repos**, not one repo.
+A real onboarding (a .NET API + a Python worker + a React app) is one scan: the
+whole of each repo is downloaded (one tarball per repo, no per-file API calls) and
+audited, and the findings + proposed ruleset **aggregate across all repos**, each
+finding tagged with its repo.
+
+The phase must be **thorough at every level**: each proposed rule is classified by
+**scope** and assigned a **placement** up front, so the human approves not just
+"which rules" but "where each rule and its gate live":
+
+- **repo-local** (content rules) — the gate + config installed in EACH repo; bound
+  to the repos that actually carry the violation.
+- **cross-repo** (API contracts and the like) — spans the repo set, enforced at the
+  integration tier (review-tier until the integration gate is built deterministically;
+  see [`cross_agent_integration_gate`](2026-06-15_cross_agent_integration_gate.md)).
+- **process** (VCS-workflow, e.g. conventional commits / `AB#{id}`) — account-level,
+  the VCS-action gate across all repos' commits/PRs (see
+  [`process_rules_and_vcs_action_gate`](2026-06-15_process_rules_and_vcs_action_gate.md)).
+
+So the proposed-rules table carries `scope`, `applies-to repos`, and `gate
+placement` columns, and `arm` installs each rule's gate at its decided location.
+The findings table carries a `repo` column so violations group/filter by repo.
+
 ## Honest current state
 
 This is a design capture, not built. What exists today: the gate (deny-before-execute
