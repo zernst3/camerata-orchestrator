@@ -14,6 +14,7 @@
 //! land in later phases, behind the same router.
 
 pub mod clarify;
+pub mod connections;
 pub mod decompose;
 pub mod live_fleet;
 pub mod provider;
@@ -114,6 +115,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clarifications/:cid/answer", post(answer_clarification))
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/provider", get(provider_info))
+        .route("/api/connections", get(connections_status))
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
@@ -266,6 +268,14 @@ async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value>
         "provider": state.provider.label,
         "live": state.provider.live,
     }))
+}
+
+/// Connection health for the optional integrations (GitHub, Claude). Probes
+/// GitHub reachability when a token is set so a 401/403/5xx surfaces as a real
+/// error; integrations being absent is reported as "not configured" (a warning,
+/// not an error, in the UI).
+async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
+    Json(crate::connections::probe().await)
 }
 
 /// Request to adopt an external work item by its tracker id.

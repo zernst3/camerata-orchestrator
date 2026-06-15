@@ -21,6 +21,7 @@ mod maintenance_run;
 mod routines;
 mod screens;
 mod style;
+mod toast;
 
 use std::sync::Arc;
 
@@ -134,17 +135,27 @@ fn App() -> Element {
 
     let edition = use_signal(|| Edition::AppBuilder);
 
+    // App-wide toast stack, shared via context so any component can push
+    // notifications/errors. The ConnectionWatcher below seeds it from the
+    // integration health probe.
+    let toasts = use_signal(Vec::<toast::Toast>::new);
+    use_context_provider(|| toasts);
+
     rsx! {
         // Global stylesheet, injected as a raw <style> so it works identically on
         // desktop without the asset pipeline. Keeps the whole look in one place.
         style { dangerous_inner_html: style::GLOBAL_CSS }
 
         div { class: "app-root",
+            // Watches connection health and pushes warning/error toasts; renders nothing.
+            toast::ConnectionWatcher {}
             EditionSwitcher { edition }
             match edition() {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
                 Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
             }
+            // The toast stack overlays everything, top-right.
+            toast::ToastHost {}
         }
     }
 }

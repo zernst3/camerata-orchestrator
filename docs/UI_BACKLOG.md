@@ -24,3 +24,20 @@ Current, post-clean-slate UI follow-ups. Newest intent at the top.
 - **Wire the VCS-action gate into the live commit/PR path.** The deterministic core
   (`camerata-checks::vcs_action`, `PROCESS-*`) is built and tested; it plugs into
   Camerata's commit/PR step when the live-build path is hardened.
+
+- **Real-time / notifications (POLLING, tiered cadence — webhooks NOT a priority).**
+  Decision (Zach, 2026-06-15): interval polling is the mechanism; websockets/webhooks
+  are an opt-in upgrade we are not prioritizing — the use cases are comment back-and-forth
+  and watching deployments, which polling handles fine. The provider `poll()` capability
+  already exists (GitHub adapter implements inbound reconciliation); what's NOT built is
+  an always-on server-side poller that ingests tracker events and emits notifications.
+  Build it with **tiered cadences**:
+  - **Comments / clarifications (PO answers):** slow poll (~30–60s) is plenty.
+  - **Deployment watching:** as near-real-time as polling allows — a fast cadence
+    (single-digit seconds) while a deploy is in flight, backing off when idle.
+  Shape: a background tokio task in `serve()` calls `provider.poll(cursor)` (and a
+  deploy-status poll) on its cadence, applies inbound events to the store, and exposes a
+  notifications feed the UI drains into toasts (the toast host + `push_toast` are already
+  in place; `ConnectionWatcher` is the same pattern at 45s for connection health). The
+  current `ConnectionWatcher` is the connection-health slice of this; the event-ingest
+  slice is the build.
