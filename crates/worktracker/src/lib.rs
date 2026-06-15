@@ -568,6 +568,113 @@ impl WorkItemProvider for NativeProvider {
     }
 }
 
+// ── Story store (the canonical spine repository) ────────────────────────────────
+
+/// A repository for the canonical story spine: the SET of stories the architect
+/// surface steers.
+///
+/// This is distinct from [`WorkItemProvider`], which syncs ONE item to and from an
+/// external tracker. The store owns the list (what the cockpit's left rail renders);
+/// the provider owns per-item tracker I/O. In-memory now; a SQLite-backed impl
+/// behind this same trait is the cloud-hosting step (mirrors
+/// `camerata_persistence::ArtifactStore`).
+#[async_trait]
+pub trait StoryStore: Send + Sync {
+    /// All stories on the spine, in insertion order.
+    async fn list(&self) -> anyhow::Result<Vec<CanonicalStory>>;
+    /// One story by its canonical id, or `None` if absent.
+    async fn get(&self, id: &str) -> anyhow::Result<Option<CanonicalStory>>;
+    /// Insert a new story or replace an existing one with the same id.
+    async fn upsert(&self, story: CanonicalStory) -> anyhow::Result<()>;
+}
+
+/// In-memory [`StoryStore`] for local/desktop runs and tests. The cloud build
+/// swaps a persistent impl behind the same trait without touching callers.
+#[derive(Default)]
+pub struct InMemoryStoryStore {
+    stories: Mutex<Vec<CanonicalStory>>,
+}
+
+impl InMemoryStoryStore {
+    /// An empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A store pre-seeded with representative stories across lifecycle states, so
+    /// the cockpit spine has a believable starting set before any live wiring.
+    pub fn seeded() -> Self {
+        let store = Self::new();
+        let seed = vec![
+            CanonicalStory {
+                id: "CAM-1".into(),
+                external_ref: None,
+                title: "Add CSV export to org members".into(),
+                description: "As an org admin I want to export the member directory to \
+                              CSV so I can reconcile it against payroll."
+                    .into(),
+                status: FeatureStatus::Executing,
+                created_by: "architect".into(),
+            },
+            CanonicalStory {
+                id: "CAM-2".into(),
+                external_ref: None,
+                title: "Fix timezone handling in reminders".into(),
+                description: "Reminder emails fire in UTC instead of the org's local zone."
+                    .into(),
+                status: FeatureStatus::SignedOff,
+                created_by: "architect".into(),
+            },
+            CanonicalStory {
+                id: "CAM-3".into(),
+                external_ref: None,
+                title: "Invite-only org signup".into(),
+                description: "Gate new-member signup behind an invitation from an org admin."
+                    .into(),
+                status: FeatureStatus::Blocked,
+                created_by: "architect".into(),
+            },
+        ];
+        if let Ok(mut guard) = store.stories.lock() {
+            *guard = seed;
+        }
+        store
+    }
+}
+
+#[async_trait]
+impl StoryStore for InMemoryStoryStore {
+    async fn list(&self) -> anyhow::Result<Vec<CanonicalStory>> {
+        Ok(self
+            .stories
+            .lock()
+            .map_err(|_| anyhow::anyhow!("story store mutex poisoned"))?
+            .clone())
+    }
+
+    async fn get(&self, id: &str) -> anyhow::Result<Option<CanonicalStory>> {
+        Ok(self
+            .stories
+            .lock()
+            .map_err(|_| anyhow::anyhow!("story store mutex poisoned"))?
+            .iter()
+            .find(|s| s.id == id)
+            .cloned())
+    }
+
+    async fn upsert(&self, story: CanonicalStory) -> anyhow::Result<()> {
+        let mut guard = self
+            .stories
+            .lock()
+            .map_err(|_| anyhow::anyhow!("story store mutex poisoned"))?;
+        match guard.iter_mut().find(|s| s.id == story.id) {
+            Some(existing) => *existing = story,
+            None => guard.push(story),
+        }
+        Ok(())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -968,5 +1075,37 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: InboundWorkItemEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, event);
+    }
+
+    // ── StoryStore ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn seeded_story_store_lists_representative_stories() {
+        let store = InMemoryStoryStore::seeded();
+        let stories = store.list().await.unwrap();
+        assert_eq!(stories.len(), 3);
+        assert_eq!(stories[0].id, "CAM-1");
+        assert_eq!(stories[0].status, FeatureStatus::Executing);
+    }
+
+    #[tokio::test]
+    async fn story_store_upsert_inserts_then_replaces() {
+        let store = InMemoryStoryStore::new();
+        store.upsert(make_story("s-1", "First")).await.unwrap();
+        assert_eq!(store.list().await.unwrap().len(), 1);
+
+        // Same id replaces in place rather than appending.
+        let mut updated = make_story("s-1", "First, edited");
+        updated.status = FeatureStatus::SignedOff;
+        store.upsert(updated).await.unwrap();
+
+        let stories = store.list().await.unwrap();
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].title, "First, edited");
+        assert_eq!(stories[0].status, FeatureStatus::SignedOff);
+
+        let got = store.get("s-1").await.unwrap().unwrap();
+        assert_eq!(got.title, "First, edited");
+        assert!(store.get("missing").await.unwrap().is_none());
     }
 }

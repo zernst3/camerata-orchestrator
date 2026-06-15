@@ -8,4 +8,28 @@ version = "0.0.0"
 [lints]
 workspace = true
 
+# The Axum BFF the Dioxus cockpit talks to. The same server runs locally behind
+# the desktop shell now and is the cloud-hosted API later (the long-term goal),
+# so all UI-facing contracts live here as HTTP endpoints rather than in-process
+# calls. Read endpoints first (rules, stories); execution + live-status stream
+# land in later phases.
+
+[[bin]]
+name = "camerata-server"
+path = "src/main.rs"
+
 [dependencies]
+axum = "0.7"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = "0.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+# The backend contracts the BFF exposes.
+camerata-gateway = { path = "../gateway" }
+camerata-worktracker = { path = "../worktracker" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
