@@ -14,6 +14,7 @@
 //! land in later phases, behind the same router.
 
 pub mod clarify;
+pub mod decompose;
 pub mod provider;
 pub mod run;
 
@@ -32,6 +33,7 @@ use camerata_gateway::RULE_REGISTRY;
 use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore};
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
+use crate::decompose::{propose, to_story, DecompositionStore, Practice, ProposedChild};
 use crate::provider::ProviderHandle;
 use crate::run::{execute_run, Run, RunStore};
 
@@ -44,6 +46,7 @@ pub struct AppState {
     runs: RunStore,
     clarifications: ClarificationStore,
     provider: ProviderHandle,
+    decompositions: DecompositionStore,
 }
 
 impl AppState {
@@ -55,6 +58,7 @@ impl AppState {
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
             provider: ProviderHandle::native(),
+            decompositions: DecompositionStore::new(),
         }
     }
 
@@ -101,6 +105,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/provider", get(provider_info))
         .route("/api/stories/adopt", post(adopt_story))
+        .route("/api/stories/:id/decompose", post(decompose_propose))
+        .route("/api/stories/:id/decompose/commit", post(decompose_commit))
+        .route("/api/stories/:id/children", get(list_children))
         .with_state(state)
 }
 
@@ -260,6 +267,61 @@ async fn adopt_story(
         .map_err(AppError)?;
     state.stories.upsert(story.clone()).await.map_err(AppError)?;
     Ok(Json(story))
+}
+
+/// Propose the component children for a parent story (not yet created). The architect
+/// reviews/edits these, then commits.
+async fn decompose_propose(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Result<Json<Vec<ProposedChild>>, AppError> {
+    let parent = state
+        .stories
+        .get(&story_id)
+        .await
+        .map_err(AppError)?
+        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+    Ok(Json(propose(&parent, &Practice::default_feature())))
+}
+
+/// The edited set of children to commit.
+#[derive(serde::Deserialize)]
+struct CommitChildrenReq {
+    children: Vec<ProposedChild>,
+}
+
+/// Commit the (edited) children: create each as a real story on the spine, linked to
+/// the parent. The tracker write-back (as the right work-item type, with parent/child
+/// relationship metadata) is the provider phase.
+async fn decompose_commit(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<CommitChildrenReq>,
+) -> Result<Json<Vec<CanonicalStory>>, AppError> {
+    let mut created = Vec::new();
+    let mut child_ids = Vec::new();
+    for pc in &req.children {
+        let child = to_story(&story_id, pc);
+        state.stories.upsert(child.clone()).await.map_err(AppError)?;
+        child_ids.push(child.id.clone());
+        created.push(child);
+    }
+    state.decompositions.record(&story_id, child_ids);
+    Ok(Json(created))
+}
+
+/// The committed children of a parent story.
+async fn list_children(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Result<Json<Vec<CanonicalStory>>, AppError> {
+    let mut children = Vec::new();
+    for cid in state.decompositions.children_of(&story_id) {
+        if let Some(story) = state.stories.get(&cid).await.map_err(AppError)? {
+            children.push(story);
+        }
+    }
+    Ok(Json(children))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────
