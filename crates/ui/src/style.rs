@@ -863,6 +863,9 @@ html, body {
   padding: 8px 16px;
   background: var(--ink);
   color: #f4f1ea;
+  /* Full width so app-root's align-items:center can't shrink it to content
+     width (which differs per view and shifted the toolbar). */
+  width: 100%;
 }
 .edition-brand { font-weight: 700; letter-spacing: .02em; font-size: 14px; }
 .edition-tabs { display: flex; gap: 4px; background: #00000033; border-radius: 9px; padding: 3px; }
@@ -889,7 +892,7 @@ html, body {
 /* ===================================================================== */
 /* The enterprise cockpit — a dense, single-pane control surface.        */
 /* ===================================================================== */
-.cockpit { display: flex; flex-direction: column; height: calc(100vh - 44px); background: var(--paper); }
+.cockpit { display: flex; flex-direction: column; height: calc(100vh - 44px); width: 100%; background: var(--paper); }
 
 /* Top bar */
 .cockpit-topbar { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -898,12 +901,15 @@ html, body {
 .topbar-story { font-size: 13px; color: var(--ink-soft); }
 .topbar-status { margin-left: auto; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 3px 9px; border-radius: 6px; }
 /* Toast notifications (top-right overlay). */
-.toast-host { position: fixed; top: 14px; right: 14px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; max-width: 380px; }
-.toast { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 6px 24px rgba(0,0,0,.12); font-size: 12px; line-height: 1.45; animation: toast-in .18s ease-out; }
+/* A separate top-layer overlay: fixed to the viewport, above everything, and
+   click-through (pointer-events:none) except on the toasts themselves. */
+.toast-host { position: fixed; top: 14px; right: 14px; z-index: 2147483000; display: flex; flex-direction: column; gap: 8px; width: 360px; max-width: calc(100vw - 28px); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface); box-shadow: 0 8px 28px rgba(0,0,0,.18); font-size: 12px; line-height: 1.45; animation: toast-in .18s ease-out; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 .toast-label { font-weight: 700; font-size: 10px; letter-spacing: .06em; padding: 2px 6px; border-radius: 5px; flex: none; margin-top: 1px; }
 .toast-msg { color: var(--ink); flex: 1; }
-.toast-close { background: none; border: none; font-size: 16px; line-height: 1; color: var(--ink-faint); cursor: pointer; flex: none; padding: 0 2px; }
+.toast-close { background: none; border: none; font-size: 17px; line-height: 1; color: var(--ink-faint); cursor: pointer; flex: none; width: 20px; height: 20px; border-radius: 5px; display: flex; align-items: center; justify-content: center; margin: -1px -3px 0 0; }
+.toast-close:hover { background: rgba(0,0,0,.08); color: var(--ink); }
 .toast.info { border-color: #b9c6d6; }
 .toast.info .toast-label { background: #e7eef6; color: #355b86; }
 .toast.warning { border-color: #f0c89a; background: #fff8ef; }

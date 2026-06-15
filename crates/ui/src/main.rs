@@ -156,9 +156,11 @@ fn App() -> Element {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
                 Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
             }
-            // The toast stack overlays everything, top-right.
-            toast::ToastHost {}
         }
+        // The toast stack is a SEPARATE top-layer overlay — a sibling of app-root,
+        // position:fixed, pointer-events:none on the layer (so it never blocks the
+        // UI behind it) with pointer-events:auto on each toast.
+        toast::ToastHost {}
     }
 }
 

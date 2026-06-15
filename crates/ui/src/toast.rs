@@ -42,14 +42,24 @@ pub struct Toast {
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Most toasts to keep on screen at once. A burst (e.g. many story updates in one
+/// poll) drops the oldest rather than stacking into a wall — the auto-dismiss timer
+/// clears the rest.
+const MAX_VISIBLE: usize = 6;
+
 /// Push a toast onto the app-wide stack.
 pub fn push_toast(mut list: Signal<Vec<Toast>>, kind: ToastKind, message: impl Into<String>) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    list.write().push(Toast {
+    let mut toasts = list.write();
+    toasts.push(Toast {
         id,
         kind,
         message: message.into(),
     });
+    if toasts.len() > MAX_VISIBLE {
+        let drop = toasts.len() - MAX_VISIBLE;
+        toasts.drain(0..drop);
+    }
 }
 
 /// Renders the toast stack. Reads the app-wide `Signal<Vec<Toast>>` from context.
@@ -65,19 +75,29 @@ pub fn ToastHost() -> Element {
     }
 }
 
+/// How long a toast stays before auto-dismissing, from `CAMERATA_UI_TOAST_SECS`
+/// (default 10s). Applies to ALL toasts so a burst of story updates self-clears
+/// rather than piling up; the close X dismisses early.
+fn toast_secs() -> u64 {
+    std::env::var("CAMERATA_UI_TOAST_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(10)
+}
+
 #[component]
 fn ToastCard(toast: Toast) -> Element {
     let mut list = use_context::<Signal<Vec<Toast>>>();
     let id = toast.id;
-    // Info/warning auto-dismiss; errors stay until dismissed. Spawned once on mount.
-    let auto_dismiss = !matches!(toast.kind, ToastKind::Error);
+    // EVERY toast auto-dismisses after the configured timer (default 10s), so the
+    // user is never bombarded by a stream of updates. Spawned once on mount.
     use_hook(move || {
-        if auto_dismiss {
-            spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(9)).await;
-                list.write().retain(|t| t.id != id);
-            });
-        }
+        let secs = toast_secs();
+        spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            list.write().retain(|t| t.id != id);
+        });
     });
 
     let (cls, label) = match toast.kind {
@@ -91,6 +111,7 @@ fn ToastCard(toast: Toast) -> Element {
             span { class: "toast-msg", "{toast.message}" }
             button {
                 class: "toast-close",
+                title: "Dismiss",
                 onclick: move |_| {
                     list.write().retain(|t| t.id != id);
                 },
@@ -108,7 +129,6 @@ fn ToastCard(toast: Toast) -> Element {
 struct ConnView {
     id: String,
     label: String,
-    #[allow(dead_code)]
     configured: bool,
     ok: Option<bool>,
     #[serde(default)]
@@ -118,7 +138,6 @@ struct ConnView {
 #[derive(Deserialize, Clone)]
 struct ConnectionsView {
     connections: Vec<ConnView>,
-    any_configured: bool,
 }
 
 async fn fetch_connections() -> Option<ConnectionsView> {
@@ -207,14 +226,26 @@ pub fn ConnectionWatcher() -> Element {
             let mut first = true;
             loop {
                 if let Some(report) = fetch_connections().await {
-                    if first && !report.any_configured {
-                        push_toast(
-                            toasts,
-                            ToastKind::Warning,
-                            "No integrations connected. Camerata is running on the built-in \
-                             tracker — connect GitHub (and Claude) to link real repos, \
-                             stories, and agents. See docs/USER_GUIDE.md.",
-                        );
+                    if first {
+                        // Warn when the GitHub (code host + work tracker) integration
+                        // is not configured. Integrations are OPTIONAL, so this is a
+                        // warning, not an error — and Claude being present does not
+                        // suppress it (the user asked specifically about the code/story
+                        // integration).
+                        if report
+                            .connections
+                            .iter()
+                            .any(|c| c.id == "github" && !c.configured)
+                        {
+                            push_toast(
+                                toasts,
+                                ToastKind::Warning,
+                                "No GitHub integration connected (code host + work \
+                                 tracker). Set CAMERATA_GITHUB_TOKEN to link real repos \
+                                 and stories — optional; Camerata runs on the built-in \
+                                 tracker without it.",
+                            );
+                        }
                     }
                     for c in &report.connections {
                         let prev_ok = prev.get(&c.id).copied();
