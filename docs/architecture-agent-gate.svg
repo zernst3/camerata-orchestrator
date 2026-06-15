@@ -1,0 +1,97 @@
+<svg viewBox="0 0 980 780" role="img" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+<title>camerata architecture: how an AI agent fits behind the governance gate</title>
+<desc>The orchestrator is deterministic Rust that makes zero model calls. It prepares a per-session rule file and an MCP config, then spawns a claude -p agent behind the AgentDriver seam. The agent's built-in write tools are disallowed, so its only way to write is the camerata gateway's gated_write MCP tool. The gateway is a Rust MCP server that denies or allows each write before it executes (layer 1). Allowed writes land in an isolated worktree; denied writes return a tool error and the agent re-routes. After the task, layer-2 checks (cargo fmt, clippy, test) run and bounce failures back. The agent uses your local Claude subscription login; camerata stores no model credentials, and the gate is model-agnostic.</desc>
+
+<rect x="1" y="1" width="978" height="778" rx="14" fill="#FCFCFA" stroke="#E5E4DD" stroke-width="1"/>
+
+<defs>
+<marker id="aw" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#6B6A64"/></marker>
+<marker id="ag" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0F6E56"/></marker>
+<marker id="ad" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#B0432E"/></marker>
+</defs>
+
+<text x="490" y="30" text-anchor="middle" font-size="16" font-weight="600" fill="#2C2C2A">camerata: how an AI agent fits behind the gate</text>
+<text x="490" y="50" text-anchor="middle" font-size="12" fill="#6B6A64">the orchestrator makes zero model calls; the agent's only way to write is the gated MCP tool</text>
+
+<!-- A. Orchestrator -->
+<rect x="110" y="72" width="760" height="74" rx="8" fill="none" stroke="#CFCEC7" stroke-width="1.6"/>
+<text x="128" y="100" font-size="15" font-weight="500" fill="#2C2C2A">Camerata orchestrator</text>
+<text x="128" y="120" font-size="12" fill="#6B6A64">deterministic Rust · zero model calls · FleetCoordinator + coordinator</text>
+<text x="128" y="138" font-size="11.5" fill="#6B6A64">prepare_session: writes the role's rules.json + an MCP config (gateway.json) pointing at the gateway binary</text>
+
+<line x1="330" y1="146" x2="330" y2="178" stroke="#6B6A64" stroke-width="1.6" marker-end="url(#aw)"/>
+<text x="342" y="166" font-size="11.5" fill="#6B6A64">1 prepare session + spawn</text>
+
+<!-- B. AgentDriver seam -->
+<rect x="110" y="182" width="760" height="98" rx="10" fill="none" stroke="#CFCEC7" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="124" y="176" font-size="12" fill="#6B6A64">AgentDriver seam (trait) · model-agnostic — the gate does not care which model</text>
+<rect x="130" y="200" width="350" height="62" rx="8" fill="none" stroke="#185FA5" stroke-width="1.8"/>
+<text x="148" y="226" font-size="14" font-weight="500" fill="#2C2C2A">ClaudeCliDriver</text>
+<text x="148" y="247" font-size="11.5" fill="#185FA5">this PoC · spawns `claude -p` headless</text>
+<rect x="500" y="200" width="350" height="62" rx="8" fill="none" stroke="#CFCEC7" stroke-width="1.4" stroke-dasharray="4 4"/>
+<text x="518" y="226" font-size="14" font-weight="500" fill="#9A958C">future drivers</text>
+<text x="518" y="247" font-size="11.5" fill="#9A958C">metered API key · other CLI · Gemini / OpenAI</text>
+
+<line x1="305" y1="262" x2="305" y2="300" stroke="#6B6A64" stroke-width="1.6" marker-end="url(#aw)"/>
+<text x="317" y="285" font-size="11.5" fill="#6B6A64">2 launch</text>
+
+<!-- C. Agent process -->
+<rect x="110" y="304" width="440" height="96" rx="8" fill="none" stroke="#2C2C2A" stroke-width="1.8"/>
+<text x="128" y="332" font-size="15" font-weight="500" fill="#2C2C2A">Agent process: `claude -p` (Claude Code CLI)</text>
+<text x="128" y="354" font-size="12" fill="#6B6A64">the MODEL reasons and calls tools</text>
+<text x="128" y="376" font-size="11.5" fill="#B0432E">built-in write tools DISALLOWED: Bash · Write · Edit · MultiEdit</text>
+<text x="128" y="392" font-size="11.5" fill="#6B6A64">--strict-mcp-config · --add-dir worktree · --output-format json</text>
+
+<!-- Credentials note -->
+<rect x="590" y="304" width="280" height="96" rx="8" fill="none" stroke="#CFCEC7" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="606" y="328" font-size="12.5" font-weight="600" fill="#6B6A64">Credentials</text>
+<text x="606" y="348" font-size="11.5" fill="#6B6A64">agent auth = your local Claude login</text>
+<text x="606" y="364" font-size="11.5" fill="#6B6A64">(your subscription). Camerata stores</text>
+<text x="606" y="380" font-size="11.5" fill="#6B6A64">NO model credentials. To productize,</text>
+<text x="606" y="396" font-size="11.5" fill="#6B6A64">swap a metered API key at the seam.</text>
+
+<line x1="330" y1="400" x2="330" y2="440" stroke="#6B6A64" stroke-width="1.6" marker-end="url(#aw)"/>
+<text x="342" y="424" font-size="11.5" fill="#6B6A64">3 the ONLY write path: mcp__camerata__gated_write</text>
+
+<!-- D. Gateway -->
+<rect x="110" y="444" width="440" height="100" rx="8" fill="none" stroke="#B0432E" stroke-width="2"/>
+<text x="128" y="472" font-size="15" font-weight="500" fill="#2C2C2A">Camerata gateway — Rust MCP server (stdio)</text>
+<text x="128" y="494" font-size="12.5" font-weight="600" fill="#B0432E">LAYER 1 · deny-before-execute</text>
+<text x="128" y="514" font-size="11.5" fill="#6B6A64">reads CAMERATA_RULES_FILE = this role's rule subset</text>
+<text x="128" y="532" font-size="11.5" fill="#6B6A64">evaluate_call(rules, write) → allow / deny, before a byte hits disk</text>
+
+<!-- E. Worktree -->
+<line x1="330" y1="544" x2="330" y2="588" stroke="#0F6E56" stroke-width="1.8" marker-end="url(#ag)"/>
+<text x="342" y="570" font-size="11.5" fill="#0F6E56">4 ALLOW → write reaches disk</text>
+<rect x="110" y="592" width="440" height="62" rx="8" fill="none" stroke="#CFCEC7" stroke-width="1.6"/>
+<text x="128" y="618" font-size="14" font-weight="500" fill="#2C2C2A">Worktree (isolated git worktree)</text>
+<text x="128" y="638" font-size="11.5" fill="#6B6A64">agent is --add-dir scoped to it; writes land here only when the gate allows</text>
+
+<!-- Deny feedback (far-left return path) -->
+<path d="M110,494 L72,494 L72,352 L106,352" fill="none" stroke="#B0432E" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#ad)"/>
+<text x="64" y="430" font-size="11.5" fill="#B0432E" transform="rotate(-90 64 430)">DENY → tool error · agent re-routes</text>
+
+<!-- F. Layer 2 -->
+<rect x="590" y="444" width="280" height="138" rx="8" fill="none" stroke="#0F6E56" stroke-width="1.8"/>
+<text x="606" y="472" font-size="14" font-weight="500" fill="#2C2C2A">LAYER 2 · post-task</text>
+<text x="606" y="494" font-size="11.5" fill="#6B6A64">RustCheckRunner over the worktree:</text>
+<text x="606" y="512" font-size="11.5" fill="#0F6E56">cargo fmt · clippy · test</text>
+<text x="606" y="534" font-size="11.5" fill="#6B6A64">fail → bounce back to the agent to revise</text>
+<text x="606" y="556" font-size="11.5" fill="#6B6A64">inspects the produced CODE, not the model</text>
+<text x="606" y="574" font-size="11.5" fill="#6B6A64">(so it is fully model-agnostic)</text>
+
+<line x1="550" y1="623" x2="690" y2="584" stroke="#0F6E56" stroke-width="1.6" marker-end="url(#ag)"/>
+<text x="612" y="612" font-size="11.5" fill="#0F6E56">5 post-task checks</text>
+<path d="M730,444 L730,420 L470,420 L470,402" fill="none" stroke="#0F6E56" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#ag)"/>
+<text x="600" y="414" font-size="11.5" fill="#0F6E56">bounce on fail → revise</text>
+
+<!-- Legend -->
+<line x1="120" y1="712" x2="152" y2="712" stroke="#B0432E" stroke-width="2.5"/>
+<text x="158" y="716" font-size="12" fill="#6B6A64">the gate · deny-before-execute (layer 1)</text>
+<line x1="430" y1="712" x2="462" y2="712" stroke="#0F6E56" stroke-width="2.5"/>
+<text x="468" y="716" font-size="12" fill="#6B6A64">allow · layer-2 checks</text>
+<line x1="650" y1="712" x2="682" y2="712" stroke="#6B6A64" stroke-width="2.5"/>
+<text x="688" y="716" font-size="12" fill="#6B6A64">orchestration / flow</text>
+
+<text x="490" y="748" text-anchor="middle" font-size="11.5" fill="#9A958C">Two enforcement layers. Layer 1 needs an MCP-speaking agent (Claude Code today). Layer 2 governs any model, because it checks the output, not the agent.</text>
+</svg>

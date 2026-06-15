@@ -1029,10 +1029,20 @@ html, body {
 
 /* Cockpit loading / error / empty notice (shown while the BFF fetch resolves). */
 .cockpit-notice {
-  height: calc(100vh - 44px); display: flex; flex-direction: column;
+  flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px; text-align: center;
   padding: 40px; background: var(--paper);
 }
+
+/* Cockpit internal nav: control surface vs routines (both architect tools). */
+.cockpit-nav { display: flex; gap: 4px; padding: 7px 16px; background: #f1efe9; border-bottom: 1px solid var(--line); }
+.cockpit-nav-tab {
+  border: none; background: transparent; color: var(--ink-soft);
+  font-size: 12.5px; font-weight: 700; padding: 5px 13px; border-radius: 7px; cursor: pointer;
+}
+.cockpit-nav-tab:hover { color: var(--ink); }
+.cockpit-nav-tab.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-card); }
+.cockpit-scroll { flex: 1; overflow-y: auto; }
 .cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
 .cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }
 

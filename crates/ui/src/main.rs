@@ -108,10 +108,9 @@ async fn open_store() -> (Option<SqliteStore>, PersistenceMode) {
 pub enum Edition {
     /// The consumer / small-business app-builder (the guided wizard).
     AppBuilder,
-    /// The enterprise / architect cockpit (the dense control surface).
+    /// The enterprise / architect cockpit (the dense control surface). Routines live
+    /// INSIDE this surface (an architect tool), reached via the cockpit's own nav.
     Cockpit,
-    /// The routine dashboard (scheduled governed routines).
-    Routines,
 }
 
 /// Root. Injects the global stylesheet once and lets the viewer switch between
@@ -145,7 +144,6 @@ fn App() -> Element {
             match edition() {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
                 Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
-                Edition::Routines => rsx! { routines::RoutineDashboard {} },
             }
         }
     }
@@ -166,11 +164,6 @@ fn EditionSwitcher(edition: Signal<Edition>) -> Element {
     } else {
         "edition-tab"
     };
-    let routines_cls = if edition() == Edition::Routines {
-        "edition-tab on"
-    } else {
-        "edition-tab"
-    };
     rsx! {
         div { class: "edition-switcher",
             span { class: "edition-brand", "Camerata" }
@@ -184,11 +177,6 @@ fn EditionSwitcher(edition: Signal<Edition>) -> Element {
                     class: "{cockpit_cls}",
                     onclick: move |_| edition.set(Edition::Cockpit),
                     "Enterprise cockpit"
-                }
-                button {
-                    class: "{routines_cls}",
-                    onclick: move |_| edition.set(Edition::Routines),
-                    "Routines"
                 }
             }
             span { class: "edition-hint", "one governed engine" }

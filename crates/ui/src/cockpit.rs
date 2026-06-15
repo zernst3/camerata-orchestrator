@@ -281,8 +281,51 @@ fn active_stage_index(status: FeatureStatus) -> usize {
 
 const STAGE_TABS: &[&str] = &["INTAKE", "INVESTIGATION", "PLAN", "STATUS", "QA"];
 
+/// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit
+/// (it's an architect tool), reached via the cockpit's own nav, not a top-level app.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CockpitView {
+    Stories,
+    Routines,
+}
+
+/// The cockpit's internal nav: switch between the control surface (stories) and the
+/// routine dashboard. Both are architect tools, so both live in the Enterprise app.
+#[component]
+fn CockpitNav(view: Signal<CockpitView>) -> Element {
+    let mut view = view;
+    let stories_cls = if view() == CockpitView::Stories {
+        "cockpit-nav-tab on"
+    } else {
+        "cockpit-nav-tab"
+    };
+    let routines_cls = if view() == CockpitView::Routines {
+        "cockpit-nav-tab on"
+    } else {
+        "cockpit-nav-tab"
+    };
+    rsx! {
+        div { class: "cockpit-nav",
+            button {
+                class: "{stories_cls}",
+                onclick: move |_| view.set(CockpitView::Stories),
+                "Control surface"
+            }
+            button {
+                class: "{routines_cls}",
+                onclick: move |_| view.set(CockpitView::Routines),
+                "Routines"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn CockpitApp() -> Element {
+    // Which cockpit view (control surface vs routines). Declared first so all hooks
+    // below run unconditionally in a stable order regardless of the view.
+    let view = use_signal(|| CockpitView::Stories);
+
     // Both data sets come from the BFF over HTTP. `use_resource` runs the fetch when
     // the cockpit mounts; the embedded server (see main.rs) is up by then.
     let stories_res = use_resource(fetch_stories);
@@ -309,16 +352,35 @@ pub fn CockpitApp() -> Element {
     // A resolved-but-None fetch means the BFF was unreachable / returned junk.
     let errored = matches!(&stories_loaded, Some(None)) || matches!(&rules_loaded, Some(None));
 
+    // Routines live inside the cockpit (an architect tool). All hooks above have run,
+    // so branching here is safe.
+    if view() == CockpitView::Routines {
+        return rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    crate::routines::RoutineDashboard {}
+                }
+            }
+        };
+    }
+
     match (stories_loaded, rules_loaded) {
         (Some(Some(story_list)), Some(Some(rules))) => {
             if story_list.is_empty() {
-                return rsx! { CockpitNotice { kind: "empty".to_string() } };
+                return rsx! {
+                    div { class: "cockpit",
+                        CockpitNav { view }
+                        CockpitNotice { kind: "empty".to_string() }
+                    }
+                };
             }
             let current = story_list[selected().min(story_list.len() - 1)].clone();
             let active_stage = active_stage_index(current.status);
 
             rsx! {
                 div { class: "cockpit",
+                    CockpitNav { view }
                     CockpitTopBar { story: current.clone() }
 
                     div { class: "cockpit-body",
@@ -510,8 +572,18 @@ pub fn CockpitApp() -> Element {
                 }
             }
         }
-        _ if errored => rsx! { CockpitNotice { kind: "error".to_string() } },
-        _ => rsx! { CockpitNotice { kind: "loading".to_string() } },
+        _ if errored => rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                CockpitNotice { kind: "error".to_string() }
+            }
+        },
+        _ => rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                CockpitNotice { kind: "loading".to_string() }
+            }
+        },
     }
 }
 
