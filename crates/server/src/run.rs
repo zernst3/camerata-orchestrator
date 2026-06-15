@@ -50,6 +50,16 @@ pub struct Run {
     pub events: Vec<GateEvent>,
     /// True once the run has walked to AwaitingQa.
     pub done: bool,
+    /// "scripted" (token-free, real-gate verdicts) or "live" (a real claude -p fleet).
+    pub mode: String,
+}
+
+/// Whether the live-fleet run path is enabled (CAMERATA_LIVE_BUILD=1). Off by default,
+/// so a run is the token-free scripted path unless explicitly opted in.
+pub fn live_mode_enabled() -> bool {
+    std::env::var("CAMERATA_LIVE_BUILD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// In-memory store of runs, shared into the background executor and the handlers.
@@ -64,8 +74,9 @@ impl RunStore {
         Self::default()
     }
 
-    /// Create a Planned run for `story_id` and return its id.
-    pub fn create(&self, story_id: &str) -> String {
+    /// Create a Planned run for `story_id` in the given mode ("scripted" | "live") and
+    /// return its id.
+    pub fn create(&self, story_id: &str, mode: &str) -> String {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("run-{n}");
         let run = Run {
@@ -74,6 +85,7 @@ impl RunStore {
             status: RunStatus::Planned,
             events: Vec::new(),
             done: false,
+            mode: mode.to_string(),
         };
         if let Ok(mut guard) = self.runs.lock() {
             guard.insert(id.clone(), run);
@@ -85,7 +97,7 @@ impl RunStore {
         self.runs.lock().ok()?.get(id).cloned()
     }
 
-    fn set_status(&self, id: &str, status: RunStatus, done: bool) {
+    pub(crate) fn set_status(&self, id: &str, status: RunStatus, done: bool) {
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
                 run.status = status;
@@ -94,7 +106,7 @@ impl RunStore {
         }
     }
 
-    fn push_event(&self, id: &str, event: GateEvent) {
+    pub(crate) fn push_event(&self, id: &str, event: GateEvent) {
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
                 run.events.push(event);
@@ -227,7 +239,7 @@ mod tests {
     #[test]
     fn run_store_create_and_get() {
         let store = RunStore::new();
-        let id = store.create("CAM-1");
+        let id = store.create("CAM-1", "scripted");
         let run = store.get(&id).expect("run exists");
         assert_eq!(run.story_id, "CAM-1");
         assert_eq!(run.status, RunStatus::Planned);
@@ -238,7 +250,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn execute_run_walks_to_awaiting_qa_with_real_denies() {
         let store = RunStore::new();
-        let id = store.create("CAM-1");
+        let id = store.create("CAM-1", "scripted");
         // start_paused auto-advances tokio time, so the sleeps resolve instantly.
         execute_run(store.clone(), id.clone()).await;
 

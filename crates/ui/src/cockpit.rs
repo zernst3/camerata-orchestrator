@@ -56,6 +56,8 @@ struct RunView {
     status: String,
     events: Vec<RunGateEvent>,
     done: bool,
+    #[serde(default)]
+    mode: String,
 }
 
 /// One real gate verdict in a run.
@@ -651,18 +653,30 @@ fn StagePanel(story: CanonicalStory, fleet: Vec<FleetAgent>) -> Element {
 #[component]
 fn LiveRunPanel(run: RunView) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
+    let live = run.mode == "live";
+    let mode_label = if live { "live fleet" } else { "scripted · token-free" };
+    let sub = if live {
+        "A real governed fleet (claude -p) under the gate. Stage and bounce events are reported as they happen."
+    } else {
+        "Token-free run: the agent is scripted, but the gate doing the deciding is the live one. Real deny/allow verdicts."
+    };
     rsx! {
         div { class: "live-run",
             div { class: "live-run-head",
                 span { class: "live-run-title", "Governed run" }
+                span { class: "live-run-mode", "{mode_label}" }
                 span { class: "live-run-status {status_cls}", "{status_label}" }
             }
-            p { class: "panel-sub", "Real verdicts from the gate, as the run executes. In this token-free run the agent is scripted; the gate doing the deciding is the live one." }
+            p { class: "panel-sub", "{sub}" }
             div { class: "live-events",
                 for ev in run.events.iter() {
                     {
-                        let vcls = if ev.verdict == "deny" { "live-event deny" } else { "live-event allow" };
-                        let vlabel = if ev.verdict == "deny" { "DENIED" } else { "ALLOWED" };
+                        let vcls = match ev.verdict.as_str() {
+                            "deny" => "live-event deny",
+                            "allow" => "live-event allow",
+                            _ => "live-event info",
+                        };
+                        let vlabel = ev.verdict.to_uppercase();
                         rsx! {
                             div { class: "{vcls}",
                                 div { class: "live-event-head",

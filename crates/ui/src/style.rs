@@ -1052,6 +1052,9 @@ html, body {
 .live-event { border-left: 3px solid var(--ink-faint); border-radius: 0 8px 8px 0; background: #fbfaf7; padding: 9px 12px; }
 .live-event.deny { border-left-color: #b0432e; background: #f7e1dc55; }
 .live-event.allow { border-left-color: #2f8f5b; background: #f0f8f3; }
+.live-event.info { border-left-color: var(--ink-faint); background: #fbfaf7; }
+.live-event.info .live-event-verdict { color: var(--ink-soft); }
+.live-run-mode { font-size: 10.5px; font-weight: 700; letter-spacing: .03em; padding: 3px 8px; border-radius: 6px; background: var(--accent-wash); color: var(--accent-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .live-event-head { display: flex; align-items: center; gap: 9px; margin-bottom: 3px; }
 .live-event-verdict { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .live-event.deny .live-event-verdict { color: #b0432e; }

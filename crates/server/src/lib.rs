@@ -15,6 +15,7 @@
 
 pub mod clarify;
 pub mod decompose;
+pub mod live_fleet;
 pub mod provider;
 pub mod routine;
 pub mod run;
@@ -37,7 +38,7 @@ use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyRe
 use crate::decompose::{propose, to_story, DecompositionStore, Practice, ProposedChild};
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
-use crate::run::{execute_run, Run, RunStore};
+use crate::run::{execute_run, live_mode_enabled, Run, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
 /// in-memory impls used now can be swapped for persistent / cloud impls later
@@ -163,11 +164,26 @@ async fn start_run(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let run_id = state.runs.create(&story_id);
+    let live = live_mode_enabled();
+    let mode = if live { "live" } else { "scripted" };
+    let run_id = state.runs.create(&story_id, mode);
     let store = state.runs.clone();
     let rid = run_id.clone();
-    tokio::spawn(async move { execute_run(store, rid).await });
-    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id }))
+
+    if live {
+        // Real governed fleet (needs the gateway binary + claude + tokens). Pass the
+        // story so the live executor can build a plan from it.
+        let (title, desc) = match state.stories.get(&story_id).await {
+            Ok(Some(s)) => (s.title, s.description),
+            _ => (story_id.clone(), String::new()),
+        };
+        tokio::spawn(async move { live_fleet::execute_live_run(store, rid, title, desc).await });
+    } else {
+        // Token-free scripted path: real gate verdicts over planted calls.
+        tokio::spawn(async move { execute_run(store, rid).await });
+    }
+
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
 }
 
 /// The current state of a run: its status plus the real gate verdicts so far.
