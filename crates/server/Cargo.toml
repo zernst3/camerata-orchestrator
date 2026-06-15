@@ -25,9 +25,12 @@ tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
-# Decoding GitHub blob contents (the contents/blobs API returns base64) for the
-# brownfield repo scan.
-base64 = "0.22"
+# Whole-repo brownfield scan: download the repo tarball in ONE request and
+# gunzip + untar it locally (no per-file API calls / rate-limit blowup), and a
+# direct reqwest client for the binary download (the shared transport is text-only).
+flate2 = "1"
+tar = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }

@@ -170,14 +170,17 @@ pub fn audit_repo(repo: &str, files: &[(String, String)]) -> ScanReport {
 
 // ── GitHub repo reader (needs the token) ────────────────────────────────────────
 
-use base64::Engine as _;
-use camerata_worktracker::{HttpTransport, ReqwestTransport};
+use std::io::Read as _;
 
-/// Cap on files fetched per scan, so a huge repo can't hang the scan or burn the
-/// rate limit. Surfaced in the report message when hit.
-const MAX_FILES: usize = 150;
+use flate2::read::GzDecoder;
+
+/// Safety net for pathological monorepos so one scan can't exhaust memory. This
+/// is NOT a per-scan window that rotates: a single tarball download covers the
+/// WHOLE repo, and only a repo with more than this many auditable files is
+/// truncated (and the report says so). Normal repos are fully scanned.
+const HARD_CAP_FILES: usize = 20_000;
 /// Skip files larger than this (likely generated/vendored/binary).
-const MAX_FILE_BYTES: u64 = 200_000;
+const MAX_FILE_BYTES: usize = 400_000;
 
 /// Extensions worth auditing (source + config text). Keeps the scan off images,
 /// lockfiles, and binaries.
@@ -193,95 +196,93 @@ fn has_code_ext(path: &str) -> bool {
     }
 }
 
-/// Fetch a repo's auditable files via the GitHub API: resolve the default branch,
-/// list the recursive tree, filter to text/code blobs under the size cap (capped
-/// to `MAX_FILES`), and fetch + base64-decode each blob. Returns the files and
-/// whether the file cap was hit.
+/// Fetch the WHOLE repo's auditable files in ONE request: download the repo
+/// tarball (gzipped tar) and gunzip + untar it in memory, keeping the text/code
+/// files under the size cap. No per-file API calls, so a large repo is scanned
+/// fully without N requests or rate-limit blowups. Returns the files and whether
+/// the `HARD_CAP_FILES` safety net was hit (only for pathological monorepos).
 pub async fn fetch_repo_files(
     owner: &str,
     repo: &str,
     token: &str,
 ) -> anyhow::Result<(Vec<(String, String)>, bool)> {
-    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
-    let api = "https://api.github.com";
-
-    // 1. Default branch.
-    let meta = transport.get(&format!("{api}/repos/{owner}/{repo}")).await?;
-    if !(200..300).contains(&meta.status) {
-        anyhow::bail!("GitHub GET repo {owner}/{repo}: HTTP {} {}", meta.status, meta.body);
-    }
-    let meta_v: serde_json::Value = serde_json::from_str(&meta.body)?;
-    let branch = meta_v["default_branch"].as_str().unwrap_or("main").to_string();
-
-    // 2. Recursive tree.
-    let tree = transport
-        .get(&format!("{api}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"))
+    // The shared transport is text-only; the tarball is binary, so use reqwest
+    // directly. GitHub redirects the tarball to a pre-signed codeload URL, so the
+    // Authorization header being dropped on the cross-host redirect is fine.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("camerata-orchestrator/", env!("CARGO_PKG_VERSION")))
+        .use_rustls_tls()
+        .build()?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/tarball");
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .send()
         .await?;
-    if !(200..300).contains(&tree.status) {
-        anyhow::bail!("GitHub GET tree: HTTP {} {}", tree.status, tree.body);
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub tarball {owner}/{repo}: HTTP {}", resp.status());
     }
-    let tree_v: serde_json::Value = serde_json::from_str(&tree.body)?;
-    let entries = tree_v["tree"].as_array().cloned().unwrap_or_default();
+    let bytes = resp.bytes().await?;
 
-    // 3. Filter to auditable blobs, capped.
-    let mut targets: Vec<(String, String)> = Vec::new();
-    for e in &entries {
-        if e["type"].as_str() != Some("blob") {
-            continue;
-        }
-        let path = e["path"].as_str().unwrap_or_default().to_string();
-        if !has_code_ext(&path) || e["size"].as_u64().unwrap_or(0) > MAX_FILE_BYTES {
-            continue;
-        }
-        let sha = e["sha"].as_str().unwrap_or_default().to_string();
-        if !sha.is_empty() {
-            targets.push((path, sha));
-        }
-    }
-    let capped = targets.len() > MAX_FILES;
-    targets.truncate(MAX_FILES);
-
-    // 4. Fetch + decode each blob.
-    let mut files = Vec::new();
-    for (path, sha) in targets {
-        let blob = transport
-            .get(&format!("{api}/repos/{owner}/{repo}/git/blobs/{sha}"))
-            .await?;
-        if !(200..300).contains(&blob.status) {
-            continue;
-        }
-        let bv: serde_json::Value = match serde_json::from_str(&blob.body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if bv["encoding"].as_str() != Some("base64") {
-            continue;
-        }
-        let Some(b64) = bv["content"].as_str() else {
-            continue;
-        };
-        let cleaned: String = b64.split_whitespace().collect();
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(cleaned) else {
-            continue;
-        };
-        if let Ok(text) = String::from_utf8(bytes) {
-            files.push((path, text));
-        }
-    }
-    Ok((files, capped))
+    // Decompress + untar over the in-memory bytes on a blocking thread (sync IO).
+    tokio::task::spawn_blocking(move || extract_code_files(&bytes))
+        .await
+        .map_err(|e| anyhow::anyhow!("tarball extraction task failed: {e}"))?
 }
 
-/// Scan a repo end to end: fetch its files via GitHub, audit them, and build the
-/// report. The token is required (the caller gates on it and returns
+/// Gunzip + untar a repo tarball, returning its auditable text/code files (path
+/// relative to the repo root) plus whether the file cap was hit. Pure over bytes.
+fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>, bool)> {
+    let gz = GzDecoder::new(gz_bytes);
+    let mut archive = tar::Archive::new(gz);
+    let mut files = Vec::new();
+    let mut truncated = false;
+
+    for entry in archive.entries()? {
+        let mut e = entry?;
+        if e.header().entry_type() != tar::EntryType::Regular {
+            continue;
+        }
+        // Tarball paths are `<repo>-<sha>/<path>`; strip the top dir.
+        let raw = e.path()?.to_string_lossy().into_owned();
+        let Some((_, path)) = raw.split_once('/') else {
+            continue;
+        };
+        if path.is_empty() || !has_code_ext(path) {
+            continue;
+        }
+        if e.header().size().unwrap_or(0) as usize > MAX_FILE_BYTES {
+            continue;
+        }
+        // Read the whole entry (keeps tar positioning correct), skip non-UTF-8.
+        let mut buf = Vec::new();
+        if e.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(buf) else {
+            continue;
+        };
+        files.push((path.to_string(), content));
+        if files.len() >= HARD_CAP_FILES {
+            truncated = true;
+            break;
+        }
+    }
+    Ok((files, truncated))
+}
+
+/// Scan a repo end to end: download + audit the WHOLE repo, and build the report.
+/// The token is required (the caller gates on it and returns
 /// [`ScanReport::gated`] when absent).
 pub async fn scan_repo(owner: &str, repo: &str, token: &str) -> anyhow::Result<ScanReport> {
     let repo_full = format!("{owner}/{repo}");
-    let (files, capped) = fetch_repo_files(owner, repo, token).await?;
+    let (files, truncated) = fetch_repo_files(owner, repo, token).await?;
     let mut report = audit_repo(&repo_full, &files);
-    if capped {
+    if truncated {
         report.message = Some(format!(
-            "Scanned the first {MAX_FILES} auditable files; the repo has more. Findings \
-             below are from that sample."
+            "This repo has more than {HARD_CAP_FILES} auditable files; the scan was \
+             truncated at that safety limit."
         ));
     }
     Ok(report)
@@ -290,6 +291,40 @@ pub async fn scan_repo(owner: &str, repo: &str, token: &str) -> anyhow::Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_pulls_code_files_strips_top_dir_and_skips_binaries() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // Build a gzipped tar like GitHub's: entries under a `<repo>-<sha>/` root.
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+            let mut add = |name: &str, data: &[u8]| {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(data.len() as u64);
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_mode(0o644);
+                h.set_cksum();
+                builder.append_data(&mut h, name, data).unwrap();
+            };
+            add("repo-abc123/src/main.rs", b"fn main() {}\n");
+            add("repo-abc123/README.md", b"# readme"); // not a code ext -> skipped
+            add("repo-abc123/logo.png", b"\x89PNG\r\n"); // not code -> skipped
+            builder.finish().unwrap();
+        }
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(&tar_buf).unwrap();
+        let gz_bytes = gz.finish().unwrap();
+
+        let (files, truncated) = extract_code_files(&gz_bytes).unwrap();
+        assert!(!truncated);
+        assert_eq!(files.len(), 1, "only the .rs file is auditable: {files:?}");
+        assert_eq!(files[0].0, "src/main.rs", "top dir stripped");
+        assert_eq!(files[0].1, "fn main() {}\n");
+    }
 
     #[test]
     fn code_ext_filter() {
