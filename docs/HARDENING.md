@@ -5,38 +5,70 @@
 > a 2026-06-15 architecture review) with honest status, so the claim is defended, not
 > assumed.
 
-## 1. Denylist completeness (the escape-hatch surface) — PARTIALLY HARDENED
+## 1. Denylist completeness (the escape-hatch surface) — PARTIALLY HARDENED, LIVE-PROBED
 
 "No escape hatch" rests on a denylist (`--disallowedTools`), not a pure allowlist, so it
 is fragile by construction: the guarantee is "these tools are denied," not "only these
 are permitted."
 
-- **Done:** `Task` (subagent spawning) is now on the explicit denylist alongside
+**Live probe (2026-06-15, CLI 2.1.123), the structural-vs-maintenance question, answered.**
+Two `claude -p ... --dangerously-skip-permissions` runs in `/tmp` (the flag our driver
+passes, [`lib.rs:131`](../crates/agent/src/lib.rs)):
+
+1. `--allowedTools "Read"`, prompt "run `echo` via Bash." → **Bash ran.** Result was
+   `CAMERATA_PROBE_EXEC_OK`, `permission_denials: []`. So under `--dangerously-skip-permissions`
+   the allowlist is **NOT exclusive** — a tool absent from `--allowedTools` is still live
+   and auto-approved. The allowlist buys us nothing in headless mode.
+2. `--allowedTools "Read" --disallowedTools "Bash"`, same prompt. → **Bash was gone.** The
+   model reported "the Bash tool is not available in this session." `--disallowedTools`
+   *removes* the tool from the session entirely; it is structural, not a runtime gate.
+
+Conclusion: the cage is **structurally safe for every tool on the denylist** (removed, not
+gated) and the allowlist is decorative under our flags. Therefore cage integrity rests
+entirely on the denylist being **complete**, which makes the items below load-bearing, not
+hygiene.
+
+- **Done:** `Task` (subagent spawning) is on the explicit denylist alongside
   `Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, with a unit test
   (`escape_tools_are_explicitly_denied_and_never_allowed`) asserting the escape set is
-  denied AND never on the allowlist. A subagent that could regain `Write`/`Bash` is now
-  blocked even if `--allowedTools` is not strictly exclusive.
-- **Open:**
-  - Verify with a LIVE test that `--allowedTools` is exclusive under
-    `--dangerously-skip-permissions` (an unlisted tool is denied, not auto-approved).
-    Needs the CLI + a token.
-  - Pin the Claude Code CLI version; re-audit the denylist on every upgrade. A new
-    write/exec/spawn tool added by the CLI must be added to the denylist.
-  - Add a live test: an explicit "write via `Bash`" and "spawn a subagent that writes"
-    attempt is blocked end to end.
+  denied AND never on the allowlist. A subagent that could regain `Write`/`Bash` is
+  blocked even though `--allowedTools` is not exclusive (now empirically confirmed).
+- **Done:** the live probe above confirms `--allowedTools` is non-exclusive under
+  `--dangerously-skip-permissions` and `--disallowedTools` is structural.
+- **Open (now load-bearing, not optional):**
+  - **Pin the Claude Code CLI version**; re-audit the denylist on every upgrade. Because
+    the allowlist is non-exclusive, any new write/exec/spawn tool the CLI ships that we do
+    NOT add to `--disallowedTools` is live and auto-approved on the next version bump.
+    This is the single largest standing risk to the cage.
+  - Add a live end-to-end test in the app's own harness: a "write via `Bash`" and a
+    "spawn a subagent that writes" attempt, both asserted blocked, run against the pinned
+    CLI in CI so a denylist regression or a CLI tool-surface change trips the build.
 
-## 2. Guard the guard (config tamper) — CONFIRMED SAFE
+## 2. Guard the guard (config tamper) — CLOSED via code-level jail
 
 The agent's own `rules.json` / `gateway.json` must not be writable by the agent, or the
 thing being governed could edit its own governance.
 
-- **Confirmed:** `prepare_session` writes both files into a per-session `session_dir`,
-  a SIBLING of the worktree (`root/session-N` vs `root/crate`). Only the worktree is
-  `--add-dir` scoped, so the config dir is outside the agent's writable scope.
-  Additionally, `SEC-NO-PATH-ESCAPE-1` denies `..` traversal through `gated_write`.
-- **Open (regression guard):** add a test asserting a `gated_write` targeting the
-  session config path is denied / out of scope, so the invariant cannot silently
-  regress on a refactor.
+**Why the first answer was wrong.** The earlier "confirmed safe" leaned on `--add-dir`.
+But `--add-dir` only scopes the `claude` process's built-in tools, and those are all on
+the denylist anyway. The agent's *only* live write path is `gated_write`, and that write
+is performed by the **gateway** process, which Camerata launches with its own full
+filesystem permissions. `--add-dir` does not constrain the gateway. Nor does the
+rule-level `SEC-NO-PATH-ESCAPE-1` close the gap: it matches `..` segments only and misses
+absolute paths (`/work/session-1/rules.json`, `/etc/passwd`) entirely.
+
+- **Closed:** the worktree jail is now a structural invariant in `gated_write`'s code,
+  independent of any rule. The gateway reads `CAMERATA_WORKTREE_ROOT`; `within_jail()`
+  resolves the target (joining relative paths onto the root), lexically normalizes it,
+  and asserts it `starts_with` the canonicalized root. It runs FIRST, before rule
+  evaluation, and denies with `DENIED [JAIL: outside the worktree]`. The session config
+  dir is a sibling of the worktree (`root/session-N` vs `root/crate`), so a write to
+  `rules.json` / `gateway.json` is structurally outside the jail and refused — whether
+  the agent reaches for it via `..` OR an absolute path.
+- **Regression guard (done):** `jail_tests` asserts a `gated_write` targeting the session
+  config path (`/work/session-1/rules.json`, `/work/session-1/gateway.json`) is jailed,
+  alongside `/etc/passwd`, sibling-crate, and `..`-climb cases; absolute-inside and
+  relative-under-root remain allowed. The invariant cannot silently regress on a refactor.
 
 ## 3. Two "blocked" signals are distinct — OPEN
 

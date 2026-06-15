@@ -4,25 +4,57 @@
 > thin for everything else, so corpus coverage across languages and frameworks is a
 > first-class product axis, not an afterthought.
 
-## The gap
+## The unit of language support is the CheckRunner, not the rule
 
-- Rust has thorough, robust rules. JavaScript / TypeScript and other languages are
-  lacking.
-- Most API / UI-layer rules are **language-agnostic** and already apply across languages
-  (e.g. no hardcoded secrets, no raw SQL built by string concatenation, no secrets in
-  URLs, layering boundaries, every UI-gated action maps to a guarded endpoint).
-- Some rules are **language-specific** and need per-language authoring.
+The instinct is to count rules: "Rust has N, JS has few, author the rest." That mis-prices
+the work. Authoring a rule is cheap — it's prose plus an ID. A rule only *governs* anything
+once a **deterministic Layer-2 `CheckRunner`** can mechanically decide pass/fail for it in
+that language. So a language is "supported" when it has a CheckRunner that actually enforces
+its rules, not when the rules are written down. **Roadmap milestones are "shipped a
+deterministic CheckRunner for language X," not "authored X's rules."** A drawer full of JS
+rules with no JS checker is convention with extra steps — the exact thing the project argues
+against.
+
+## Two tiers of rule, with very different porting costs
+
+- **Commodity / carry-over rules (cheap).** The textual and security rules port almost for
+  free because they're language-agnostic and a generic checker (regex / secret-scanner /
+  simple lint) already decides them: no hardcoded secrets, no secrets in URLs, no raw SQL by
+  string concatenation, audit-field presence, etc. These are real value but they are the
+  *commodity* space — every linter ships them.
+- **Differentiated / architectural rules (expensive — the moat).** The layering and
+  boundary rules are the differentiator: "`db.*` only inside `repositories/`," "UI-gated
+  action maps to a guarded endpoint," component/module boundaries, state-management
+  discipline. These are **NOT language-agnostic to enforce.** Deciding them requires
+  language-aware analysis — an AST / parser / type-resolver for each target language. The
+  Rust versions lean on Rust's structure; the JS/TS versions need an eslint AST rule, the
+  Python versions an `ast`-module check, and so on. **Porting the moat costs more than "most
+  rules carry over" implies**, because the part that carries over is the commodity part and
+  the part that defines the product does not.
+
+## Sequencing rule, by checker availability, not popularity
+
+Order new-language work by *"where can I get a real, deterministic checker for the
+**architectural** rules,"* not by language popularity. A language with a mature AST-lint
+ecosystem (JS/TS via eslint custom rules) lets the moat travel; a popular language where the
+architectural checks would mean hand-rolling a parser is a worse early bet even if more users
+ask for it. The architectural-checker availability is the gating constraint on the whole
+language.
 
 ## The task
 
-1. Populate **JavaScript / TypeScript** rules in the corpus, at least to parity with the
-   universal Rust ones, plus the JS/TS-specific ones (typing discipline, async/promise
-   handling, module boundaries, no `any`, etc.).
-2. Author **framework** rules: React, Redux, Express (and others as needed) — component
-   boundaries, state-management discipline, middleware/error-handling conventions.
-3. For each rule, record its **enforcement scope**: language-agnostic vs
-   language-specific, and **which Layer-2 toolchain** enforces it (eslint / tsc /
-   prettier / ...), so the gate knows how to check it per stack.
+1. Populate **JavaScript / TypeScript** rules in the corpus — but treat shipping the JS/TS
+   `CheckRunner` (eslint + tsc + prettier, including **custom eslint AST rules for the
+   architectural boundaries**) as the actual milestone. Universal Rust-parity rules and the
+   JS/TS-specific ones (typing discipline, async/promise handling, no `any`) are the input;
+   the deterministic checker is the deliverable.
+2. Author **framework** rules: React, Redux, Express — component boundaries,
+   state-management discipline, middleware/error-handling conventions. These are
+   architectural (moat) rules, so each needs an AST-level eslint check, not just prose.
+3. For each rule, record its **tier** (commodity carry-over vs differentiated architectural),
+   its **enforcement scope** (language-agnostic vs language-specific), and **which Layer-2
+   toolchain** enforces it (eslint / tsc / prettier / custom AST rule), so the gate knows how
+   to check it per stack and so the moat-porting cost is visible, not hidden.
 
 ## Where rules live
 
