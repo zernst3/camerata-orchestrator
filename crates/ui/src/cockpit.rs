@@ -167,6 +167,54 @@ async fn answer_clarification(cid: &str, answer: &str, answered_by: &str) -> Opt
         .ok()
 }
 
+/// A proposed child story from decomposition (editable before commit). Serializes
+/// back to the BFF on commit.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ProposedChildView {
+    kind: String,
+    title: String,
+    description: String,
+}
+
+/// Propose the component children for a parent (not yet created).
+async fn fetch_proposal(story_id: &str) -> Option<Vec<ProposedChildView>> {
+    reqwest::Client::new()
+        .post(format!("{}/api/stories/{}/decompose", crate::BFF_URL, story_id))
+        .send()
+        .await
+        .ok()?
+        .json::<Vec<ProposedChildView>>()
+        .await
+        .ok()
+}
+
+/// Commit the edited children; returns the created child stories.
+async fn commit_children(story_id: &str, children: &[ProposedChildView]) -> Option<Vec<CanonicalStory>> {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/stories/{}/decompose/commit",
+            crate::BFF_URL,
+            story_id
+        ))
+        .json(&serde_json::json!({ "children": children }))
+        .send()
+        .await
+        .ok()?
+        .json::<Vec<CanonicalStory>>()
+        .await
+        .ok()
+}
+
+/// The committed children of a parent.
+async fn fetch_children(story_id: &str) -> Option<Vec<CanonicalStory>> {
+    reqwest::get(format!("{}/api/stories/{}/children", crate::BFF_URL, story_id))
+        .await
+        .ok()?
+        .json::<Vec<CanonicalStory>>()
+        .await
+        .ok()
+}
+
 /// One agent in the governed fleet, as the status strip renders it.
 #[derive(Clone, PartialEq)]
 struct FleetAgent {
@@ -383,6 +431,10 @@ pub fn CockpitApp() -> Element {
                                 // The clarify-bridge: ask the team a question, pick who
                                 // to ask, and see the thread. In-process now.
                                 ClarifySection { story_id: current.id.clone() }
+
+                                // Decomposition: split this story into component
+                                // children per the practice, review/edit, create.
+                                DecomposeSection { story_id: current.id.clone() }
                             }
 
                             div { class: "status-strip",
@@ -764,6 +816,108 @@ fn ClarificationCard(clar: ClarificationView, refresh: Signal<u32>) -> Element {
                 div { class: "clar-answered",
                     span { class: "clar-answer-by", "{clar.answered_by.clone().unwrap_or_default()} answered" }
                     p { class: "clar-answer-text", "{clar.answer.clone().unwrap_or_default()}" }
+                }
+            }
+        }
+    }
+}
+
+/// Decompose a parent story into component children: propose, edit titles, create.
+/// Created children are real stories on the spine (visible in the left rail on the
+/// next mount); the tracker write-back is the provider phase.
+#[component]
+fn DecomposeSection(story_id: String) -> Element {
+    let mut proposed = use_signal(|| Option::<Vec<ProposedChildView>>::None);
+    let mut child_refresh = use_signal(|| 0u32);
+    let sid_children = story_id.clone();
+    let children_res = use_resource(move || {
+        let sid = sid_children.clone();
+        let _dep = child_refresh();
+        async move { fetch_children(&sid).await }
+    });
+
+    let sid_propose = story_id.clone();
+    let sid_commit = story_id.clone();
+
+    rsx! {
+        div { class: "decompose",
+            p { class: "clarify-h", "Decompose into component stories" }
+            p { class: "section-hint", "Split this feature into the component stories your practice calls for (here: a UI story and an API story). Review and edit, then create. Creating writes them to the tracker as child work items in the provider phase." }
+            button {
+                class: "btn-run",
+                onclick: move |_| {
+                    let sid = sid_propose.clone();
+                    spawn(async move {
+                        if let Some(p) = fetch_proposal(&sid).await {
+                            proposed.set(Some(p));
+                        }
+                    });
+                },
+                "Propose children"
+            }
+
+            {
+                match proposed() {
+                    Some(list) if !list.is_empty() => rsx! {
+                        div { class: "proposed-list",
+                            for (i , pc) in list.iter().enumerate() {
+                                {
+                                    let kind = pc.kind.clone();
+                                    let title = pc.title.clone();
+                                    rsx! {
+                                        div { class: "proposed-child",
+                                            span { class: "proposed-kind", "{kind}" }
+                                            input {
+                                                class: "addressee-input proposed-title",
+                                                value: "{title}",
+                                                oninput: move |e| {
+                                                    if let Some(v) = proposed.write().as_mut() {
+                                                        if let Some(item) = v.get_mut(i) {
+                                                            item.title = e.value();
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            button {
+                                class: "btn-run",
+                                onclick: move |_| {
+                                    let sid = sid_commit.clone();
+                                    let children = proposed().unwrap_or_default();
+                                    spawn(async move {
+                                        if commit_children(&sid, &children).await.is_some() {
+                                            proposed.set(None);
+                                            child_refresh += 1;
+                                        }
+                                    });
+                                },
+                                "Create these stories"
+                            }
+                        }
+                    },
+                    _ => rsx! {},
+                }
+            }
+
+            {
+                let kids = children_res.read().clone().flatten().unwrap_or_default();
+                if kids.is_empty() {
+                    rsx! {}
+                } else {
+                    rsx! {
+                        div { class: "children-list",
+                            p { class: "clarify-label", "Component stories" }
+                            for k in kids.iter() {
+                                div { class: "child-row",
+                                    span { class: "child-id", "{k.id}" }
+                                    span { class: "child-title", "{k.title}" }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

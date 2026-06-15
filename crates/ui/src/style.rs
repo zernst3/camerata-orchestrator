@@ -1094,4 +1094,19 @@ html, body {
 .clar-answered { background: #f0f8f3; border-radius: 8px; padding: 8px 10px; }
 .clar-answer-by { font-size: 11px; font-weight: 700; color: #2f8f5b; }
 .clar-answer-text { font-size: 13px; color: var(--ink); margin: 3px 0 0; line-height: 1.4; }
+
+/* Decomposition (Phase: story decomposition). */
+.decompose { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 16px; }
+.proposed-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.proposed-child { display: flex; align-items: center; gap: 9px; }
+.proposed-kind {
+  flex: none; min-width: 42px; text-align: center; font-size: 10.5px; font-weight: 700;
+  letter-spacing: .04em; padding: 4px 8px; border-radius: 6px; background: var(--accent-wash);
+  color: var(--accent-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.proposed-title { flex: 1; }
+.children-list { margin-top: 14px; }
+.child-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.child-id { flex: none; font-size: 11.5px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent-ink); }
+.child-title { font-size: 13px; color: var(--ink); }
 "#;
