@@ -36,8 +36,14 @@ Current, post-clean-slate UI follow-ups. Newest intent at the top.
   colors). A dark theme is mostly a second `:root`/`[data-theme="dark"]` variable
   block plus a toggle in the edition switcher — no per-component rewrites, since
   components already reference the variables. The few hardcoded colors (the
-  onboarding gate `#fff7ed`/`#f0c89a`/`#8a4f1d`, the conn-ok/conn-warn greens/oranges)
-  need theme-aware values.
+  onboarding gate `#fff7ed`/`#f0c89a`/`#8a4f1d`, the conn-ok/conn-warn greens/oranges,
+  the toast severity colors, the scan-result colors) need theme-aware values.
+  **chorale is already covered:** the `Table` component takes a `theme: Theme` prop
+  (`Theme::Light` default / `Theme::Dark` / `Theme::Custom`) with its own built-in
+  stylesheet, so when Camerata's toggle lands, pass `theme: Theme::Dark|Light` to each
+  `Table` driven by Camerata's mode and chorale's tables follow automatically — no
+  separate styling for them. Plumb the mode via context so the tables (and any future
+  chorale surfaces) read it without prop-drilling.
 
 - **Projects v2 board as a cockpit view.** The engine + CLI (`projects-live`) are
   built and proven; surface the board listing as a view (likely under "Onboard a
