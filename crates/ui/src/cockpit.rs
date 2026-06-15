@@ -48,6 +48,56 @@ async fn fetch_rules() -> Option<Vec<CockpitRule>> {
         .ok()
 }
 
+/// A run as the BFF reports it (`GET /api/runs/:id`): status plus the REAL gate
+/// verdicts produced so far.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct RunView {
+    story_id: String,
+    status: String,
+    events: Vec<RunGateEvent>,
+    done: bool,
+}
+
+/// One real gate verdict in a run.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct RunGateEvent {
+    verdict: String,
+    rule: Option<String>,
+    detail: String,
+}
+
+/// Start a governed run for a story; returns the run id.
+async fn start_run(story_id: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id))
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("run_id")?.as_str().map(|s| s.to_string())
+}
+
+/// Fetch the current state of a run.
+async fn fetch_run(run_id: &str) -> Option<RunView> {
+    reqwest::get(format!("{}/api/runs/{}", crate::BFF_URL, run_id))
+        .await
+        .ok()?
+        .json::<RunView>()
+        .await
+        .ok()
+}
+
+/// Map a run status string to a label + badge CSS modifier.
+fn run_status_badge(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "planned" => ("PLANNED", "neutral"),
+        "executing" => ("EXECUTING", "active"),
+        "gating" => ("GATING", "active"),
+        "awaiting_qa" => ("AWAITING QA", "warn"),
+        _ => ("RUNNING", "active"),
+    }
+}
+
 /// One agent in the governed fleet, as the status strip renders it.
 #[derive(Clone, PartialEq)]
 struct FleetAgent {
@@ -122,6 +172,9 @@ pub fn CockpitApp() -> Element {
     let fleet = use_signal(seed_fleet);
     let mut selected = use_signal(|| 0usize);
     let mut selected_rule = use_signal(|| 0usize);
+    // The live run for the selected story, if one has been started. Polled to
+    // completion; its gate events are REAL verdicts from the BFF run engine.
+    let mut active_run = use_signal(|| Option::<RunView>::None);
 
     let stories_loaded = stories_res.read().clone();
     let rules_loaded = rules_res.read().clone();
@@ -192,7 +245,43 @@ pub fn CockpitApp() -> Element {
                             }
 
                             div { class: "stage-panel",
-                                StagePanel { story: current.clone(), fleet: fleet() }
+                                // Run control: start a governed run for this story and
+                                // poll it to completion, streaming the real gate verdicts.
+                                {
+                                    let sid = current.id.clone();
+                                    rsx! {
+                                        button {
+                                            class: "btn-run",
+                                            onclick: move |_| {
+                                                let sid = sid.clone();
+                                                spawn(async move {
+                                                    if let Some(rid) = start_run(&sid).await {
+                                                        loop {
+                                                            if let Some(rv) = fetch_run(&rid).await {
+                                                                let done = rv.done;
+                                                                active_run.set(Some(rv));
+                                                                if done {
+                                                                    break;
+                                                                }
+                                                            }
+                                                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            "▶ Run this story (governed)"
+                                        }
+                                    }
+                                }
+
+                                // While a run for THIS story is live, show it; otherwise
+                                // the representative panel for the story's status.
+                                {
+                                    match active_run() {
+                                        Some(r) if r.story_id == current.id => rsx! { LiveRunPanel { run: r } },
+                                        _ => rsx! { StagePanel { story: current.clone(), fleet: fleet() } },
+                                    }
+                                }
                             }
 
                             div { class: "status-strip",
@@ -401,5 +490,43 @@ fn StagePanel(story: CanonicalStory, fleet: Vec<FleetAgent>) -> Element {
                 p { class: "panel-sub", "{story.description}" }
             }
         },
+    }
+}
+
+/// The live governed run: the real gate verdicts from the BFF run engine, streamed
+/// in as the run walks to completion.
+#[component]
+fn LiveRunPanel(run: RunView) -> Element {
+    let (status_label, status_cls) = run_status_badge(&run.status);
+    rsx! {
+        div { class: "live-run",
+            div { class: "live-run-head",
+                span { class: "live-run-title", "Governed run" }
+                span { class: "live-run-status {status_cls}", "{status_label}" }
+            }
+            p { class: "panel-sub", "Real verdicts from the gate, as the run executes. In this token-free run the agent is scripted; the gate doing the deciding is the live one." }
+            div { class: "live-events",
+                for ev in run.events.iter() {
+                    {
+                        let vcls = if ev.verdict == "deny" { "live-event deny" } else { "live-event allow" };
+                        let vlabel = if ev.verdict == "deny" { "DENIED" } else { "ALLOWED" };
+                        rsx! {
+                            div { class: "{vcls}",
+                                div { class: "live-event-head",
+                                    span { class: "live-event-verdict", "{vlabel}" }
+                                    if let Some(rule) = ev.rule.clone() {
+                                        span { class: "live-event-rule", "{rule}" }
+                                    }
+                                }
+                                p { class: "live-event-detail", "{ev.detail}" }
+                            }
+                        }
+                    }
+                }
+                if run.events.is_empty() {
+                    p { class: "live-events-empty", "Spinning up the fleet…" }
+                }
+            }
+        }
     }
 }

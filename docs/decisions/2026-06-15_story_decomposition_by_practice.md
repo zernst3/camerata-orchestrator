@@ -34,13 +34,24 @@ Camerata ingests a parent work item and proposes a set of child stories, governe
   code-host axis) to ground the children: which components/repos a feature touches
   drives which child stories exist (a feature touching the API repo and the UI repo
   yields an API child and a UI child). Multi-repo is normal.
-- **Human-reviewed before commit (review-then-create).** The architect sees the
-  proposed children, edits/adds/removes, and approves before anything is created. Same
-  posture as the clarify-bridge: an agent never writes work items unsupervised.
-- **Parent/child lives on the spine.** Children link to the parent on the canonical
-  spine (a parent_id on the Story), and each child is independently adoptable and
-  governable. Children can sync back to the tracker as child work items (ADO child
-  links, GitHub task lists / sub-issues, Jira sub-tasks) via the `WorkItemProvider`.
+- **Edit in Camerata, THEN push back (review-then-create).** The architect sees the
+  proposed children and edits / adds / removes them inside Camerata first. Nothing is
+  written to the tracker until they approve. An agent never writes work items
+  unsupervised.
+- **Children are pushed back to the tracker AS those story types.** The approved
+  children are created as real work items in the integrated service (GitHub, ADO,
+  Jira) of the correct TYPE per the practice: a UI story becomes a real UI-typed story
+  / issue, an API story an API-typed one, a task a task. They are not Camerata-only
+  artifacts; they land in the board the team actually uses.
+- **The write-back carries the relationship metadata.** Each created child sets the
+  correct parent / child / related links in the tracker's own model, so the hierarchy
+  is real on their board, not just in our spine: ADO work-item link types
+  (Parent/Child, Related), GitHub sub-issues / task-list links / "relates to", Jira
+  sub-tasks and issue links. Getting these relationships right is a first-class
+  requirement of the write-back, not an afterthought.
+- **Parent/child also lives on our spine.** Children carry a `parent_id` on the
+  canonical Story and each is independently adoptable and governable; the spine and the
+  tracker mirror the same hierarchy per the existing `SyncPolicy`.
 
 ## Where it sits in the workflow
 
@@ -55,7 +66,10 @@ Design only; not built. Prerequisites that do not exist yet: a parent/child fiel
 the canonical Story spine, a decomposition engine (the agent step that reads repo
 context + templates and proposes children), the practice-config model, and the
 child-write-back per provider. The spine itself (`StoryStore`) is new as of Phase 1
-and would need the parent/child relation added.
+and would need the parent/child relation added. Notably, the `WorkItemProvider` trait
+today has `ingest_story` / `push_status` / `post_clarifying_questions` / `poll` but NO
+"create a child work item of type X with these relationship links" capability; the
+write-back described here is a contract extension, not just a `push_status` call.
 
 ## Open questions
 
