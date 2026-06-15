@@ -7,14 +7,16 @@ written down, so the trail is navigable, not just buried in commit messages.
 ## Decision records (newest first)
 
 - **2026-06-15_cross_agent_integration_gate.md** — a THIRD enforcement tier. Layers 1
-  and 2 are per-agent, so the seam BETWEEN agents (the API contract the UI agent
-  assumes vs what the API agent built) can drift while each agent's gates pass green.
-  The cross-agent integration gate runs once on the assembled tree, before the branch
-  is pushed (a pre-PR gate), checking API-contract conformance, shared-schema/type
-  consistency, interface conformance. Principle: prefer compiled contracts (a shared
-  Rust type IS the gate; JS needs an explicit derived-contract check). Declared at
-  handoff, enforced at integration. New `INTEGRATION-*` rule family. Design only; not
-  built.
+  and 2 are per-agent, so any invariant spanning agents can drift while each agent's
+  gates pass green. The cross-agent integration gate runs once on the assembled tree,
+  before the branch is pushed (a pre-PR gate). API contracts are just the obvious
+  example; the category is any rule only checkable on >1 agent's output: contract
+  conformance, wiring completeness (events/config/DI/migrations, no dangling ends),
+  convention coherence (casing/naming/dates/money), and cross-cutting policy (e.g.
+  every UI-gated action maps to a guarded endpoint, audit on every write path).
+  Principle: prefer compiled contracts (a shared Rust type IS the gate; JS needs an
+  explicit derived-contract check). Declared at handoff, enforced at integration. New
+  `INTEGRATION-*` rule family. Design only; not built.
 - **2026-06-15_brownfield_onboarding_flow.md** — onboarding an EXISTING repo, reframed
   as the instant-value weapon: an existing codebase is pre-loaded with the violations
   the gate catches, so the flow is scan -> propose a starter ruleset -> approve ->

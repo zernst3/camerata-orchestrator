@@ -56,17 +56,51 @@ push branch / open PR
 human QA
 ```
 
-## What it enforces (cross-cutting invariants)
+## What it enforces: any invariant that spans agents
 
-- **API contract conformance:** the endpoints, methods, request/response shapes, and
-  status codes the consumer calls match what the producer actually exposes.
-- **Shared schema / type consistency:** DTOs, enums, and serialization formats agree
-  across the boundary.
-- **Interface / port conformance:** where one agent defines a port and another
-  implements or consumes it.
-- **DB schema vs code agreement:** migrations match the entities the code uses.
-- **No dangling references** across agents (a call with no corresponding handler, a
-  consumed field never produced).
+The defining property of a cross-agent rule: **it holds across two or more agents'
+outputs, so no per-agent gate can see it; it is only checkable on the assembled
+whole.** Litmus test: if catching the violation requires looking at more than one
+agent's worktree at once, it belongs in this tier. API contracts are the obvious first
+example, not the category. The space is broad; a non-exhaustive map:
+
+**1. Contract conformance (interface shapes agree across the seam)**
+- API contracts: the endpoints, methods, request/response shapes, and status codes a
+  consumer calls match what the producer exposes.
+- Shared DTOs / types / enum value sets agree on both sides.
+- The error and status-code shapes the consumer handles match what the producer returns.
+
+**2. Wiring completeness (no dangling ends)**
+- Every event/message emitted has a consumer; every subscribed event is actually emitted.
+- Every config / env var one agent reads is declared or provided by another.
+- DI / module wiring: a service registered by one agent is the one injected by another.
+- Every entity the code references has a migration that creates it (DB agent vs code).
+
+**3. Convention coherence (the same decision made the same way everywhere)**
+- Serialization casing across the wire (snake_case JSON vs a camelCase consumer).
+- The same concept named consistently across agents (`member_id` / `memberId` / `user_id`).
+- Pagination/filtering conventions, date/timezone handling, money/units representation,
+  and i18n key sets, agreed across the boundary. (The earlier intake currency and
+  timezone clarifications are exactly these, now enforced ACROSS agents, not just within
+  one.)
+
+**4. Cross-cutting policy holds end to end (true of the whole, not per file)**
+- Authorization actually enforced server-side for every action the UI gates. The
+  classic gap, the UI hides a button but the endpoint is open (or 403s), is a
+  cross-agent inconsistency no per-agent gate catches: the UI agent's diff is clean,
+  the API agent's diff is clean, and the SEAM is wrong. The integration tier is the
+  only place positioned to enforce "every gated affordance maps to a guarded endpoint."
+- A write-path audit / provenance convention is honored by every agent's write path.
+- Referential / soft-delete behavior is consistent across the agents that touch an entity.
+
+**5. The seam is tested**
+- An integration / contract test exists for each cross-agent boundary, not just
+  per-agent unit tests. The tier can require that the seam itself be covered.
+
+Same deterministic-first principle as the other tiers: lead with the invariants that are
+mechanically checkable (a contract diff, a casing lint across the wire, "every gated UI
+action maps to a guarded endpoint," migration-vs-entity reconciliation), and leave the
+genuinely semantic ones to human QA.
 
 ## The principle: prefer compiled contracts; check explicitly where you cannot
 
