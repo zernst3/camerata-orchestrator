@@ -236,3 +236,98 @@ impl HttpTransport for FakeTransport {
         Ok(self.find("PUT", url))
     }
 }
+
+// ── Live-transport wire tests ─────────────────────────────────────────────────
+//
+// These exercise `ReqwestTransport` against a throwaway loopback HTTP server so
+// we assert what actually goes ON THE WIRE — the layer `FakeTransport` cannot
+// see. They exist because a missing `User-Agent` header (which GitHub 403s on)
+// was invisible to the shape-only fake-transport tests and only surfaced against
+// real GitHub. This guards that regression.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Stand up a one-shot loopback server that captures the raw request head of
+    /// the first connection and replies `200 {}`. Returns (base_url, JoinHandle
+    /// yielding the captured request bytes as a String).
+    async fn capture_one_request() -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            // Read until the end of the request headers (CRLFCRLF). A GET has no
+            // body, so the head is the whole request.
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let n = socket.read(&mut chunk).await.expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            socket.flush().await.expect("flush");
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    #[tokio::test]
+    async fn live_get_sends_the_default_user_agent() {
+        let (url, server) = capture_one_request().await;
+        let transport = ReqwestTransport::new("Bearer test-token").expect("build transport");
+
+        let resp = transport.get(&url).await.expect("get succeeds");
+        assert_eq!(resp.status, 200);
+
+        let request = server.await.expect("server task");
+        // Header names are case-insensitive on the wire; lowercase the head.
+        let lower = request.to_lowercase();
+        assert!(
+            lower.contains("user-agent:"),
+            "request must carry a User-Agent header (GitHub 403s without it); got:\n{request}"
+        );
+        assert!(
+            request.contains(DEFAULT_USER_AGENT),
+            "User-Agent must be DEFAULT_USER_AGENT ({DEFAULT_USER_AGENT}); got:\n{request}"
+        );
+        // The auth header the adapter supplied must also be present.
+        assert!(
+            lower.contains("authorization: bearer test-token"),
+            "request must carry the supplied Authorization header; got:\n{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_user_agent_overrides_the_default() {
+        let (url, server) = capture_one_request().await;
+        let transport = ReqwestTransport::with_user_agent("Bearer t", "my-custom-agent/9.9")
+            .expect("build transport");
+
+        transport.get(&url).await.expect("get succeeds");
+
+        let request = server.await.expect("server task");
+        assert!(
+            request.contains("my-custom-agent/9.9"),
+            "explicit user agent must be on the wire; got:\n{request}"
+        );
+    }
+
+    #[test]
+    fn default_user_agent_is_nonempty_and_named() {
+        // Cheap guard: the const can't be blanked out without tripping this.
+        assert!(!DEFAULT_USER_AGENT.is_empty());
+        assert!(DEFAULT_USER_AGENT.starts_with("camerata-orchestrator/"));
+    }
+}
