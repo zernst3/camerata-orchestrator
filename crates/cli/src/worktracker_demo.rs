@@ -26,6 +26,7 @@ pub fn demo_ref() -> ExternalRef {
     ExternalRef {
         provider: Provider::Native,
         external_id: "FEAT-SSO-1".to_string(),
+        container: None,
         url: "native://stories/FEAT-SSO-1".to_string(),
         revision: None,
     }

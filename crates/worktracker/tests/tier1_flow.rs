@@ -21,6 +21,7 @@ fn reference() -> ExternalRef {
     ExternalRef {
         provider: Provider::Native,
         external_id: "FEAT-42".to_string(),
+        container: None,
         url: "native://FEAT-42".to_string(),
         revision: None,
     }

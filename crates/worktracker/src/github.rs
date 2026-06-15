@@ -34,20 +34,28 @@ use serde::Deserialize;
 
 use crate::{
     CanonicalStory, ExternalRef, FeatureStatus, FeatureStatusReport, GateOutcome, InboundKind,
-    InboundWorkItemEvent, PrStatus, Provider, WorkItemProvider,
+    InboundWorkItemEvent, PrStatus, Provider, RepoCoord, WorkItemProvider,
 };
 
 use super::http::HttpTransport;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-/// Connection parameters for one GitHub repository.
+/// Connection parameters for a GitHub ACCOUNT (not a single repo).
+///
+/// Per the credential-delegated-scope decision, the connection carries the token
+/// and at most an OPTIONAL default repo; the actual repo for any operation is
+/// resolved per-request from the `ExternalRef.container`. One `GithubProvider`
+/// therefore serves every repo the token can reach in a single process. The
+/// `default_owner`/`default_repo` are a convenience fallback for refs that carry
+/// no container (legacy/native-style), never a hard ceiling.
 #[derive(Debug, Clone)]
 pub struct GithubConfig {
-    /// The repository owner (user or org name, e.g. `octocat`).
-    pub owner: String,
-    /// The repository name (e.g. `my-project`).
-    pub repo: String,
+    /// Optional default repository owner, used only when a reference carries no
+    /// `container`. `None` means "no default; every ref must name its repo."
+    pub owner: Option<String>,
+    /// Optional default repository name, paired with `owner`.
+    pub repo: Option<String>,
     /// A PAT or GitHub App installation token with Issues read/write scope.
     /// The GitHub App JWT signing flow is NOT handled here; produce an
     /// installation token externally and supply it in this field.
@@ -55,9 +63,45 @@ pub struct GithubConfig {
 }
 
 impl GithubConfig {
+    /// Build a token-only connection with no default repo. Every operation must
+    /// then resolve its repo from the reference's `container`.
+    pub fn from_token(token: impl Into<String>) -> Self {
+        Self {
+            owner: None,
+            repo: None,
+            token: token.into(),
+        }
+    }
+
+    /// Build a connection with a default `owner/repo` fallback for container-less
+    /// references. Multi-repo still works: a reference that carries a `container`
+    /// overrides this default.
+    pub fn with_default_repo(
+        token: impl Into<String>,
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner: Some(owner.into()),
+            repo: Some(repo.into()),
+            token: token.into(),
+        }
+    }
+
     /// Build the `Authorization: Bearer <token>` header value for this config.
     pub fn auth_header(&self) -> String {
         format!("Bearer {}", self.token)
+    }
+
+    /// The default repo coordinate, if both owner and repo are set.
+    fn default_coord(&self) -> Option<RepoCoord> {
+        match (&self.owner, &self.repo) {
+            (Some(o), Some(r)) => Some(RepoCoord {
+                owner: o.clone(),
+                repo: r.clone(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -326,6 +370,8 @@ pub fn parse_issues(json: &str) -> anyhow::Result<Vec<InboundWorkItemEvent>> {
                 reference: ExternalRef {
                     provider: Provider::GitHub,
                     external_id: id_str.clone(),
+                    // Set by the provider's poll() after parsing (it knows the repo).
+                    container: None,
                     url: issue.html_url.clone(),
                     revision: None,
                 },
@@ -370,6 +416,8 @@ pub fn parse_issue(json: &str) -> anyhow::Result<CanonicalStory> {
         external_ref: Some(ExternalRef {
             provider: Provider::GitHub,
             external_id: id_str,
+            // Set by the provider's ingest_story() after parsing (it knows the repo).
+            container: None,
             url: issue.html_url,
             revision: None,
         }),
@@ -395,29 +443,51 @@ impl<T: HttpTransport> GithubProvider<T> {
         Self { config, transport }
     }
 
-    fn issue_url(&self, number: &str) -> String {
+    /// Resolve the repo coordinate for one operation: the reference's `container`
+    /// (`owner/repo`) when present, else the connection's default repo. Errors
+    /// when neither is available, so a container-less ref against a default-less
+    /// connection fails loudly instead of hitting the wrong repo.
+    fn resolve_coord(&self, reference: &ExternalRef) -> anyhow::Result<RepoCoord> {
+        if let Some(container) = reference.container.as_deref() {
+            return RepoCoord::parse(container).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "GitHub reference container is not `owner/repo`: {container:?} (item {})",
+                    reference.external_id
+                )
+            });
+        }
+        self.config.default_coord().ok_or_else(|| {
+            anyhow::anyhow!(
+                "GitHub reference for item {} has no container and the connection has \
+                 no default repo; cannot resolve owner/repo",
+                reference.external_id
+            )
+        })
+    }
+
+    fn issue_url(coord: &RepoCoord, number: &str) -> String {
         format!(
             "https://api.github.com/repos/{}/{}/issues/{number}",
-            self.config.owner, self.config.repo
+            coord.owner, coord.repo
         )
     }
 
-    fn labels_url(&self, number: &str) -> String {
+    fn labels_url(coord: &RepoCoord, number: &str) -> String {
         format!(
             "https://api.github.com/repos/{}/{}/issues/{number}/labels",
-            self.config.owner, self.config.repo
+            coord.owner, coord.repo
         )
     }
 
-    fn comments_url(&self, number: &str) -> String {
+    fn comments_url(coord: &RepoCoord, number: &str) -> String {
         format!(
             "https://api.github.com/repos/{}/{}/issues/{number}/comments",
-            self.config.owner, self.config.repo
+            coord.owner, coord.repo
         )
     }
 
-    fn poll_url(&self, cursor: Option<&str>) -> String {
-        let path = issues_since_path(&self.config.owner, &self.config.repo, cursor);
+    fn poll_url(coord: &RepoCoord, cursor: Option<&str>) -> String {
+        let path = issues_since_path(&coord.owner, &coord.repo, cursor);
         format!("https://api.github.com{path}")
     }
 }
@@ -429,17 +499,24 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
     }
 
     async fn ingest_story(&self, reference: &ExternalRef) -> anyhow::Result<CanonicalStory> {
-        let url = self.issue_url(&reference.external_id);
+        let coord = self.resolve_coord(reference)?;
+        let url = Self::issue_url(&coord, &reference.external_id);
         let resp = self.transport.get(&url).await?;
         if resp.status < 200 || resp.status >= 300 {
             anyhow::bail!(
-                "GitHub GET issue {}: HTTP {} {}",
+                "GitHub GET issue {} in {coord}: HTTP {} {}",
                 reference.external_id,
                 resp.status,
                 resp.body
             );
         }
-        parse_issue(&resp.body)
+        let mut story = parse_issue(&resp.body)?;
+        // Stamp the resolved repo onto the story's ref so downstream operations
+        // (push_status, clarify) hit the same repo without re-deriving it.
+        if let Some(ext) = story.external_ref.as_mut() {
+            ext.container = Some(coord.to_string());
+        }
+        Ok(story)
     }
 
     async fn push_status(
@@ -448,13 +525,14 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         report: &FeatureStatusReport,
     ) -> anyhow::Result<()> {
         let number = &reference.external_id;
+        let coord = self.resolve_coord(reference)?;
 
         // Step 1: PATCH the issue state (open or closed).
         let closed = status_closes_issue(report.status);
         let state_value = if closed { "closed" } else { "open" };
         let patch_body = serde_json::to_string(&serde_json::json!({ "state": state_value }))
             .unwrap_or_else(|_| format!(r#"{{"state":"{state_value}"}}"#));
-        let issue_url = self.issue_url(number);
+        let issue_url = Self::issue_url(&coord, number);
         let patch_resp = self.transport.post(&issue_url, &patch_body).await?;
         if patch_resp.status >= 300 {
             anyhow::bail!(
@@ -480,7 +558,7 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
 
         let labels_body = serde_json::to_string(&serde_json::json!({ "labels": labels }))
             .unwrap_or_else(|_| r#"{"labels":[]}"#.to_string());
-        let labels_url = self.labels_url(number);
+        let labels_url = Self::labels_url(&coord, number);
         let labels_resp = self.transport.put(&labels_url, &labels_body).await?;
         if labels_resp.status >= 300 {
             anyhow::bail!(
@@ -495,7 +573,7 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         let md = status_rollup_md(report);
         let comment_body = serde_json::to_string(&serde_json::json!({ "body": md }))
             .unwrap_or_else(|_| format!(r#"{{"body":"{}"}}"#, md.replace('"', "\\\"")));
-        let comments_url = self.comments_url(number);
+        let comments_url = Self::comments_url(&coord, number);
         let comment_resp = self.transport.post(&comments_url, &comment_body).await?;
         if comment_resp.status >= 300 {
             anyhow::bail!(
@@ -514,10 +592,11 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         reference: &ExternalRef,
         questions: &[String],
     ) -> anyhow::Result<String> {
+        let coord = self.resolve_coord(reference)?;
         let md = clarifying_questions_md(questions);
         let body = serde_json::to_string(&serde_json::json!({ "body": md }))
             .unwrap_or_else(|_| format!(r#"{{"body":"{}"}}"#, md.replace('"', "\\\"")));
-        let url = self.comments_url(&reference.external_id);
+        let url = Self::comments_url(&coord, &reference.external_id);
         let resp = self.transport.post(&url, &body).await?;
         if resp.status < 200 || resp.status >= 300 {
             anyhow::bail!(
@@ -541,13 +620,27 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         &self,
         cursor: Option<&str>,
     ) -> anyhow::Result<(Vec<InboundWorkItemEvent>, String)> {
-        let url = self.poll_url(cursor);
+        // `poll` has no per-item reference, so it targets the connection's
+        // default repo. Multi-repo polling (iterating a saved working set of
+        // repos) is the working-set concern handled above this provider; a
+        // default-less connection cannot poll and says so.
+        let coord = self.config.default_coord().ok_or_else(|| {
+            anyhow::anyhow!(
+                "GitHub poll requires a default repo on the connection; none configured"
+            )
+        })?;
+        let url = Self::poll_url(&coord, cursor);
         let resp = self.transport.get(&url).await?;
         if resp.status < 200 || resp.status >= 300 {
-            anyhow::bail!("GitHub poll GET: HTTP {} {}", resp.status, resp.body);
+            anyhow::bail!("GitHub poll GET in {coord}: HTTP {} {}", resp.status, resp.body);
         }
 
-        let events = parse_issues(&resp.body)?;
+        let mut events = parse_issues(&resp.body)?;
+        // Stamp the polled repo onto every event's reference so each carries its
+        // source container for downstream per-item operations.
+        for ev in events.iter_mut() {
+            ev.reference.container = Some(coord.to_string());
+        }
 
         // Derive the next cursor from the maximum `updated_at` across all events.
         // Never use wall-clock time; derive from the data so the cursor is stable.
@@ -573,17 +666,14 @@ mod tests {
     // ── Helper builders ────────────────────────────────────────────────────
 
     fn test_config() -> GithubConfig {
-        GithubConfig {
-            owner: "myorg".to_string(),
-            repo: "my-project".to_string(),
-            token: "ghp_testtoken".to_string(),
-        }
+        GithubConfig::with_default_repo("ghp_testtoken", "myorg", "my-project")
     }
 
     fn github_ref(number: &str) -> ExternalRef {
         ExternalRef {
             provider: Provider::GitHub,
             external_id: number.to_string(),
+            container: None,
             url: format!("https://github.com/myorg/my-project/issues/{number}"),
             revision: None,
         }
@@ -603,11 +693,7 @@ mod tests {
 
     #[test]
     fn auth_header_is_bearer_token() {
-        let cfg = GithubConfig {
-            owner: "o".to_string(),
-            repo: "r".to_string(),
-            token: "ghp_abc123".to_string(),
-        };
+        let cfg = GithubConfig::with_default_repo("ghp_abc123", "o", "r");
         assert_eq!(cfg.auth_header(), "Bearer ghp_abc123");
     }
 
@@ -1438,6 +1524,154 @@ mod tests {
         assert!(
             post_body.contains("Should exports use UTC"),
             "POST body must contain the question"
+        );
+    }
+
+    // ── Multi-repo: one provider/connection serves many repos (Phase A) ─────
+
+    /// A GitHub reference that names its source repo via `container`.
+    fn github_ref_in(container: &str, number: &str) -> ExternalRef {
+        ExternalRef::new(
+            Provider::GitHub,
+            number,
+            format!("https://github.com/{container}/issues/{number}"),
+        )
+        .with_container(container)
+    }
+
+    #[tokio::test]
+    async fn one_token_only_provider_serves_two_repos_via_container() {
+        // Scripted responses keyed by the FULL repo path, so a wrong-repo URL
+        // would 404 and fail the assertions.
+        let issue_a = r#"{"number":1,"title":"A","body":null,"state":"open",
+            "updated_at":"2026-06-01T00:00:00Z",
+            "html_url":"https://github.com/orgA/repoA/issues/1","labels":[],"user":{"login":"a"}}"#;
+        let issue_b = r#"{"number":2,"title":"B","body":null,"state":"open",
+            "updated_at":"2026-06-01T00:00:00Z",
+            "html_url":"https://github.com/orgB/repoB/issues/2","labels":[],"user":{"login":"b"}}"#;
+        let transport = FakeTransport::new()
+            .on("GET", "/repos/orgA/repoA/issues/1", 200, issue_a)
+            .on("GET", "/repos/orgB/repoB/issues/2", 200, issue_b);
+
+        // Token-only connection: NO default repo. The container selects the repo.
+        let provider = GithubProvider::new(GithubConfig::from_token("ghp_x"), transport);
+
+        let story_a = provider
+            .ingest_story(&github_ref_in("orgA/repoA", "1"))
+            .await
+            .expect("repo A ingest");
+        let story_b = provider
+            .ingest_story(&github_ref_in("orgB/repoB", "2"))
+            .await
+            .expect("repo B ingest");
+
+        assert_eq!(story_a.title, "A");
+        assert_eq!(story_b.title, "B");
+
+        // Each call hit its own repo's URL — proven by the recorded calls.
+        let calls = provider.transport.recorded_calls();
+        assert!(calls.iter().any(|(_, u, _)| u.contains("/repos/orgA/repoA/issues/1")));
+        assert!(calls.iter().any(|(_, u, _)| u.contains("/repos/orgB/repoB/issues/2")));
+    }
+
+    #[tokio::test]
+    async fn container_overrides_the_default_repo() {
+        let issue = r#"{"number":5,"title":"Override","body":null,"state":"open",
+            "updated_at":"2026-06-01T00:00:00Z",
+            "html_url":"https://github.com/other/repo/issues/5","labels":[],"user":{"login":"x"}}"#;
+        let transport = FakeTransport::new().on("GET", "/repos/other/repo/issues/5", 200, issue);
+        // Default is myorg/my-project, but the ref names other/repo.
+        let provider = GithubProvider::new(test_config(), transport);
+
+        let story = provider
+            .ingest_story(&github_ref_in("other/repo", "5"))
+            .await
+            .expect("ingest");
+        assert_eq!(story.title, "Override");
+        let calls = provider.transport.recorded_calls();
+        assert!(
+            calls[0].1.contains("/repos/other/repo/issues/5"),
+            "container must override the default repo: {}",
+            calls[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_default_repo_when_ref_has_no_container() {
+        let transport =
+            FakeTransport::new().on("GET", "/repos/myorg/my-project/issues/42", 200, SINGLE_ISSUE_JSON);
+        let provider = GithubProvider::new(test_config(), transport);
+
+        // github_ref() has container: None -> resolves to the default repo.
+        let story = provider.ingest_story(&github_ref("42")).await.expect("ingest");
+        assert_eq!(story.id, "42");
+        let calls = provider.transport.recorded_calls();
+        assert!(calls[0].1.contains("/repos/myorg/my-project/issues/42"));
+    }
+
+    #[tokio::test]
+    async fn errors_when_no_container_and_no_default_repo() {
+        let provider = GithubProvider::new(GithubConfig::from_token("ghp_x"), FakeTransport::new());
+        let err = provider
+            .ingest_story(&github_ref("99"))
+            .await
+            .expect_err("must refuse: no repo to resolve");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no container") && msg.contains("no default repo"),
+            "error must explain the missing repo coordinate: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_stamps_resolved_container_on_returned_story() {
+        let transport =
+            FakeTransport::new().on("GET", "/repos/orgA/repoA/issues/1", 200,
+                r#"{"number":1,"title":"A","body":null,"state":"open",
+                "updated_at":"2026-06-01T00:00:00Z",
+                "html_url":"https://github.com/orgA/repoA/issues/1","labels":[],"user":{"login":"a"}}"#);
+        let provider = GithubProvider::new(GithubConfig::from_token("ghp_x"), transport);
+
+        let story = provider
+            .ingest_story(&github_ref_in("orgA/repoA", "1"))
+            .await
+            .expect("ingest");
+        let ext = story.external_ref.expect("has ref");
+        assert_eq!(
+            ext.container.as_deref(),
+            Some("orgA/repoA"),
+            "ingest must stamp the resolved repo onto the story ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_container_is_a_clear_error() {
+        let provider = GithubProvider::new(GithubConfig::from_token("ghp_x"), FakeTransport::new());
+        let bad = ExternalRef::new(Provider::GitHub, "1", "url").with_container("not-a-repo-spec");
+        let err = provider.ingest_story(&bad).await.expect_err("must reject");
+        assert!(
+            err.to_string().contains("not `owner/repo`"),
+            "error must name the malformed container: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_requires_a_default_repo_and_stamps_container_on_events() {
+        // Token-only connection cannot poll: there is no per-item ref to carry a repo.
+        let bare = GithubProvider::new(GithubConfig::from_token("ghp_x"), FakeTransport::new());
+        assert!(
+            bare.poll(None).await.is_err(),
+            "poll without a default repo must error"
+        );
+
+        // With a default repo, poll works and stamps the repo on each event.
+        let transport = FakeTransport::new().on("GET", "/issues", 200, ISSUES_JSON);
+        let provider = GithubProvider::new(test_config(), transport);
+        let (events, _) = provider.poll(None).await.expect("poll");
+        assert_eq!(events.len(), 2);
+        assert!(
+            events.iter().all(|e| e.reference.container.as_deref() == Some("myorg/my-project")),
+            "every polled event must carry the polled repo as its container"
         );
     }
 }

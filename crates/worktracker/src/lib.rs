@@ -123,11 +123,74 @@ pub struct ExternalRef {
     /// The provider's own id for the item (Jira issue key, ADO work-item id,
     /// GitHub node id, or a synthetic id for the native provider).
     pub external_id: String,
+    /// The provider's CONTAINER for this item — the per-request source
+    /// coordinate that lets one connection serve many containers (the
+    /// credential-delegated-scope decision). Provider-specific meaning:
+    /// `owner/repo` for GitHub, the project key for Jira, the project for ADO.
+    /// `None` for the native provider (no external container) and for legacy
+    /// refs that predate this field, in which case the provider falls back to
+    /// its configured default container if it has one.
+    #[serde(default)]
+    pub container: Option<String>,
     /// A human-navigable URL for the item on the tracker's UI.
     pub url: String,
     /// Optional revision token used for echo suppression. GitHub delivery id,
     /// Jira issue version, ADO `rev`, etc. None when not yet written back.
     pub revision: Option<String>,
+}
+
+impl ExternalRef {
+    /// Construct an `ExternalRef` with no container and no revision — the common
+    /// case for native/legacy refs. Prefer this over a struct literal so adding
+    /// future optional fields stays source-compatible.
+    pub fn new(provider: Provider, external_id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            provider,
+            external_id: external_id.into(),
+            container: None,
+            url: url.into(),
+            revision: None,
+        }
+    }
+
+    /// Builder-style setter for the container coordinate (e.g. GitHub
+    /// `owner/repo`). Returns `self` so it chains off [`ExternalRef::new`].
+    pub fn with_container(mut self, container: impl Into<String>) -> Self {
+        self.container = Some(container.into());
+        self
+    }
+}
+
+/// A GitHub repository coordinate (`owner/repo`). The neutral [`ExternalRef::container`]
+/// string is parsed into this for the GitHub provider; kept here (not in the GitHub
+/// adapter) so the canonical layer owns the parse/format contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoCoord {
+    /// The repository owner (user or org).
+    pub owner: String,
+    /// The repository name.
+    pub repo: String,
+}
+
+impl RepoCoord {
+    /// Parse an `owner/repo` string. Returns `None` when it does not contain
+    /// exactly one `/` with non-empty halves.
+    pub fn parse(spec: &str) -> Option<Self> {
+        let (owner, repo) = spec.split_once('/')?;
+        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
+            return None;
+        }
+        Some(Self {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        })
+    }
+}
+
+impl std::fmt::Display for RepoCoord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.owner, self.repo)
+    }
 }
 
 // ── Canonical story ───────────────────────────────────────────────────────────
@@ -681,11 +744,51 @@ impl StoryStore for InMemoryStoryStore {
 mod tests {
     use super::*;
 
+    // ── RepoCoord parse/format + ExternalRef builder ───────────────────────
+
+    #[test]
+    fn repo_coord_parses_owner_slash_repo() {
+        let c = RepoCoord::parse("octocat/hello-world").expect("valid");
+        assert_eq!(c.owner, "octocat");
+        assert_eq!(c.repo, "hello-world");
+        assert_eq!(c.to_string(), "octocat/hello-world");
+    }
+
+    #[test]
+    fn repo_coord_rejects_malformed_specs() {
+        assert!(RepoCoord::parse("no-slash").is_none());
+        assert!(RepoCoord::parse("/leading").is_none());
+        assert!(RepoCoord::parse("trailing/").is_none());
+        assert!(RepoCoord::parse("too/many/slashes").is_none());
+        assert!(RepoCoord::parse("").is_none());
+    }
+
+    #[test]
+    fn external_ref_builder_sets_container() {
+        let r = ExternalRef::new(Provider::GitHub, "1", "https://example/1");
+        assert_eq!(r.container, None);
+        let r2 = r.with_container("orgA/repoA");
+        assert_eq!(r2.container.as_deref(), Some("orgA/repoA"));
+    }
+
+    #[test]
+    fn external_ref_container_survives_json_round_trip() {
+        let r = ExternalRef::new(Provider::GitHub, "7", "u").with_container("o/r");
+        let json = serde_json::to_string(&r).unwrap();
+        let back: ExternalRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.container.as_deref(), Some("o/r"));
+        // A legacy payload with no `container` field deserializes to None (serde default).
+        let legacy = r#"{"provider":"github","external_id":"7","url":"u","revision":null}"#;
+        let parsed: ExternalRef = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.container, None);
+    }
+
     // Helper: build a minimal ExternalRef pointing at the native provider.
     fn native_ref(id: &str) -> ExternalRef {
         ExternalRef {
             provider: Provider::Native,
             external_id: id.to_string(),
+            container: None,
             url: format!("native://stories/{id}"),
             revision: None,
         }
@@ -1016,6 +1119,7 @@ mod tests {
             external_ref: Some(ExternalRef {
                 provider: Provider::Jira,
                 external_id: "PROJ-99".to_string(),
+                container: None,
                 url: "https://jira.example.com/browse/PROJ-99".to_string(),
                 revision: Some("v7".to_string()),
             }),

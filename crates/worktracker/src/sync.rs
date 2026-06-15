@@ -270,6 +270,7 @@ mod tests {
         ExternalRef {
             provider: Provider::GitHub,
             external_id: id.to_string(),
+            container: Some("org/repo".to_string()),
             url: format!("https://github.com/org/repo/issues/{id}"),
             revision: None,
         }
@@ -279,6 +280,7 @@ mod tests {
         ExternalRef {
             provider: Provider::GitHub,
             external_id: id.to_string(),
+            container: Some("org/repo".to_string()),
             url: format!("https://github.com/org/repo/issues/{id}"),
             revision: Some(revision.to_string()),
         }

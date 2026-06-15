@@ -136,6 +136,7 @@ mod tests {
         ExternalRef {
             provider: Provider::Native,
             external_id: "STORY-1".to_string(),
+            container: None,
             url: "native://STORY-1".to_string(),
             revision: None,
         }

@@ -40,23 +40,36 @@ impl ProviderHandle {
     }
 }
 
-/// Build a GitHub provider handle from env vars, or `None` if they are not all set.
+/// Build a GitHub provider handle from env vars, or `None` if no token is set.
 ///
-/// `CAMERATA_GITHUB_TOKEN` = a PAT / installation token with Issues read+write.
-/// `CAMERATA_GITHUB_REPO`  = `owner/repo` (or set `CAMERATA_GITHUB_OWNER` + `_REPO`).
+/// Per the credential-delegated-scope decision, the TOKEN alone is sufficient: the
+/// provider serves every repo the token can reach, resolving the repo per request
+/// from each story's container. `CAMERATA_GITHUB_REPO` (`owner/repo`, or
+/// `CAMERATA_GITHUB_OWNER` + `_REPO`) is now an OPTIONAL default for container-less
+/// operations (e.g. the inbound `poll`), never a hard scope ceiling.
 fn github_from_env() -> Option<ProviderHandle> {
     let token = non_empty("CAMERATA_GITHUB_TOKEN")?;
-    let repo_spec = non_empty("CAMERATA_GITHUB_REPO")?;
-    let (owner, repo) = match repo_spec.split_once('/') {
-        Some((o, r)) => (o.to_string(), r.to_string()),
-        None => (non_empty("CAMERATA_GITHUB_OWNER")?, repo_spec),
+
+    // Optional default repo: present -> a labeled default; absent -> token-only,
+    // every operation must name its repo via the story container.
+    let default_repo: Option<(String, String)> = non_empty("CAMERATA_GITHUB_REPO").and_then(|spec| {
+        match spec.split_once('/') {
+            Some((o, r)) => Some((o.to_string(), r.to_string())),
+            None => non_empty("CAMERATA_GITHUB_OWNER").map(|o| (o, spec)),
+        }
+    });
+
+    let (config, label) = match &default_repo {
+        Some((owner, repo)) => (
+            GithubConfig::with_default_repo(token, owner.clone(), repo.clone()),
+            format!("github (token; default {owner}/{repo})"),
+        ),
+        None => (
+            GithubConfig::from_token(token),
+            "github (token; multi-repo, no default)".to_string(),
+        ),
     };
 
-    let config = GithubConfig {
-        owner: owner.clone(),
-        repo: repo.clone(),
-        token,
-    };
     let transport = match ReqwestTransport::new(config.auth_header()) {
         Ok(t) => t,
         Err(e) => {
@@ -66,7 +79,7 @@ fn github_from_env() -> Option<ProviderHandle> {
     };
     Some(ProviderHandle {
         provider: Arc::new(GithubProvider::new(config, transport)),
-        label: format!("github ({owner}/{repo})"),
+        label,
         live: true,
     })
 }

@@ -37,17 +37,16 @@ pub async fn run_worktracker_live() -> anyhow::Result<()> {
     println!("repo:  {owner}/{repo}");
     println!("issue: #{issue}\n");
 
-    let config = GithubConfig {
-        owner: owner.clone(),
-        repo: repo.clone(),
-        token,
-    };
+    // Token-only connection (no baked-in repo): the per-request container on the
+    // reference is what selects the repo, exactly as the multi-repo app path works.
+    let config = GithubConfig::from_token(token);
     let transport = ReqwestTransport::new(config.auth_header())?;
     let provider = GithubProvider::new(config, transport);
 
     let reference = ExternalRef {
         provider: Provider::GitHub,
         external_id: issue.clone(),
+        container: Some(format!("{owner}/{repo}")),
         url: format!("https://github.com/{owner}/{repo}/issues/{issue}"),
         revision: None,
     };

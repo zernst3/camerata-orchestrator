@@ -396,6 +396,7 @@ pub fn parse_search_results(json: &str) -> anyhow::Result<Vec<InboundWorkItemEve
                 reference: ExternalRef {
                     provider: Provider::Jira,
                     external_id: issue.key.clone(),
+                    container: None,
                     url: issue.self_url.clone(),
                     revision: None,
                 },
@@ -454,6 +455,7 @@ pub fn parse_issue(json: &str) -> anyhow::Result<CanonicalStory> {
         external_ref: Some(ExternalRef {
             provider: Provider::Jira,
             external_id: issue.key.clone(),
+            container: None,
             url: browse_url,
             revision: None,
         }),
@@ -710,6 +712,7 @@ mod tests {
         ExternalRef {
             provider: Provider::Jira,
             external_id: key.to_string(),
+            container: None,
             url: format!("https://example.atlassian.net/browse/{key}"),
             revision: None,
         }

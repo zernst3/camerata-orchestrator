@@ -268,6 +268,11 @@ async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value>
 #[derive(serde::Deserialize)]
 struct AdoptReq {
     external_id: String,
+    /// Optional source container coordinate (GitHub `owner/repo`, Jira/ADO
+    /// project). Lets the BFF adopt from any repo the connection can reach, not
+    /// just a default. Omitted falls back to the provider's default container.
+    #[serde(default)]
+    container: Option<String>,
 }
 
 /// Adopt a story from the active tracker into the spine: ingest the work item by id
@@ -280,6 +285,7 @@ async fn adopt_story(
     let reference = ExternalRef {
         provider: state.provider.provider.kind(),
         external_id: req.external_id.clone(),
+        container: req.container.clone(),
         url: String::new(),
         revision: None,
     };

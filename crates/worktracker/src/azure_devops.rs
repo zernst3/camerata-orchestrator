@@ -434,6 +434,7 @@ pub fn parse_wiql_workitems(json: &str) -> anyhow::Result<Vec<InboundWorkItemEve
                 reference: ExternalRef {
                     provider: Provider::AzureDevOps,
                     external_id: id_str.clone(),
+                    container: None,
                     // URL is set to empty string here; the provider fills it from config.
                     url: String::new(),
                     revision: None,
@@ -550,6 +551,7 @@ impl<T: HttpTransport> WorkItemProvider for AdoProvider<T> {
             external_ref: Some(ExternalRef {
                 provider: Provider::AzureDevOps,
                 external_id: parsed.id.to_string(),
+                container: None,
                 url: browse_url,
                 revision: None,
             }),
@@ -708,6 +710,7 @@ mod tests {
         ExternalRef {
             provider: Provider::AzureDevOps,
             external_id: id.to_string(),
+            container: None,
             url: format!("https://dev.azure.com/myorg/MyProject/_workitems/edit/{id}"),
             revision: None,
         }
