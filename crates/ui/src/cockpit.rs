@@ -20,8 +20,20 @@
 
 use dioxus::prelude::*;
 
-use camerata_gateway::RULE_REGISTRY;
+use camerata_gateway::{RuleEntry, RULE_REGISTRY};
 use camerata_worktracker::{CanonicalStory, FeatureStatus};
+
+/// The rules the cockpit inspector showcases: every enforced rule EXCEPT GOV-1.
+///
+/// GOV-1 ("deny writes whose path contains the substring 'forbidden'") is the
+/// verification fixture the live-demo and acceptance tests fire against; it stays
+/// in the registry (and the test suite) but is deliberately not surfaced here,
+/// because as a product rule it is trivial and would undercut the substantive
+/// SEC/ARCH rules that earn the inspector its credibility. The remaining four are
+/// all real, enforced rules with non-trivial checks.
+fn showcase_rules() -> Vec<&'static RuleEntry> {
+    RULE_REGISTRY.iter().filter(|e| e.id != "GOV-1").collect()
+}
 
 /// One agent in the governed fleet, as the status strip renders it.
 #[derive(Clone, PartialEq)]
@@ -231,7 +243,7 @@ pub fn CockpitApp() -> Element {
                     p { class: "cockpit-rail-label", "INSPECTOR" }
                     p { class: "inspector-hint", "The rules this fleet is governed by. These are the gate's actual enforced rules." }
                     div { class: "rule-list",
-                        for (i , entry) in RULE_REGISTRY.iter().enumerate() {
+                        for (i , entry) in showcase_rules().iter().enumerate() {
                             {
                                 let sel = i == selected_rule();
                                 let cls = if sel { "rule-chip sel" } else { "rule-chip" };
@@ -246,7 +258,8 @@ pub fn CockpitApp() -> Element {
                         }
                     }
                     {
-                        let entry = &RULE_REGISTRY[selected_rule().min(RULE_REGISTRY.len() - 1)];
+                        let rules = showcase_rules();
+                        let entry = rules[selected_rule().min(rules.len() - 1)];
                         rsx! {
                             div { class: "rule-detail",
                                 p { class: "rule-id", "{entry.id}" }
@@ -286,7 +299,7 @@ fn CockpitTopBar(story: CanonicalStory) -> Element {
                 span { class: "topbar-sep", "·" }
                 span { class: "conn-ok", "● Connected" }
                 span { class: "topbar-sep", "·" }
-                span { class: "conn-warn", "1 gate bounce" }
+                span { class: "conn-warn", "gate: 1 layer-1 deny · 1 layer-2 bounce" }
             }
         }
     }
@@ -319,9 +332,24 @@ fn StagePanel(story: CanonicalStory, fleet: Vec<FleetAgent>) -> Element {
                         }
                     }
                 }
-                div { class: "exec-bounce",
-                    span { class: "bounce-tag", "1 bounce" }
-                    "Frontend attempted a direct DB read; SEC / layering rule denied it, bounced back, and it is revising. The architect never had to catch it."
+                div { class: "gate-activity",
+                    p { class: "gate-activity-h", "Gate activity" }
+                    div { class: "gate-event",
+                        span { class: "gate-layer l1", "LAYER 1 · DENY" }
+                        p { class: "gate-event-text",
+                            "Frontend tried to write a hardcoded API token into the export config. "
+                            span { class: "gate-rule", "SEC-NO-HARDCODED-SECRETS-1" }
+                            " denied the write before it reached disk. The architect never had to catch it."
+                        }
+                    }
+                    div { class: "gate-event",
+                        span { class: "gate-layer l2", "LAYER 2 · BOUNCE" }
+                        p { class: "gate-event-text",
+                            "Backend's first diff built a SQL query by string concatenation. "
+                            span { class: "gate-rule", "SEC-NO-RAW-SQL-CONCAT-1" }
+                            " bounced it post-task; it revised and passed on the next attempt."
+                        }
+                    }
                 }
             }
         },
@@ -335,7 +363,7 @@ fn StagePanel(story: CanonicalStory, fleet: Vec<FleetAgent>) -> Element {
                 }
                 div { class: "prov-line",
                     span { class: "prov-k", "rules passed" }
-                    span { class: "prov-v", "GOV-1 · SEC-NO-PATH-ESCAPE-1 · RUST-FMT · RUST-CLIPPY · RUST-TEST" }
+                    span { class: "prov-v", "SEC-NO-HARDCODED-SECRETS-1 · SEC-NO-PATH-ESCAPE-1 · RUST-FMT · RUST-CLIPPY · RUST-TEST" }
                 }
                 div { class: "prov-line",
                     span { class: "prov-k", "sign-off" }

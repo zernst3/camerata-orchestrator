@@ -974,8 +974,15 @@ html, body {
 .exec-agent.gated .exec-state { color: #2f8f5b; }
 .exec-agent.exec .exec-state { color: #2f5f9e; }
 .exec-note { font-size: 12.5px; color: var(--ink-soft); margin: 5px 0 0; line-height: 1.4; }
-.exec-bounce { margin-top: 16px; display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; background: #fdf8ef; border: 1px solid #f0e2c8; border-radius: 9px; padding: 11px 13px; }
-.bounce-tag { flex: none; font-size: 10.5px; font-weight: 700; color: #9a6418; background: #fbecd6; border-radius: 5px; padding: 2px 7px; letter-spacing: .03em; }
+/* Gate activity: the two layers named consistently and distinctly. */
+.gate-activity { margin-top: 18px; }
+.gate-activity-h { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ink-faint); margin: 0 0 8px; }
+.gate-event { display: flex; gap: 11px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.gate-layer { flex: none; font-size: 10px; font-weight: 700; letter-spacing: .03em; padding: 3px 8px; border-radius: 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.gate-layer.l1 { background: #f7e1dc; color: #b0432e; }   /* deny-before-execute */
+.gate-layer.l2 { background: #fbecd6; color: #9a6418; }   /* post-task bounce */
+.gate-event-text { font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; margin: 0; }
+.gate-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; font-weight: 700; color: var(--ink); }
 
 /* Done / provenance panel */
 .prov-line { display: flex; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
