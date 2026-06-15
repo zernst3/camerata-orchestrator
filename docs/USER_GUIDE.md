@@ -75,6 +75,20 @@ Investigation refines one **piece of work**.
 
 Pick your path:
 
+Brownfield onboards a **set of inter-related repos** at once (one `owner/repo` per
+line — e.g. a .NET API, a Python worker, a React app). Camerata downloads the WHOLE
+of each repo (one tarball each, not a per-file cap) and:
+
+- runs the **universal** rules (secrets, raw SQL, secrets-in-URL) immediately → instant
+  findings, no stack knowledge needed (the 5-minute payoff);
+- **detects each repo's stack** (languages from extensions, frameworks from manifests)
+  and proposes the **stack-specific** rules that apply, for you to select;
+- classifies every proposed rule by **scope** (repo-local / cross-repo / process) and
+  **placement** (which gate lives where), so you approve where each rule and its gate go.
+
+Findings land in a table you **triage**: select rows and **Ignore**, **Resolve** (queue
+a governed fix), or **Accept as tech debt** (opens a ticket with the findings).
+
 ### Brownfield (an existing repo)
 The flow is **scan → propose → approve → audit → arm**:
 

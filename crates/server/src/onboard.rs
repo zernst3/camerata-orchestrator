@@ -12,7 +12,7 @@
 //! Everything in this module is pure (files in -> report out); fetching the files
 //! from GitHub lives in `repo_reader` and needs the token.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The content rules the brownfield audit runs (the ones that are pure functions
 /// over file content). Path-based rules (GOV-1 forbidden paths, SEC-NO-PATH-ESCAPE-1)
@@ -24,7 +24,7 @@ pub const AUDIT_RULES: &[&str] = &[
 ];
 
 /// One violation already present in the repo.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Finding {
     /// Which repo this finding is in (`owner/repo`). Lets a multi-repo scan group
     /// and filter findings by repo.
@@ -70,6 +70,18 @@ pub struct ProposedRule {
     pub recommended: bool,
 }
 
+/// The detected tech stack for one repo (languages from extensions, frameworks
+/// from manifests). Drives the stack-specific rule proposals (Approach B).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RepoStack {
+    /// `owner/repo`.
+    pub repo: String,
+    /// Languages detected from file extensions (e.g. `TypeScript`, `Python`).
+    pub languages: Vec<String>,
+    /// Frameworks detected from manifest contents (e.g. `React`, `ASP.NET`).
+    pub frameworks: Vec<String>,
+}
+
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
@@ -78,6 +90,9 @@ pub struct ProposedRule {
 pub struct ScanReport {
     /// The repos scanned (`owner/repo`).
     pub repos: Vec<String>,
+    /// The detected stack per repo (languages + frameworks).
+    #[serde(default)]
+    pub stacks: Vec<RepoStack>,
     /// Number of files scanned across all repos.
     pub files_scanned: usize,
     /// Every violation found, across all repos (each tagged with its repo).
@@ -95,6 +110,7 @@ impl ScanReport {
     pub fn gated(repos: &[String]) -> Self {
         Self {
             repos: repos.to_vec(),
+            stacks: Vec::new(),
             files_scanned: 0,
             findings: Vec::new(),
             proposed_rules: Vec::new(),
@@ -223,6 +239,119 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
     out
 }
 
+/// Map a file extension to a language label.
+fn lang_for_ext(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "rs" => "Rust",
+        "ts" | "tsx" => "TypeScript",
+        "js" | "jsx" => "JavaScript",
+        "py" => "Python",
+        "go" => "Go",
+        "cs" => "C#",
+        "java" => "Java",
+        "kt" => "Kotlin",
+        "rb" => "Ruby",
+        "php" => "PHP",
+        "swift" => "Swift",
+        "c" | "h" => "C",
+        "cpp" => "C++",
+        "sql" => "SQL",
+        _ => return None,
+    })
+}
+
+/// Detect frameworks from a manifest file's path + content.
+fn detect_frameworks(path: &str, content: &str, out: &mut std::collections::BTreeSet<String>) {
+    let file = path.rsplit_once('/').map(|(_, f)| f).unwrap_or(path);
+    let lc = content.to_ascii_lowercase();
+    let mut add = |s: &str| {
+        out.insert(s.to_string());
+    };
+    match file {
+        "package.json" => {
+            if lc.contains("\"next\"") {
+                add("Next.js");
+            }
+            if lc.contains("\"react\"") {
+                add("React");
+            }
+            if lc.contains("\"vue\"") {
+                add("Vue");
+            }
+            if lc.contains("\"@angular/core\"") {
+                add("Angular");
+            }
+            if lc.contains("\"express\"") {
+                add("Express");
+            }
+            if lc.contains("redux") {
+                add("Redux");
+            }
+            if lc.contains("\"svelte\"") {
+                add("Svelte");
+            }
+        }
+        "requirements.txt" | "pyproject.toml" | "Pipfile" => {
+            if lc.contains("django") {
+                add("Django");
+            }
+            if lc.contains("flask") {
+                add("Flask");
+            }
+            if lc.contains("fastapi") {
+                add("FastAPI");
+            }
+        }
+        "go.mod" => add("Go modules"),
+        "Cargo.toml" => {
+            if lc.contains("dioxus") {
+                add("Dioxus");
+            }
+            if lc.contains("axum") {
+                add("Axum");
+            }
+            if lc.contains("actix") {
+                add("Actix");
+            }
+            if lc.contains("leptos") {
+                add("Leptos");
+            }
+        }
+        "Gemfile" => {
+            if lc.contains("rails") {
+                add("Rails");
+            }
+        }
+        _ => {
+            if file.ends_with(".csproj") || file.ends_with(".sln") {
+                add(".NET");
+                if lc.contains("microsoft.aspnetcore") {
+                    add("ASP.NET");
+                }
+            }
+        }
+    }
+}
+
+/// Detect a repo's stack from its files: languages from extensions, frameworks
+/// from manifests. Pure and deterministic.
+pub fn detect_stack(repo: &str, files: &[(String, String)]) -> RepoStack {
+    let mut languages = std::collections::BTreeSet::new();
+    let mut frameworks = std::collections::BTreeSet::new();
+    for (path, content) in files {
+        if let Some(lang) = lang_for_ext(path) {
+            languages.insert(lang.to_string());
+        }
+        detect_frameworks(path, content, &mut frameworks);
+    }
+    RepoStack {
+        repo: repo.to_string(),
+        languages: languages.into_iter().collect(),
+        frameworks: frameworks.into_iter().collect(),
+    }
+}
+
 /// Audit one repo's already-fetched files into a flat finding list (each tagged
 /// with `repo`). Pure.
 pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
@@ -233,17 +362,78 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     findings
 }
 
-/// Build a report from already-aggregated findings across `repos`. Pure.
-pub fn build_report(repos: Vec<String>, files_scanned: usize, findings: Vec<Finding>) -> ScanReport {
+/// Build a report from already-aggregated findings + per-repo stacks. Pure.
+pub fn build_report(
+    repos: Vec<String>,
+    stacks: Vec<RepoStack>,
+    files_scanned: usize,
+    findings: Vec<Finding>,
+) -> ScanReport {
     let proposed_rules = propose_rules(&findings, &repos);
     ScanReport {
         repos,
+        stacks,
         files_scanned,
         findings,
         proposed_rules,
         gated: false,
         message: None,
     }
+}
+
+// ── Tech-debt ticket (accept findings as debt -> open a GitHub issue) ───────────
+
+/// Render selected findings as a GitHub issue body, grouped by repo.
+pub fn tech_debt_issue_body(findings: &[Finding]) -> String {
+    use std::collections::BTreeMap;
+    let mut s = String::from(
+        "Accepted tech debt from a Camerata brownfield audit. These existing \
+         violations were reviewed and deferred.\n\n",
+    );
+    s.push_str(&format!("**{} finding(s):**\n\n", findings.len()));
+    let mut by_repo: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    for f in findings {
+        by_repo.entry(f.repo.as_str()).or_default().push(f);
+    }
+    for (repo, fs) in by_repo {
+        s.push_str(&format!("### {repo}\n\n"));
+        for f in fs {
+            s.push_str(&format!(
+                "- **[{}]** `{}` — `{}:{}`\n",
+                f.severity.to_uppercase(),
+                f.rule_id,
+                f.path,
+                f.line
+            ));
+        }
+        s.push('\n');
+    }
+    s.push_str("\n_Filed by Camerata onboarding._");
+    s
+}
+
+/// Open a GitHub issue in `owner/repo` with the selected findings as accepted tech
+/// debt. Returns the issue URL. Needs Issues write on the token.
+pub async fn create_tech_debt_ticket(
+    owner: &str,
+    repo: &str,
+    token: &str,
+    title: &str,
+    findings: &[Finding],
+) -> anyhow::Result<String> {
+    use camerata_worktracker::{HttpTransport, ReqwestTransport};
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues");
+    let body = serde_json::to_string(&serde_json::json!({
+        "title": title,
+        "body": tech_debt_issue_body(findings),
+    }))?;
+    let resp = transport.post(&url, &body).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub create issue: HTTP {} {}", resp.status, resp.body);
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp.body)?;
+    Ok(v["html_url"].as_str().unwrap_or_default().to_string())
 }
 
 // ── GitHub repo reader (needs the token) ────────────────────────────────────────
@@ -358,6 +548,7 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
 /// what it could read. The token is required (the caller gates on it).
 pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut all_findings = Vec::new();
+    let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
@@ -374,6 +565,7 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         match fetch_repo_files(owner, repo, token).await {
             Ok((files, truncated)) => {
                 files_total += files.len();
+                stacks.push(detect_stack(spec, &files));
                 all_findings.extend(audit_files(spec, &files));
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -386,7 +578,7 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         }
     }
 
-    let mut report = build_report(repos_ok, files_total, all_findings);
+    let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
@@ -508,6 +700,7 @@ mod tests {
         ));
         let report = build_report(
             vec!["me/api".to_string(), "me/web".to_string()],
+            vec![],
             2,
             findings,
         );
@@ -515,6 +708,61 @@ mod tests {
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].repo, "me/api");
         assert!(!report.gated);
+    }
+
+    #[test]
+    fn detect_stack_finds_languages_and_frameworks() {
+        let files = vec![
+            ("src/App.tsx".to_string(), "export default App".to_string()),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "react": "18", "@reduxjs/toolkit": "2", "express": "4" } }"#
+                    .to_string(),
+            ),
+            ("api/Program.cs".to_string(), "class Program {}".to_string()),
+            (
+                "api/Api.csproj".to_string(),
+                "<Project><PackageReference Include=\"Microsoft.AspNetCore.App\"/></Project>"
+                    .to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/app", &files);
+        assert!(stack.languages.contains(&"TypeScript".to_string()));
+        assert!(stack.languages.contains(&"C#".to_string()));
+        assert!(stack.frameworks.contains(&"React".to_string()));
+        assert!(stack.frameworks.contains(&"Redux".to_string()));
+        assert!(stack.frameworks.contains(&"Express".to_string()));
+        assert!(stack.frameworks.contains(&".NET".to_string()));
+        assert!(stack.frameworks.contains(&"ASP.NET".to_string()));
+    }
+
+    #[test]
+    fn tech_debt_body_groups_by_repo() {
+        let findings = vec![
+            Finding {
+                repo: "me/api".into(),
+                path: "a.rs".into(),
+                line: 3,
+                rule_id: "SEC-NO-HARDCODED-SECRETS-1".into(),
+                severity: "high".into(),
+                snippet: "x".into(),
+                detail: "d".into(),
+            },
+            Finding {
+                repo: "me/web".into(),
+                path: "b.tsx".into(),
+                line: 7,
+                rule_id: "ARCH-NO-SECRETS-IN-URL-1".into(),
+                severity: "high".into(),
+                snippet: "y".into(),
+                detail: "d".into(),
+            },
+        ];
+        let body = tech_debt_issue_body(&findings);
+        assert!(body.contains("### me/api"));
+        assert!(body.contains("### me/web"));
+        assert!(body.contains("a.rs:3"));
+        assert!(body.contains("2 finding"));
     }
 
     #[test]

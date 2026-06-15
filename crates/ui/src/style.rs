@@ -960,6 +960,11 @@ html, body {
 .scan-stat-n.high { color: #9a3526; }
 .scan-section-h { font-size: 13px; font-weight: 700; color: var(--ink); margin: 18px 0 2px; }
 .scan-section-sub { font-size: 12px; color: var(--ink-soft); margin-bottom: 8px; line-height: 1.5; }
+.scan-stacks { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; }
+.scan-stack { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
+.scan-stack-repo { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.scan-stack-tech { color: var(--ink-soft); }
+.findings-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }

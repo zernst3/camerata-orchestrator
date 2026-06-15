@@ -666,7 +666,7 @@ fn CockpitNotice(kind: String) -> Element {
 
 // ── Brownfield scan: data + chorale-backed tables ──────────────────────────────
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct FindingView {
     #[serde(default)]
     repo: String,
@@ -675,7 +675,6 @@ struct FindingView {
     rule_id: String,
     severity: String,
     snippet: String,
-    #[allow(dead_code)]
     detail: String,
 }
 
@@ -696,9 +695,20 @@ struct ProposedRuleView {
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
+struct StackView {
+    repo: String,
+    #[serde(default)]
+    languages: Vec<String>,
+    #[serde(default)]
+    frameworks: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
 struct ScanReportView {
     #[serde(default)]
     repos: Vec<String>,
+    #[serde(default)]
+    stacks: Vec<StackView>,
     files_scanned: usize,
     findings: Vec<FindingView>,
     proposed_rules: Vec<ProposedRuleView>,
@@ -717,6 +727,24 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
         .json::<ScanReportView>()
         .await
         .ok()
+}
+
+/// Accept selected findings as tech debt: open a GitHub issue. Returns the URL.
+async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/ticket", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo, "findings": findings }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        v.get("url").and_then(|u| u.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    }
 }
 
 fn finding_columns() -> Vec<ColumnDef<FindingView>> {
@@ -809,15 +837,68 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
     ]
 }
 
-/// The findings table: group/sort by severity + finding type, filter by type or
-/// location. Virtualized by chorale, so a large audit doesn't choke the UI.
+/// The findings table with TRIAGE: sort by repo/severity/type, filter, select rows
+/// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
+/// chorale, so a large audit doesn't choke the UI.
 #[component]
-fn FindingsTable(findings: Vec<FindingView>) -> Element {
+fn FindingsTable(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let target_repo = repos.first().cloned().unwrap_or_default();
     let rows: Vec<(RowId, FindingView)> =
-        findings.into_iter().map(|f| (RowId::new(), f)).collect();
+        findings.iter().map(|f| (RowId::new(), f.clone())).collect();
+    let id_map: std::collections::HashMap<RowId, FindingView> =
+        rows.iter().map(|(r, f)| (*r, f.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), finding_columns()));
+    let mut busy = use_signal(|| false);
+
     rsx! {
-        Table { handle, sort_enabled: true, filter_enabled: true, resize_enabled: true }
+        div { class: "findings-toolbar",
+            button {
+                class: "btn-restart",
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    if sel.is_empty() { return; }
+                    let n = sel.len();
+                    handle.remove_rows(&sel);
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Ignored {n} finding(s)."));
+                },
+                "Ignore selected"
+            }
+            button {
+                class: "btn-restart",
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    if sel.is_empty() { return; }
+                    let n = sel.len();
+                    handle.remove_rows(&sel);
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Queued {n} for a governed fix (runs when Claude is connected)."));
+                },
+                "Resolve selected"
+            }
+            button {
+                class: "btn-run",
+                disabled: busy(),
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map.get(id).cloned()).collect();
+                    if picked.is_empty() { return; }
+                    let repo = target_repo.clone();
+                    busy.set(true);
+                    spawn(async move {
+                        match create_ticket(&repo, &picked).await {
+                            Some(url) => {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Tech-debt ticket opened: {url}"));
+                                handle.remove_rows(&sel);
+                            }
+                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Couldn't open the ticket — needs Issues write on the connected token."),
+                        }
+                        busy.set(false);
+                    });
+                },
+                if busy() { "Filing…" } else { "Accept as tech debt \u{2192} ticket" }
+            }
+        }
+        Table { handle, sort_enabled: true, filter_enabled: true, selection_enabled: true, resize_enabled: true }
     }
 }
 
@@ -1022,9 +1103,26 @@ fn ScanResults(report: ScanReportView) -> Element {
                 }
             }
 
-            p { class: "scan-section-h", "Findings already in this repo" }
-            p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Sort by severity or finding type; filter by type or location." }
-            FindingsTable { key: "f-{table_key}", findings: report.findings.clone() }
+            if !report.stacks.is_empty() {
+                div { class: "scan-stacks",
+                    for s in report.stacks.iter() {
+                        div { class: "scan-stack",
+                            span { class: "scan-stack-repo", "{s.repo}" }
+                            span { class: "scan-stack-tech",
+                                {
+                                    let mut tech = s.languages.clone();
+                                    tech.extend(s.frameworks.clone());
+                                    if tech.is_empty() { "stack not detected".to_string() } else { tech.join(" · ") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            p { class: "scan-section-h", "Findings already in these repos" }
+            p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/type; filter by type or location." }
+            FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone() }
 
             p { class: "scan-section-h", "Proposed starter ruleset" }
             p { class: "scan-section-sub", "Select the rules to arm (each shows how many existing violations it catches). You own the final set; arming generates the governance PR." }

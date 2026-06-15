@@ -123,6 +123,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/onboard/scan", post(onboard_scan))
+        .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
@@ -334,6 +335,43 @@ async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanRepo
         return Json(crate::onboard::ScanReport::gated(&repos));
     };
     Json(crate::onboard::scan_repos(&repos, &token).await)
+}
+
+/// Request to file accepted findings as a tech-debt ticket.
+#[derive(serde::Deserialize)]
+struct TicketReq {
+    /// `owner/repo` to file the issue in.
+    repo: String,
+    #[serde(default)]
+    title: Option<String>,
+    /// The selected findings to record.
+    findings: Vec<crate::onboard::Finding>,
+}
+
+/// Accept selected findings as tech debt: open a GitHub issue with them. Gated on
+/// the token (needs Issues write). Returns `{ ok, url, message }`.
+async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
+    let Some((owner, repo)) = req.repo.split_once('/') else {
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Target repo must be `owner/repo`." }),
+        );
+    };
+    if req.findings.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No findings selected." }));
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to file a ticket." }));
+    };
+    let title = req.title.unwrap_or_else(|| {
+        format!("Tech debt: {} audit finding(s) accepted", req.findings.len())
+    });
+    match crate::onboard::create_tech_debt_ticket(owner, repo, &token, &title, &req.findings).await {
+        Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
 }
 
 /// Query for draining the notification feed: only items newer than `since`.
