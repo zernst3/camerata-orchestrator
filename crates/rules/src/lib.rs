@@ -92,17 +92,50 @@ struct RuleToml {
     qualifies: Option<String>,
     #[serde(default)]
     decision: Option<DecisionToml>,
+    /// Whether this rule ships an adopted default option. When `false`, the
+    /// architect MUST choose an alternative at onboarding.
+    #[serde(default)]
+    default: bool,
+    /// The alternatives the architect chooses among (`[[option]]` blocks).
+    #[serde(default, rename = "option")]
+    options: Vec<OptionToml>,
 }
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
     #[serde(default)]
     why: Option<String>,
+    /// The id of the default option, when one is adopted.
+    #[serde(default)]
+    default: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OptionToml {
+    id: String,
+    label: String,
+    #[serde(default)]
+    directive: String,
+    #[serde(default)]
+    why: String,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public domain types
 // ────────────────────────────────────────────────────────────────────────────
+
+/// One alternative the architect can codify for a rule (a `[[option]]` block).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleOption {
+    /// Stable option id (what gets codified as the choice).
+    pub id: String,
+    /// Human label.
+    pub label: String,
+    /// The concrete directive this alternative codifies.
+    pub directive: String,
+    /// Why this alternative (the rationale; the default option says so).
+    pub why: String,
+}
 
 /// A single camerata principle loaded from the corpus.
 #[derive(Debug, Clone)]
@@ -118,6 +151,19 @@ pub struct Rule {
     /// A one-paragraph summary — sourced from `qualifies`, then
     /// `decision.why`, then `title` as a final fallback.
     pub summary: String,
+    /// The alternatives the architect chooses among. May be empty (a mechanical
+    /// rule with no variants).
+    pub options: Vec<RuleOption>,
+    /// The default option id, when this rule adopts one. `None` means the
+    /// architect MUST choose an alternative — there is no default to fall back on.
+    pub default_option: Option<String>,
+}
+
+impl Rule {
+    /// Whether this rule has an adopted default option.
+    pub fn has_default(&self) -> bool {
+        self.default_option.is_some()
+    }
 }
 
 impl Rule {
@@ -312,12 +358,35 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         })
         .unwrap_or_else(|| raw.title.clone());
 
+    // The default option id, only when the rule adopts one (`default = true`).
+    let default_option = if raw.default {
+        raw.decision
+            .as_ref()
+            .and_then(|d| d.default.clone())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+
+    let options = raw
+        .options
+        .into_iter()
+        .map(|o| RuleOption {
+            id: o.id,
+            label: o.label,
+            directive: o.directive,
+            why: o.why,
+        })
+        .collect();
+
     Ok(Rule {
         id: RuleId(raw.id),
         title: raw.title,
         enforcement: raw.enforcement,
         domain: raw.domain,
         summary,
+        options,
+        default_option,
     })
 }
 
@@ -541,7 +610,33 @@ mod tests {
             enforcement,
             domain: domain.to_owned(),
             summary: format!("Summary of {id}"),
+            options: Vec::new(),
+            default_option: None,
         }
+    }
+
+    #[tokio::test]
+    async fn corpus_rule_loads_options_and_default() {
+        // ARCH-BOUNDARY-VALIDATION-1 has a default + three [[option]] alternatives.
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the camerata-ai checkout
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let Some(rule) = set.get_by_id("ARCH-BOUNDARY-VALIDATION-1") else {
+            return; // rule not in this corpus version
+        };
+        assert!(rule.has_default(), "this rule ships an adopted default");
+        assert!(
+            rule.options.len() >= 2,
+            "it has alternatives to choose among: {}",
+            rule.options.len()
+        );
+        let default_id = rule.default_option.clone().unwrap();
+        assert!(
+            rule.options.iter().any(|o| o.id == default_id),
+            "the default option id resolves to a real option"
+        );
     }
 
     fn populated_set() -> RuleSet {
