@@ -34,6 +34,11 @@ camerata-persistence = { path = "../persistence" }
 # The governed build runner: lets the Build screen run a REAL governed fleet
 # (gateway + claude -p agents) in-process, the same path the CLI po-demo uses.
 camerata-fleet = { path = "../fleet" }
+# The enterprise/architect cockpit reads REAL domain types: the canonical Story
+# spine + lifecycle status from worktracker, and the actual enforced gate rules
+# from the gateway registry (shown verbatim in the cockpit's rule inspector).
+camerata-worktracker = { path = "../worktracker" }
+camerata-gateway = { path = "../gateway" }
 # The BYO-infra publish step: the Live screen deploys through this seam.
 camerata-deploy = { path = "../deploy" }
 # The standing ops agent: scans the live app for dependency and security news.

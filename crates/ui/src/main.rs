@@ -14,6 +14,7 @@
 
 mod app_state;
 mod build_run;
+mod cockpit;
 mod data;
 mod deploy_run;
 mod maintenance_run;
@@ -94,11 +95,78 @@ async fn open_store() -> (Option<SqliteStore>, PersistenceMode) {
     }
 }
 
-/// Root. Owns the current-screen signal and injects the global stylesheet once.
-/// Each screen receives the signal so its primary action can advance the journey.
+/// The two surfaces this one window can show. Both run on the same engine; they
+/// differ in where the human stands (a led wizard vs. a steered control surface).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Edition {
+    /// The consumer / small-business app-builder (the guided wizard).
+    AppBuilder,
+    /// The enterprise / architect cockpit (the dense control surface).
+    Cockpit,
+}
+
+/// Root. Injects the global stylesheet once and lets the viewer switch between
+/// the two surfaces in a single window (so a demo can flip between them).
 #[component]
 fn App() -> Element {
-    let screen = use_signal(|| Screen::Intake);
+    let edition = use_signal(|| Edition::AppBuilder);
+
+    rsx! {
+        // Global stylesheet, injected as a raw <style> so it works identically on
+        // desktop without the asset pipeline. Keeps the whole look in one place.
+        style { dangerous_inner_html: style::GLOBAL_CSS }
+
+        div { class: "app-root",
+            EditionSwitcher { edition }
+            match edition() {
+                Edition::AppBuilder => rsx! { ConsumerApp {} },
+                Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
+            }
+        }
+    }
+}
+
+/// The segmented control at the very top of the window: flip between the two
+/// surfaces. Present in every demo so both editions are reachable at once.
+#[component]
+fn EditionSwitcher(edition: Signal<Edition>) -> Element {
+    let mut edition = edition;
+    let app_cls = if edition() == Edition::AppBuilder {
+        "edition-tab on"
+    } else {
+        "edition-tab"
+    };
+    let cockpit_cls = if edition() == Edition::Cockpit {
+        "edition-tab on"
+    } else {
+        "edition-tab"
+    };
+    rsx! {
+        div { class: "edition-switcher",
+            span { class: "edition-brand", "Camerata" }
+            div { class: "edition-tabs",
+                button {
+                    class: "{app_cls}",
+                    onclick: move |_| edition.set(Edition::AppBuilder),
+                    "App builder"
+                }
+                button {
+                    class: "{cockpit_cls}",
+                    onclick: move |_| edition.set(Edition::Cockpit),
+                    "Enterprise cockpit"
+                }
+            }
+            span { class: "edition-hint", "two surfaces, one engine" }
+        }
+    }
+}
+
+/// The consumer app-builder surface: the guided journey Intake -> Clarify -> Build
+/// -> Try it -> Live. Owns the live project, the design corpus, and the durable
+/// version-history store, and exposes a Start over control to reset the journey.
+#[component]
+fn ConsumerApp() -> Element {
+    let mut screen = use_signal(|| Screen::Intake);
 
     // The live consumer project, shared with every screen via context. `None`
     // until the intake screen builds it on submit. Intake writes it; the
@@ -146,31 +214,35 @@ fn App() -> Element {
         }
     });
 
+    // Start over: clear the live project and return to the first screen. Intake
+    // re-seeds fresh on remount, so this is a clean reset of the whole journey.
+    let restart = move |_| {
+        app.set(None);
+        screen.set(Screen::Intake);
+    };
+
     rsx! {
-        // Global stylesheet, injected as a raw <style> so it works identically on
-        // desktop without the asset pipeline. Keeps the whole look in one place.
-        style { dangerous_inner_html: style::GLOBAL_CSS }
+        // If durability is degraded, say so in plain language rather than
+        // silently dropping the user's history.
+        if let Some(mode) = persistence_mode {
+            PersistenceBanner { mode }
+        }
 
-        div { class: "app-root",
-            // If durability is degraded, say so in plain language rather than
-            // silently dropping the user's history.
-            if let Some(mode) = persistence_mode {
-                PersistenceBanner { mode }
-            }
-
-            // A quiet, fixed progress rail at the top — four dots that fill as the
-            // user moves through the journey. It is orientation, not a dashboard.
+        // The progress rail, plus a quiet Start over control on the right so the
+        // user can reset the journey from any screen.
+        div { class: "rail-row",
             ProgressRail { screen }
+            button { class: "btn-restart", onclick: restart, "Start over" }
+        }
 
-            div { class: "stage",
-                match screen() {
-                    Screen::Intake => rsx! { screens::intake::IntakeScreen { screen } },
-                    Screen::Clarify => rsx! { screens::clarify::ClarifyScreen { screen } },
-                    Screen::Build => rsx! { screens::build::BuildScreen { screen } },
-                    Screen::Qa => rsx! { screens::qa::QaScreen { screen } },
-                    Screen::Bug => rsx! { screens::bug::BugScreen { screen } },
-                    Screen::Live => rsx! { screens::live::LiveScreen { screen } },
-                }
+        div { class: "stage",
+            match screen() {
+                Screen::Intake => rsx! { screens::intake::IntakeScreen { screen } },
+                Screen::Clarify => rsx! { screens::clarify::ClarifyScreen { screen } },
+                Screen::Build => rsx! { screens::build::BuildScreen { screen } },
+                Screen::Qa => rsx! { screens::qa::QaScreen { screen } },
+                Screen::Bug => rsx! { screens::bug::BugScreen { screen } },
+                Screen::Live => rsx! { screens::live::LiveScreen { screen } },
             }
         }
     }
