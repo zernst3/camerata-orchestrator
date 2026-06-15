@@ -29,6 +29,13 @@ tokio = { version = "1", features = ["time", "rt-multi-thread"] }
 # the same client/server split that makes the server cloud-hostable later.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# Chorale: the headless table library (my own crate), from crates.io. Used where
+# data genuinely scales — the brownfield audit-findings + proposed-rules tables —
+# with the small fixed lists riding the same primitive for consistency (see
+# docs/UI_BACKLOG.md for the right-sizing decision).
+chorale-core = "0.2.2"
+chorale-dioxus = "0.2.2"
+
 # The real engine. The consumer app is no longer purely mocked: app_state bridges
 # the screens to the typed IntakeForm / Project / RefinementSession (intake) and
 # the versioned ArtifactStore (persistence).

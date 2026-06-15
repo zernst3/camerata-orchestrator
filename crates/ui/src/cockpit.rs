@@ -20,6 +20,14 @@ use dioxus::prelude::*;
 
 use camerata_worktracker::{CanonicalStory, FeatureStatus};
 
+// Chorale (crates.io, headless table) backs the brownfield audit-findings and
+// proposed-rules tables — the surfaces where the data genuinely scales.
+use chorale_core::{
+    Alignment, BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
+    RenderKind, RowId, TableState,
+};
+use chorale_dioxus::{use_table, Table};
+
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
 /// filtered out server-side). The cockpit just renders what the BFF returns.
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -656,6 +664,139 @@ fn CockpitNotice(kind: String) -> Element {
     }
 }
 
+// ── Brownfield scan: data + chorale-backed tables ──────────────────────────────
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct FindingView {
+    path: String,
+    line: usize,
+    rule_id: String,
+    severity: String,
+    snippet: String,
+    #[allow(dead_code)]
+    detail: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ProposedRuleView {
+    id: String,
+    title: String,
+    kind: String,
+    finding_count: usize,
+    #[allow(dead_code)]
+    recommended: bool,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ScanReportView {
+    repo: String,
+    files_scanned: usize,
+    findings: Vec<FindingView>,
+    proposed_rules: Vec<ProposedRuleView>,
+    gated: bool,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+async fn scan_repo(repo: &str) -> Option<ScanReportView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/scan", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+        .ok()?
+        .json::<ScanReportView>()
+        .await
+        .ok()
+}
+
+fn finding_columns() -> Vec<ColumnDef<FindingView>> {
+    let sev = BadgeVariantMap::new()
+        .with("high", BadgeVariant::new("High", "red"))
+        .with("medium", BadgeVariant::new("Medium", "yellow"));
+    vec![
+        ColumnDef::new(ColumnId("severity"), "Severity", |f: &FindingView| {
+            CellValue::Text(f.severity.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(sev))
+        .initial_width(110.0),
+        ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
+            CellValue::Text(f.rule_id.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(250.0),
+        ColumnDef::new(ColumnId("loc"), "Location", |f: &FindingView| {
+            CellValue::Text(format!("{}:{}", f.path, f.line))
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(280.0),
+        ColumnDef::new(ColumnId("snippet"), "Snippet", |f: &FindingView| {
+            CellValue::Text(f.snippet.clone())
+        })
+        .initial_width(380.0),
+    ]
+}
+
+fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
+    let kind = BadgeVariantMap::new()
+        .with("mechanical", BadgeVariant::new("Mechanical", "green"))
+        .with("review", BadgeVariant::new("Review", "yellow"));
+    vec![
+        ColumnDef::new(ColumnId("id"), "Rule", |r: &ProposedRuleView| {
+            CellValue::Text(r.id.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(250.0),
+        ColumnDef::new(ColumnId("title"), "What it enforces", |r: &ProposedRuleView| {
+            CellValue::Text(r.title.clone())
+        })
+        .initial_width(430.0),
+        ColumnDef::new(ColumnId("kind"), "Kind", |r: &ProposedRuleView| {
+            CellValue::Text(r.kind.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(kind))
+        .initial_width(130.0),
+        ColumnDef::new(
+            ColumnId("count"),
+            "Existing violations",
+            |r: &ProposedRuleView| CellValue::Integer(r.finding_count as i64),
+        )
+        .sortable()
+        .render_kind(RenderKind::Number)
+        .alignment(Alignment::Right)
+        .initial_width(160.0),
+    ]
+}
+
+/// The findings table: group/sort by severity + finding type, filter by type or
+/// location. Virtualized by chorale, so a large audit doesn't choke the UI.
+#[component]
+fn FindingsTable(findings: Vec<FindingView>) -> Element {
+    let rows: Vec<(RowId, FindingView)> =
+        findings.into_iter().map(|f| (RowId::new(), f)).collect();
+    let handle = use_table(move || TableState::new(rows.clone(), finding_columns()));
+    rsx! {
+        Table { handle, sort_enabled: true, filter_enabled: true, resize_enabled: true }
+    }
+}
+
+/// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
+/// each rule into the approved starter set.
+#[component]
+fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
+    let rows: Vec<(RowId, ProposedRuleView)> =
+        rules.into_iter().map(|r| (RowId::new(), r)).collect();
+    let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
+    rsx! {
+        Table { handle, sort_enabled: true, selection_enabled: true }
+    }
+}
+
 /// Which onboarding path the user is setting up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OnboardPath {
@@ -677,6 +818,8 @@ enum OnboardPath {
 fn OnboardView(connection: Option<ProviderView>) -> Element {
     let mut path = use_signal(|| OnboardPath::Brownfield);
     let mut repo = use_signal(String::new);
+    let mut scan = use_signal(|| Option::<ScanReportView>::None);
+    let mut scanning = use_signal(|| false);
     let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
 
     let brownfield_cls = if path() == OnboardPath::Brownfield { "onboard-path on" } else { "onboard-path" };
@@ -750,31 +893,96 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                 }
                 button {
                     class: "onboard-cta",
-                    disabled: !connected || repo().trim().is_empty(),
-                    // The scan/scaffold engine runs against GitHub; it activates with
-                    // a connected token. Wired to the onboarding endpoint as that lands.
-                    onclick: move |_| {},
+                    disabled: !connected || repo().trim().is_empty() || scanning(),
+                    // Brownfield scans the repo (audit + propose rules) via the gated
+                    // /api/onboard/scan; greenfield scaffolding is the next build.
+                    onclick: move |_| {
+                        if path() != OnboardPath::Brownfield { return; }
+                        let r = repo();
+                        if r.trim().is_empty() { return; }
+                        scanning.set(true);
+                        spawn(async move {
+                            scan.set(scan_repo(&r).await);
+                            scanning.set(false);
+                        });
+                    },
                     {
-                        match path() {
-                            OnboardPath::Brownfield => "Scan repo",
-                            OnboardPath::Greenfield => "Scaffold repo",
+                        match (path(), scanning()) {
+                            (OnboardPath::Greenfield, _) => "Scaffold repo",
+                            (_, true) => "Scanning…",
+                            (_, false) => "Scan repo",
                         }
                     }
                 }
             }
 
-            // The flow.
-            div { class: "onboard-steps",
-                for (i , (h , b)) in steps.iter().enumerate() {
-                    div { class: "onboard-step",
-                        span { class: "onboard-step-n", "{i + 1}" }
+            // Scan results: the audit findings + proposed-rules tables (chorale).
+            if let Some(report) = scan() {
+                if report.gated {
+                    div { class: "onboard-gate",
+                        span { class: "onboard-gate-dot" }
                         div {
-                            p { class: "onboard-step-h", "{h}" }
-                            p { class: "onboard-step-b", "{b}" }
+                            p { class: "onboard-gate-h", "Scan not run" }
+                            p { class: "onboard-gate-b", "{report.message.clone().unwrap_or_default()}" }
+                        }
+                    }
+                } else {
+                    ScanResults { report }
+                }
+            }
+
+            // The flow (shown until a scan has run).
+            if scan().is_none() {
+                div { class: "onboard-steps",
+                    for (i , (h , b)) in steps.iter().enumerate() {
+                        div { class: "onboard-step",
+                            span { class: "onboard-step-n", "{i + 1}" }
+                            div {
+                                p { class: "onboard-step-h", "{h}" }
+                                p { class: "onboard-step-b", "{b}" }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+/// Renders one brownfield scan's results: the audit summary, the findings table,
+/// and the proposed-rules table. Keyed by the parent so a new scan remounts the
+/// chorale tables with fresh rows.
+#[component]
+fn ScanResults(report: ScanReportView) -> Element {
+    let high = report.findings.iter().filter(|f| f.severity == "high").count();
+    let table_key = format!("{}-{}", report.repo, report.findings.len());
+    rsx! {
+        div { class: "scan-results",
+            if let Some(msg) = report.message.clone() {
+                p { class: "scan-note", "{msg}" }
+            }
+            div { class: "scan-summary",
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n", "{report.findings.len()}" }
+                    " findings"
+                }
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n high", "{high}" }
+                    " high severity"
+                }
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n", "{report.files_scanned}" }
+                    " files scanned"
+                }
+            }
+
+            p { class: "scan-section-h", "Findings already in this repo" }
+            p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Sort by severity or finding type; filter by type or location." }
+            FindingsTable { key: "f-{table_key}", findings: report.findings.clone() }
+
+            p { class: "scan-section-h", "Proposed starter ruleset" }
+            p { class: "scan-section-sub", "Select the rules to arm (each shows how many existing violations it catches). You own the final set; arming generates the governance PR." }
+            ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone() }
         }
     }
 }

@@ -2,6 +2,16 @@
 
 Current, post-clean-slate UI follow-ups. Newest intent at the top.
 
+- **chorale integration — DONE 2026-06-15 (where it earns its keep).** `chorale-core`
+  + `chorale-dioxus` `0.2.2` from crates.io now back the brownfield **audit-findings**
+  table (sort by severity/type, filter by type/location, resize, virtualized) and the
+  **proposed-rules** table (chorale selection checkboxes = accept/reject into the
+  starter set). Built with the explicit `ColumnDef` API (not `#[derive(TableRow)]`,
+  which doesn't support the severity/kind **badges** these tables rely on). chorale
+  injects its own stylesheet (and has a `Theme` prop — relevant to the dark-mode item).
+  Remaining: route the routines table onto the same primitive for consistency, and wire
+  rule-selection → "arm" (governance PR).
+
 - **Where chorale (the headless table) earns its keep — decided 2026-06-15.** Do NOT
   justify chorale on the routines table (3 rows; a virtualized grid behind it reads as
   hammer-thumbtack and undercuts the right-sizing judgment). Wire it into the cockpit

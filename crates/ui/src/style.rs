@@ -951,6 +951,14 @@ html, body {
 .onboard-step-n { width: 22px; height: 22px; flex: none; border-radius: 50%; background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
 .onboard-step-h { font-weight: 700; font-size: 13px; color: var(--ink); }
 .onboard-step-b { font-size: 12px; color: var(--ink-soft); margin-top: 2px; line-height: 1.5; }
+.scan-results { margin-top: 18px; }
+.scan-note { font-size: 12px; color: #8a4f1d; background: #fff8ef; border: 1px solid #f0c89a; border-radius: 8px; padding: 8px 11px; margin-bottom: 12px; }
+.scan-summary { display: flex; gap: 18px; margin-bottom: 16px; }
+.scan-stat { font-size: 12px; color: var(--ink-soft); }
+.scan-stat-n { font-size: 16px; font-weight: 700; color: var(--ink); margin-right: 4px; }
+.scan-stat-n.high { color: #9a3526; }
+.scan-section-h { font-size: 13px; font-weight: 700; color: var(--ink); margin: 18px 0 2px; }
+.scan-section-sub { font-size: 12px; color: var(--ink-soft); margin-bottom: 8px; line-height: 1.5; }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }
