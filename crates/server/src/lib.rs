@@ -14,6 +14,7 @@
 //! land in later phases, behind the same router.
 
 pub mod clarify;
+pub mod provider;
 pub mod run;
 
 use std::sync::Arc;
@@ -28,9 +29,10 @@ use axum::{
 use serde::Serialize;
 
 use camerata_gateway::RULE_REGISTRY;
-use camerata_worktracker::{CanonicalStory, InMemoryStoryStore, StoryStore};
+use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore};
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
+use crate::provider::ProviderHandle;
 use crate::run::{execute_run, Run, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
@@ -41,21 +43,33 @@ pub struct AppState {
     stories: Arc<dyn StoryStore>,
     runs: RunStore,
     clarifications: ClarificationStore,
+    provider: ProviderHandle,
 }
 
 impl AppState {
-    /// Build state from an explicit story store.
+    /// Build state from an explicit story store, with the native (in-process)
+    /// provider.
     pub fn new(stories: Arc<dyn StoryStore>) -> Self {
         Self {
             stories,
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
+            provider: ProviderHandle::native(),
         }
     }
 
-    /// Build state seeded with the representative spine, for local/demo runs.
+    /// Build state seeded with the representative spine, native provider. Used by
+    /// tests and the creds-free demo default.
     pub fn seeded() -> Self {
         Self::new(Arc::new(InMemoryStoryStore::seeded()))
+    }
+
+    /// Seeded spine plus the provider selected from the environment: GitHub when
+    /// `CAMERATA_GITHUB_TOKEN` + `CAMERATA_GITHUB_REPO` are set, native otherwise.
+    pub fn from_env() -> Self {
+        let mut state = Self::seeded();
+        state.provider = ProviderHandle::from_env();
+        state
     }
 }
 
@@ -82,12 +96,16 @@ pub fn router(state: AppState) -> Router {
             get(list_clarifications).post(post_clarification),
         )
         .route("/api/clarifications/:cid/answer", post(answer_clarification))
+        .route("/api/provider", get(provider_info))
+        .route("/api/stories/adopt", post(adopt_story))
         .with_state(state)
 }
 
-/// Bind `addr` and serve. The same entry point runs locally and in the cloud.
+/// Bind `addr` and serve. The same entry point runs locally and in the cloud. The
+/// provider is selected from the environment, so setting the GitHub vars switches the
+/// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
-    let app = router(AppState::seeded());
+    let app = router(AppState::from_env());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("camerata-server listening on http://{addr}");
     axum::serve(listener, app).await?;
@@ -154,17 +172,36 @@ async fn list_clarifications(
     Json(state.clarifications.for_story(&story_id))
 }
 
-/// Post a clarifying question on a story, addressed to the chosen recipient.
+/// Post a clarifying question on a story, addressed to the chosen recipient. When a
+/// real tracker is wired AND the story has an external ref, the question is ALSO
+/// posted as a comment on the tracker item via the provider (best-effort; the local
+/// record is returned regardless so the cockpit never blocks on a remote failure).
 async fn post_clarification(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<PostClarifyReq>,
 ) -> Json<Clarification> {
-    Json(
-        state
-            .clarifications
-            .post(&story_id, &req.question, &req.addressee),
-    )
+    let clar = state
+        .clarifications
+        .post(&story_id, &req.question, &req.addressee);
+
+    if state.provider.live {
+        if let Ok(Some(story)) = state.stories.get(&story_id).await {
+            if let Some(reference) = story.external_ref.as_ref() {
+                let questions = [req.question.clone()];
+                if let Err(e) = state
+                    .provider
+                    .provider
+                    .post_clarifying_questions(reference, &questions)
+                    .await
+                {
+                    eprintln!("[camerata-server] clarify write-back to tracker failed: {e}");
+                }
+            }
+        }
+    }
+
+    Json(clar)
 }
 
 /// Record the answer to a clarification.
@@ -178,6 +215,43 @@ async fn answer_clarification(
         .answer(&cid, &req.answer, &req.answered_by)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))
+}
+
+/// Which work-tracker provider is active, and whether it is a live external tracker.
+async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "provider": state.provider.label,
+        "live": state.provider.live,
+    }))
+}
+
+/// Request to adopt an external work item by its tracker id.
+#[derive(serde::Deserialize)]
+struct AdoptReq {
+    external_id: String,
+}
+
+/// Adopt a story from the active tracker into the spine: ingest the work item by id
+/// via the provider and upsert it into the `StoryStore`. With the native provider this
+/// only succeeds for a seeded id; with GitHub configured it pulls a real issue.
+async fn adopt_story(
+    State(state): State<AppState>,
+    Json(req): Json<AdoptReq>,
+) -> Result<Json<CanonicalStory>, AppError> {
+    let reference = ExternalRef {
+        provider: state.provider.provider.kind(),
+        external_id: req.external_id.clone(),
+        url: String::new(),
+        revision: None,
+    };
+    let story = state
+        .provider
+        .provider
+        .ingest_story(&reference)
+        .await
+        .map_err(AppError)?;
+    state.stories.upsert(story.clone()).await.map_err(AppError)?;
+    Ok(Json(story))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────
