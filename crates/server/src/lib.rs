@@ -16,6 +16,7 @@
 pub mod clarify;
 pub mod decompose;
 pub mod provider;
+pub mod routine;
 pub mod run;
 
 use std::sync::Arc;
@@ -35,6 +36,7 @@ use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, Stor
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::decompose::{propose, to_story, DecompositionStore, Practice, ProposedChild};
 use crate::provider::ProviderHandle;
+use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
 use crate::run::{execute_run, Run, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
@@ -47,6 +49,7 @@ pub struct AppState {
     clarifications: ClarificationStore,
     provider: ProviderHandle,
     decompositions: DecompositionStore,
+    routines: RoutineStore,
 }
 
 impl AppState {
@@ -59,6 +62,7 @@ impl AppState {
             clarifications: ClarificationStore::new(),
             provider: ProviderHandle::native(),
             decompositions: DecompositionStore::new(),
+            routines: RoutineStore::new(),
         }
     }
 
@@ -67,6 +71,7 @@ impl AppState {
     pub fn seeded() -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::seeded()));
         state.clarifications = ClarificationStore::seeded();
+        state.routines = RoutineStore::seeded();
         state
     }
 
@@ -108,6 +113,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
+        .route("/api/routines", get(list_routines).post(create_routine))
+        .route("/api/routines/:id/enable", post(set_routine_enabled))
+        .route("/api/routines/:id/run", post(run_routine_now))
         .with_state(state)
 }
 
@@ -322,6 +330,44 @@ async fn list_children(
         }
     }
     Ok(Json(children))
+}
+
+/// All routines.
+async fn list_routines(State(state): State<AppState>) -> Json<Vec<Routine>> {
+    Json(state.routines.list())
+}
+
+/// Create a routine.
+async fn create_routine(
+    State(state): State<AppState>,
+    Json(req): Json<CreateRoutineReq>,
+) -> Json<Routine> {
+    Json(state.routines.create(&req))
+}
+
+/// Enable or disable a routine.
+async fn set_routine_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetEnabledReq>,
+) -> Result<Json<Routine>, AppError> {
+    state
+        .routines
+        .set_enabled(&id, req.enabled)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+}
+
+/// Run a routine now (a governed run via the real gate; records the summary).
+async fn run_routine_now(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Routine>, AppError> {
+    state
+        .routines
+        .run_now(&id)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

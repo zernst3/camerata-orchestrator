@@ -18,6 +18,7 @@ mod cockpit;
 mod data;
 mod deploy_run;
 mod maintenance_run;
+mod routines;
 mod screens;
 mod style;
 
@@ -109,6 +110,8 @@ pub enum Edition {
     AppBuilder,
     /// The enterprise / architect cockpit (the dense control surface).
     Cockpit,
+    /// The routine dashboard (scheduled governed routines).
+    Routines,
 }
 
 /// Root. Injects the global stylesheet once and lets the viewer switch between
@@ -142,6 +145,7 @@ fn App() -> Element {
             match edition() {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
                 Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
+                Edition::Routines => rsx! { routines::RoutineDashboard {} },
             }
         }
     }
@@ -162,6 +166,11 @@ fn EditionSwitcher(edition: Signal<Edition>) -> Element {
     } else {
         "edition-tab"
     };
+    let routines_cls = if edition() == Edition::Routines {
+        "edition-tab on"
+    } else {
+        "edition-tab"
+    };
     rsx! {
         div { class: "edition-switcher",
             span { class: "edition-brand", "Camerata" }
@@ -176,8 +185,13 @@ fn EditionSwitcher(edition: Signal<Edition>) -> Element {
                     onclick: move |_| edition.set(Edition::Cockpit),
                     "Enterprise cockpit"
                 }
+                button {
+                    class: "{routines_cls}",
+                    onclick: move |_| edition.set(Edition::Routines),
+                    "Routines"
+                }
             }
-            span { class: "edition-hint", "two surfaces, one engine" }
+            span { class: "edition-hint", "one governed engine" }
         }
     }
 }

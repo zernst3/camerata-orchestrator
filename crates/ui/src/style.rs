@@ -1109,4 +1109,33 @@ html, body {
 .child-row { display: flex; align-items: baseline; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
 .child-id { flex: none; font-size: 11.5px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent-ink); }
 .child-title { font-size: 13px; color: var(--ink); }
+
+/* Routine dashboard (third surface). */
+.routines-page { max-width: 980px; }
+.routine-table { margin-top: 18px; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; background: var(--surface); }
+.routine-row {
+  display: grid; grid-template-columns: 2.4fr 1fr 1.4fr 1.4fr auto; gap: 14px;
+  align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
+}
+.routine-row:last-child { border-bottom: none; }
+.routine-head { background: #fbfaf7; font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ink-faint); }
+.routine-row.off { opacity: .55; }
+.routine-name { display: flex; flex-direction: column; gap: 3px; }
+.routine-title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.routine-prompt { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
+.routine-sched { font-size: 12.5px; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.routine-scope { font-size: 12px; color: var(--ink-soft); }
+.routine-last { font-size: 12px; }
+.routine-passed { color: #2f8f5b; font-weight: 600; }
+.routine-never { color: var(--ink-faint); font-style: italic; }
+.routine-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.btn-run-sm {
+  border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
+  padding: 5px 11px; border-radius: 7px; cursor: pointer;
+}
+.btn-run-sm:hover { background: var(--accent-ink); }
+.routine-create { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
+.routine-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.routine-create-row .addressee-input { flex: 1; min-width: 140px; }
+.routine-prompt-input { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
 "#;
