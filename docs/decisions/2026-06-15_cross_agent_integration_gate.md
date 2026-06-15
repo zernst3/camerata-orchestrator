@@ -102,23 +102,54 @@ mechanically checkable (a contract diff, a casing lint across the wire, "every g
 action maps to a guarded endpoint," migration-vs-entity reconciliation), and leave the
 genuinely semantic ones to human QA.
 
+## The determinism trap (watch this one closely)
+
+This tier is the most differentiated capability in the system AND the one most likely
+to fake us out. Single-write rules (no hardcoded secret, no DB call in the service
+layer) are **local**: pass/fail is decidable against one write in isolation. A
+cross-agent contract is **relational**: the producer emits it, the consumer reads it,
+and "do they match" is a comparison across two artifacts, possibly separated in time.
+Relational checks are genuinely harder to keep mechanical, and this is the easiest place
+in the whole system for "deterministic enforcement" to quietly degrade into "an LLM
+eyeballs whether they line up", which is probabilistic convention wearing the gate's
+uniform. If the determinism slips here, it slips exactly where it mattered most.
+
+Hard line, **the definition of "enforced" for this tier**:
+
+- The contract is a concrete artifact (a schema, generated types, an OpenAPI doc), not
+  a description in prose.
+- The check is a deterministic comparison of artifacts (schema diff, typed comparison,
+  a compiled type boundary, a contract test), never a model judging consistency.
+- The verdict is binary and reproducible.
+
+If a given seam on a given stack cannot be made deterministic, it is **review-tier**: it
+goes to human QA and is reported as such. It must NOT be rendered as a passed gate. An
+LLM opinion about consistency is never allowed to show up green in this tier. A
+half-real contract gate is worse than an honest "this is human-reviewed," because it
+spends the credibility the deterministic tiers earn.
+
 ## The principle: prefer compiled contracts; check explicitly where you cannot
 
 "Rust makes it impossible to get wrong" generalizes to a rule: **make the contract a
-compiled artifact whenever the stack allows**, so the seam is enforced for free and the
-integration gate has nothing to do. Where the stack cannot (JavaScript), the gate runs
-an explicit, deterministic contract check: derive the contract from the producer (e.g.
-an OpenAPI document or a generated typed client) and verify the consumer conforms, or
-run contract tests across the boundary. Deterministic cross-agent checks first; fuzzy
-semantic ones (does this endpoint mean what the story intended) stay human-QA.
+compiled artifact whenever the stack allows**, so the seam is enforced for free (a
+shared type that will not compile if it drifts) and the integration gate has nothing to
+do. Where the stack cannot (JavaScript), the gate runs an explicit, deterministic
+contract check: derive the contract from the producer (e.g. an OpenAPI document or a
+generated typed client), persist it, and verify the consumer conforms to that persisted
+artifact, or run contract tests across the boundary. Deterministic cross-agent checks
+first; fuzzy semantic ones (does this endpoint mean what the story intended) stay
+human-QA and are labeled as such.
 
 ## Connection to contract handoffs
 
 VISION already has contract handoffs: an upstream task emits a contract (API / type
 definitions) that downstream tasks consume, and the coordinator passes it forward. This
 gate is the enforcement half of that: the contract is **declared at handoff** (the
-producer emits it) and **enforced at integration** (the gate verifies the consumer
-matches it). Declare at handoff, enforce at integration.
+producer emits it as a concrete, persisted artifact) and **enforced at integration**
+(the gate deterministically diffs the consumer against that stored artifact). Persisting
+the contract is what makes the relational, across-time check tractable: the consumer is
+compared to a fixed artifact, not to a re-derivation or a memory of what the producer
+"probably" built. Declare at handoff, enforce at integration.
 
 ## Mechanism
 

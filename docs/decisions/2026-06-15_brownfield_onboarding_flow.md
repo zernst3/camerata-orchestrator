@@ -66,6 +66,15 @@ typed a single rule. So the sequence is audit-first:
 Audit first (here is what is already wrong), arm second (and now it is enforced). The
 audit is the hook; the PR is the close.
 
+A caution to keep honest: the **deployed CI gate** this flow installs is the
+**pipeline-stage safety net** (post-hoc, repo-level, the commodity-adjacent territory
+of Semgrep / pre-commit / CodeQL). It is valuable as the backstop for changes made
+outside Camerata, but it is NOT the differentiated moment. The differentiator is the
+**in-loop, pre-execution deny** during a governed run (Layer 1 at the tool boundary).
+Do not let "the brownfield CI gate is wired" get counted as "the in-loop deny works",
+they are different mechanisms. See [`ENFORCEMENT.md`](../ENFORCEMENT.md), "In-loop
+enforcement vs the deployed CI gate."
+
 Honest grounding on the audit: the content rules (hardcoded-secret, raw-SQL-concat,
 secrets-in-URL, path-escape) are pure functions over file content, so they can audit an
 existing repo TODAY by scanning its files, the "3 hardcoded secrets" half is real now.

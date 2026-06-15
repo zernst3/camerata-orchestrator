@@ -14,6 +14,31 @@ The headline claim this document backs:
 
 ---
 
+## In-loop enforcement vs the deployed CI gate (do not conflate them)
+
+Two different mechanisms enforce these rules, and only one is the differentiator. Keep
+them separate in your head and in this doc.
+
+- **The in-loop gate (the differentiator).** Enforcement that runs DURING a governed
+  Camerata run: Layer 1 denies a tool call *before it executes* (real-time,
+  pre-execution, at the MCP tool boundary), Layer 2 bounces a task's diff, Layer 3
+  (planned) checks the cross-agent seam before the branch ships. Layer 1's
+  pre-execution deny is the thirty-second moment that converts a skeptic: "watch it
+  deny the write before it hits disk." This is the hard, novel real-time part.
+- **The deployed CI gate (the safety net, commodity-adjacent).** The CI/CD workflow
+  that brownfield onboarding installs into a repo (a pipeline running the mechanical
+  checks). It is post-hoc, repo-level, and the closest thing to existing territory:
+  Semgrep, pre-commit, and CodeQL already live there. Genuinely valuable as the
+  backstop for changes made OUTSIDE Camerata (a human or another tool commits), but it
+  is NOT the differentiated moment.
+
+The trap: "the CI gate is wired" must never get counted, in our heads or our docs, as
+"the in-loop deny works." They are different code paths, and only the in-loop,
+pre-execution deny is the capability a model vendor cannot ship and a prompt-based
+competitor cannot claim.
+
+---
+
 ## The three enforcement lanes
 
 Camerata enforces at three distinct points, each with different power and
