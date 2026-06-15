@@ -102,10 +102,21 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ClarificationView {
     id: String,
+    story_id: String,
     question: String,
     addressee: String,
     answer: Option<String>,
     answered_by: Option<String>,
+}
+
+/// Fetch all OPEN clarifications across stories (the NEEDS YOU queue).
+async fn fetch_open_clarifications() -> Option<Vec<ClarificationView>> {
+    reqwest::get(format!("{}/api/clarifications", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<ClarificationView>>()
+        .await
+        .ok()
 }
 
 /// Fetch the clarifications on a story.
@@ -234,6 +245,15 @@ pub fn CockpitApp() -> Element {
     // completion; its gate events are REAL verdicts from the BFF run engine.
     let mut active_run = use_signal(|| Option::<RunView>::None);
 
+    // A shared refresh tick: bumped whenever a clarification is posted or answered,
+    // so both the NEEDS YOU queue here and the per-story thread refetch together.
+    let clarify_refresh = use_signal(|| 0u32);
+    use_context_provider(|| clarify_refresh);
+    let open_clars_res = use_resource(move || {
+        let _dep = clarify_refresh();
+        async move { fetch_open_clarifications().await }
+    });
+
     let stories_loaded = stories_res.read().clone();
     let rules_loaded = rules_res.read().clone();
     // A resolved-but-None fetch means the BFF was unreachable / returned junk.
@@ -274,19 +294,38 @@ pub fn CockpitApp() -> Element {
                                 button { class: "spine-new", "+ New story" }
                             }
 
-                            p { class: "cockpit-rail-label needs", "NEEDS YOU (2)" }
-                            div { class: "needs-list",
-                                button {
-                                    class: "needs-item",
-                                    onclick: move |_| selected.set(0),
-                                    span { class: "needs-dot warn" }
-                                    span { "Answer: currency for the export amounts?" }
-                                }
-                                button {
-                                    class: "needs-item",
-                                    onclick: move |_| selected.set(1),
-                                    span { class: "needs-dot warn" }
-                                    span { "QA the governed diff for CAM-2" }
+                            {
+                                let open_clars = open_clars_res.read().clone().flatten().unwrap_or_default();
+                                let n = open_clars.len();
+                                rsx! {
+                                    p { class: "cockpit-rail-label needs", "NEEDS YOU ({n})" }
+                                    div { class: "needs-list",
+                                        if open_clars.is_empty() {
+                                            p { class: "needs-empty", "Nothing needs you right now." }
+                                        }
+                                        for c in open_clars.iter() {
+                                            {
+                                                let target = story_list.iter().position(|s| s.id == c.story_id);
+                                                let q = c.question.clone();
+                                                let who = c.addressee.clone();
+                                                rsx! {
+                                                    button {
+                                                        class: "needs-item",
+                                                        onclick: move |_| {
+                                                            if let Some(i) = target {
+                                                                selected.set(i);
+                                                            }
+                                                        },
+                                                        span { class: "needs-dot warn" }
+                                                        span {
+                                                            span { class: "needs-q", "{q}" }
+                                                            span { class: "needs-who", "asked {who}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -598,7 +637,8 @@ fn LiveRunPanel(run: RunView) -> Element {
 /// in-process; the live-tracker comment write-back is the provider phase.
 #[component]
 fn ClarifySection(story_id: String) -> Element {
-    let mut refresh = use_signal(|| 0u32);
+    // Shared with the NEEDS YOU queue so posting/answering refetches both.
+    let mut refresh = use_context::<Signal<u32>>();
     let sid_res = story_id.clone();
     let clars = use_resource(move || {
         let sid = sid_res.clone();

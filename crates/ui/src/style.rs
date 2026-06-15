@@ -947,6 +947,9 @@ html, body {
 .needs-item:hover { border-color: var(--accent); }
 .needs-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; }
 .needs-dot.warn { background: #d9a441; }
+.needs-q { display: block; }
+.needs-who { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.needs-empty { font-size: 12.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
 
 /* Center stage */
 .cockpit-stage { display: flex; flex-direction: column; min-width: 0; padding: 14px 18px; }

@@ -58,10 +58,12 @@ impl AppState {
         }
     }
 
-    /// Build state seeded with the representative spine, native provider. Used by
-    /// tests and the creds-free demo default.
+    /// Build state seeded with the representative spine + seeded open clarifications,
+    /// native provider. Used by tests and the creds-free demo default.
     pub fn seeded() -> Self {
-        Self::new(Arc::new(InMemoryStoryStore::seeded()))
+        let mut state = Self::new(Arc::new(InMemoryStoryStore::seeded()));
+        state.clarifications = ClarificationStore::seeded();
+        state
     }
 
     /// Seeded spine plus the provider selected from the environment: GitHub when
@@ -96,6 +98,7 @@ pub fn router(state: AppState) -> Router {
             get(list_clarifications).post(post_clarification),
         )
         .route("/api/clarifications/:cid/answer", post(answer_clarification))
+        .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/provider", get(provider_info))
         .route("/api/stories/adopt", post(adopt_story))
         .with_state(state)
@@ -162,6 +165,11 @@ async fn get_run(
         .get(&id)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))
+}
+
+/// All OPEN clarifications across every story (the NEEDS YOU queue).
+async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Clarification>> {
+    Json(state.clarifications.all_open())
 }
 
 /// All clarifications on a story (open and answered).

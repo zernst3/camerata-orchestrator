@@ -63,6 +63,36 @@ impl ClarificationStore {
         Self::default()
     }
 
+    /// A store pre-seeded with a couple of open clarifications, so the cockpit's
+    /// NEEDS YOU queue has real (not hardcoded) content on first load. These are
+    /// genuine store entries, just seeded the way the spine is.
+    pub fn seeded() -> Self {
+        let store = Self::new();
+        store.post(
+            "CAM-1",
+            "Should the CSV export include archived members, or only currently active ones?",
+            "@maria-pm",
+        );
+        store.post(
+            "CAM-2",
+            "Should reminders use the org's timezone, or each member's own?",
+            "@jdoe",
+        );
+        store
+    }
+
+    /// All OPEN (unanswered) clarifications across every story, oldest first. Drives
+    /// the cockpit's NEEDS YOU queue.
+    pub fn all_open(&self) -> Vec<Clarification> {
+        let mut v: Vec<Clarification> = self
+            .items
+            .lock()
+            .map(|g| g.values().filter(|c| c.is_open()).cloned().collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    }
+
     /// Post a new (open) clarification for a story; returns it.
     pub fn post(&self, story_id: &str, question: &str, addressee: &str) -> Clarification {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
