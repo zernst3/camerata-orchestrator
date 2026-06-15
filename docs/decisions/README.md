@@ -6,6 +6,26 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-15_credential_delegated_scope_and_build_targets.md** — Camerata never
+  self-scopes: the connected token/account IS the scope (no `CAMERATA_GITHUB_REPO`
+  process pin; mirror the GitHub-MCP model of repo-as-per-call, not repo-as-process).
+  And a story has two INDEPENDENT axes: a SOURCE (where tracked — Issues / Projects v2 /
+  ADO / Jira, which sit above the repo) and a set of BUILD TARGETS (the repos where code
+  lands — zero/one/many). `PrLink` already encodes multi-repo at the output; the gap is
+  one field, `CanonicalStory.targets`. Governance sits underneath both axes, unchanged.
+  Phased: A repo-per-request (GitHub Issues, multi-repo) → B source/target split in the
+  model → C GitHub Projects v2 source → D second board provider. Design only; Phase A
+  changes the provider surface (ROUTE-1).
+- **2026-06-15_process_rules_and_vcs_action_gate.md** — a FOURTH enforcement point.
+  Layers 1/2 and the integration tier all enforce on CODE artifacts (content/diff/tree);
+  none sees commit messages or PR titles. A real process rule (`AB#{ticketId}` required
+  in the PR title + commit prefix, per Zach's ADO workflow) is metadata, not code, so no
+  existing gate can enforce it. Add a `vcs-action` gate at Camerata's commit/PR
+  chokepoint — complete by construction because the agent has no `git` (Bash denied), so
+  Camerata is the sole committer. New `PROCESS-*` family; per-account custom; gated
+  firmly (error, never warn). Formalizes the two-axis rule taxonomy: scope
+  (corpus-global / repo-local / cross-repo / process) × enforcement-point (content /
+  integration / vcs-action). Design only; not built.
 - **2026-06-15_routine_dashboard.md** — a management surface (table) over scheduled,
   governed agent routines: name, schedule/fire time, prompt, permission scope,
   enabled, status + run history, with create/edit/enable/run-now. A routine is a
@@ -94,6 +114,8 @@ written down, so the trail is navigable, not just buried in commit messages.
 | Cross-agent / integration gate (third tier, contract enforcement) | ADR `cross_agent_integration_gate`; `ENFORCEMENT.md` |
 | Story decomposition (parent -> component stories by practice) | ADR `story_decomposition_by_practice` |
 | Routine dashboard (manage scheduled governed routines) | ADR `routine_dashboard` |
+| Credential-delegated scope + multi-repo + story source/target split | ADR `credential_delegated_scope_and_build_targets`; `WORKTRACKER_INTEGRATION.md` |
+| Process rules + the VCS-action gate (`AB#{id}`); the rule taxonomy | ADR `process_rules_and_vcs_action_gate`; `ENFORCEMENT.md` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |
 
 ## Convention
