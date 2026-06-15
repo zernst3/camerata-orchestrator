@@ -31,10 +31,21 @@ pub trait HttpTransport: Send + Sync {
 
 // ── Reqwest transport (live, production path) ─────────────────────────────────
 
+/// Default `User-Agent` sent on every live request. GitHub's REST API **rejects
+/// any request without a `User-Agent` header** with `403 Request forbidden by
+/// administrative rules`, and Jira/ADO expect one too, so the transport always
+/// sends a non-empty identifier. Provider-agnostic on purpose (it names Camerata,
+/// not a specific tracker).
+pub const DEFAULT_USER_AGENT: &str = concat!("camerata-orchestrator/", env!("CARGO_PKG_VERSION"));
+
 /// A real HTTP transport backed by `reqwest` with rustls-tls. Constructed with
 /// a static `Authorization` header value (e.g. `"Basic <base64>"`). Every
 /// request carries that header so the transport stays generic (no provider
 /// coupling) while the adapter supplies the correct credential string.
+///
+/// A default [`DEFAULT_USER_AGENT`] is baked into the client, because GitHub
+/// refuses User-Agent-less REST requests; without it every live GitHub call 403s
+/// before it is ever authenticated.
 pub struct ReqwestTransport {
     client: reqwest::Client,
     auth_header: String,
@@ -43,9 +54,22 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
     /// Build a transport. `auth_header` is the full value for the
     /// `Authorization` header (e.g. `"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="`).
+    ///
+    /// The client carries [`DEFAULT_USER_AGENT`] on every request; use
+    /// [`ReqwestTransport::with_user_agent`] to override it.
     pub fn new(auth_header: impl Into<String>) -> anyhow::Result<Self> {
+        Self::with_user_agent(auth_header, DEFAULT_USER_AGENT)
+    }
+
+    /// Build a transport with an explicit `User-Agent`. Exposed so a deployment
+    /// can identify itself distinctly (GitHub recommends a real app/user name).
+    pub fn with_user_agent(
+        auth_header: impl Into<String>,
+        user_agent: impl Into<String>,
+    ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
+            .user_agent(user_agent.into())
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build reqwest client: {e}"))?;
         Ok(Self {
