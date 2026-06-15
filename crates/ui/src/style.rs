@@ -1056,4 +1056,39 @@ html, body {
 .live-event-rule { font-size: 11px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
 .live-event-detail { font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; margin: 0; }
 .live-events-empty { font-size: 12.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
+
+/* Clarify-bridge composer + thread (Phase 4). */
+.clarify { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 16px; }
+.clarify-h { font-size: 15px; font-weight: 700; color: var(--ink); margin: 0 0 4px; }
+.clarify-q {
+  width: 100%; box-sizing: border-box; margin-top: 8px;
+  border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
+  font: inherit; font-size: 13.5px; color: var(--ink); resize: vertical; background: var(--surface);
+}
+.clarify-q:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.clarify-label { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ink-faint); margin: 12px 0 6px; }
+.clarify-addressees { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 12px; }
+.addressee-chip {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 12.5px; font-weight: 600; padding: 5px 11px; border-radius: 20px; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.addressee-chip:hover { border-color: var(--ink-faint); }
+.addressee-chip.sel { border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
+.addressee-input {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 8px; min-width: 160px;
+}
+.addressee-input:focus { outline: none; border-color: var(--accent); }
+.clarify-thread { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
+.clar-card { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--surface); }
+.clar-card.open { border-left: 3px solid #d9a441; }
+.clar-card.answered { border-left: 3px solid #2f8f5b; }
+.clar-card-q { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0 0 2px; line-height: 1.35; }
+.clar-card-meta { font-size: 11.5px; color: var(--ink-faint); margin: 0 0 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.clar-answer-row { display: flex; gap: 8px; align-items: center; }
+.clar-answer-row .addressee-input { flex: 1; }
+.clar-answered { background: #f0f8f3; border-radius: 8px; padding: 8px 10px; }
+.clar-answer-by { font-size: 11px; font-weight: 700; color: #2f8f5b; }
+.clar-answer-text { font-size: 13px; color: var(--ink); margin: 3px 0 0; line-height: 1.4; }
 "#;

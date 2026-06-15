@@ -13,6 +13,7 @@
 //! Execution endpoints (run a governed fleet on a story) and a live-status stream
 //! land in later phases, behind the same router.
 
+pub mod clarify;
 pub mod run;
 
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use serde::Serialize;
 use camerata_gateway::RULE_REGISTRY;
 use camerata_worktracker::{CanonicalStory, InMemoryStoryStore, StoryStore};
 
+use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::run::{execute_run, Run, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
@@ -38,6 +40,7 @@ use crate::run::{execute_run, Run, RunStore};
 pub struct AppState {
     stories: Arc<dyn StoryStore>,
     runs: RunStore,
+    clarifications: ClarificationStore,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
         Self {
             stories,
             runs: RunStore::new(),
+            clarifications: ClarificationStore::new(),
         }
     }
 
@@ -73,6 +77,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories", get(stories))
         .route("/api/stories/:id/run", post(start_run))
         .route("/api/runs/:id", get(get_run))
+        .route(
+            "/api/stories/:id/clarifications",
+            get(list_clarifications).post(post_clarification),
+        )
+        .route("/api/clarifications/:cid/answer", post(answer_clarification))
         .with_state(state)
 }
 
@@ -135,6 +144,40 @@ async fn get_run(
         .get(&id)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))
+}
+
+/// All clarifications on a story (open and answered).
+async fn list_clarifications(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<Vec<Clarification>> {
+    Json(state.clarifications.for_story(&story_id))
+}
+
+/// Post a clarifying question on a story, addressed to the chosen recipient.
+async fn post_clarification(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<PostClarifyReq>,
+) -> Json<Clarification> {
+    Json(
+        state
+            .clarifications
+            .post(&story_id, &req.question, &req.addressee),
+    )
+}
+
+/// Record the answer to a clarification.
+async fn answer_clarification(
+    State(state): State<AppState>,
+    Path(cid): Path<String>,
+    Json(req): Json<AnswerReq>,
+) -> Result<Json<Clarification>, AppError> {
+    state
+        .clarifications
+        .answer(&cid, &req.answer, &req.answered_by)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

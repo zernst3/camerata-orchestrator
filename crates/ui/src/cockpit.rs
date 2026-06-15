@@ -98,6 +98,64 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// A clarification as the BFF reports it (`/api/stories/:id/clarifications`).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ClarificationView {
+    id: String,
+    question: String,
+    addressee: String,
+    answer: Option<String>,
+    answered_by: Option<String>,
+}
+
+/// Fetch the clarifications on a story.
+async fn fetch_clarifications(story_id: &str) -> Option<Vec<ClarificationView>> {
+    reqwest::get(format!(
+        "{}/api/stories/{}/clarifications",
+        crate::BFF_URL,
+        story_id
+    ))
+    .await
+    .ok()?
+    .json::<Vec<ClarificationView>>()
+    .await
+    .ok()
+}
+
+/// Post a clarifying question on a story, addressed to `addressee`.
+async fn post_clarification(
+    story_id: &str,
+    question: &str,
+    addressee: &str,
+) -> Option<ClarificationView> {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/stories/{}/clarifications",
+            crate::BFF_URL,
+            story_id
+        ))
+        .json(&serde_json::json!({ "question": question, "addressee": addressee }))
+        .send()
+        .await
+        .ok()?
+        .json::<ClarificationView>()
+        .await
+        .ok()
+}
+
+/// Record the answer to a clarification.
+async fn answer_clarification(cid: &str, answer: &str, answered_by: &str) -> Option<ClarificationView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/clarifications/{}/answer", crate::BFF_URL, cid))
+        .json(&serde_json::json!({ "answer": answer, "answered_by": answered_by }))
+        .send()
+        .await
+        .ok()?
+        .json::<ClarificationView>()
+        .await
+        .ok()
+}
+
 /// One agent in the governed fleet, as the status strip renders it.
 #[derive(Clone, PartialEq)]
 struct FleetAgent {
@@ -282,6 +340,10 @@ pub fn CockpitApp() -> Element {
                                         _ => rsx! { StagePanel { story: current.clone(), fleet: fleet() } },
                                     }
                                 }
+
+                                // The clarify-bridge: ask the team a question, pick who
+                                // to ask, and see the thread. In-process now.
+                                ClarifySection { story_id: current.id.clone() }
                             }
 
                             div { class: "status-strip",
@@ -525,6 +587,143 @@ fn LiveRunPanel(run: RunView) -> Element {
                 }
                 if run.events.is_empty() {
                     p { class: "live-events-empty", "Spinning up the fleet…" }
+                }
+            }
+        }
+    }
+}
+
+/// The clarify-bridge composer + thread: review a question, pick who to ask (the
+/// per-question addressee picker), post it, and record the reply. Wired to the BFF
+/// in-process; the live-tracker comment write-back is the provider phase.
+#[component]
+fn ClarifySection(story_id: String) -> Element {
+    let mut refresh = use_signal(|| 0u32);
+    let sid_res = story_id.clone();
+    let clars = use_resource(move || {
+        let sid = sid_res.clone();
+        let _dep = refresh();
+        async move { fetch_clarifications(&sid).await }
+    });
+
+    let mut question = use_signal(|| {
+        "Should the CSV export include archived members, or only currently active ones?"
+            .to_string()
+    });
+    let mut addressee = use_signal(|| "@maria-pm".to_string());
+
+    // Representative suggestions; on a live tracker these come from the ticket's
+    // participants (assignee, reporter), plus "you" and a free-typed handle.
+    let suggestions = ["@maria-pm", "@jdoe", "you"];
+
+    let sid_post = story_id.clone();
+
+    rsx! {
+        div { class: "clarify",
+            p { class: "clarify-h", "Ask the team" }
+            p { class: "section-hint", "Review the question, pick who to ask, and post it. In-process now; this posts to the real tracker comment (with an @-mention) in the provider phase." }
+            textarea {
+                class: "clarify-q",
+                value: "{question}",
+                rows: "2",
+                oninput: move |e| question.set(e.value()),
+            }
+            p { class: "clarify-label", "Ask:" }
+            div { class: "clarify-addressees",
+                for s in suggestions {
+                    {
+                        let sel = addressee() == s;
+                        let cls = if sel { "addressee-chip sel" } else { "addressee-chip" };
+                        rsx! {
+                            button {
+                                class: "{cls}",
+                                onclick: move |_| addressee.set(s.to_string()),
+                                "{s}"
+                            }
+                        }
+                    }
+                }
+                input {
+                    class: "addressee-input",
+                    placeholder: "or type a handle…",
+                    oninput: move |e| addressee.set(e.value()),
+                }
+            }
+            button {
+                class: "btn-run",
+                onclick: move |_| {
+                    let sid = sid_post.clone();
+                    let q = question();
+                    let a = addressee();
+                    spawn(async move {
+                        if post_clarification(&sid, &q, &a).await.is_some() {
+                            refresh += 1;
+                        }
+                    });
+                },
+                "Post the question"
+            }
+
+            div { class: "clarify-thread",
+                {
+                    match clars() {
+                        Some(Some(list)) if !list.is_empty() => rsx! {
+                            for c in list {
+                                ClarificationCard { clar: c, refresh }
+                            }
+                        },
+                        Some(Some(_)) => rsx! { p { class: "section-hint", "No questions posted yet." } },
+                        Some(None) => rsx! { p { class: "section-hint", "(Couldn't load the thread.)" } },
+                        None => rsx! { p { class: "section-hint", "Loading…" } },
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One clarification in the thread: shows the question + addressee, an answer input
+/// while open, or the recorded reply once answered.
+#[component]
+fn ClarificationCard(clar: ClarificationView, refresh: Signal<u32>) -> Element {
+    let mut refresh = refresh;
+    let mut answer_text = use_signal(String::new);
+    let open = clar.answer.is_none();
+    let cid = clar.id.clone();
+    let cls = if open { "clar-card open" } else { "clar-card answered" };
+
+    rsx! {
+        div { class: "{cls}",
+            p { class: "clar-card-q", "{clar.question}" }
+            p { class: "clar-card-meta", "to {clar.addressee}" }
+            if open {
+                div { class: "clar-answer-row",
+                    input {
+                        class: "addressee-input",
+                        placeholder: "record the reply…",
+                        value: "{answer_text}",
+                        oninput: move |e| answer_text.set(e.value()),
+                    }
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let cid = cid.clone();
+                            let ans = answer_text();
+                            spawn(async move {
+                                if !ans.is_empty()
+                                    && answer_clarification(&cid, &ans, "you").await.is_some()
+                                {
+                                    refresh += 1;
+                                }
+                            });
+                        },
+                        "Record answer"
+                    }
+                }
+            } else {
+                div { class: "clar-answered",
+                    span { class: "clar-answer-by", "{clar.answered_by.clone().unwrap_or_default()} answered" }
+                    p { class: "clar-answer-text", "{clar.answer.clone().unwrap_or_default()}" }
                 }
             }
         }
