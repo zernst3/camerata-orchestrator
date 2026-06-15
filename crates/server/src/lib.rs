@@ -17,6 +17,7 @@ pub mod clarify;
 pub mod connections;
 pub mod decompose;
 pub mod notify;
+pub mod onboard;
 pub mod live_fleet;
 pub mod provider;
 pub mod routine;
@@ -121,6 +122,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
+        .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
@@ -292,6 +294,40 @@ async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value>
 /// not an error, in the UI).
 async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
     Json(crate::connections::probe().await)
+}
+
+/// Request to scan a repo for the brownfield audit.
+#[derive(serde::Deserialize)]
+struct ScanReq {
+    /// `owner/repo` to scan.
+    repo: String,
+}
+
+/// Brownfield scan: audit an existing repo against the content rules and propose a
+/// starter ruleset. Gated on the GitHub token — without it, returns a gated report
+/// (no scan) so the UI shows "connect GitHub". The audit reuses the gate's own
+/// arms, so it reports exactly what the gate would deny on a new write.
+async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanReport> {
+    let Some((owner, repo)) = req.repo.split_once('/') else {
+        let mut r = crate::onboard::ScanReport::gated(&req.repo);
+        r.message = Some("Repository must be `owner/repo`.".to_string());
+        return Json(r);
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(crate::onboard::ScanReport::gated(&req.repo));
+    };
+    match crate::onboard::scan_repo(owner, repo, &token).await {
+        Ok(report) => Json(report),
+        Err(e) => {
+            let mut r = crate::onboard::ScanReport::gated(&req.repo);
+            r.gated = false;
+            r.message = Some(format!("Scan failed: {e}"));
+            Json(r)
+        }
+    }
 }
 
 /// Query for draining the notification feed: only items newer than `since`.
