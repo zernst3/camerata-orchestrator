@@ -17,6 +17,13 @@
 pub mod parse;
 pub mod subprocess;
 
+/// The VCS-action gate: deterministic process rules (`PROCESS-*`) over commit /
+/// PR / branch METADATA — the fourth enforcement point. Distinct from the
+/// content-layer `CheckRunner` in this crate: it gates the metadata of the
+/// commit/PR Camerata is about to perform, the one place no code gate can see.
+/// See `docs/decisions/2026-06-15_process_rules_and_vcs_action_gate.md`.
+pub mod vcs_action;
+
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_core::{CheckRunner, Role, RuleId};
