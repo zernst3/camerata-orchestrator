@@ -6,13 +6,15 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
-- **2026-06-15_brownfield_onboarding_flow.md** — onboarding an EXISTING repo: the
-  engine reviews the repo, proposes a RuleSet (corpus + synthesized + conflicts
-  flagged), then INSTALLS governance as one reviewable PR (CONVENTIONS.md/AGENTS.md +
-  an enforced CI workflow + the gate's rule-subset config), so the rules are
-  mechanical, not just prose. Same commitment as the greenfield genesis harness,
-  pointed at brownfield. Design only; not built. Rides the code-host axis (GitHub
-  Actions first, ADO Pipelines next).
+- **2026-06-15_brownfield_onboarding_flow.md** — onboarding an EXISTING repo, reframed
+  as the instant-value weapon: an existing codebase is pre-loaded with the violations
+  the gate catches, so the flow is scan -> propose a starter ruleset -> approve ->
+  AUDIT (here are the 12 arch violations + 3 hardcoded secrets already in your code,
+  value in 5 min) -> ARM (one governance PR: CONVENTIONS.md/AGENTS.md + an enforced CI
+  workflow + the gate's rule-subset config). Audit first (the hook), arm second (the
+  close). Never make the user hand-author rules before they see value. Same commitment
+  as the greenfield genesis harness, pointed at brownfield. The secret/SQL audit is
+  real-now; the architecture audit needs the AST rules. Design only; not built.
 - **2026-06-15_cockpit_story_view_ux.md** — how the cockpit's story-view behaves over
   a real (messy) tracker: a governed working SET the Architect adopts into, never a
   mirror of the board (no whole-board polling); provider-neutral across ADO / Jira /

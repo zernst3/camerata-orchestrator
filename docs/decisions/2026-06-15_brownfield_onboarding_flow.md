@@ -18,30 +18,60 @@ real**: the prose conventions, the rule config the gate reads, and a CI workflow
 actually fails the build when a rule is violated. Prose without enforcement is the
 exact "examples are not enforcement" failure the whole project exists to fix.
 
-## Decision: brownfield onboarding produces a governance PR, not a recommendation
+## Brownfield is the instant-value weapon, not "setup"
 
-The flow, end to end:
+The most important reframe: brownfield onboarding is not plumbing you suffer through
+before the product is useful. It is potentially the single best instant-value demo,
+because **an existing codebase is pre-loaded with the violations the gate catches.**
+The moment you point the armed gate at a real repo, it scans the existing code against
+the rules and reports what is already wrong:
+
+> "I pointed it at your repo and found 12 architecture violations and 3 hardcoded
+> secrets that are in there right now."
+
+That is value in five minutes, not a week, and it is undeniable, because it is their
+code. Then the pitch closes itself: **"and now the gate stops any new ones."**
+
+The one design rule that makes this land fast: **the user must not be made to
+hand-author forty rules before they see anything.** Value must come before they have
+typed a single rule. So the sequence is audit-first:
+
+## Decision: scan -> propose -> approve -> audit + arm
 
 1. **Point Camerata at the repo(s).** One or several (multi-repo is normal; a feature
    can span repos). Each repo is onboarded independently against the shared corpus.
-2. **Review (the engine as staff engineer).** Map the architecture, detect the stack
-   and any checks already present (linters, CI, type-checking), and extract the
-   conventions the code already follows (its de-facto patterns), versus what it lacks.
-3. **Propose a RuleSet.** Some rules selected from the Camerata corpus that apply,
-   some synthesized from observed patterns, conflicts between corpus and existing
-   patterns flagged for the human, and each rule tagged mechanically-enforceable vs
-   review-only. The Architect edits and approves; the Architect owns the final set.
-4. **Install it (the load-bearing step).** Camerata generates a single reviewable
-   **governance PR** that deploys the apparatus that makes the rules real:
+2. **Scan + propose a STARTER ruleset.** The engine maps the architecture, detects the
+   stack and any checks already present, extracts de-facto conventions, and proposes a
+   starter RuleSet (corpus rules that apply + synthesized from observed patterns +
+   conflicts flagged, each tagged mechanically-enforceable vs review-only). The user
+   does NOT author rules from scratch; they start from the proposal.
+3. **Approve / edit.** The Architect adjusts and approves; the Architect owns the
+   final set. This is the only gate before value, and it is a review, not authoring.
+4. **Audit (the instant value).** Scan the existing code against the approved rules and
+   report the violations already in it. This is the five-minute payoff, the undeniable
+   "here is what is wrong in your code right now."
+5. **Arm (the governance PR).** Generate one reviewable PR that installs the apparatus
+   that makes the rules real going forward:
    - **Prose:** `CONVENTIONS.md` / `AGENTS.md`, each rule carrying its id.
    - **Enforced CI:** a CI workflow (GitHub Actions now; ADO Pipelines on the ADO
      code-host axis) that runs the mechanical checks for the stack (fmt, lint/clippy,
      tests, AST/structural checks) so a violation fails the build, not just a doc.
    - **Gate config:** the rule-subset file the MCP gateway reads for live agent runs.
    - Optionally pre-commit hooks for fast local feedback.
-   The repo goes from ungoverned to governed by merging one PR the human reviews.
-5. **Incremental adoption.** Brownfield teams will not accept all rules at once.
+   The repo goes from ungoverned to governed by merging one PR the human reviews, and
+   new violations are now stopped at the gate.
+6. **Incremental adoption.** Brownfield teams will not accept all rules at once.
    Support adopting a subset and expanding over time; never an all-or-nothing gate.
+
+Audit first (here is what is already wrong), arm second (and now it is enforced). The
+audit is the hook; the PR is the close.
+
+Honest grounding on the audit: the content rules (hardcoded-secret, raw-SQL-concat,
+secrets-in-URL, path-escape) are pure functions over file content, so they can audit an
+existing repo TODAY by scanning its files, the "3 hardcoded secrets" half is real now.
+The "12 architecture violations" half needs the AST-level rules (e.g. layering), which
+are not built yet (see the commanded-violation demo note). So the secret/SQL audit is
+real-now; the full architecture audit is pending those checks.
 
 ## Why this is the same idea as the greenfield genesis harness
 
