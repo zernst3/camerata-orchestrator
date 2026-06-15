@@ -897,6 +897,9 @@ html, body {
 .topbar-brand { font-weight: 700; font-size: 13px; color: var(--ink); }
 .topbar-story { font-size: 13px; color: var(--ink-soft); }
 .topbar-status { margin-left: auto; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 3px 9px; border-radius: 6px; }
+.topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.topbar-axis-label { color: var(--ink-faint); }
+.topbar-axis-val { color: var(--ink); }
 .topbar-line2 { display: flex; align-items: center; gap: 9px; margin-top: 6px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-meter { color: var(--ink); }
 .meter-est { color: var(--ink-faint); }

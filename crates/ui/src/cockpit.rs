@@ -616,12 +616,40 @@ fn CockpitNotice(kind: String) -> Element {
 #[component]
 fn CockpitTopBar(story: CanonicalStory) -> Element {
     let (badge, badge_cls) = status_badge(story.status);
+
+    // SOURCE (where it's tracked) vs BUILD TARGETS (where its code lands) — the
+    // two independent axes from the credential-delegated-scope decision.
+    let source = match story.external_ref.as_ref() {
+        Some(r) => format!("{:?} {}", r.provider, r.external_id),
+        None => "native".to_string(),
+    };
+    let targets = if story.targets.is_empty() {
+        "no targets yet".to_string()
+    } else {
+        story
+            .targets
+            .iter()
+            .map(|t| match &t.role {
+                Some(role) => format!("{} ({role})", t.repo),
+                None => t.repo.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     rsx! {
         div { class: "cockpit-topbar",
             div { class: "topbar-line1",
                 span { class: "topbar-brand", "Camerata · Conductor" }
                 span { class: "topbar-story", "{story.title}" }
                 span { class: "topbar-status {badge_cls}", "{badge}" }
+            }
+            div { class: "topbar-line3",
+                span { class: "topbar-axis-label", "source:" }
+                span { class: "topbar-axis-val", "{source}" }
+                span { class: "topbar-sep", "·" }
+                span { class: "topbar-axis-label", "targets:" }
+                span { class: "topbar-axis-val", "{targets}" }
             }
             div { class: "topbar-line2",
                 span { class: "topbar-meter", "spent: $4.10 ",
