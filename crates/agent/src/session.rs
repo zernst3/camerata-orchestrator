@@ -27,6 +27,12 @@ use crate::{ClaudeCliDriver, GATED_WRITE_TOOL};
 /// sync with `camerata-gateway`'s `RULES_FILE_ENV`.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 
+/// The env var name the gateway reads its worktree jail root from. Kept in sync with
+/// the gateway binary's `WORKTREE_ROOT_ENV`. When set, the gateway refuses any
+/// `gated_write` whose target resolves outside this worktree (a code-level jail,
+/// independent of any rule).
+pub const WORKTREE_ROOT_ENV: &str = "CAMERATA_WORKTREE_ROOT";
+
 /// The mcp-config server KEY. Claude Code namespaces the tool as
 /// `mcp__<key>__<tool>`; this key plus the gateway's `gated_write` tool yield
 /// exactly [`GATED_WRITE_TOOL`] (`mcp__camerata__gated_write`).
@@ -72,9 +78,16 @@ struct McpConfig {
 ///
 /// Pure (no I/O) so it is unit-testable. The server key is [`MCP_SERVER_KEY`],
 /// which is what makes the agent-visible tool name [`GATED_WRITE_TOOL`].
-pub fn render_mcp_config(gateway_bin: &Path, rules_file: &Path) -> Result<String, SessionError> {
+pub fn render_mcp_config(
+    gateway_bin: &Path,
+    rules_file: &Path,
+    worktree: Option<&Path>,
+) -> Result<String, SessionError> {
     let mut env = std::collections::BTreeMap::new();
     env.insert(RULES_FILE_ENV.to_string(), rules_file.display().to_string());
+    if let Some(wt) = worktree {
+        env.insert(WORKTREE_ROOT_ENV.to_string(), wt.display().to_string());
+    }
 
     let mut servers = std::collections::BTreeMap::new();
     servers.insert(
@@ -128,6 +141,7 @@ pub fn prepare_session(
     session_dir: &Path,
     gateway_bin: &Path,
     role: &Role,
+    worktree: Option<&Path>,
 ) -> Result<SessionSpawn, SessionError> {
     std::fs::create_dir_all(session_dir).map_err(|source| SessionError::Write {
         what: "session dir",
@@ -144,7 +158,7 @@ pub fn prepare_session(
     })?;
 
     let mcp_config = session_dir.join("gateway.json");
-    let config_json = render_mcp_config(gateway_bin, &rules_file)?;
+    let config_json = render_mcp_config(gateway_bin, &rules_file, worktree)?;
     std::fs::write(&mcp_config, config_json).map_err(|source| SessionError::Write {
         what: "mcp-config",
         path: mcp_config.clone(),
@@ -206,12 +220,30 @@ mod tests {
         let cfg = render_mcp_config(
             Path::new("/bin/camerata-gateway"),
             Path::new("/tmp/s/rules.json"),
+            None,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
         let server = &v["mcpServers"][MCP_SERVER_KEY];
         assert_eq!(server["command"], "/bin/camerata-gateway");
         assert_eq!(server["env"][RULES_FILE_ENV], "/tmp/s/rules.json");
+        // No worktree passed -> the jail env is absent.
+        assert!(server["env"].get(WORKTREE_ROOT_ENV).is_none());
+    }
+
+    #[test]
+    fn mcp_config_sets_the_worktree_jail_env_when_given() {
+        let cfg = render_mcp_config(
+            Path::new("/bin/camerata-gateway"),
+            Path::new("/tmp/s/rules.json"),
+            Some(Path::new("/work/crate")),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        assert_eq!(
+            v["mcpServers"][MCP_SERVER_KEY]["env"][WORKTREE_ROOT_ENV],
+            "/work/crate"
+        );
     }
 
     #[test]
@@ -228,7 +260,7 @@ mod tests {
     fn prepare_session_writes_both_files_and_wires_driver() {
         let dir =
             std::env::temp_dir().join(format!("camerata-session-test-{}", std::process::id()));
-        let spawn = prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role()).unwrap();
+        let spawn = prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(

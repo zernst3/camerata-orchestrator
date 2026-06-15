@@ -47,6 +47,56 @@ use std::time::Instant;
 /// Env var the orchestrator points at the per-session rules JSON file.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 
+/// Env var the orchestrator points at the worktree the agent is jailed to. When set,
+/// `gated_write` refuses any write whose resolved target is outside this root, in CODE,
+/// independent of any rule. This is the structural guard for "guard the guard":
+/// `--add-dir` only scopes the agent's (disallowed) built-ins, not the gateway process
+/// that performs the actual write, so the jail has to live here, not in a rule.
+pub const WORKTREE_ROOT_ENV: &str = "CAMERATA_WORKTREE_ROOT";
+
+/// Lexically normalize a path: resolve `.` and `..` WITHOUT touching the filesystem
+/// (so it works for not-yet-created files). Symlink resolution is intentionally not
+/// done; the agent cannot create symlinks because `Bash` is denied at the cage.
+fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether `target` resolves to a path inside `root`. Relative targets resolve against
+/// `root` (the agent's cwd is the worktree); absolute targets are taken as-is. Both are
+/// lexically normalized, then a component-wise prefix check jails the result. An
+/// absolute path outside the worktree, or a `..` climb above it, returns false.
+fn within_jail(root: &std::path::Path, target: &str) -> bool {
+    let t = std::path::Path::new(target);
+    let abs = if t.is_absolute() {
+        t.to_path_buf()
+    } else {
+        root.join(t)
+    };
+    normalize_lexical(&abs).starts_with(normalize_lexical(root))
+}
+
+/// Load the worktree jail root from the environment, canonicalized. `None` means no
+/// jail is configured (standalone / test runs keep the rule-only behavior).
+fn load_jail_root() -> Option<std::path::PathBuf> {
+    let raw = std::env::var_os(WORKTREE_ROOT_ENV)?;
+    let path = std::path::PathBuf::from(raw);
+    match std::fs::canonicalize(&path) {
+        Ok(canon) => Some(canon),
+        Err(_) => Some(path),
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct WriteArgs {
     /// Absolute path to write.
@@ -114,20 +164,25 @@ pub struct Gateway {
     /// The session's rule-subset, delivered via `CAMERATA_RULES_FILE` at spawn.
     /// Shared (`Arc`) because rmcp clones the handler per connection.
     rule_subset: Arc<Vec<RuleId>>,
+    /// The worktree the agent is jailed to (via `CAMERATA_WORKTREE_ROOT`). When set,
+    /// `gated_write` refuses any target outside it, in code, before any rule runs.
+    jail_root: Option<Arc<std::path::PathBuf>>,
 }
 
 impl Gateway {
-    /// Construct the gateway with the rule-subset read from the environment.
+    /// Construct the gateway with the rule-subset + jail root read from the environment.
     pub fn new() -> Self {
         Self::with_rules(load_rule_subset())
     }
 
     /// Construct the gateway with an explicit rule-subset (used by `new` and by
-    /// tests). Keeps the evaluation seam injectable.
+    /// tests). Keeps the evaluation seam injectable. The jail root is read from the
+    /// environment (unset = no jail).
     pub fn with_rules(rule_subset: Vec<RuleId>) -> Self {
         Self {
             tool_router: Self::tool_router(),
             rule_subset: Arc::new(rule_subset),
+            jail_root: load_jail_root().map(Arc::new),
         }
     }
 
@@ -170,12 +225,24 @@ impl Gateway {
         let t0 = Instant::now();
         let WriteArgs { path, content } = args.0;
 
-        let decision = match self.evaluate(&path, &content) {
-            Err(rule) => format!("DENIED [{rule}] path={path}"),
-            Ok(()) => match std::fs::write(&path, content.as_bytes()) {
-                Ok(()) => format!("ALLOWED: wrote {} bytes to {path}", content.len()),
-                Err(e) => format!("ALLOWED but IO error on {path}: {e}"),
-            },
+        // Structural worktree jail FIRST, independent of any rule: the gateway process
+        // can write anywhere on the filesystem, so refuse any target outside the
+        // worktree before evaluating content rules. This is what keeps the agent from
+        // writing its own rules.json / system files via an absolute path.
+        let decision = if self
+            .jail_root
+            .as_ref()
+            .is_some_and(|root| !within_jail(root, &path))
+        {
+            format!("DENIED [JAIL: outside the worktree] path={path}")
+        } else {
+            match self.evaluate(&path, &content) {
+                Err(rule) => format!("DENIED [{rule}] path={path}"),
+                Ok(()) => match std::fs::write(&path, content.as_bytes()) {
+                    Ok(()) => format!("ALLOWED: wrote {} bytes to {path}", content.len()),
+                    Err(e) => format!("ALLOWED but IO error on {path}: {e}"),
+                },
+            }
         };
 
         let micros = t0.elapsed().as_micros();
@@ -228,4 +295,46 @@ async fn main() -> anyhow::Result<()> {
     let service = Gateway::with_rules(subset).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod jail_tests {
+    use super::within_jail;
+    use std::path::Path;
+
+    #[test]
+    fn relative_paths_resolve_under_the_worktree() {
+        let root = Path::new("/work/crate");
+        assert!(within_jail(root, "src/lib.rs"));
+        assert!(within_jail(root, "./src/api/members.rs"));
+        assert!(within_jail(root, "Cargo.toml"));
+    }
+
+    #[test]
+    fn absolute_paths_outside_the_worktree_are_jailed() {
+        let root = Path::new("/work/crate");
+        // The exact attack: the agent's own session config, a sibling of the worktree.
+        assert!(!within_jail(root, "/work/session-1/rules.json"));
+        assert!(!within_jail(root, "/work/session-1/gateway.json"));
+        // System files.
+        assert!(!within_jail(root, "/etc/passwd"));
+        assert!(!within_jail(root, "/root/.ssh/authorized_keys"));
+        // A sibling whose name merely starts with the root name (component-wise check).
+        assert!(!within_jail(root, "/work/crate-evil/x.rs"));
+    }
+
+    #[test]
+    fn dotdot_climbs_above_the_worktree_are_jailed() {
+        let root = Path::new("/work/crate");
+        assert!(!within_jail(root, "../session-1/rules.json"));
+        assert!(!within_jail(root, "src/../../session-1/rules.json"));
+        // A `..` that stays inside is fine.
+        assert!(within_jail(root, "src/api/../lib.rs"));
+    }
+
+    #[test]
+    fn absolute_paths_inside_the_worktree_are_allowed() {
+        let root = Path::new("/work/crate");
+        assert!(within_jail(root, "/work/crate/src/lib.rs"));
+    }
 }

@@ -126,7 +126,7 @@ async fn run_one(
     task: &str,
 ) -> anyhow::Result<LiveRun> {
     let session_dir = root.join(session_name);
-    let spawn = prepare_session(&session_dir, gateway_bin, role)?;
+    let spawn = prepare_session(&session_dir, gateway_bin, role, None)?;
 
     eprintln!(
         "[live-demo] session={} rules_file={} mcp_config={}",

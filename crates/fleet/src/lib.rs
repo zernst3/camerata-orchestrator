@@ -307,7 +307,9 @@ pub async fn build_from_plan(
     let mut spawns = Vec::with_capacity(total);
     for (i, role) in roles.iter().enumerate() {
         let session_dir = root.join(format!("session-{}", i + 1));
-        let spawn = prepare_session(&session_dir, gateway_bin, role)?;
+        // Pass the worktree so the gateway is jailed to it (CAMERATA_WORKTREE_ROOT):
+        // gated_write refuses any target outside the worktree, in code.
+        let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
         spawns.push(spawn);
     }
     let drivers: Vec<_> = spawns
