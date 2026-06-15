@@ -47,6 +47,12 @@ pub enum Screen {
     Live,
 }
 
+/// Where the embedded BFF binds, and the URL the cockpit fetches from. The desktop
+/// shell talks to this local server over HTTP (the same server that runs in the
+/// cloud later); the UI never calls the backend crates in-process for cockpit data.
+pub const BFF_ADDR: &str = "127.0.0.1:8787";
+pub const BFF_URL: &str = "http://127.0.0.1:8787";
+
 fn main() {
     dioxus::launch(App);
 }
@@ -109,6 +115,21 @@ pub enum Edition {
 /// the two surfaces in a single window (so a demo can flip between them).
 #[component]
 fn App() -> Element {
+    // Stand up the BFF once, on its own background Tokio runtime, so the desktop
+    // shell talks to the exact same HTTP server that will run in the cloud. If the
+    // port is already serving (e.g. a standalone `camerata-server`), this bind fails
+    // harmlessly and the cockpit uses the already-running one.
+    use_hook(|| {
+        std::thread::spawn(|| match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt.block_on(async {
+                if let Err(e) = camerata_server::serve(BFF_ADDR).await {
+                    eprintln!("[camerata-ui] embedded BFF exited: {e}");
+                }
+            }),
+            Err(e) => eprintln!("[camerata-ui] could not start BFF runtime: {e}"),
+        });
+    });
+
     let edition = use_signal(|| Edition::AppBuilder);
 
     rsx! {

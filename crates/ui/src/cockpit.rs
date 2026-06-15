@@ -8,31 +8,44 @@
 //! - LEFT: the story spine (every story + its lifecycle status) and a NEEDS YOU queue.
 //! - CENTER: a stage that swaps by the selected story's status, with a live status
 //!   strip showing the governed fleet and the gate activity.
-//! - RIGHT: an inspector that binds to the selection (rules show statement + rationale
-//!   + selectable alternatives).
+//! - RIGHT: an inspector that binds to the selection (the gate's enforced rules).
 //!
-//! Honesty note: this is a faithful shell over representative cockpit state, not a
-//! live fleet run. The story spine uses the REAL canonical types
-//! (`camerata_worktracker::{CanonicalStory, FeatureStatus}`) and the rule inspector
-//! shows the REAL enforced rules from `camerata_gateway::RULE_REGISTRY` verbatim. The
-//! live fleet wiring (the same path `worktracker-demo` / `po-demo` exercise) is the
-//! next increment behind this surface.
+//! Wiring: the spine and the inspector rules are fetched from the BFF
+//! (`camerata-server`) over HTTP (`/api/stories`, `/api/rules`), not read in-process,
+//! the same client/server split that makes the server cloud-hostable. The fleet and
+//! gate-activity panels are still representative; live execution + a status stream are
+//! the next phase (the same path `worktracker-demo` / `po-demo` exercise).
 
 use dioxus::prelude::*;
 
-use camerata_gateway::{RuleEntry, RULE_REGISTRY};
 use camerata_worktracker::{CanonicalStory, FeatureStatus};
 
-/// The rules the cockpit inspector showcases: every enforced rule EXCEPT GOV-1.
-///
-/// GOV-1 ("deny writes whose path contains the substring 'forbidden'") is the
-/// verification fixture the live-demo and acceptance tests fire against; it stays
-/// in the registry (and the test suite) but is deliberately not surfaced here,
-/// because as a product rule it is trivial and would undercut the substantive
-/// SEC/ARCH rules that earn the inspector its credibility. The remaining four are
-/// all real, enforced rules with non-trivial checks.
-fn showcase_rules() -> Vec<&'static RuleEntry> {
-    RULE_REGISTRY.iter().filter(|e| e.id != "GOV-1").collect()
+/// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
+/// filtered out server-side). The cockpit just renders what the BFF returns.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct CockpitRule {
+    id: String,
+    statement: String,
+}
+
+/// Fetch the canonical story spine from the BFF.
+async fn fetch_stories() -> Option<Vec<CanonicalStory>> {
+    reqwest::get(format!("{}/api/stories", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<CanonicalStory>>()
+        .await
+        .ok()
+}
+
+/// Fetch the gate's enforced rules from the BFF.
+async fn fetch_rules() -> Option<Vec<CockpitRule>> {
+    reqwest::get(format!("{}/api/rules", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<CockpitRule>>()
+        .await
+        .ok()
 }
 
 /// One agent in the governed fleet, as the status strip renders it.
@@ -45,44 +58,8 @@ struct FleetAgent {
     state_class: &'static str,
 }
 
-/// Representative cockpit state, built from the real canonical Story type. Three
-/// stories in different lifecycle states so the spine and the center stage show
-/// the range a steering architect actually sees.
-fn seed_stories() -> Vec<CanonicalStory> {
-    vec![
-        CanonicalStory {
-            id: "CAM-1".into(),
-            external_ref: None,
-            title: "Add CSV export to org members".into(),
-            description: "As an org admin I want to export the member directory to CSV \
-                          so I can reconcile it against payroll."
-                .into(),
-            status: FeatureStatus::Executing,
-            created_by: "architect".into(),
-        },
-        CanonicalStory {
-            id: "CAM-2".into(),
-            external_ref: None,
-            title: "Fix timezone handling in reminders".into(),
-            description: "Reminder emails fire in UTC instead of the org's local zone."
-                .into(),
-            status: FeatureStatus::SignedOff,
-            created_by: "architect".into(),
-        },
-        CanonicalStory {
-            id: "CAM-3".into(),
-            external_ref: None,
-            title: "Invite-only org signup".into(),
-            description: "Gate new-member signup behind an invitation from an org admin."
-                .into(),
-            status: FeatureStatus::Blocked,
-            created_by: "architect".into(),
-        },
-    ]
-}
-
 /// The fleet for the active (Executing) story: Backend gated, Frontend running,
-/// Integrate pending. Mirrors the wireframe's status strip.
+/// Integrate pending. Representative until the live execution stream lands (Phase 3).
 fn seed_fleet() -> Vec<FleetAgent> {
     vec![
         FleetAgent {
@@ -137,145 +114,185 @@ const STAGE_TABS: &[&str] = &["INTAKE", "INVESTIGATION", "PLAN", "STATUS", "QA"]
 
 #[component]
 pub fn CockpitApp() -> Element {
-    let stories = use_signal(seed_stories);
+    // Both data sets come from the BFF over HTTP. `use_resource` runs the fetch when
+    // the cockpit mounts; the embedded server (see main.rs) is up by then.
+    let stories_res = use_resource(fetch_stories);
+    let rules_res = use_resource(fetch_rules);
+
     let fleet = use_signal(seed_fleet);
     let mut selected = use_signal(|| 0usize);
-    // The inspector binds to a selected enforced rule (real data from the gateway).
     let mut selected_rule = use_signal(|| 0usize);
 
-    let story_list = stories();
-    let current = story_list[selected().min(story_list.len() - 1)].clone();
-    let active_stage = active_stage_index(current.status);
+    let stories_loaded = stories_res.read().clone();
+    let rules_loaded = rules_res.read().clone();
+    // A resolved-but-None fetch means the BFF was unreachable / returned junk.
+    let errored = matches!(&stories_loaded, Some(None)) || matches!(&rules_loaded, Some(None));
 
-    rsx! {
-        div { class: "cockpit",
-            // ── Top bar: story, live status, cost meter, fleet count, conn, gate ──
-            CockpitTopBar { story: current.clone() }
+    match (stories_loaded, rules_loaded) {
+        (Some(Some(story_list)), Some(Some(rules))) => {
+            if story_list.is_empty() {
+                return rsx! { CockpitNotice { kind: "empty".to_string() } };
+            }
+            let current = story_list[selected().min(story_list.len() - 1)].clone();
+            let active_stage = active_stage_index(current.status);
 
-            div { class: "cockpit-body",
-                // ── LEFT: story spine + NEEDS YOU queue ──
-                aside { class: "cockpit-rail",
-                    p { class: "cockpit-rail-label", "STORY SPINE" }
-                    div { class: "spine-list",
-                        for (i , s) in story_list.iter().enumerate() {
-                            {
-                                let (badge, badge_cls) = status_badge(s.status);
-                                let sel = i == selected();
-                                let cls = if sel { "spine-item sel" } else { "spine-item" };
-                                rsx! {
-                                    button {
-                                        class: "{cls}",
-                                        onclick: move |_| selected.set(i),
-                                        span { class: "spine-title", "{s.title}" }
-                                        span { class: "spine-badge {badge_cls}", "{badge}" }
-                                    }
-                                }
-                            }
-                        }
-                        button { class: "spine-new", "+ New story" }
-                    }
+            rsx! {
+                div { class: "cockpit",
+                    CockpitTopBar { story: current.clone() }
 
-                    p { class: "cockpit-rail-label needs", "NEEDS YOU (2)" }
-                    div { class: "needs-list",
-                        button {
-                            class: "needs-item",
-                            onclick: move |_| selected.set(0),
-                            span { class: "needs-dot warn" }
-                            span { "Answer: currency for the export amounts?" }
-                        }
-                        button {
-                            class: "needs-item",
-                            onclick: move |_| selected.set(1),
-                            span { class: "needs-dot warn" }
-                            span { "QA the governed diff for CAM-2" }
-                        }
-                    }
-                }
-
-                // ── CENTER: stage tabs + active stage panel + status strip ──
-                section { class: "cockpit-stage",
-                    div { class: "stage-tabs",
-                        for (i , tab) in STAGE_TABS.iter().enumerate() {
-                            {
-                                let cls = if i == active_stage { "stage-tab on" } else { "stage-tab" };
-                                rsx! { span { class: "{cls}", "{tab}" } }
-                            }
-                        }
-                    }
-
-                    div { class: "stage-panel",
-                        StagePanel { story: current.clone(), fleet: fleet() }
-                    }
-
-                    // Always-visible status strip: the governed fleet + the gate tally.
-                    div { class: "status-strip",
-                        div { class: "strip-fleet",
-                            for (i , a) in fleet().iter().enumerate() {
-                                {
-                                    let arrow = i + 1 < fleet().len();
-                                    rsx! {
-                                        span { class: "fleet-pill {a.state_class}",
-                                            span { class: "fleet-role", "{a.role}" }
-                                            span { class: "fleet-state", "{a.state}" }
-                                        }
-                                        if arrow {
-                                            span { class: "fleet-arrow", "→" }
+                    div { class: "cockpit-body",
+                        // ── LEFT: story spine (from /api/stories) + NEEDS YOU queue ──
+                        aside { class: "cockpit-rail",
+                            p { class: "cockpit-rail-label", "STORY SPINE" }
+                            div { class: "spine-list",
+                                for (i , s) in story_list.iter().enumerate() {
+                                    {
+                                        let (badge, badge_cls) = status_badge(s.status);
+                                        let sel = i == selected();
+                                        let cls = if sel { "spine-item sel" } else { "spine-item" };
+                                        rsx! {
+                                            button {
+                                                class: "{cls}",
+                                                onclick: move |_| selected.set(i),
+                                                span { class: "spine-title", "{s.title}" }
+                                                span { class: "spine-badge {badge_cls}", "{badge}" }
+                                            }
                                         }
                                     }
                                 }
+                                button { class: "spine-new", "+ New story" }
                             }
-                        }
-                        div { class: "strip-gates",
-                            span { class: "gate-tally",
-                                span { class: "gate-num", "1" }
-                                " layer-1 deny"
-                            }
-                            span { class: "gate-tally",
-                                span { class: "gate-num", "1" }
-                                " layer-2 bounce"
-                            }
-                        }
-                    }
-                }
 
-                // ── RIGHT: inspector. Real enforced rules from the gateway. ──
-                aside { class: "cockpit-inspector",
-                    p { class: "cockpit-rail-label", "INSPECTOR" }
-                    p { class: "inspector-hint", "The rules this fleet is governed by. These are the gate's actual enforced rules." }
-                    div { class: "rule-list",
-                        for (i , entry) in showcase_rules().iter().enumerate() {
-                            {
-                                let sel = i == selected_rule();
-                                let cls = if sel { "rule-chip sel" } else { "rule-chip" };
-                                rsx! {
-                                    button {
-                                        class: "{cls}",
-                                        onclick: move |_| selected_rule.set(i),
-                                        "{entry.id}"
+                            p { class: "cockpit-rail-label needs", "NEEDS YOU (2)" }
+                            div { class: "needs-list",
+                                button {
+                                    class: "needs-item",
+                                    onclick: move |_| selected.set(0),
+                                    span { class: "needs-dot warn" }
+                                    span { "Answer: currency for the export amounts?" }
+                                }
+                                button {
+                                    class: "needs-item",
+                                    onclick: move |_| selected.set(1),
+                                    span { class: "needs-dot warn" }
+                                    span { "QA the governed diff for CAM-2" }
+                                }
+                            }
+                        }
+
+                        // ── CENTER: stage tabs + active stage panel + status strip ──
+                        section { class: "cockpit-stage",
+                            div { class: "stage-tabs",
+                                for (i , tab) in STAGE_TABS.iter().enumerate() {
+                                    {
+                                        let cls = if i == active_stage { "stage-tab on" } else { "stage-tab" };
+                                        rsx! { span { class: "{cls}", "{tab}" } }
+                                    }
+                                }
+                            }
+
+                            div { class: "stage-panel",
+                                StagePanel { story: current.clone(), fleet: fleet() }
+                            }
+
+                            div { class: "status-strip",
+                                div { class: "strip-fleet",
+                                    for (i , a) in fleet().iter().enumerate() {
+                                        {
+                                            let arrow = i + 1 < fleet().len();
+                                            rsx! {
+                                                span { class: "fleet-pill {a.state_class}",
+                                                    span { class: "fleet-role", "{a.role}" }
+                                                    span { class: "fleet-state", "{a.state}" }
+                                                }
+                                                if arrow {
+                                                    span { class: "fleet-arrow", "→" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "strip-gates",
+                                    span { class: "gate-tally",
+                                        span { class: "gate-num", "1" }
+                                        " layer-1 deny"
+                                    }
+                                    span { class: "gate-tally",
+                                        span { class: "gate-num", "1" }
+                                        " layer-2 bounce"
                                     }
                                 }
                             }
                         }
-                    }
-                    {
-                        let rules = showcase_rules();
-                        let entry = rules[selected_rule().min(rules.len() - 1)];
-                        rsx! {
-                            div { class: "rule-detail",
-                                p { class: "rule-id", "{entry.id}" }
-                                p { class: "rule-enforce",
-                                    span { class: "enforce-dot" }
-                                    "deterministic, active"
+
+                        // ── RIGHT: inspector. Enforced rules from /api/rules. ──
+                        aside { class: "cockpit-inspector",
+                            p { class: "cockpit-rail-label", "INSPECTOR" }
+                            p { class: "inspector-hint", "The rules this fleet is governed by. These are the gate's actual enforced rules." }
+                            div { class: "rule-list",
+                                for (i , r) in rules.iter().enumerate() {
+                                    {
+                                        let sel = i == selected_rule();
+                                        let cls = if sel { "rule-chip sel" } else { "rule-chip" };
+                                        rsx! {
+                                            button {
+                                                class: "{cls}",
+                                                onclick: move |_| selected_rule.set(i),
+                                                "{r.id}"
+                                            }
+                                        }
+                                    }
                                 }
-                                p { class: "rule-label", "Statement" }
-                                p { class: "rule-statement", "{entry.description}" }
-                                p { class: "rule-label", "Enforcement" }
-                                p { class: "rule-statement", "Checked at the MCP tool boundary before the write executes (deny-before-execute), and re-checked out-of-process after the task. Binary pass/fail." }
+                            }
+                            {
+                                let idx = selected_rule().min(rules.len().saturating_sub(1));
+                                let r = &rules[idx];
+                                rsx! {
+                                    div { class: "rule-detail",
+                                        p { class: "rule-id", "{r.id}" }
+                                        p { class: "rule-enforce",
+                                            span { class: "enforce-dot" }
+                                            "deterministic, active"
+                                        }
+                                        p { class: "rule-label", "Statement" }
+                                        p { class: "rule-statement", "{r.statement}" }
+                                        p { class: "rule-label", "Enforcement" }
+                                        p { class: "rule-statement", "Checked at the MCP tool boundary before the write executes (deny-before-execute), and re-checked out-of-process after the task. Binary pass/fail." }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+        _ if errored => rsx! { CockpitNotice { kind: "error".to_string() } },
+        _ => rsx! { CockpitNotice { kind: "loading".to_string() } },
+    }
+}
+
+/// Loading / error / empty placeholder for the cockpit, shown while the BFF fetch
+/// is pending or if it fails.
+#[component]
+fn CockpitNotice(kind: String) -> Element {
+    let (title, body) = match kind.as_str() {
+        "loading" => (
+            "Connecting to the engine…",
+            "Reaching the local Camerata server.",
+        ),
+        "error" => (
+            "Can't reach the engine",
+            "The Camerata server isn't responding on localhost:8787. It starts with the app; if this persists, restart the app.",
+        ),
+        _ => (
+            "No stories yet",
+            "Adopt a story to start steering. (Story adoption from a tracker lands in a later phase.)",
+        ),
+    };
+    rsx! {
+        div { class: "cockpit-notice",
+            p { class: "cockpit-notice-title", "{title}" }
+            p { class: "cockpit-notice-body", "{body}" }
         }
     }
 }

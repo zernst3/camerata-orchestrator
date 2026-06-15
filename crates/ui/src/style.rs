@@ -1023,4 +1023,13 @@ html, body {
 .enforce-dot { width: 8px; height: 8px; border-radius: 50%; background: #2f8f5b; }
 .rule-label { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; color: var(--ink-faint); margin: 10px 0 4px; }
 .rule-statement { font-size: 12.5px; color: var(--ink); line-height: 1.5; margin: 0; }
+
+/* Cockpit loading / error / empty notice (shown while the BFF fetch resolves). */
+.cockpit-notice {
+  height: calc(100vh - 44px); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; text-align: center;
+  padding: 40px; background: var(--paper);
+}
+.cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
+.cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }
 "#;
