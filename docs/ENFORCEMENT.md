@@ -113,6 +113,7 @@ arm is applied everywhere with no edit):
 | Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers. |
 | Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST` | Enforced via `cargo fmt`/`cargo clippy`/`cargo test` in the coordinator's bounce-and-revise. |
+| Layer-3 (cross-agent, **planned**) | `INTEGRATION-*` family | NOT built. The integration gate that checks the seam BETWEEN agents (API-contract conformance, shared-schema match) on the assembled tree before the branch ships. Both tiers above are per-agent and cannot catch contract drift between agents. See ADR `cross_agent_integration_gate`. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 
 **Everything else in the 71-rule subset is a no-op today** — carried, loaded,
