@@ -540,6 +540,7 @@ dependencies = [
  "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
+ "camerata-rules",
  "camerata-worktracker",
  "flate2",
  "http-body-util",

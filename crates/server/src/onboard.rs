@@ -43,6 +43,17 @@ pub struct Finding {
     pub detail: String,
 }
 
+/// One alternative the architect can codify for a proposed rule.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuleOptionView {
+    /// Stable option id (what gets codified as the choice).
+    pub id: String,
+    /// Human label.
+    pub label: String,
+    /// The concrete directive this alternative codifies.
+    pub directive: String,
+}
+
 /// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
 /// brownfielding decides, up front, where each rule and its mechanical gate live.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -53,6 +64,13 @@ pub struct ProposedRule {
     pub title: String,
     /// `mechanical` (deterministic check exists) | `review` (human-judged).
     pub kind: String,
+    /// The alternatives the architect chooses among. Empty for mechanical rules
+    /// with no variants (the content/security rules).
+    #[serde(default)]
+    pub options: Vec<RuleOptionView>,
+    /// The default option id, or `None` when the architect MUST choose one.
+    #[serde(default)]
+    pub default_option: Option<String>,
     /// Scope: `repo-local` (applies within each repo), `cross-repo` (spans the
     /// repo set, e.g. API contracts), or `process` (VCS-workflow, per account).
     pub scope: String,
@@ -195,6 +213,10 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             id: id.to_string(),
             title: title_for(id),
             kind: "mechanical".to_string(),
+            // Content/security rules are single-variant: one deterministic check,
+            // no alternatives to choose among.
+            options: Vec::new(),
+            default_option: None,
             scope: "repo-local".to_string(),
             enforcement_point: "content".to_string(),
             repos: repos_for_rule,
@@ -214,6 +236,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             // Deterministic enforcement needs the integration gate (designed, not
             // built), so it is review-tier until that lands.
             kind: "review".to_string(),
+            options: Vec::new(),
+            default_option: None,
             scope: "cross-repo".to_string(),
             enforcement_point: "integration".to_string(),
             repos: repos.to_vec(),
@@ -228,6 +252,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         id: "PROCESS-CONVENTIONAL-COMMIT-1".to_string(),
         title: "Commit subject follows conventional-commits (type: subject).".to_string(),
         kind: "mechanical".to_string(),
+        options: Vec::new(),
+        default_option: None,
         scope: "process".to_string(),
         enforcement_point: "vcs-action".to_string(),
         repos: repos.to_vec(),
@@ -360,6 +386,84 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
         findings.extend(audit_content(repo, path, content));
     }
     findings
+}
+
+/// Map detected stacks to corpus domains, so we propose the rules that apply to
+/// what each repo actually uses.
+fn domains_for_stacks(stacks: &[RepoStack]) -> Vec<String> {
+    let mut domains = std::collections::BTreeSet::new();
+    for s in stacks {
+        for lang in &s.languages {
+            match lang.as_str() {
+                "JavaScript" | "TypeScript" => {
+                    domains.insert("javascript");
+                    domains.insert("fullstack");
+                    domains.insert("api-layer");
+                }
+                "Rust" => {
+                    domains.insert("rust");
+                    domains.insert("api-layer");
+                }
+                // Other backend languages map to the API-layer architecture rules.
+                _ => {
+                    domains.insert("api-layer");
+                }
+            }
+        }
+        if !s.frameworks.is_empty() {
+            domains.insert("fullstack");
+        }
+    }
+    domains.into_iter().map(String::from).collect()
+}
+
+/// Propose corpus rules (the architectural ones that carry ALTERNATIVES) for the
+/// detected `domains`, each with its options + default so the architect chooses
+/// which alternative to codify. finding_count is 0: scanning these needs the
+/// per-language AST checker (future); the selection is real now.
+pub async fn propose_corpus_rules(domains: &[String], repos: &[String]) -> Vec<ProposedRule> {
+    let path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
+    if !path.exists() {
+        return Vec::new();
+    }
+    let (set, _errs) = camerata_rules::load_corpus_lenient(path).await;
+    let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
+    camerata_rules::select_for_domains(&set, &domain_refs)
+        .into_iter()
+        // Only the rules that actually have alternatives to choose among.
+        .filter(|r| !r.options.is_empty())
+        .map(|r| {
+            let options = r
+                .options
+                .iter()
+                .map(|o| RuleOptionView {
+                    id: o.id.clone(),
+                    label: o.label.clone(),
+                    directive: o.directive.clone(),
+                })
+                .collect();
+            let kind = if matches!(r.enforcement, camerata_rules::EnforcementKind::Mechanical) {
+                "mechanical"
+            } else {
+                "review"
+            };
+            ProposedRule {
+                id: r.id.0.clone(),
+                title: r.title.clone(),
+                kind: kind.to_string(),
+                options,
+                default_option: r.default_option.clone(),
+                scope: "repo-local".to_string(),
+                enforcement_point: "content".to_string(),
+                repos: repos.to_vec(),
+                placement: "CI gate + gate config installed in each repo".to_string(),
+                finding_count: 0,
+                // Recommend the ones with a default; the no-default ones still
+                // appear (the architect MUST choose an alternative for them).
+                recommended: r.has_default(),
+            }
+        })
+        .collect()
 }
 
 /// Build a report from already-aggregated findings + per-repo stacks. Pure.
@@ -578,7 +682,13 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         }
     }
 
+    // Propose the architectural corpus rules (with alternatives) for the detected
+    // stacks, alongside the content/cross-repo/process rules.
+    let domains = domains_for_stacks(&stacks);
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    let corpus = propose_corpus_rules(&domains, &report.repos).await;
+    report.proposed_rules.extend(corpus);
+
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }

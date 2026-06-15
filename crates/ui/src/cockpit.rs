@@ -26,7 +26,7 @@ use chorale_core::{
     Alignment, BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
     RenderKind, RowId, TableState,
 };
-use chorale_dioxus::{use_table, Table};
+use chorale_dioxus::{use_table, CellRenderer, CellRenderers, Table};
 
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
 /// filtered out server-side). The cockpit just renders what the BFF returns.
@@ -679,10 +679,22 @@ struct FindingView {
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
+struct RuleOptionView {
+    id: String,
+    label: String,
+    #[serde(default)]
+    directive: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
 struct ProposedRuleView {
     id: String,
     title: String,
     kind: String,
+    #[serde(default)]
+    options: Vec<RuleOptionView>,
+    #[serde(default)]
+    default_option: Option<String>,
     #[serde(default)]
     scope: String,
     #[serde(default)]
@@ -841,7 +853,11 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
 /// and Ignore / Resolve / Accept-as-tech-debt (open a ticket) them. Virtualized by
 /// chorale, so a large audit doesn't choke the UI.
 #[component]
-fn FindingsTable(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
+fn FindingsTable(
+    findings: Vec<FindingView>,
+    repos: Vec<String>,
+    descriptions: std::collections::HashMap<String, String>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let target_repo = repos.first().cloned().unwrap_or_default();
     let rows: Vec<(RowId, FindingView)> =
@@ -850,6 +866,26 @@ fn FindingsTable(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), finding_columns()));
     let mut busy = use_signal(|| false);
+
+    // Hover the rule id in the "type" column to read what it enforces (and, once a
+    // rule's alternative is chosen, the chosen alternative) — no memorizing.
+    let renderers = {
+        let desc = descriptions.clone();
+        let mut m: std::collections::HashMap<ColumnId, CellRenderer> =
+            std::collections::HashMap::new();
+        m.insert(
+            ColumnId("type"),
+            std::sync::Arc::new(move |val: &CellValue| {
+                let rid = match val {
+                    CellValue::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let tip = desc.get(&rid).cloned().unwrap_or_else(|| rid.clone());
+                rsx! { span { title: "{tip}", "{rid}" } }
+            }) as CellRenderer,
+        );
+        CellRenderers::new(m)
+    };
 
     rsx! {
         div { class: "findings-toolbar",
@@ -898,7 +934,85 @@ fn FindingsTable(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
                 if busy() { "Filing…" } else { "Accept as tech debt \u{2192} ticket" }
             }
         }
-        Table { handle, sort_enabled: true, filter_enabled: true, selection_enabled: true, resize_enabled: true }
+        Table { handle, sort_enabled: true, filter_enabled: true, selection_enabled: true, resize_enabled: true, cell_renderers: renderers }
+    }
+}
+
+/// The alternative-selection step: rules that carry alternatives get a per-rule
+/// picker. Rules with an adopted default pre-select it ("use defaults" sets them
+/// all at once); rules WITHOUT a default must be chosen before they can be armed.
+/// The chosen map (rule id -> option id) is shared via context so the findings
+/// table's rule-id hover can show the chosen alternative.
+#[component]
+fn AlternativesPicker(rules: Vec<ProposedRuleView>) -> Element {
+    let mut chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let opt_rules: Vec<ProposedRuleView> =
+        rules.into_iter().filter(|r| !r.options.is_empty()).collect();
+    if opt_rules.is_empty() {
+        return rsx! {};
+    }
+    let defaults: Vec<(String, String)> = opt_rules
+        .iter()
+        .filter_map(|r| r.default_option.clone().map(|d| (r.id.clone(), d)))
+        .collect();
+
+    rsx! {
+        div { class: "alts",
+            div { class: "alts-head",
+                div {
+                    p { class: "scan-section-h", "Choose an alternative per rule" }
+                    p { class: "scan-section-sub", "Some rules ship an adopted default; rules without one require a choice before they can be armed." }
+                }
+                button {
+                    class: "btn-restart",
+                    onclick: move |_| {
+                        for (id, d) in &defaults {
+                            chosen.write().insert(id.clone(), d.clone());
+                        }
+                    },
+                    "Use defaults where available"
+                }
+            }
+            for r in opt_rules.iter() {
+                {
+                    let rid = r.id.clone();
+                    let current = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                    let must_choose = r.default_option.is_none() && current.is_none();
+                    let cls = if must_choose { "alt-row must" } else { "alt-row" };
+                    rsx! {
+                        div { class: "{cls}",
+                            div { class: "alt-rule",
+                                span { class: "alt-rule-id", "{r.id}" }
+                                span { class: "alt-rule-title", "{r.title}" }
+                                if must_choose {
+                                    span { class: "alt-must", "choice required" }
+                                }
+                            }
+                            select {
+                                class: "alt-select",
+                                value: current.clone().unwrap_or_default(),
+                                onchange: move |e| { chosen.write().insert(rid.clone(), e.value()); },
+                                if r.default_option.is_none() {
+                                    option { value: "", "— choose an alternative —" }
+                                }
+                                for o in r.options.iter() {
+                                    option {
+                                        value: "{o.id}",
+                                        selected: current.as_deref() == Some(o.id.as_str()),
+                                        title: "{o.directive}",
+                                        if r.default_option.as_deref() == Some(o.id.as_str()) {
+                                            "{o.label} (default)"
+                                        } else {
+                                            "{o.label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1079,6 +1193,35 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
 fn ScanResults(report: ScanReportView) -> Element {
     let high = report.findings.iter().filter(|f| f.severity == "high").count();
     let table_key = format!("{}-{}", report.repos.join(","), report.findings.len());
+
+    // The architect's per-rule alternative choices (rule id -> option id), seeded
+    // with each rule's default. Shared so the findings hover reads the choice.
+    let chosen = use_signal(|| {
+        let mut m = std::collections::HashMap::<String, String>::new();
+        for r in &report.proposed_rules {
+            if let Some(d) = &r.default_option {
+                m.insert(r.id.clone(), d.clone());
+            }
+        }
+        m
+    });
+    use_context_provider(|| chosen);
+
+    // rule id -> what it enforces (the chosen/default alternative's directive, else
+    // the rule title), for the findings-table rule-id hover.
+    let descriptions: std::collections::HashMap<String, String> = report
+        .proposed_rules
+        .iter()
+        .map(|r| {
+            let picked = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+            let desc = picked
+                .and_then(|oid| r.options.iter().find(|o| o.id == oid).map(|o| o.directive.clone()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| r.title.clone());
+            (r.id.clone(), desc)
+        })
+        .collect();
+
     rsx! {
         div { class: "scan-results",
             if let Some(msg) = report.message.clone() {
@@ -1122,11 +1265,13 @@ fn ScanResults(report: ScanReportView) -> Element {
 
             p { class: "scan-section-h", "Findings already in these repos" }
             p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/type; filter by type or location." }
-            FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone() }
+            FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
 
             p { class: "scan-section-h", "Proposed starter ruleset" }
-            p { class: "scan-section-sub", "Select the rules to arm (each shows how many existing violations it catches). You own the final set; arming generates the governance PR." }
+            p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
             ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone() }
+
+            AlternativesPicker { rules: report.proposed_rules.clone() }
         }
     }
 }

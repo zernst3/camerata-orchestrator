@@ -965,6 +965,15 @@ html, body {
 .scan-stack-repo { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-stack-tech { color: var(--ink-soft); }
 .findings-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.alts { margin-top: 22px; }
+.alts-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.alt-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.alt-row.must { background: #fff8ef; border-radius: 8px; padding: 10px 12px; border-bottom: none; margin: 4px 0; }
+.alt-rule { display: flex; flex-direction: column; gap: 2px; }
+.alt-rule-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 700; color: var(--ink); }
+.alt-rule-title { font-size: 12px; color: var(--ink-soft); }
+.alt-must { display: inline-block; margin-top: 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #8a4f1d; }
+.alt-select { min-width: 280px; max-width: 420px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 12px; background: var(--surface); }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }
