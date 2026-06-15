@@ -31,6 +31,31 @@ Everything else is wired. You provide:
    Camerata locks each agent to a single gated write tool; it never gets `Bash`,
    `Write`, or subagents (see [`HARDENING.md`](HARDENING.md)).
 
+   **CLI vs API.** Camerata's live driver shells out to the **`claude` CLI**
+   (`claude -p`); a direct-Anthropic-API driver is a seam but not built. So you
+   configure *how the CLI authenticates*: log in for **subscription** credits, or
+   set `ANTHROPIC_API_KEY` for **metered API** billing (the CLI picks it up). Set
+   `CAMERATA_LIVE_BUILD=1` to run a real `claude -p` fleet (otherwise runs are
+   scripted/token-free, but the gate deciding is still the real one).
+
+### Notifications & polling cadence (optional env)
+
+Camerata polls the integrations (no webhooks needed). Intervals are env-configurable
+with sensible defaults:
+
+| Variable | Default | What it paces |
+|---|---|---|
+| `CAMERATA_POLL_TRACKER_SECS` | `45` | Server poll of tracker events (PO comments, status changes). |
+| `CAMERATA_POLL_DEPLOY_SECS` | `5` | Deployment-status poll (fast; reserved until a deploy source is wired). |
+| `CAMERATA_UI_NOTIFY_SECS` | `5` | How often the app drains the notification feed into toasts. |
+
+The app shows **toasts**: a warning when no integration is connected (optional, not
+an error), an error when a configured connection fails (401/403/5xx), and an info
+toast when one recovers — re-checked every 45s. Tracker events (a PO answering a
+comment) flow through the server poller into toasts. Note the background tracker
+poll uses the connection's **default repo** (`CAMERATA_GITHUB_REPO`); set it for the
+poller to have a repo to watch.
+
 Set the token, then launch:
 ```bash
 CAMERATA_GITHUB_TOKEN=github_pat_xxx cargo run -p camerata-ui

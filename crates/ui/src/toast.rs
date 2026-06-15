@@ -130,6 +130,70 @@ async fn fetch_connections() -> Option<ConnectionsView> {
         .ok()
 }
 
+// ── Notification poller ────────────────────────────────────────────────────────
+
+/// One notification from the BFF feed. Extra fields (id, source) are ignored.
+#[derive(Deserialize, Clone)]
+struct NotificationView {
+    kind: String,
+    message: String,
+}
+
+#[derive(Deserialize, Clone)]
+struct NotificationsFeed {
+    notifications: Vec<NotificationView>,
+    cursor: u64,
+}
+
+async fn fetch_notifications(since: u64) -> Option<NotificationsFeed> {
+    reqwest::get(format!("{}/api/notifications?since={since}", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<NotificationsFeed>()
+        .await
+        .ok()
+}
+
+/// Invisible component: drains the BFF notification feed on a cadence and pushes
+/// each new event as a toast. The feed is fed by the server-side event-ingest
+/// pollers (tracker events now; deploy status when wired). The UI drain cadence is
+/// `CAMERATA_UI_NOTIFY_SECS` (default 5s) so server-ingested events surface
+/// quickly. Mount once near the app root.
+#[component]
+pub fn NotificationPoller() -> Element {
+    let toasts = use_context::<Signal<Vec<Toast>>>();
+    use_hook(move || {
+        let secs = std::env::var("CAMERATA_UI_NOTIFY_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(5);
+        spawn(async move {
+            // Start from the current high-water mark so we only toast NEW events,
+            // not whatever was already in the feed when the app launched.
+            let mut cursor = match fetch_notifications(0).await {
+                Some(feed) => feed.cursor,
+                None => 0,
+            };
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                if let Some(feed) = fetch_notifications(cursor).await {
+                    for n in &feed.notifications {
+                        let kind = match n.kind.as_str() {
+                            "error" => ToastKind::Error,
+                            "warning" => ToastKind::Warning,
+                            _ => ToastKind::Info,
+                        };
+                        push_toast(toasts, kind, n.message.clone());
+                    }
+                    cursor = feed.cursor;
+                }
+            }
+        });
+    });
+    rsx! {}
+}
+
 /// Invisible component: probes connection health on startup and on a slow cadence,
 /// pushing toasts on the initial state and on any transition. Mount it once near
 /// the app root.

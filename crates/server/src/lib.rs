@@ -16,6 +16,7 @@
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
+pub mod notify;
 pub mod live_fleet;
 pub mod provider;
 pub mod routine;
@@ -52,6 +53,7 @@ pub struct AppState {
     provider: ProviderHandle,
     decompositions: DecompositionStore,
     routines: RoutineStore,
+    notifications: crate::notify::NotificationStore,
 }
 
 impl AppState {
@@ -65,6 +67,7 @@ impl AppState {
             provider: ProviderHandle::native(),
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
+            notifications: crate::notify::NotificationStore::new(),
         }
     }
 
@@ -116,6 +119,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
+        .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
@@ -130,7 +134,18 @@ pub fn router(state: AppState) -> Router {
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
-    let app = router(AppState::from_env());
+    let state = AppState::from_env();
+
+    // Background event-ingest pollers (tracker events -> notification feed -> UI
+    // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
+    // in `router`, so unit tests that build the router don't start background work.
+    crate::notify::spawn_tracker_poller(
+        state.provider.provider.clone(),
+        state.notifications.clone(),
+    );
+    crate::notify::spawn_deploy_poller(state.notifications.clone());
+
+    let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("camerata-server listening on http://{addr}");
     axum::serve(listener, app).await?;
@@ -276,6 +291,23 @@ async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value>
 /// not an error, in the UI).
 async fn connections_status() -> Json<crate::connections::ConnectionsReport> {
     Json(crate::connections::probe().await)
+}
+
+/// Query for draining the notification feed: only items newer than `since`.
+#[derive(serde::Deserialize)]
+struct NotifyQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+/// The notification feed the UI polls (env-configurable cadence) and turns into
+/// toasts. Returns items with id > `since` plus the new cursor to send next time.
+async fn notifications_feed(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<NotifyQuery>,
+) -> Json<serde_json::Value> {
+    let (items, cursor) = state.notifications.since(q.since);
+    Json(serde_json::json!({ "notifications": items, "cursor": cursor }))
 }
 
 /// Request to adopt an external work item by its tracker id.

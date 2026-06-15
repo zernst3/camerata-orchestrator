@@ -149,6 +149,8 @@ fn App() -> Element {
         div { class: "app-root",
             // Watches connection health and pushes warning/error toasts; renders nothing.
             toast::ConnectionWatcher {}
+            // Drains the server-side event-ingest feed (tracker/deploy) into toasts.
+            toast::NotificationPoller {}
             EditionSwitcher { edition }
             match edition() {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
