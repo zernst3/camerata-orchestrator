@@ -82,7 +82,11 @@ pub fn allowed_tools_for_role(role: &Role) -> Vec<String> {
 pub struct ClaudeCliDriver {
     /// Path to the MCP config that points the agent at the Rust gateway.
     pub mcp_config_path: String,
-    /// Built-in tools removed so the agent cannot bypass the gate.
+    /// Built-in tools EXPLICITLY denied so the agent cannot bypass the gate, even if
+    /// `--allowedTools` is not strictly exclusive. Covers the direct write/exec tools
+    /// AND `Task` (subagent spawning), which could otherwise launch a child agent that
+    /// regains Write/Bash. This denylist must be re-audited on every Claude Code CLI
+    /// upgrade: a new write/exec/spawn tool added by the CLI must be added here.
     pub disallowed_builtins: Vec<String>,
     /// Optional worktree the agent is bound to. When set it becomes the child
     /// process cwd AND is passed via `--add-dir`, scoping the agent to its
@@ -94,7 +98,7 @@ impl ClaudeCliDriver {
     pub fn new(mcp_config_path: impl Into<String>) -> Self {
         Self {
             mcp_config_path: mcp_config_path.into(),
-            disallowed_builtins: ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"]
+            disallowed_builtins: ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -209,6 +213,33 @@ mod tests {
         let allowed_val = &args[allowed_idx + 1];
         assert!(allowed_val.contains(GATED_WRITE_TOOL));
         assert!(allowed_val.contains("Read"));
+    }
+
+    #[test]
+    fn escape_tools_are_explicitly_denied_and_never_allowed() {
+        // The cage's integrity must not rest only on --allowedTools being exclusive:
+        // every write/exec/spawn tool is on the explicit denylist, AND absent from the
+        // allowlist. `Task` matters most (a subagent could otherwise regain Write/Bash).
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json");
+        let args = driver.build_args(&role(), "task");
+        let disallowed = {
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(
+                disallowed.split(' ').any(|t| t == tool),
+                "{tool} must be on the explicit denylist"
+            );
+            assert!(
+                !allowed.split(' ').any(|t| t == tool),
+                "{tool} must never be on the allowlist"
+            );
+        }
     }
 
     #[test]
