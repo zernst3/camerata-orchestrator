@@ -162,6 +162,17 @@ cargo run -p camerata-ui                    # the Dioxus app-builder surface (de
   the same trait seam) so every user/AI edit is saved with full history.
 - **UI:** a Dioxus app; tabular surfaces dogfood [Chorale](../rust-chorale).
 
+## How an AI agent fits behind the gate
+
+The orchestrator makes zero model calls; it prepares a session and spawns a `claude -p`
+agent behind the `AgentDriver` seam. The agent's built-in write tools are disallowed,
+so its only way to write is the gateway's MCP tool, which denies or allows each write
+before it executes (layer 1). Allowed writes land in an isolated worktree; layer-2
+checks bounce failures back. The agent uses your own local Claude login (Camerata holds
+no model credentials), and the gate is model-agnostic.
+
+![Camerata architecture: how an AI agent fits behind the governance gate](docs/architecture-agent-gate.svg)
+
 ## Family
 
 - [camerata-ai](../camerata-ai) — the rule corpus and conventions engine.
