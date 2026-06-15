@@ -2,6 +2,24 @@
 
 Current, post-clean-slate UI follow-ups. Newest intent at the top.
 
+- **Where chorale (the headless table) earns its keep — decided 2026-06-15.** Do NOT
+  justify chorale on the routines table (3 rows; a virtualized grid behind it reads as
+  hammer-thumbtack and undercuts the right-sizing judgment). Wire it into the cockpit
+  surfaces where data genuinely scales:
+  - **Brownfield audit findings** — a real audit can surface hundreds/thousands of
+    findings. This is the prime home: group + sort by finding TYPE and severity,
+    group + sort proposed RULES with **selection** (checkboxes to accept/reject into the
+    approved set), filtering. Virtualization is real value here, not decoration.
+  - **Gate activity log** — the run/verdict stream grows; same primitive.
+  Then the routines table (and other small fixed lists) ride the SAME primitive for
+  consistency (one table abstraction across the cockpit), explicitly NOT because they
+  "need virtualization." chorale is headless, so small-N surfaces use the table state
+  (columns/sort/selection) without lighting up the virtualization path. The defensible
+  line to keep: "chorale where data can scale (audit findings, activity logs); the same
+  primitive for the small lists for consistency; a plain table for a true one-off."
+  Build order: the audit-findings table is the design to nail (grouping/sorting/selection
+  over a large finding set) and pairs with the brownfield scan engine.
+
 - **Dark mode** (requested 2026-06-15; NOT a priority). The whole look is driven by
   CSS custom properties in `crates/ui/src/style.rs` (`--ink`, `--ink-soft`,
   `--ink-faint`, `--surface`, `--line`, `--accent`, plus the warm onboarding-gate

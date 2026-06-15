@@ -6,6 +6,14 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-15_routine_authoring_intent_not_prompt.md** — the routine form was
+  treating the user's text as the literal agent prompt; backwards. The user writes
+  INTENT (what they want); the lead-engineer AI authors the OPERATIONAL prompt
+  (model tiering, directives, governance framing, scope) and the user reviews/edits
+  before save. Same intake→clarify / propose→approve shape as the rest of the
+  product. Routine gains `intent` + `prompt`; `POST /api/routines/draft-prompt`
+  drafts it (deterministic scaffold now, `authored_by: scaffold|claude`; real AI
+  authoring activates with Claude). The raw intent is never run as-is.
 - **2026-06-15_credential_delegated_scope_and_build_targets.md** — Camerata never
   self-scopes: the connected token/account IS the scope (no `CAMERATA_GITHUB_REPO`
   process pin; mirror the GitHub-MCP model of repo-as-per-call, not repo-as-process).

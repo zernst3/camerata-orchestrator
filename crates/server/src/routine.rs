@@ -31,6 +31,13 @@ pub struct Routine {
     /// Human-readable schedule (e.g. "daily 04:00"). The scheduler that fires on it is
     /// the remaining wiring.
     pub schedule: String,
+    /// The user's plain-language description of WHAT they want the routine to do.
+    /// This is what the user writes; the AI authors the operational `prompt` from it
+    /// (ADR routine_authoring_intent_not_prompt).
+    pub intent: String,
+    /// The OPERATIONAL prompt the agent actually runs — authored from `intent` by the
+    /// lead-engineer AI (model tiering, directives, governance framing) and
+    /// human-reviewed. Never the user's raw description verbatim.
     pub prompt: String,
     /// The permission / rule scope the routine runs under (shown so an unattended
     /// agent's governance is legible).
@@ -39,13 +46,65 @@ pub struct Routine {
     pub last_run: Option<RoutineRunSummary>,
 }
 
-/// Request body to create a routine.
+/// Request body to create a routine. The user supplies `intent`; `prompt` is the
+/// reviewed operational prompt (from the draft step). If `prompt` is empty the
+/// server scaffolds one from the intent so the raw description is never run as-is.
 #[derive(Deserialize)]
 pub struct CreateRoutineReq {
     pub name: String,
     pub schedule: String,
+    pub intent: String,
+    #[serde(default)]
     pub prompt: String,
     pub scope: String,
+}
+
+/// Request body for the draft-prompt step: the user's intent + scope.
+#[derive(Deserialize)]
+pub struct DraftPromptReq {
+    pub intent: String,
+    #[serde(default)]
+    pub scope: String,
+}
+
+/// Response from the draft-prompt step.
+#[derive(Serialize)]
+pub struct DraftPromptResp {
+    /// The drafted operational prompt for the user to review/edit.
+    pub prompt: String,
+    /// How it was authored: `scaffold` (deterministic fallback, no Claude) or
+    /// `claude` (the lead-engineer AI authored it).
+    pub authored_by: String,
+}
+
+/// Deterministic scaffold for the operational prompt when no Claude connection is
+/// available to author it for real. Wraps the user's intent with the standard
+/// governance/scope framing and marks model tiering as the lead engineer's call,
+/// so the flow is usable offline and the user always reviews a structured prompt
+/// rather than running their raw description. The real AI authoring replaces this
+/// when Claude is connected.
+pub fn scaffold_prompt(intent: &str, scope: &str) -> String {
+    let scope = if scope.trim().is_empty() {
+        "read-only"
+    } else {
+        scope.trim()
+    };
+    format!(
+        "Objective (from the user's description):\n{intent}\n\n\
+         Operating constraints:\n\
+         - Every file write passes the governance gate (deny-before-execute); the agent \
+         has no shell, no direct file tools, and cannot spawn subagents.\n\
+         - Scope / rules: {scope}\n\
+         - Model tiering: use the smallest capable model per task and escalate only for \
+         genuinely hard reasoning (the lead engineer sets this per task once Claude is \
+         connected).\n\
+         - Be directive and concrete: prefer exact files and steps over open-ended \
+         exploration.\n\
+         - Report what was done, what the gate denied, and anything left for human \
+         review.\n\n\
+         [Draft scaffold — connect Claude so the lead engineer authors the full \
+         operational prompt (including chosen model tiers) from your description.]"
+    )
 }
 
 /// Request body to enable/disable a routine.
@@ -69,36 +128,45 @@ impl RoutineStore {
     /// A store seeded with representative routines so the dashboard has content.
     pub fn seeded() -> Self {
         let store = Self::new();
+        let mk = |id: &str, name: &str, schedule: &str, intent: &str, scope: &str, enabled: bool| {
+            Routine {
+                id: id.to_string(),
+                name: name.to_string(),
+                schedule: schedule.to_string(),
+                intent: intent.to_string(),
+                // Demo data: the operational prompt is the scaffold of the intent
+                // (the live create path does the same, or AI-authors it).
+                prompt: scaffold_prompt(intent, scope),
+                scope: scope.to_string(),
+                enabled,
+                last_run: None,
+            }
+        };
         let seed = vec![
-            Routine {
-                id: "rt-1".to_string(),
-                name: "Nightly dependency + security sweep".to_string(),
-                schedule: "daily 04:00".to_string(),
-                prompt: "Scan dependencies for advisories; open governed PRs for safe upgrades."
-                    .to_string(),
-                scope: "SEC-* + maintenance, write behind the gate".to_string(),
-                enabled: true,
-                last_run: None,
-            },
-            Routine {
-                id: "rt-2".to_string(),
-                name: "Stale-PR auditor".to_string(),
-                schedule: "weekly Mon 09:00".to_string(),
-                prompt: "Flag PRs with no activity in 14 days and summarize what they are blocked on."
-                    .to_string(),
-                scope: "read-only".to_string(),
-                enabled: true,
-                last_run: None,
-            },
-            Routine {
-                id: "rt-3".to_string(),
-                name: "Convention drift check".to_string(),
-                schedule: "daily 06:00".to_string(),
-                prompt: "Check that CONVENTIONS rule ids referenced in code still exist.".to_string(),
-                scope: "ARCH-*, read-only".to_string(),
-                enabled: false,
-                last_run: None,
-            },
+            mk(
+                "rt-1",
+                "Nightly dependency + security sweep",
+                "daily 04:00",
+                "Scan dependencies for advisories; open governed PRs for safe upgrades.",
+                "SEC-* + maintenance, write behind the gate",
+                true,
+            ),
+            mk(
+                "rt-2",
+                "Stale-PR auditor",
+                "weekly Mon 09:00",
+                "Flag PRs with no activity in 14 days and summarize what they are blocked on.",
+                "read-only",
+                true,
+            ),
+            mk(
+                "rt-3",
+                "Convention drift check",
+                "daily 06:00",
+                "Check that CONVENTIONS rule ids referenced in code still exist.",
+                "ARCH-*, read-only",
+                false,
+            ),
         ];
         if let Ok(mut guard) = store.items.lock() {
             *guard = seed;
@@ -113,11 +181,19 @@ impl RoutineStore {
 
     pub fn create(&self, req: &CreateRoutineReq) -> Routine {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        // The user's raw intent is never run as-is: if the reviewed operational
+        // prompt is empty, scaffold one from the intent.
+        let prompt = if req.prompt.trim().is_empty() {
+            scaffold_prompt(&req.intent, &req.scope)
+        } else {
+            req.prompt.clone()
+        };
         let routine = Routine {
             id: format!("rt-{n}"),
             name: req.name.clone(),
             schedule: req.schedule.clone(),
-            prompt: req.prompt.clone(),
+            intent: req.intent.clone(),
+            prompt,
             scope: req.scope.clone(),
             enabled: true,
             last_run: None,
@@ -176,11 +252,16 @@ mod tests {
         let created = store.create(&CreateRoutineReq {
             name: "Ad-hoc".to_string(),
             schedule: "manual".to_string(),
-            prompt: "do a thing".to_string(),
+            intent: "do a thing".to_string(),
+            prompt: String::new(),
             scope: "read-only".to_string(),
         });
         assert_eq!(created.id, "rt-4");
         assert_eq!(store.list().len(), 4);
+        // Empty prompt -> scaffolded from intent (never run the raw intent as-is).
+        assert!(created.prompt.contains("do a thing"));
+        assert!(created.prompt.contains("governance gate"));
+        assert_eq!(created.intent, "do a thing");
 
         // Run-now records a real-gate summary (2 denies + 1 allow from the script).
         let ran = store.run_now("rt-1").unwrap();

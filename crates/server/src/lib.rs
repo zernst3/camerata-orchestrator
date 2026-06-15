@@ -125,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
         .route("/api/routines", get(list_routines).post(create_routine))
+        .route("/api/routines/draft-prompt", post(draft_routine_prompt))
         .route("/api/routines/:id/enable", post(set_routine_enabled))
         .route("/api/routines/:id/run", post(run_routine_now))
         .with_state(state)
@@ -411,6 +412,22 @@ async fn create_routine(
     Json(req): Json<CreateRoutineReq>,
 ) -> Json<Routine> {
     Json(state.routines.create(&req))
+}
+
+/// Draft the operational prompt from the user's intent (ADR
+/// routine_authoring_intent_not_prompt). The user describes WHAT they want; this
+/// returns the operational prompt for them to review/edit. Today it returns the
+/// deterministic scaffold (`authored_by: scaffold`); when Claude is connected the
+/// lead-engineer AI authors it for real (`authored_by: claude`) — that hook lives
+/// here.
+async fn draft_routine_prompt(
+    Json(req): Json<crate::routine::DraftPromptReq>,
+) -> Json<crate::routine::DraftPromptResp> {
+    let prompt = crate::routine::scaffold_prompt(&req.intent, &req.scope);
+    Json(crate::routine::DraftPromptResp {
+        prompt,
+        authored_by: "scaffold".to_string(),
+    })
 }
 
 /// Enable or disable a routine.

@@ -1207,5 +1207,8 @@ html, body {
 .routine-create { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
 .routine-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .routine-create-row .addressee-input { flex: 1; min-width: 140px; }
-.routine-prompt-input { width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+.routine-intent-input { width: 100%; box-sizing: border-box; margin: 8px 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 13px; resize: vertical; }
+.routine-draft-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.routine-authored { font-size: 12px; color: var(--ink-soft); font-style: italic; }
+.routine-prompt-input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; resize: vertical; }
 "#;
