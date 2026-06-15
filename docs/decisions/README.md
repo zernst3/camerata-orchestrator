@@ -6,6 +6,17 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-15_cockpit_story_view_ux.md** — how the cockpit's story-view behaves over
+  a real (messy) tracker: a governed working SET the Architect adopts into, never a
+  mirror of the board (no whole-board polling); provider-neutral across ADO / Jira /
+  GitHub on two axes (board + code host), GitHub-first PoC (it serves both axes);
+  intake by explicit id then a scoped saved-query picker ("current sprint + assigned
+  to me") then opt-in tag/column; spine grouped by Camerata `FeatureStatus` with the
+  NEEDS YOU queue as the working surface; the clarify-bridge posts an agent question
+  as a tracker comment (review-then-post). Key call: the **respondent is a
+  Camerata-side per-story concept, seeded from tracker hints but not dependent on a
+  "PO" field**, with a never-block fallback ladder, because real teams often have no
+  PO and reassign constantly.
 - **2026-06-14_worktracker_port_architecture.md** — the architect surface: one
   `WorkItemProvider` port (core imports no provider); our Story spine is canonical, the tracker is a
   mirror configurable per field (provenance/gate/PR/sign-off always ours); two
@@ -43,6 +54,7 @@ written down, so the trail is navigable, not just buried in commit messages.
 | Maintenance / ops agent + dependency ownership | ADR `maintenance_ops_agent_and_dependencies`; `CONSUMER_UX.md` (Maintenance section) |
 | Why deterministic governance, and the design rationale | `RATIONALE.md` |
 | Two interaction surfaces on one engine, BYO-infra | `VISION.md` |
+| Cockpit story-view UX + tracker working set + respondent model | ADR `cockpit_story_view_ux`; `WORKTRACKER_INTEGRATION.md` |
 | The governance gate + enforcement | `RATIONALE.md`; `ENFORCEMENT.md`; `RUST_CORE_VERIFICATION.md` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |
 
