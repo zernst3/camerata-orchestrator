@@ -692,6 +692,8 @@ struct ProposedRuleView {
     title: String,
     kind: String,
     #[serde(default)]
+    enforcement: String,
+    #[serde(default)]
     options: Vec<RuleOptionView>,
     #[serde(default)]
     default_option: Option<String>,
@@ -739,6 +741,43 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
         .json::<ScanReportView>()
         .await
         .ok()
+}
+
+/// A fully-resolved rule sent to arm (the chosen directive + where it installs).
+#[derive(Clone, serde::Serialize)]
+struct ArmRuleReq {
+    id: String,
+    title: String,
+    directive: String,
+    enforcement: String,
+    repos: Vec<String>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct ArmResultView {
+    repo: String,
+    ok: bool,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Arm: install the selected rules into their repos via governance PRs.
+async fn arm_rules(rules: &[ArmRuleReq]) -> Option<Vec<ArmResultView>> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/arm", crate::BFF_URL))
+        .json(&serde_json::json!({ "rules": rules }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v.get("results").cloned()?).ok()
 }
 
 /// Accept selected findings as tech debt: open a GitHub issue. Returns the URL.
@@ -1020,11 +1059,71 @@ fn AlternativesPicker(rules: Vec<ProposedRuleView>) -> Element {
 /// each rule into the approved starter set.
 #[component]
 fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let rows: Vec<(RowId, ProposedRuleView)> =
-        rules.into_iter().map(|r| (RowId::new(), r)).collect();
+        rules.iter().map(|r| (RowId::new(), r.clone())).collect();
+    let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
+        rows.iter().map(|(r, p)| (*r, p.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
+    let mut arming = use_signal(|| false);
+
     rsx! {
         Table { handle, sort_enabled: true, selection_enabled: true }
+        div { class: "findings-toolbar",
+            button {
+                class: "btn-run",
+                disabled: arming(),
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    let picked: Vec<ProposedRuleView> = sel.iter().filter_map(|id| id_map.get(id).cloned()).collect();
+                    if picked.is_empty() { return; }
+                    // Resolve each selected rule to its adopted directive; a rule
+                    // with alternatives and no choice yet blocks arming.
+                    let mut arm_reqs = Vec::new();
+                    let mut unresolved = Vec::new();
+                    for r in &picked {
+                        let directive = if r.options.is_empty() {
+                            r.title.clone()
+                        } else {
+                            let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                            match oid.and_then(|oid| r.options.iter().find(|o| o.id == oid).map(|o| o.directive.clone())) {
+                                Some(d) if !d.is_empty() => d,
+                                _ => { unresolved.push(r.id.clone()); continue; }
+                            }
+                        };
+                        arm_reqs.push(ArmRuleReq {
+                            id: r.id.clone(),
+                            title: r.title.clone(),
+                            directive,
+                            enforcement: r.enforcement.clone(),
+                            repos: r.repos.clone(),
+                        });
+                    }
+                    if !unresolved.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Choose an alternative first for: {}", unresolved.join(", ")));
+                        return;
+                    }
+                    arming.set(true);
+                    spawn(async move {
+                        match arm_rules(&arm_reqs).await {
+                            Some(results) => {
+                                for r in results {
+                                    if r.ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: governance PR \u{2192} {}", r.repo, r.url.unwrap_or_default()));
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
+                                    }
+                                }
+                            }
+                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Arm failed — needs Contents + PR write on the connected token."),
+                        }
+                        arming.set(false);
+                    });
+                },
+                if arming() { "Arming…" } else { "Arm selected rules \u{2192} governance PR" }
+            }
+        }
     }
 }
 

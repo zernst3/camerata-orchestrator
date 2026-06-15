@@ -64,6 +64,11 @@ pub struct ProposedRule {
     pub title: String,
     /// `mechanical` (deterministic check exists) | `review` (human-judged).
     pub kind: String,
+    /// The corpus enforcement level: `prose` | `structured` | `mechanical`. Drives
+    /// where arm emits the rule (prose -> AGENTS.md, the rest -> CONVENTIONS.md),
+    /// matching camerata-ai's emit partitioning.
+    #[serde(default)]
+    pub enforcement: String,
     /// The alternatives the architect chooses among. Empty for mechanical rules
     /// with no variants (the content/security rules).
     #[serde(default)]
@@ -213,6 +218,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             id: id.to_string(),
             title: title_for(id),
             kind: "mechanical".to_string(),
+            enforcement: "mechanical".to_string(),
             // Content/security rules are single-variant: one deterministic check,
             // no alternatives to choose among.
             options: Vec::new(),
@@ -236,6 +242,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             // Deterministic enforcement needs the integration gate (designed, not
             // built), so it is review-tier until that lands.
             kind: "review".to_string(),
+            enforcement: "structured".to_string(),
             options: Vec::new(),
             default_option: None,
             scope: "cross-repo".to_string(),
@@ -252,6 +259,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         id: "PROCESS-CONVENTIONAL-COMMIT-1".to_string(),
         title: "Commit subject follows conventional-commits (type: subject).".to_string(),
         kind: "mechanical".to_string(),
+        enforcement: "mechanical".to_string(),
         options: Vec::new(),
         default_option: None,
         scope: "process".to_string(),
@@ -442,6 +450,11 @@ pub async fn propose_corpus_rules(domains: &[String], repos: &[String]) -> Vec<P
                     directive: o.directive.clone(),
                 })
                 .collect();
+            let enforcement = match r.enforcement {
+                camerata_rules::EnforcementKind::Prose => "prose",
+                camerata_rules::EnforcementKind::Structured => "structured",
+                camerata_rules::EnforcementKind::Mechanical => "mechanical",
+            };
             let kind = if matches!(r.enforcement, camerata_rules::EnforcementKind::Mechanical) {
                 "mechanical"
             } else {
@@ -451,6 +464,7 @@ pub async fn propose_corpus_rules(domains: &[String], repos: &[String]) -> Vec<P
                 id: r.id.0.clone(),
                 title: r.title.clone(),
                 kind: kind.to_string(),
+                enforcement: enforcement.to_string(),
                 options,
                 default_option: r.default_option.clone(),
                 scope: "repo-local".to_string(),

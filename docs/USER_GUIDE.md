@@ -100,9 +100,14 @@ The flow is **scan → propose → approve → audit → arm**:
    already wrong. This is the five-minute payoff ("here are the 12 things wrong in
    your repo right now"). *Content rules (hardcoded secrets, raw-SQL-concat, secrets
    in URLs) audit today; the AST-level architecture rules follow.*
-5. **Arm** — generate **one** governance PR: `CONVENTIONS.md`/`AGENTS.md`, an
-   enforced CI workflow, and the gate's rule-subset config. Merge it and new
-   violations are stopped at the gate going forward.
+5. **Arm** — select the rules and press **"Arm selected rules → governance PR"**.
+   Camerata opens a PR per repo installing the **adopted** ruleset in the
+   camerata-ai emit format: **prose** rules → `AGENTS.md`, **structured/mechanical**
+   rules → `CONVENTIONS.md` (each as a single citable directive — your chosen
+   alternative, not the curation surface), plus `.camerata/rules.json` (the gate
+   config). A rule with alternatives must have an alternative chosen first. Merge
+   the PR and the repo is governed going forward. (Needs Contents + PR write on the
+   token.)
 
 ### Greenfield (a new repo)
 **name → pick starter ruleset → scaffold + arm**: Camerata scaffolds the repo with

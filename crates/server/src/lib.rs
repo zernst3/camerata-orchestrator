@@ -13,6 +13,7 @@
 //! Execution endpoints (run a governed fleet on a story) and a live-status stream
 //! land in later phases, behind the same router.
 
+pub mod arm;
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
@@ -124,6 +125,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/onboard/ticket", post(onboard_ticket))
+        .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
@@ -372,6 +374,45 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
+}
+
+/// Request to arm a set of repos with the approved (resolved) rules.
+#[derive(serde::Deserialize)]
+struct ArmReq {
+    /// Fully-resolved rules (each with its chosen directive + which repos it goes to).
+    rules: Vec<crate::arm::ArmRule>,
+}
+
+/// Arm: install the approved ruleset into each repo via a governance PR (AGENTS.md
+/// / CONVENTIONS.md / gate config), per the camerata-ai emit format. Gated on the
+/// token (needs Contents + PR write). Returns a per-repo result list.
+async fn onboard_arm(Json(req): Json<ArmReq>) -> Json<serde_json::Value> {
+    if req.rules.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to arm." }));
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to arm." }));
+    };
+
+    let by_repo = crate::arm::rules_by_repo(&req.rules);
+    let mut results = Vec::new();
+    for (repo, rules) in by_repo {
+        let Some((owner, name)) = repo.split_once('/') else {
+            results.push(serde_json::json!({ "repo": repo, "ok": false, "message": "not owner/repo" }));
+            continue;
+        };
+        let files = crate::arm::arm_files_for_repo(&rules);
+        match crate::arm::arm_repo(owner, name, &token, &files).await {
+            Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
+            Err(e) => {
+                results.push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") }))
+            }
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
 /// Query for draining the notification feed: only items newer than `since`.
