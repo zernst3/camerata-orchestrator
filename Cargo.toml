@@ -30,7 +30,11 @@ unwrap_used = "deny"
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+# Source-available, noncommercial. Deliberately NOT permissive: the code is fully
+# readable, but commercial / competing use is reserved to the copyright holder. You
+# can always loosen a license later; you cannot tighten one already shipped, so this
+# starts reserved. See LICENSE.
+license = "PolyForm-Noncommercial-1.0.0"
 authors = ["Zachary Ernst"]
 
 [workspace.dependencies]

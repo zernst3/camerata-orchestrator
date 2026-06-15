@@ -168,3 +168,11 @@ cargo run -p camerata-ui                    # the Dioxus app-builder surface (de
 - [rust-chorale](../rust-chorale) — the headless, virtualized Dioxus / Leptos table
   library used for tabular surfaces.
 - this repo — the conductor that leads the ensemble.
+
+## License
+
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). The code
+is fully readable, and noncommercial use (study, evaluation, personal and research
+projects) is permitted. Commercial and competing use is reserved by the copyright
+holder, Zachary Ernst. This is a deliberate choice over a permissive license: a
+license can be loosened later but never tightened, so it starts reserved.
