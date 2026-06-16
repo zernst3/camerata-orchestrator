@@ -439,8 +439,9 @@ fn arm_sec_no_hardcoded_secrets_1(_path: &str, content: &str) -> Result<(), Stri
 ///
 /// This pattern fires when **both** conditions hold on the same line or in
 /// close proximity in the file:
-///   1. A SQL keyword (SELECT, INSERT, UPDATE, DELETE, WHERE — case-insensitive)
-///      appears inside a string literal (detected by flanking quote context).
+///   1. A SQL keyword (SELECT, INSERT, UPDATE, DELETE — case-insensitive; WHERE is
+///      deliberately excluded as too common in prose) appears inside a string
+///      literal (detected by flanking quote context).
 ///   2. That same context contains either a format-interpolation placeholder
 ///      (`{}` — Rust/Python f-strings) OR a string-concatenation operator
 ///      (`" +` — a closing quote followed by a `+`).

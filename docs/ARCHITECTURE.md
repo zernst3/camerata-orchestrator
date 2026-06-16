@@ -21,7 +21,7 @@ boundary moved.
 | **MCP tool-gateway** | *our* Rust MCP server that checks every tool call against the rules before running it | authorization middleware for agent actions |
 | **Governance gate** | the checkpoint every agent action passes through (deny-before-execute) | auth middleware, but for what agents do |
 | **`PreToolUse` hook** | Claude Code's older "block a tool before it runs" script | replaced by the MCP gateway (stronger) |
-| **BFF** (Backend-for-Frontend) | thin server shaping core data for the UI | in the old TS design it bridged Rust-UI ↔ TS-core; all-Rust, it **disappears** |
+| **BFF** (Backend-for-Frontend) | thin server shaping core data for the UI | in the old TS design it bridged Rust-UI ↔ TS-core; all-Rust, the cross-language **boundary** disappears (the BFF survives as the embedded `camerata-server`) |
 | **Axum** | Rust web framework | Express, for Rust |
 | **Dioxus** | Rust UI framework (desktop/web) | React, for Rust |
 | **worktree** | multiple working dirs from one git repo, each on its own branch | lets each agent work isolated without collisions |
@@ -48,7 +48,7 @@ boundary moved.
 |     Dashboard grids dogfood rust-chorale.                    |
 +------------------------------+-------------------------------+
                                | localhost HTTP + WebSocket
-                               | (NO cross-language BFF: collapsed by all-Rust)
+                               | (NO cross-language boundary: the BFF is now embedded all-Rust)
 +------------------------------v-------------------------------+
 |  2. ORCHESTRATOR CORE  -  Rust, makes ZERO model calls       |
 |     - Intake driver        (your request -> work)            |
@@ -79,7 +79,9 @@ boundary moved.
 ```
 
 The verification's structural win: layers 2 and 3 were TypeScript with a Rust BFF
-bolted on to reach the UI. They are now Rust, and the BFF vanishes.
+bolted on to reach the UI. They are now Rust, and the cross-language BFF *boundary*
+vanishes — the BFF survives as the embedded `camerata-server` (Axum), now a
+same-language component rather than a cross-stack bridge.
 
 ---
 

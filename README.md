@@ -158,8 +158,9 @@ because the intended reader is exactly the person who will run the code and chec
   live API calls.** The `WorkItemProvider` port, the Jira / Azure DevOps / GitHub adapters, the
   async clarify-bridge, and SyncPolicy per-field source-of-truth + echo suppression all
   exist with an end-to-end flow test, but every adapter test runs against a scripted
-  fake transport. The real `ReqwestTransport` compiles but is instantiated nowhere; no
-  real board has been touched yet.
+  fake transport. The real `ReqwestTransport` is instantiated only for a startup
+  health check (a GitHub rate-limit probe); no real board work-item operations
+  (issue CRUD) have run against it yet.
 
 **Still ahead:** live execution wiring for the worktracker adapters (OAuth / webhooks),
 the Azure deploy adapter's live execution (BYO-infra credentials), deepening the gate's

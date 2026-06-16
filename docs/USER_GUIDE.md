@@ -5,11 +5,14 @@ all the way through?" walkthrough. It covers both **brownfield** (an existing re
 and **greenfield** (a new repo), the two credentials you connect, and the full loop
 from onboarding a repo to shipping a governed change.
 
-> Status note (2026-06-15): the app runs end to end on a **clean slate** with no
-> seeded data. The two things you connect are a **GitHub token** and **Claude**
-> (the `claude` CLI). What each step needs is called out inline, honestly: some
-> steps light up the moment the token is present; the brownfield *scan/audit
-> engine* is the next backend build and is flagged where it applies.
+> Status note (updated 2026-06-16): the app runs end to end on a **clean slate** with
+> no seeded data. The two things you connect are a **GitHub token** and **Claude**
+> (the `claude` CLI). What each step needs is called out inline, honestly: the steps
+> light up the moment the token is present. The brownfield **scan + audit engine is
+> now built and live** — the deterministic security floor (secrets / raw-SQL /
+> secret-URLs) plus an AI architectural audit, with a user-selectable model, three
+> scan modes (Parallel / Sequential / Background job), and async jobs you can walk
+> away from. See the Audit step below.
 
 ---
 
@@ -48,6 +51,18 @@ with sensible defaults:
 | `CAMERATA_POLL_TRACKER_SECS` | `45` | Server poll of tracker events (PO comments, status changes). |
 | `CAMERATA_POLL_DEPLOY_SECS` | `5` | Deployment-status poll (fast; reserved until a deploy source is wired). |
 | `CAMERATA_UI_NOTIFY_SECS` | `5` | How often the app drains the notification feed into toasts. |
+
+#### Audit / model env (optional)
+
+The audit model is picked in the UI per scan, but these env vars set defaults and
+tune the LLM calls:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CAMERATA_LLM_MODEL` | `claude-sonnet-4-6` | Default model for generic/research LLM calls. |
+| `CAMERATA_AUDIT_MODEL` | (the default) | Default model for the audit passes (the UI model picker overrides it per scan). |
+| `CAMERATA_LLM_IDLE_SECS` | `120` | Stall timeout for a streaming call — fails a pass if the model produces no output for this long (catches a true hang without capping a legitimately long stream). |
+| `CAMERATA_LLM_MAX_SECS` | `600` | Coarse total backstop for non-streaming calls (calibration/headless). |
 
 The app shows **toasts**: a warning when no integration is connected (optional, not
 an error), an error when a configured connection fails (401/403/5xx), and an info
@@ -98,8 +113,16 @@ The flow is **scan → propose → approve → audit → arm**:
 3. **Approve / edit** — adjust and approve. You own the final set.
 4. **Audit** — scan the existing code against the approved rules and list what's
    already wrong. This is the five-minute payoff ("here are the 12 things wrong in
-   your repo right now"). *Content rules (hardcoded secrets, raw-SQL-concat, secrets
-   in URLs) audit today; the AST-level architecture rules follow.*
+   your repo right now"). Two tiers run together: the **deterministic security floor**
+   (hardcoded secrets, raw-SQL-concat, secrets-in-URLs) always runs, free + instant,
+   and ranks its hits **Critical**; the **AI architectural audit** checks the code
+   against the rules you selected (layering, DI, exact-decimals, auth gaps, N+1, …)
+   and flags anything else worth a look (advisory). Pick the **model** (speed vs
+   thoroughness) and the **scan mode** — *Parallel* (default), *Sequential* (gentle),
+   or *Background job* (async; submit, walk away, watch progress stream) — both
+   auto-recommended by the scan's size. Click any finding row to read the violated
+   rule's full directive + explanation. Findings are tagged **Rule · enforced**
+   (deterministic, gateable) vs **AI · advisory** (review-only).
 5. **Arm** — select the rules and press **"Arm selected rules → governance PR"**.
    Camerata opens a PR per repo installing the **adopted** ruleset in the
    camerata-ai emit format: **prose** rules → `AGENTS.md`, **structured/mechanical**

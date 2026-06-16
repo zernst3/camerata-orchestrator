@@ -128,14 +128,14 @@ The per-session rule-subset is selected from the corpus by
 requested domains), then delivered as data to the gateway via
 `CAMERATA_RULES_FILE`. In the live `Backend` role that subset is **71 rules**.
 
-**Of those 71, five gate rules have executable layer-1 enforcement, plus three
-have layer-2 enforcement. All five layer-1 rules ride along in every live/fleet
+**Of those 71, six gate rules have executable layer-1 enforcement, plus three
+have layer-2 enforcement. All six layer-1 rules ride along in every live/fleet
 subset** (via `enforced_gate_rules()`, derived from the registry, so a newly added
 arm is applied everywhere with no edit):
 
 | Lane | Enforced rule ids | Status |
 |---|---|---|
-| Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers. |
+| Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers; `SEC-NO-SECRET-FILES-1` denies writing a secret-bearing file by name (a real `.env`, a private-key file, a keystore). |
 | Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST` | Enforced via `cargo fmt`/`cargo clippy`/`cargo test` in the coordinator's bounce-and-revise. |
 | Layer-3 (cross-agent, **planned**) | `INTEGRATION-*` family | NOT built. The integration gate that checks any invariant spanning AGENTS on the assembled tree before the branch ships: contract conformance (API contracts are one example), wiring completeness (events/config/DI/migrations with no dangling ends), convention coherence (casing, naming, dates, money), and cross-cutting policy (e.g. every UI-gated action maps to a guarded endpoint). Both tiers above are per-agent and cannot see between agents. See ADR `cross_agent_integration_gate`. |
