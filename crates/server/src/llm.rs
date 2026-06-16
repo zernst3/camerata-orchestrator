@@ -338,10 +338,13 @@ impl Llm {
         });
         let mut lines = tokio::io::BufReader::new(stdout).lines();
 
-        // IDLE/STALL timeout, not a total-time cap: the wall-clock allowed BETWEEN output
-        // lines. A legitimate large scan keeps streaming and resets this every line, so it
-        // scales with repo size; only a genuine hang (no output at all for the window)
-        // trips it. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
+        // PROGRESS/STALL timeout, not a total-time cap: the wall-clock allowed since the
+        // last sign of the model actually RESPONDING. It resets only on real progress
+        // (message/content events), NOT on `system`/`status`/`rate_limit` keepalive lines —
+        // those keep arriving while a call is queued/throttled BEFORE the first token, and
+        // resetting on them was why a stalled call ran for minutes without tripping. A
+        // legitimate large scan keeps emitting content and never trips; a call stuck before
+        // (or mid) generation does. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
         let idle = std::time::Duration::from_secs(
             std::env::var("CAMERATA_LLM_IDLE_SECS")
                 .ok()
@@ -352,12 +355,22 @@ impl Llm {
 
         let mut full = String::new();
         let mut cost = None;
+        let mut deadline = tokio::time::Instant::now() + idle;
         loop {
-            match tokio::time::timeout(idle, lines.next_line()).await {
-                // No output for the whole idle window -> a true stall. kill_on_drop reaps
-                // the subprocess when this future is dropped on the error path.
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                // No model progress for the whole window -> a true stall (often a queued /
+                // rate-limited call sitting before its first token). kill_on_drop reaps the
+                // subprocess when this future is dropped on the error path.
+                anyhow::bail!(
+                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
+                    idle.as_secs()
+                );
+            }
+            let remaining = deadline - now;
+            match tokio::time::timeout(remaining, lines.next_line()).await {
                 Err(_) => anyhow::bail!(
-                    "claude CLI streamed nothing for {}s — treating as a hang (set CAMERATA_LLM_IDLE_SECS to tune)",
+                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
                     idle.as_secs()
                 ),
                 Ok(Ok(None)) => break, // EOF — the process finished
@@ -366,9 +379,24 @@ impl Llm {
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                         continue;
                     };
+                    // Real model progress extends the deadline; status/keepalive lines do not.
+                    let mut progressed = false;
                     match v["type"].as_str() {
                         Some("stream_event") => {
                             let ev = &v["event"];
+                            // Any of these mean the model is actively responding.
+                            if matches!(
+                                ev["type"].as_str(),
+                                Some(
+                                    "message_start"
+                                        | "content_block_start"
+                                        | "content_block_delta"
+                                        | "content_block_stop"
+                                        | "message_delta"
+                                )
+                            ) {
+                                progressed = true;
+                            }
                             if ev["type"] == "content_block_delta"
                                 && ev["delta"]["type"] == "text_delta"
                             {
@@ -378,7 +406,9 @@ impl Llm {
                                 }
                             }
                         }
+                        Some("assistant") => progressed = true,
                         Some("result") => {
+                            progressed = true;
                             if let Some(r) = v["result"].as_str() {
                                 if !r.is_empty() {
                                     full = r.to_string();
@@ -387,6 +417,9 @@ impl Llm {
                             cost = v["total_cost_usd"].as_f64();
                         }
                         _ => {}
+                    }
+                    if progressed {
+                        deadline = tokio::time::Instant::now() + idle;
                     }
                 }
             }
