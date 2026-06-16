@@ -577,8 +577,14 @@ async fn run_passes(
             let batch = batches[bi];
             async move {
                 let rb = build_rules_block(batch);
+                // PROMPT ORDER IS CACHE-AWARE: the STABLE content (the per-chunk repo map +
+                // digest) leads, so it forms a reusable cached prefix across this chunk's
+                // rule-batches (and the system prompt before it). The VARYING content (the
+                // batch number + the rules) trails, so it never breaks the prefix. The
+                // opening line is deliberately free of the batch number for the same reason.
+                // Bonus: rules landing last = most recent context = strongest rule-following.
                 let prompt = format!(
-                    "Repository: {repo} ({label} {}/{n_c}, rules {}/{n_b})\n\n{rb}{repo_map}Audit the file bodies below for conformance to the adopted rules, and flag any other genuine issues. Use the REPO MAP above for cross-file context.\n\n{digest}",
+                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n── Check the code above against the ADOPTED rules below (batch {}/{n_b}); also flag any other genuine issues. Use the REPO MAP for cross-file context. ──\n\n{rb}",
                     ci + 1,
                     bi + 1
                 );

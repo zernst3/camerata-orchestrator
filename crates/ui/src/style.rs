@@ -1524,6 +1524,7 @@ html, body {
 .audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+.audit-mode-rec { font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; }
 
 /* Async-job live progress bar (Mode 3). */
 .job-progress { display: flex; align-items: center; gap: 11px; margin: 10px 0; }

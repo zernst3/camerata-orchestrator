@@ -1947,6 +1947,18 @@ async fn audit_job_start(
     v.get("job_id").and_then(|j| j.as_str()).map(String::from)
 }
 
+/// Recommend a scan mode by the scanned codebase's SCALE (the design's auto-select):
+/// multi-repo or a large codebase → Background job (decoupled, walk-away); otherwise
+/// Parallel (fast enough to wait on). Sequential is never auto-recommended — it's a manual
+/// gentle/debug override. The user can always change it.
+fn recommend_scan_mode(report: &ScanReportView) -> String {
+    if report.repos.len() > 1 || report.files_scanned > 150 {
+        "job".to_string()
+    } else {
+        "parallel".to_string()
+    }
+}
+
 /// Poll an async audit job for progress + incremental findings + the final report.
 async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
     reqwest::get(format!("{}/api/onboard/audit/job/{}", crate::BFF_URL, job_id))
@@ -2910,7 +2922,9 @@ fn ScanResults(report: ScanReportView) -> Element {
     }
     // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
     // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
-    let mut audit_mode = use_signal(|| "parallel".to_string());
+    // AUTO-SELECTED by the scan's scale; the user can override.
+    let recommended_mode = recommend_scan_mode(&report);
+    let mut audit_mode = use_signal(|| recommended_mode.clone());
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     let audited = audit.read().clone();
@@ -3151,9 +3165,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                         disabled: auditing(),
                         value: "{audit_mode}",
                         onchange: move |e| audit_mode.set(e.value()),
-                        option { value: "parallel", "Parallel (recommended)" }
+                        option { value: "parallel", "Parallel" }
                         option { value: "sequential", "Sequential (slower, gentlest)" }
                         option { value: "job", "Background job (walk away)" }
+                    }
+                    if audit_mode() == recommended_mode {
+                        span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
                     span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
                 }
