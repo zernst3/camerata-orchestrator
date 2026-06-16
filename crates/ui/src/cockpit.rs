@@ -249,8 +249,13 @@ fn custom_columns() -> Vec<ColumnDef<CustomRuleView>> {
 #[component]
 fn CustomRulesTable(custom: Vec<CustomRuleView>, project_id: String, refresh: Signal<u32>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    let rows: Vec<(RowId, CustomRuleView)> =
-        custom.iter().map(|c| (RowId::new(), c.clone())).collect();
+    // Mint row ids ONCE per mount (see ProposedRulesTable): minting in the render body
+    // re-ids every render and desyncs selection. The call site keys this component on the
+    // ruleset's refresh tick + count, so any add/edit/delete remounts it with fresh rows.
+    let rows: Vec<(RowId, CustomRuleView)> = use_hook({
+        let custom = custom.clone();
+        move || custom.iter().map(|c| (RowId::new(), c.clone())).collect()
+    });
     let id_map: std::collections::HashMap<RowId, CustomRuleView> =
         rows.iter().map(|(r, c)| (*r, c.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), custom_columns()));
@@ -604,7 +609,7 @@ fn RulesView() -> Element {
                             }
                         }
                         if !p.ruleset.custom.is_empty() {
-                            CustomRulesTable { key: "cr-{p.ruleset.custom.len()}", custom: p.ruleset.custom.clone(), project_id: p.id.clone(), refresh }
+                            CustomRulesTable { key: "cr-{refresh()}-{p.ruleset.custom.len()}", custom: p.ruleset.custom.clone(), project_id: p.id.clone(), refresh }
                         }
 
                         p { class: "section-label", "Export ruleset (source of truth)" }
@@ -2115,8 +2120,15 @@ fn FindingsTable(
     let mut filter_types: Vec<String> = findings.iter().map(|f| f.rule_id.clone()).collect();
     filter_types.sort();
     filter_types.dedup();
-    let rows: Vec<(RowId, FindingView)> =
-        findings.iter().map(|f| (RowId::new(), f.clone())).collect();
+    // Mint row ids ONCE per mount (see ProposedRulesTable): `RowId::new()` in the render
+    // body would re-id every render and desync the Table from id_map/selection. This
+    // component remounts on each new audit (it's gated behind `audited.is_some()` and the
+    // re-audit clears it first), so freezing rows per mount tracks fresh findings while
+    // keeping ids stable within a mount.
+    let rows: Vec<(RowId, FindingView)> = use_hook({
+        let findings = findings.clone();
+        move || findings.iter().map(|f| (RowId::new(), f.clone())).collect()
+    });
     let id_map: std::collections::HashMap<RowId, FindingView> =
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
     let handle = use_table(move || {
@@ -2263,8 +2275,17 @@ fn ProposedRulesTable(
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
-    let rows: Vec<(RowId, ProposedRuleView)> =
-        rules.iter().map(|r| (RowId::new(), r.clone())).collect();
+    // Mint the row ids ONCE and persist them. `RowId::new()` is random, so doing this
+    // in the render body would generate fresh ids every re-render: the Table keeps the
+    // ids from its first render (use_table runs its initializer once), while id_map /
+    // domain_rows / selected_set would rebuild with NEW ids that no longer match. That
+    // desync is exactly why the multi-select and the table didn't share selection and
+    // why "select at least one rule" fired with rules visibly ticked. use_hook persists
+    // the same Vec (same RowIds) for the life of the component.
+    let rows: Vec<(RowId, ProposedRuleView)> = use_hook({
+        let rules = rules.clone();
+        move || rules.iter().map(|r| (RowId::new(), r.clone())).collect()
+    });
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
         rows.iter().map(|(r, p)| (*r, p.clone())).collect();
     let id_map_audit = id_map.clone();
