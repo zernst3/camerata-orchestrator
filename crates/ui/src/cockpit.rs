@@ -186,6 +186,87 @@ async fn fetch_reconcile(project_id: &str) -> Option<Vec<AppliedRuleView>> {
     serde_json::from_value(v.get("applied").cloned()?).ok()
 }
 
+/// Add or edit (by name) a custom rule on a project.
+async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/custom", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "name": name, "body": body, "domain": domain }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Delete a custom rule by name (the only way a custom rule leaves a project).
+async fn delete_custom_rule(project_id: &str, name: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/custom/delete", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+fn custom_columns() -> Vec<ColumnDef<CustomRuleView>> {
+    vec![
+        ColumnDef::new(ColumnId("name"), "Name", |c: &CustomRuleView| {
+            CellValue::Text(c.name.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(200.0),
+        ColumnDef::new(ColumnId("domain"), "Domain", |c: &CustomRuleView| {
+            CellValue::Text(if c.domain.is_empty() { "*".to_string() } else { c.domain.clone() })
+        })
+        .sortable()
+        .initial_width(150.0),
+        ColumnDef::new(ColumnId("body"), "Directive", |c: &CustomRuleView| {
+            CellValue::Text(c.body.clone())
+        })
+        .initial_width(460.0),
+    ]
+}
+
+/// The custom-rules editor: a chorale table of the project's custom rules grouped
+/// by domain, with selection -> delete. The add/edit form lives in the parent.
+#[component]
+fn CustomRulesTable(custom: Vec<CustomRuleView>, project_id: String, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let rows: Vec<(RowId, CustomRuleView)> =
+        custom.iter().map(|c| (RowId::new(), c.clone())).collect();
+    let id_map: std::collections::HashMap<RowId, CustomRuleView> =
+        rows.iter().map(|(r, c)| (*r, c.clone())).collect();
+    let handle = use_table(move || TableState::new(rows.clone(), custom_columns()));
+    // Group by domain so custom rules cluster by where they apply.
+    use_hook(move || handle.set_grouping(vec![ColumnId("domain")]));
+
+    rsx! {
+        Table { handle, sort_enabled: true, selection_enabled: true }
+        button {
+            class: "btn-restart",
+            onclick: move |_| {
+                let sel = handle.selected_ids();
+                let names: Vec<String> = sel.iter().filter_map(|id| id_map.get(id).map(|c| c.name.clone())).collect();
+                if names.is_empty() { return; }
+                let pid = project_id.clone();
+                let mut refresh = refresh;
+                spawn(async move {
+                    let mut n = 0;
+                    for name in &names {
+                        if delete_custom_rule(&pid, name).await { n += 1; }
+                    }
+                    if n > 0 {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Deleted {n} custom rule(s)."));
+                        refresh += 1;
+                    }
+                });
+            },
+            "Delete selected custom rules"
+        }
+    }
+}
+
 /// Import a ruleset JSON (upsert base rules; the server preserves custom).
 async fn import_ruleset(project_id: &str, json: String) -> bool {
     reqwest::Client::new()
@@ -218,6 +299,9 @@ fn RulesView() -> Element {
     let mut import_text = use_signal(String::new);
     let mut applied = use_signal(|| Option::<Vec<AppliedRuleView>>::None);
     let mut reconciling = use_signal(|| false);
+    let mut cr_name = use_signal(String::new);
+    let mut cr_domain = use_signal(String::new);
+    let mut cr_body = use_signal(String::new);
 
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
@@ -345,6 +429,38 @@ fn RulesView() -> Element {
                                 }
                             }
                         }
+                        // Custom rules editor: add/edit (by name) + a grouped table.
+                        p { class: "section-label", "Custom rules" }
+                        p { class: "section-hint", "Your own rules — no corpus source. They're carried into every emit and removed only when you delete them here. Adding a name that already exists edits it." }
+                        {
+                            let pid_add = p.id.clone();
+                            rsx! {
+                                div { class: "routine-create-row",
+                                    input { class: "addressee-input", placeholder: "name", value: "{cr_name}", oninput: move |e| cr_name.set(e.value()) }
+                                    input { class: "addressee-input", placeholder: "domain (e.g. api-layer, or * for all)", value: "{cr_domain}", oninput: move |e| cr_domain.set(e.value()) }
+                                }
+                                textarea { class: "routine-intent-input", rows: "3", placeholder: "the directive the agent should follow…", value: "{cr_body}", oninput: move |e| cr_body.set(e.value()) }
+                                button {
+                                    class: "btn-run",
+                                    onclick: move |_| {
+                                        let (name, domain, body) = (cr_name(), cr_domain(), cr_body());
+                                        if name.trim().is_empty() || body.trim().is_empty() { return; }
+                                        let pid = pid_add.clone();
+                                        spawn(async move {
+                                            if add_custom_rule(&pid, &name, &body, &domain).await { refresh += 1; }
+                                        });
+                                        cr_name.set(String::new());
+                                        cr_domain.set(String::new());
+                                        cr_body.set(String::new());
+                                    },
+                                    "Save custom rule"
+                                }
+                            }
+                        }
+                        if !p.ruleset.custom.is_empty() {
+                            CustomRulesTable { key: "cr-{p.ruleset.custom.len()}", custom: p.ruleset.custom.clone(), project_id: p.id.clone(), refresh }
+                        }
+
                         p { class: "section-label", "Export ruleset (source of truth)" }
                         textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
                         p { class: "section-label", "Import ruleset (upsert base; preserves custom)" }

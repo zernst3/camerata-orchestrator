@@ -130,6 +130,8 @@ pub fn router(state: AppState) -> Router {
             get(export_project_ruleset).post(import_project_ruleset),
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
+        .route("/api/projects/:id/custom", post(add_custom_rule))
+        .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -370,6 +372,60 @@ async fn import_project_ruleset(
         p.merge_custom(&incoming.custom);
     });
     match updated {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Add or edit (by name) a custom rule on a project. An existing name is replaced
+/// (an explicit edit); a new name is added. Never drops other custom rules.
+#[derive(serde::Deserialize)]
+struct CustomRuleReq {
+    name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    domain: String,
+}
+
+async fn add_custom_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CustomRuleReq>,
+) -> Json<serde_json::Value> {
+    if req.name.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "name is required" }));
+    }
+    let rule = crate::project::CustomRule {
+        name: req.name.trim().to_string(),
+        body: req.body,
+        domain: if req.domain.trim().is_empty() {
+            "*".to_string()
+        } else {
+            req.domain.trim().to_string()
+        },
+    };
+    match state.projects.update(&id, |p| p.merge_custom(std::slice::from_ref(&rule))) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Explicitly delete a custom rule by name (the ONLY way a custom rule leaves a
+/// project).
+#[derive(serde::Deserialize)]
+struct DeleteCustomReq {
+    name: String,
+}
+
+async fn delete_custom_rule(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<DeleteCustomReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        p.remove_custom(&req.name);
+    }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
