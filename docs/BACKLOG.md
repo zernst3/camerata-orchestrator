@@ -15,6 +15,24 @@ Auto-select the mode by scale with a manual override (model-picker philosophy). 
 is OUR orchestration, backend-agnostic — the CLI does it fine (it's the transcript-store/poll
 pattern generalized to findings + progress).
 
+### CRITICAL by impact × confidence, not by category (refinement)
+
+v1 ships "deterministic-floor findings → Critical" (commit cd9211c). That's the RIGHT
+starting point and it's NOT a blunt category map: only the **deterministic** hits are
+elevated — they're confirmed by regex/AST (high confidence) AND high-impact (live secret,
+injection, secret-in-URL). The AI's security-flavoured findings stay high/medium/low with
+their `[needs review]` tags, so a low-confidence "maybe auth gap" never screams Critical.
+
+The refinement to guard the tier (so Critical stays rare + trusted, no alert fatigue):
+- **Critical = high-impact AND high-confidence** — the top-right corner of (severity × confidence),
+  not "the security column." A `[needs review]` semantic finding is never Critical.
+- **Not security-exclusive** — a confirmed money-correctness bug (ARCH-EXACT-DECIMALS-1) or a
+  data-loss path can be Critical too; severity is blast radius, not the rule's label.
+- **Converge on `ORCH-TIERED-ESCALATION-1`'s line**: Critical ≈ hard-guard impact (auth, payments,
+  infra, CI) + confirmed. That's the same "stop-the-line" set the gate would hard-pause on.
+- A hardcoded *test/sandbox* key or a secret-in-URL on an internal-only endpoint is security-class
+  but not stop-the-line — these shouldn't auto-elevate once the impact signal exists.
+
 Also queued from the same fixture verdict (AI audit quality, not execution):
 - **Applicability-scoping** — a rule should only fire when the pattern is actually present to
   violate (e.g. don't flag "no cursor pagination" on a repo method with no list endpoint). The
