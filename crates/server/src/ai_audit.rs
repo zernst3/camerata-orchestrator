@@ -359,6 +359,74 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
+/// The public symbols a file defines (Rust items + TS/JS exports), for the repo map. A
+/// cheap line scan — no parser — capped so the map stays compact.
+fn extract_public_symbols(content: &str) -> Vec<String> {
+    const RUST_KW: &[&str] = &[
+        "pub struct ",
+        "pub enum ",
+        "pub trait ",
+        "pub type ",
+        "pub fn ",
+    ];
+    const JSTS_KW: &[&str] = &[
+        "export class ",
+        "export interface ",
+        "export type ",
+        "export function ",
+        "export const ",
+    ];
+    let ident = |rest: &str| -> Option<String> {
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty()).then_some(name)
+    };
+    let mut syms = Vec::new();
+    for line in content.lines() {
+        let t = line.trim_start();
+        for kw in RUST_KW.iter().chain(JSTS_KW) {
+            if let Some(rest) = t.strip_prefix(kw) {
+                if let Some(name) = ident(rest) {
+                    if !syms.contains(&name) {
+                        syms.push(name);
+                    }
+                }
+            }
+        }
+        if syms.len() >= 12 {
+            break;
+        }
+    }
+    syms
+}
+
+/// A compact map of the WHOLE repo — every file path plus the public symbols it defines —
+/// injected into EVERY chunk. Naive file-chunking otherwise loses cross-file context: a
+/// layering rule needs to know which dirs are repositories vs services across files, and a
+/// "this type is defined elsewhere" finding needs to know the type exists in another file
+/// not in this pass. The map gives every chunk that architecture without every file body,
+/// so chunking doesn't reintroduce cross-file misses. (Bodies still only appear in their
+/// own chunk — a rule needing the full body of a type in another chunk is the known limit.)
+fn build_repo_map(files: &[(String, String)]) -> String {
+    let mut out = String::from(
+        "REPO MAP — every file in the repo and the public symbols it defines. Only SOME file \
+         bodies appear in THIS pass; use this map for cross-file architectural context (which \
+         directories are repositories vs services vs controllers, where a named type lives):\n",
+    );
+    for (path, content) in files {
+        let syms = extract_public_symbols(content);
+        if syms.is_empty() {
+            out.push_str(&format!("  {path}\n"));
+        } else {
+            out.push_str(&format!("  {path}  [{}]\n", syms.join(", ")));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
 ///
 /// The repo is audited in CONTEXT-SIZED CHUNKS (see `chunk_files`): a real repo is far too
@@ -379,10 +447,17 @@ pub async fn audit_repo(
         return Ok((Vec::new(), Vec::new()));
     }
     let rules_block = build_rules_block(selected);
+    // Cross-file context for every chunk (which dirs are which layer, where types live).
+    let repo_map = build_repo_map(files);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
         selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
+    // Cost lever (ORCH-MODEL-TIERING-1): the high-volume chunk passes can run on a cheaper
+    // model. `CAMERATA_AUDIT_MODEL` overrides per pass; unset = the provider's default.
+    let audit_model = std::env::var("CAMERATA_AUDIT_MODEL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let n_chunks = chunks.len();
@@ -411,7 +486,7 @@ pub async fn audit_repo(
     for (i, chunk) in chunks.iter().enumerate() {
         let digest = build_digest(chunk);
         let prompt = format!(
-            "Repository: {repo} (pass {}/{n_chunks})\n\n{rules_block}Audit this code for conformance to the adopted rules, and flag any other genuine issues.\n\n{digest}",
+            "Repository: {repo} (pass {}/{n_chunks})\n\n{rules_block}{repo_map}Audit the file bodies below for conformance to the adopted rules, and flag any other genuine issues. Use the REPO MAP above for cross-file context.\n\n{digest}",
             i + 1
         );
         if let Some((store, key)) = feedback {
@@ -421,11 +496,14 @@ pub async fn audit_repo(
                 &format!("\n── pass {}/{n_chunks} · {} file(s) ──\n", i + 1, chunk.len()),
             );
         }
-        let req = LlmRequest::new(prompt)
+        let mut req = LlmRequest::new(prompt)
             .with_system(audit_system_prompt())
             // High-recall conformance emits many findings; cap generously so the list
             // isn't cut off mid-stream.
             .with_max_tokens(8192);
+        if let Some(m) = &audit_model {
+            req = req.with_model(m.clone());
+        }
         let result = if let Some((store, key)) = feedback {
             let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
             llm.complete_streaming(req, &mut on_delta).await
@@ -460,6 +538,15 @@ pub async fn audit_repo(
         }
     }
 
+    // Cross-chunk dedup: the shared repo map means the same issue can surface in more than
+    // one pass; report it once. Findings key on (path, line, rule_id); rules on id.
+    {
+        let mut seen = std::collections::HashSet::new();
+        all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+        let mut seen_p = std::collections::HashSet::new();
+        all_proposed.retain(|p| seen_p.insert(p.id.clone()));
+    }
+
     // Calibration pass over ALL aggregated findings: recalibrate severity + flag
     // low-confidence findings. It does NOT drop anything — recall-first discovery hands
     // every finding to the architect.
@@ -481,6 +568,39 @@ pub async fn audit_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_public_symbols_finds_rust_and_ts_exports() {
+        let rust = "use x;\npub struct AdminStats { a: i32 }\nfn private() {}\npub trait Repo {}\n";
+        let s = extract_public_symbols(rust);
+        assert!(s.contains(&"AdminStats".to_string()));
+        assert!(s.contains(&"Repo".to_string()));
+        assert!(!s.iter().any(|x| x == "private"));
+        let ts = "export class UserService {}\nexport interface Dto {}\n";
+        let s2 = extract_public_symbols(ts);
+        assert!(s2.contains(&"UserService".to_string()));
+        assert!(s2.contains(&"Dto".to_string()));
+    }
+
+    #[test]
+    fn repo_map_lists_every_file_with_symbols() {
+        let files = vec![
+            (
+                "crates/api/src/repositories/user_repo.rs".to_string(),
+                "pub struct UserRepo {}".to_string(),
+            ),
+            (
+                "crates/ui/src/services/admin_stats.rs".to_string(),
+                "pub struct AdminStats {}".to_string(),
+            ),
+        ];
+        let map = build_repo_map(&files);
+        // Every file is in the map even though a chunk may only hold one of them.
+        assert!(map.contains("crates/api/src/repositories/user_repo.rs"));
+        assert!(map.contains("crates/ui/src/services/admin_stats.rs"));
+        assert!(map.contains("UserRepo"));
+        assert!(map.contains("AdminStats"));
+    }
 
     #[test]
     fn chunk_files_covers_every_file_and_respects_budget() {
