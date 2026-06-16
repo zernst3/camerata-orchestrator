@@ -1492,7 +1492,10 @@ html, body {
   border-radius: 1px; background: var(--accent);
   transform-origin: 50% 5.5px;            /* pivot on the drum center */
   animation-name: camerata-spin;
-  animation-timing-function: linear;
+  /* CLOCK-LIKE, not a smooth spin: 12 discrete clicks per revolution (the mark jumps
+     30deg each tick). All drums in a row share duration + zero delay, so they tick in
+     lockstep. `steps()` is what makes the motion choppy. */
+  animation-timing-function: steps(12, end);
   animation-iteration-count: infinite;
 }
 /* Bombe + label rows used where the AI is thinking. */

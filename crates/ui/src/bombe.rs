@@ -20,19 +20,22 @@ pub fn BombeSpinner(#[props(default)] title: Option<String>) -> Element {
     rsx! {
         div { class: "bombe", title: "{tip}", role: "status", "aria-label": "{tip}",
             for row in 0..ROWS {
-                div { class: "bombe-row", key: "{row}",
-                    for col in 0..COLS {
-                        {
-                            // Top row turns fastest; each row below is markedly slower
-                            // (odometer cascade). Columns are phase-offset so the marks
-                            // don't all line up — that's what reads as "machine running".
-                            let dur = 0.7 + (row as f64) * 1.25;
-                            let delay = -(col as f64) * (dur / COLS as f64);
-                            rsx! {
+                {
+                    // Top row ticks fastest; each row below is markedly slower (odometer
+                    // cascade). All drums in a ROW share one duration AND zero phase
+                    // offset, so they stay LOCKED in unison — every mark in the row points
+                    // the same way at every instant. The motion is CLOCK-LIKE, not a smooth
+                    // spin: the CSS `steps()` timing (see .bombe-mark) advances the mark in
+                    // discrete clicks. So `col` no longer affects timing; the whole row is
+                    // one synchronized rate.
+                    let dur = 0.7 + (row as f64) * 1.25;
+                    rsx! {
+                        div { class: "bombe-row", key: "{row}",
+                            for col in 0..COLS {
                                 div { class: "bombe-drum", key: "{col}",
                                     div {
                                         class: "bombe-mark",
-                                        style: "animation-duration: {dur}s; animation-delay: {delay}s;",
+                                        style: "animation-duration: {dur}s;",
                                     }
                                 }
                             }
