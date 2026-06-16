@@ -954,6 +954,16 @@ async fn export_project_json(id: &str) -> bool {
     }
 }
 
+/// Delete a project by id. Returns true on success.
+async fn delete_project(id: &str) -> bool {
+    reqwest::Client::new()
+        .delete(format!("{}/api/projects/{}", crate::BFF_URL, id))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Import a project from a JSON file (native open dialog → POST import). The server gives
 /// it a fresh id and makes it active. Returns true on success.
 async fn import_project_json() -> bool {
@@ -994,7 +1004,9 @@ fn ProjectGate() -> Element {
         async move { fetch_projects().await }
     });
     let mut new_name = use_signal(String::new);
-    let mut new_repos = use_signal(String::new);
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The project id awaiting a delete confirm (two-click, with a warning toast).
+    let mut pending_delete = use_signal(|| Option::<String>::None);
     let list = projects.read().clone().flatten().unwrap_or_default();
 
     rsx! {
@@ -1012,6 +1024,9 @@ fn ProjectGate() -> Element {
                             {
                                 let id_export = p.id.clone();
                                 let id_open = p.id.clone();
+                                let id_del = p.id.clone();
+                                let name_del = p.name.clone();
+                                let is_pending = pending_delete().as_deref() == Some(p.id.as_str());
                                 rsx! {
                                     div { class: "pg-card", key: "{p.id}",
                                         div { class: "pg-card-main",
@@ -1020,12 +1035,35 @@ fn ProjectGate() -> Element {
                                         }
                                         div { class: "pg-card-actions",
                                             button {
-                                                class: "btn-edit-sm",
+                                                class: "pg-btn-secondary",
                                                 onclick: move |_| {
                                                     let id = id_export.clone();
                                                     spawn(async move { let _ = export_project_json(&id).await; });
                                                 },
                                                 "Export"
+                                            }
+                                            button {
+                                                class: if is_pending { "pg-btn-danger confirm" } else { "pg-btn-danger" },
+                                                onclick: move |_| {
+                                                    let id = id_del.clone();
+                                                    if pending_delete().as_deref() == Some(id.as_str()) {
+                                                        // Second click — delete.
+                                                        pending_delete.set(None);
+                                                        spawn(async move {
+                                                            if delete_project(&id).await {
+                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Project deleted.");
+                                                                refresh += 1;
+                                                            } else {
+                                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the project.");
+                                                            }
+                                                        });
+                                                    } else {
+                                                        // First click — warn + arm the confirm.
+                                                        pending_delete.set(Some(id));
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Click Confirm to permanently delete \u{201c}{name_del}\u{201d}. This can't be undone."));
+                                                    }
+                                                },
+                                                if is_pending { "Confirm delete" } else { "Delete" }
                                             }
                                             button {
                                                 class: "btn-run",
@@ -1049,21 +1087,16 @@ fn ProjectGate() -> Element {
 
                 div { class: "pg-create",
                     p { class: "section-label", "Create a project" }
+                    p { class: "section-hint", "A project starts empty — just a name. You add repos, rules, and everything else from inside it (the way an Azure resource group works)." }
                     div { class: "pg-create-row",
                         input { class: "addressee-input", placeholder: "project name", value: "{new_name}", oninput: move |e| new_name.set(e.value()) }
-                        input { class: "addressee-input", placeholder: "repos (owner/repo, comma/space separated) — optional", value: "{new_repos}", oninput: move |e| new_repos.set(e.value()) }
                         button {
                             class: "btn-run",
                             onclick: move |_| {
                                 let name = new_name();
                                 if name.trim().is_empty() { return; }
-                                let repos: Vec<String> = new_repos()
-                                    .split([',', ' ', '\n'])
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                    .collect();
                                 spawn(async move {
-                                    if create_project(&name, repos).await.is_some() {
+                                    if create_project(&name, Vec::new()).await.is_some() {
                                         screen.set(CockpitScreen::InProject);
                                     }
                                 });
@@ -2366,6 +2399,30 @@ enum OnboardPath {
 /// Connection-gated and honest: the scan/audit/arm engine runs against GitHub, so
 /// the actionable steps light up once a GitHub token is connected. Until then it
 /// explains exactly what each step will do.
+/// Let the user NAVIGATE to a local repo folder; derive its `owner/repo` from the git
+/// origin remote (server-side). Returns the identifier, or None if cancelled / no remote.
+async fn detect_local_repo() -> Option<String> {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Choose a local repo folder")
+        .pick_folder()
+        .await?;
+    let path = folder.path().to_string_lossy().to_string();
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/git/detect-repo", crate::BFF_URL))
+        .json(&serde_json::json!({ "path": path }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        v.get("repo").and_then(|r| r.as_str()).map(String::from)
+    } else {
+        None
+    }
+}
+
 #[component]
 fn OnboardView(connection: Option<ProviderView>) -> Element {
     let mut path = use_signal(|| OnboardPath::Brownfield);
@@ -2443,6 +2500,27 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                     placeholder: "acme/api\nacme/worker\nacme/web",
                     value: "{repo}",
                     oninput: move |e| repo.set(e.value()),
+                }
+                button {
+                    class: "btn-edit-sm onboard-browse",
+                    onclick: move |_| {
+                        spawn(async move {
+                            if let Some(found) = detect_local_repo().await {
+                                let mut cur = repo();
+                                let exists = cur
+                                    .split([',', '\n'])
+                                    .any(|s| s.trim() == found);
+                                if !exists {
+                                    if !cur.trim().is_empty() && !cur.ends_with('\n') {
+                                        cur.push('\n');
+                                    }
+                                    cur.push_str(&found);
+                                    repo.set(cur);
+                                }
+                            }
+                        });
+                    },
+                    "Browse for a local repo folder\u{2026}"
                 }
                 button {
                     class: "onboard-cta",

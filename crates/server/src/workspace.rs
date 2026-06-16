@@ -153,6 +153,32 @@ pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout
     }
 }
 
+/// Read the GitHub `owner/repo` from a local git checkout's `origin` remote, so the UI
+/// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`.
+pub async fn detect_remote_repo(path: &Path) -> Option<String> {
+    let out = git(Some(path), &["config", "--get", "remote.origin.url"])
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_owner_repo(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a
+/// trailing `.git` and extra path segments.
+fn parse_owner_repo(url: &str) -> Option<String> {
+    let s = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let i = s.find("github.com")?;
+    let after = s[i + "github.com".len()..].trim_start_matches([':', '/']);
+    let parts: Vec<&str> = after.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() >= 2 {
+        Some(format!("{}/{}", parts[0], parts[1]))
+    } else {
+        None
+    }
+}
+
 /// Create (or switch to) a working branch in the local clone. Used when the fleet
 /// starts code work so edits land on a branch, not the default.
 pub async fn create_branch(root: &Path, repo: &str, branch: &str) -> anyhow::Result<()> {
@@ -260,6 +286,17 @@ mod tests {
         let dir = repo_dir(root, "acme/api");
         assert!(dir.ends_with("acme/api"));
         assert!(dir.starts_with("/Users/me/Camerata"));
+    }
+
+    #[test]
+    fn parses_owner_repo_from_remote_urls() {
+        assert_eq!(parse_owner_repo("https://github.com/acme/api.git"), Some("acme/api".into()));
+        assert_eq!(parse_owner_repo("https://github.com/acme/api"), Some("acme/api".into()));
+        assert_eq!(parse_owner_repo("git@github.com:acme/api.git"), Some("acme/api".into()));
+        assert_eq!(parse_owner_repo("git@github.com:acme/api.git\n"), Some("acme/api".into()));
+        // Non-GitHub or malformed -> None.
+        assert_eq!(parse_owner_repo("https://gitlab.com/acme/api.git"), None);
+        assert_eq!(parse_owner_repo("not a url"), None);
     }
 
     #[test]

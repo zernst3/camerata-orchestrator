@@ -1421,6 +1421,14 @@ html, body {
 .pg-card-name { font-size: 16px; font-weight: 700; color: var(--ink); }
 .pg-card-meta { font-size: 12.5px; color: var(--ink-soft); }
 .pg-card-actions { display: flex; gap: 8px; align-items: center; }
+/* One consistent button style/size across the card actions (Export / Delete / Open). */
+.pg-card-actions button { font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; transition: all .15s var(--ease); }
+.pg-btn-secondary { border-color: var(--line); background: var(--surface); color: var(--ink); }
+.pg-btn-secondary:hover { border-color: var(--accent); color: var(--accent-ink); }
+.pg-btn-danger { border-color: var(--line); background: var(--surface); color: var(--ink-soft); }
+.pg-btn-danger:hover { border-color: #c0392b; color: #c0392b; }
+.pg-btn-danger.confirm { background: #c0392b; border-color: #c0392b; color: #fff; }
+.onboard-browse { margin: 8px 0 0; }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .pg-create-row .addressee-input { flex: 1; min-width: 180px; }

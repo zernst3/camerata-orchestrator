@@ -150,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/import", post(import_project))
         .route("/api/projects/active", get(active_project).post(set_active_project))
         .route("/api/projects/:id/export", get(export_project))
+        .route("/api/projects/:id", axum::routing::delete(delete_project))
         .route(
             "/api/projects/:id/ruleset",
             get(export_project_ruleset).post(import_project_ruleset),
@@ -163,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/onboard/scan", post(onboard_scan))
+        .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/fix", post(onboard_fix))
@@ -400,6 +402,14 @@ async fn active_project(State(state): State<AppState>) -> Json<Option<crate::pro
     Json(state.projects.active())
 }
 
+/// Delete a project.
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": state.projects.delete(&id) }))
+}
+
 /// Export a project as a portable JSON document (the full project: name, repos, ruleset)
 /// — for backup or moving a project between machines/installs.
 async fn export_project(
@@ -602,6 +612,23 @@ async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanRepo
         return Json(crate::onboard::ScanReport::gated(&repos));
     };
     Json(crate::onboard::scan_repos(&repos, &token).await)
+}
+
+#[derive(serde::Deserialize)]
+struct DetectRepoReq {
+    path: String,
+}
+
+/// Derive `owner/repo` from a LOCAL git checkout's origin remote — so the UI can let a
+/// developer navigate to a repo folder instead of typing the identifier.
+async fn detect_repo(Json(req): Json<DetectRepoReq>) -> Json<serde_json::Value> {
+    match crate::workspace::detect_remote_repo(std::path::Path::new(&req.path)).await {
+        Some(repo) => Json(serde_json::json!({ "ok": true, "repo": repo })),
+        None => Json(serde_json::json!({
+            "ok": false,
+            "message": "no GitHub `origin` remote found in that folder"
+        })),
+    }
 }
 
 /// Request to file accepted findings as a tech-debt ticket.

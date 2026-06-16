@@ -230,6 +230,28 @@ impl ProjectStore {
         Some(project)
     }
 
+    /// Delete a project by id. If it was the active one, the active pointer falls back
+    /// to the first remaining project (or none). Returns true if one was removed.
+    pub fn delete(&self, id: &str) -> bool {
+        let ok = {
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let before = s.projects.len();
+            s.projects.retain(|p| p.id != id);
+            let removed = s.projects.len() != before;
+            if removed && s.active.as_deref() == Some(id) {
+                s.active = s.projects.first().map(|p| p.id.clone());
+            }
+            removed
+        };
+        if ok {
+            self.save();
+        }
+        ok
+    }
+
     /// Set the active project.
     pub fn set_active(&self, id: &str) -> bool {
         let ok = {
