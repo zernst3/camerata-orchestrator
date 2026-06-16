@@ -23,13 +23,19 @@
 use crate::llm::{Llm, LlmRequest};
 use crate::onboard::{Finding, ProposedRule};
 
-/// Cap on the code digest sent to the model (chars), to bound prompt size. ~300k chars
-/// is roughly 75k tokens — comfortably inside a 200k-context model alongside the adopted
-/// rules and the response, while being large enough that a small/medium repo is sent
-/// WHOLE. The previous 60k (~15k token) cap silently truncated real files out of context,
-/// so violations in later files were invisible to the model — a primary cause of "the
-/// audit missed obvious violations." A repo that still overflows truncates with a note.
-const MAX_DIGEST_CHARS: usize = 300_000;
+/// Per-call safety cap on a single digest's size (chars). A digest is built PER CHUNK
+/// (see `chunk_files`), so this only bounds one chunk's line-numbered text; it sits above
+/// the raw chunk-packing target so a normal chunk is never re-truncated here. Only a
+/// single pathological file larger than this would clip.
+const MAX_DIGEST_CHARS: usize = 600_000;
+
+/// Raw-bytes target when packing files into chunks. Each chunk is audited in its own model
+/// call, so the WHOLE repo is covered no matter its size — a single context can't hold a
+/// multi-MB repo (a 2.8M-char repo is ~700k tokens, far past a 200k window), and the old
+/// single-digest path silently dropped ~90% of such a repo. ~350k raw chars line-numbers
+/// to ~400k and, with the rules block + system prompt + response, stays well inside a
+/// 200k-token context. Smaller chunks also keep the model's attention per file higher.
+const CHUNK_DIGEST_CHARS: usize = 350_000;
 
 /// Number each line `NNNN| line`, so the model cites ACCURATE line numbers. Without
 /// this the digest had no line markers and the model estimated by counting (and drifted —
@@ -303,7 +309,8 @@ pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> V
         .complete(
             LlmRequest::new(prompt)
                 .with_system(verify_system_prompt())
-                .with_max_tokens(2048),
+                // Aggregated findings across all chunks can be many; one verdict each.
+                .with_max_tokens(4096),
         )
         .await
     {
@@ -312,9 +319,55 @@ pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> V
     }
 }
 
+/// The ADOPTED-rules header for the audit prompt. Empty when nothing is selected (the
+/// audit then falls back to a free-form investigative read).
+fn build_rules_block(selected: &[(String, String)]) -> String {
+    if selected.is_empty() {
+        return String::new();
+    }
+    let mut b = String::from(
+        "The project has ADOPTED these rules — check the code against each, AND flag \
+         any other genuine issues you find:\n",
+    );
+    for (id, directive) in selected {
+        b.push_str(&format!("- [{id}] {directive}\n"));
+    }
+    b.push('\n');
+    b
+}
+
+/// Partition `files` into contiguous chunks each whose RAW size is at most `budget` bytes,
+/// so each chunk's digest fits a single model context and the WHOLE repo gets audited. A
+/// file larger than `budget` becomes its own chunk (its digest then clips at the per-call
+/// cap). The repo is never partially dropped — every file lands in exactly one chunk.
+fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, String)]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut acc = 0usize;
+    for (i, (path, content)) in files.iter().enumerate() {
+        let sz = path.len() + content.len() + 32; // ≈ header + content
+        if acc > 0 && acc + sz > budget {
+            chunks.push(&files[start..i]);
+            start = i;
+            acc = 0;
+        }
+        acc += sz;
+    }
+    if start < files.len() {
+        chunks.push(&files[start..]);
+    }
+    chunks
+}
+
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
-/// A model/transport failure surfaces as an error the caller turns into a scan note,
-/// so the deterministic findings always still return.
+///
+/// The repo is audited in CONTEXT-SIZED CHUNKS (see `chunk_files`): a real repo is far too
+/// large for one model context (a 2.8M-char repo is ~700k tokens vs a 200k window), and the
+/// old single-digest path silently fed the model only the first ~10% of files — so a
+/// blatant violation in a later file produced zero findings purely because the file was
+/// never in the input. Every chunk is audited against the full ruleset and the findings are
+/// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
+/// single bad pass never discards the others.
 pub async fn audit_repo(
     llm: &Llm,
     repo: &str,
@@ -325,28 +378,14 @@ pub async fn audit_repo(
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let digest = build_digest(files);
-    // PARAMETERIZE by the architect's selected rules: the audit checks the code against
-    // the rules the project actually adopted, THEN flags anything else genuine. Without a
-    // selection it falls back to the free-form investigative audit.
-    let rules_block = if selected.is_empty() {
-        String::new()
-    } else {
-        let mut b = String::from(
-            "The project has ADOPTED these rules — check the code against each, AND flag \
-             any other genuine issues you find:\n",
-        );
-        for (id, directive) in selected {
-            b.push_str(&format!("- [{id}] {directive}\n"));
-        }
-        b.push('\n');
-        b
-    };
-    let prompt = format!(
-        "Repository: {repo}\n\n{rules_block}Audit this code for genuine architectural/security violations.\n\n{digest}"
-    );
-    // Feedback: register this agent's GENERATED prompt so the scan UI can show, live,
-    // that the AI is actually working (the "see the AI's output" panel).
+    let rules_block = build_rules_block(selected);
+    // Key findings to the adopted rule ids (so a violation shows under e.g.
+    // ARCH-STRICT-LAYERING-1, not an invented AI- name).
+    let adopted: std::collections::HashSet<String> =
+        selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
+
+    let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+    let n_chunks = chunks.len();
     let session = format!("audit-{repo}");
     if let Some((store, key)) = feedback {
         store.register(
@@ -354,50 +393,126 @@ pub async fn audit_repo(
             crate::transcript::AgentTranscript {
                 session_id: session.clone(),
                 role: format!("AI audit — {repo}"),
-                prompt: prompt.clone(),
+                prompt: format!(
+                    "Repository: {repo}\n\n{rules_block}[auditing {} files across {n_chunks} context-sized pass(es)]",
+                    files.len()
+                ),
                 output: String::new(),
                 status: "running".to_string(),
             },
         );
     }
-    let req = LlmRequest::new(prompt)
-        .with_system(audit_system_prompt())
-        // High-recall conformance audits emit many findings; cap generously so the model
-        // isn't cut off mid-list (a low cap silently dropped the tail of the findings).
-        .with_max_tokens(8192);
-    // With feedback, STREAM the model's output into the transcript as it generates (so the
-    // drawer fills in live instead of staying blank until the end).
-    let resp = if let Some((store, key)) = feedback {
-        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-        llm.complete_streaming(req, &mut on_delta).await?
-    } else {
-        llm.complete(req).await?
-    };
-    // Key findings to the adopted rule ids the architect selected (so a violation shows
-    // under e.g. ARCH-STRICT-LAYERING-1, not an invented AI- name).
-    let adopted: std::collections::HashSet<String> =
-        selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
-    let (findings, proposed) = parse_ai_findings(repo, &resp.text, &adopted);
-    // Calibration pass: recalibrate severity + flag low-confidence findings. It does NOT
-    // drop anything — recall-first discovery hands every finding to the architect.
-    let verified = verify_findings(llm, repo, findings).await;
+
+    let mut all_findings = Vec::new();
+    let mut all_proposed = Vec::new();
+    let mut ok_passes = 0usize;
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let digest = build_digest(chunk);
+        let prompt = format!(
+            "Repository: {repo} (pass {}/{n_chunks})\n\n{rules_block}Audit this code for conformance to the adopted rules, and flag any other genuine issues.\n\n{digest}",
+            i + 1
+        );
+        if let Some((store, key)) = feedback {
+            store.append_output(
+                key,
+                &session,
+                &format!("\n── pass {}/{n_chunks} · {} file(s) ──\n", i + 1, chunk.len()),
+            );
+        }
+        let req = LlmRequest::new(prompt)
+            .with_system(audit_system_prompt())
+            // High-recall conformance emits many findings; cap generously so the list
+            // isn't cut off mid-stream.
+            .with_max_tokens(8192);
+        let result = if let Some((store, key)) = feedback {
+            let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+            llm.complete_streaming(req, &mut on_delta).await
+        } else {
+            llm.complete(req).await
+        };
+        match result {
+            Ok(resp) => {
+                let (f, p) = parse_ai_findings(repo, &resp.text, &adopted);
+                all_findings.extend(f);
+                all_proposed.extend(p);
+                ok_passes += 1;
+            }
+            Err(e) => {
+                if let Some((store, key)) = feedback {
+                    store.append_output(
+                        key,
+                        &session,
+                        &format!("[pass {}/{n_chunks} failed: {e} — continuing]", i + 1),
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+
+    // Every pass failed -> surface the error so the caller notes the AI audit was skipped
+    // (the deterministic findings still return independently).
+    if ok_passes == 0 {
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+    }
+
+    // Calibration pass over ALL aggregated findings: recalibrate severity + flag
+    // low-confidence findings. It does NOT drop anything — recall-first discovery hands
+    // every finding to the architect.
+    let verified = verify_findings(llm, repo, all_findings).await;
     if let Some((store, key)) = feedback {
         store.append_output(
             key,
             &session,
             &format!(
-                "\n[calibration pass complete — {} finding(s) for review]",
+                "\n[done — {ok_passes}/{n_chunks} pass(es); {} finding(s) for review]",
                 verified.len()
             ),
         );
         store.set_status(key, &session, "done");
     }
-    Ok((verified, proposed))
+    Ok((verified, all_proposed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_files_covers_every_file_and_respects_budget() {
+        // 10 files of ~100 bytes each; a 250-byte budget forces several chunks.
+        let files: Vec<(String, String)> = (0..10)
+            .map(|i| (format!("f{i}.rs"), "x".repeat(90)))
+            .collect();
+        let chunks = chunk_files(&files, 250);
+        // Every file appears exactly once across all chunks (nothing dropped).
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 10, "all files covered, none dropped");
+        assert!(chunks.len() > 1, "small budget forces multiple chunks");
+        // Reassembled order matches the input order.
+        let flat: Vec<&str> = chunks
+            .iter()
+            .flat_map(|c| c.iter().map(|(p, _)| p.as_str()))
+            .collect();
+        let want: Vec<String> = (0..10).map(|i| format!("f{i}.rs")).collect();
+        assert_eq!(flat, want.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn chunk_files_oversized_file_gets_its_own_chunk() {
+        let files = vec![
+            ("small.rs".to_string(), "x".repeat(10)),
+            ("huge.rs".to_string(), "x".repeat(1000)),
+            ("small2.rs".to_string(), "x".repeat(10)),
+        ];
+        let chunks = chunk_files(&files, 100);
+        let total: usize = chunks.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 3, "oversized file still included, nothing dropped");
+    }
 
     #[test]
     fn digest_concatenates_and_caps() {
