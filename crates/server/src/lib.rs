@@ -18,6 +18,7 @@ pub mod arm;
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
+pub mod fix;
 pub mod notify;
 pub mod onboard;
 pub mod project;

@@ -6,6 +6,18 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_rule_corpus_is_the_moat.md** — "detect frameworks → suggest rules" is only
+  as good as the rule library; generic/wrong rules = a noisy audit = negative value, so
+  the per-language/framework corpus is the moat and is eval'd as a SEPARATE axis from the
+  scan/fix engine (precision/recall per rule + stack, proposal relevance, directive
+  quality). Deterministic corpus optimizes precision; the AI audit de-risks coverage but
+  needs the same precision scrutiny (adversarial-refute pass). Harness staged.
+- **2026-06-16_fix_through_gate_loop.md** — fixing audited items is a governed dev task
+  (not a special path): generate → gate (Layer 1 deny-before-execute) → checks (Layer 2
+  fmt/clippy/test, bounce-on-fail) → reviewable diff/PR → verify. `fix.rs::verify` compares
+  before/after findings by violation identity and returns resolved/remaining/introduced;
+  `clean()` (introduced nothing) is non-negotiable, `complete()` also resolved the target.
+  Pipeline wired via start_governed_run; live exec opt-in; auto-verify-at-completion next.
 - **2026-06-16_baseline_ratchet_and_suppressions.md** — the make-or-break brownfield
   decision: REPORT every existing violation but ENFORCE on the delta (new/changed code),
   like eslint/ruff/sonar baselines — otherwise onboarding freezes a legacy team and
