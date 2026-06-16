@@ -1377,6 +1377,23 @@ html, body {
 }
 .agent-output { background: #1b1a18; color: #ece9e3; border-color: #1b1a18; }
 
+/* ---- AI clarify suggestions ----------------------------------------------- */
+.clarify-suggest-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 8px; }
+.clarify-suggestions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.clarify-suggestion {
+  text-align: left; border: 1px solid var(--line); background: var(--accent-wash); color: var(--ink);
+  font-size: 12.5px; line-height: 1.4; padding: 8px 11px; border-radius: 8px; cursor: pointer;
+}
+.clarify-suggestion:hover { border-color: var(--accent); }
+
+/* ---- fix audited items (governed remediation) ----------------------------- */
+.fix-panel { margin: 18px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: #fbfaf7; }
+.fix-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.fix-row:last-of-type { border-bottom: none; }
+.fix-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; color: var(--ink); flex: 1; }
+.fix-count { font-size: 12.5px; color: var(--ink-soft); }
+.fix-msg { font-size: 12.5px; color: var(--accent-ink); margin: 10px 0 0; line-height: 1.5; }
+
 /* ---- local workspace surface ---------------------------------------------- */
 .ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .ws-folder-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }

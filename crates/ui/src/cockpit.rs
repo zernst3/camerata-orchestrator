@@ -685,6 +685,23 @@ async fn post_clarification(
         .ok()
 }
 
+/// AI-suggested clarifying questions for a story (the engineer's genuine unknowns),
+/// for review-then-post.
+async fn suggest_clarifications(story_id: &str) -> Vec<String> {
+    let Ok(resp) = reqwest::Client::new()
+        .post(format!(
+            "{}/api/stories/{}/clarify/suggest",
+            crate::BFF_URL,
+            story_id
+        ))
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    resp.json::<Vec<String>>().await.unwrap_or_default()
+}
+
 /// Record the answer to a clarification.
 async fn answer_clarification(cid: &str, answer: &str, answered_by: &str) -> Option<ClarificationView> {
     reqwest::Client::new()
@@ -1227,6 +1244,79 @@ struct FindingView {
     detail: String,
 }
 
+/// The "fix the audited items" panel: one governed remediation run per repo. Fixing
+/// runs through the SAME worktree → gate → layer-2 → bounce pipeline as any dev task.
+#[component]
+fn FixAuditedPanel(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
+    let mut msg = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    rsx! {
+        div { class: "fix-panel",
+            p { class: "scan-section-h", "Fix the audited items" }
+            p { class: "scan-section-sub", "Remediation runs as a governed development task — the same worktree → gate → layer-2 checks → bounce loop as any dev work, not a special path. Arm the ruleset first so the fix is held to the rules it installs." }
+            for repo in repos.iter() {
+                {
+                    let repo = repo.clone();
+                    let repo_findings: Vec<FindingView> =
+                        findings.iter().filter(|f| f.repo == repo).cloned().collect();
+                    let n = repo_findings.len();
+                    let repo_click = repo.clone();
+                    rsx! {
+                        div { class: "fix-row", key: "{repo}",
+                            span { class: "fix-repo", "{repo}" }
+                            span { class: "fix-count", "{n} findings" }
+                            button {
+                                class: "btn-run",
+                                disabled: busy() || n == 0,
+                                onclick: move |_| {
+                                    let repo = repo_click.clone();
+                                    let rf = repo_findings.clone();
+                                    busy.set(true);
+                                    msg.set(String::new());
+                                    spawn(async move {
+                                        match fix_audited(&repo, &rf).await {
+                                            Some((run, mode)) => msg.set(format!(
+                                                "Started a governed {mode} run ({run}) to fix {repo}. Watch each agent's prompt + output in the control surface (Agent activity)."
+                                            )),
+                                            None => msg.set(format!("Could not start the fix run for {repo}.")),
+                                        }
+                                        busy.set(false);
+                                    });
+                                },
+                                "Fix (governed)"
+                            }
+                        }
+                    }
+                }
+            }
+            if !msg().is_empty() {
+                p { class: "fix-msg", "{msg}" }
+            }
+        }
+    }
+}
+
+/// Fix the audited findings for a repo as a GOVERNED development run (the same
+/// worktree → gate → layer-2 pipeline as any dev task). Returns `(run_id, mode)`.
+async fn fix_audited(repo: &str, findings: &[FindingView]) -> Option<(String, String)> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/fix", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo, "findings": findings }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let run = v.get("run_id")?.as_str()?.to_string();
+    let mode = v
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((run, mode))
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct RuleOptionView {
     id: String,
@@ -1367,6 +1457,22 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
         .sortable()
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
+        // Provenance: AI architectural audit (genuine, semantic) vs the deterministic
+        // mechanical scan (secrets/SQL/path-escape). AI findings carry an `AI-` rule id.
+        ColumnDef::new(ColumnId("source"), "Source", |f: &FindingView| {
+            CellValue::Text(if f.rule_id.starts_with("AI-") {
+                "ai".to_string()
+            } else {
+                "lint".to_string()
+            })
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(
+            BadgeVariantMap::new()
+                .with("ai", BadgeVariant::new("AI · architectural", "purple"))
+                .with("lint", BadgeVariant::new("Mechanical", "gray")),
+        ))
+        .initial_width(160.0),
         ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
             CellValue::Text(f.rule_id.clone())
         })
@@ -1967,6 +2073,8 @@ fn ScanResults(report: ScanReportView) -> Element {
             p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/type; filter by type or location." }
             FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
 
+            FixAuditedPanel { findings: report.findings.clone(), repos: report.repos.clone() }
+
             p { class: "scan-section-h", "Proposed starter ruleset" }
             p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
             ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone() }
@@ -2155,12 +2263,51 @@ fn ClarifySection(story_id: String) -> Element {
     // participants (assignee, reporter), plus "you" and a free-typed handle.
     let suggestions = ["@maria-pm", "@jdoe", "you"];
 
+    // AI-suggested clarifying questions (the engineer's genuine unknowns), reviewed
+    // before any is dropped into the composer and posted.
+    let mut ai_questions = use_signal(Vec::<String>::new);
+    let mut suggesting = use_signal(|| false);
+    let sid_suggest = story_id.clone();
+
     let sid_post = story_id.clone();
 
     rsx! {
         div { class: "clarify",
             p { class: "clarify-h", "Ask the team" }
             p { class: "section-hint", "Review the question, pick who to ask, and post it. In-process now; this posts to the real tracker comment (with an @-mention) in the provider phase." }
+            div { class: "clarify-suggest-row",
+                button {
+                    class: "btn-edit-sm",
+                    disabled: suggesting(),
+                    onclick: move |_| {
+                        let sid = sid_suggest.clone();
+                        suggesting.set(true);
+                        spawn(async move {
+                            ai_questions.set(suggest_clarifications(&sid).await);
+                            suggesting.set(false);
+                        });
+                    },
+                    if suggesting() { "Thinking…" } else { "Suggest questions (AI)" }
+                }
+                span { class: "section-hint", "The lead engineer lists what it genuinely needs answered — click one to load it." }
+            }
+            if !ai_questions().is_empty() {
+                div { class: "clarify-suggestions",
+                    for (i , q) in ai_questions().iter().enumerate() {
+                        {
+                            let qq = q.clone();
+                            rsx! {
+                                button {
+                                    key: "{i}",
+                                    class: "clarify-suggestion",
+                                    onclick: move |_| question.set(qq.clone()),
+                                    "{q}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             textarea {
                 class: "clarify-q",
                 value: "{question}",

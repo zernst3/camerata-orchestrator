@@ -43,7 +43,9 @@ use axum::{
 use serde::Serialize;
 
 use camerata_gateway::RULE_REGISTRY;
-use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore};
+use camerata_worktracker::{
+    CanonicalStory, ExternalRef, FeatureStatus, InMemoryStoryStore, RepoTarget, StoryStore,
+};
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
@@ -159,6 +161,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
+        .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
@@ -243,18 +246,28 @@ async fn start_run(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
+    let (run_id, mode) = start_governed_run(&state, &story_id).await;
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
+}
+
+/// Start a governed run for a story through the ONE pipeline every development task
+/// uses — live fleet (worktree → gated MCP write → layer-2 checks → bounce) when opted
+/// in, the token-free scripted gate otherwise. Returns `(run_id, mode)`. Shared so a
+/// brownfield remediation run is governed EXACTLY like any other dev task, not a
+/// special path: fixing the audited items is a development task, the first one.
+async fn start_governed_run(state: &AppState, story_id: &str) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
-    let run_id = state.runs.create(&story_id, mode);
+    let run_id = state.runs.create(story_id, mode);
     let store = state.runs.clone();
     let rid = run_id.clone();
 
     if live {
         // Real governed fleet (needs the gateway binary + claude + tokens). Pass the
         // story so the live executor can build a plan from it.
-        let (title, desc) = match state.stories.get(&story_id).await {
+        let (title, desc) = match state.stories.get(story_id).await {
             Ok(Some(s)) => (s.title, s.description),
-            _ => (story_id.clone(), String::new()),
+            _ => (story_id.to_string(), String::new()),
         };
         tokio::spawn(async move { live_fleet::execute_live_run(store, rid, title, desc).await });
     } else {
@@ -263,8 +276,7 @@ async fn start_run(
         let transcripts = state.transcripts.clone();
         tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
-
-    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
+    (run_id, mode)
 }
 
 /// The current state of a run: its status plus the real gate verdicts so far.
@@ -630,6 +642,96 @@ async fn onboard_arm(
 
     let results = emit_to_repos(&repos, &repo_local, &custom, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// One audited finding to remediate (the subset the UI sends to the fix run).
+#[derive(serde::Deserialize)]
+struct FixFinding {
+    #[serde(default)]
+    rule_id: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    line: usize,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    snippet: String,
+}
+
+#[derive(serde::Deserialize)]
+struct FixReq {
+    repo: String,
+    findings: Vec<FixFinding>,
+}
+
+/// Fix the audited items — as a GOVERNED DEVELOPMENT TASK, not a special path.
+///
+/// This is the architectural point: remediating the violations a brownfield audit
+/// found IS a development task (the first one, usually), so it must run through the
+/// EXACT same pipeline every other dev task uses — the worktree, the deny-before-execute
+/// gate, the layer-2 post-task checks, the bounce-on-fail loop. The only brownfield-
+/// specific step is that ARM first installs the rules + CI gate the fix is then held to.
+/// Here we turn the findings into a remediation story (its spec) and start a governed
+/// run on it via `start_governed_run` — the same call `start_run` makes. It won't earn
+/// its keep unless the fix is gated identically to normal development.
+async fn onboard_fix(
+    State(state): State<AppState>,
+    Json(req): Json<FixReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if req.findings.is_empty() {
+        return Err(AppError(anyhow::anyhow!("no findings to fix")));
+    }
+    // The remediation spec: the audited violations, as the task description the
+    // governed fleet works from.
+    let mut spec = format!(
+        "Remediate the violations Camerata's audit found in {}. Fix each WITHOUT \
+         introducing new violations — every write passes the governance gate.\n\n\
+         Findings:\n",
+        req.repo
+    );
+    for (i, f) in req.findings.iter().enumerate() {
+        spec.push_str(&format!(
+            "{}. [{}] {}:{} — {}{}\n",
+            i + 1,
+            f.rule_id,
+            f.path,
+            f.line,
+            if f.detail.is_empty() { &f.snippet } else { &f.detail },
+            if f.snippet.is_empty() || f.detail.is_empty() {
+                String::new()
+            } else {
+                format!(" (`{}`)", f.snippet)
+            }
+        ));
+    }
+
+    // A stable-ish remediation story id per repo, so re-running updates the same story.
+    let slug: String = req
+        .repo
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let story_id = format!("fix-{slug}");
+    let story = CanonicalStory {
+        id: story_id.clone(),
+        external_ref: None,
+        title: format!("Remediate audited violations — {}", req.repo),
+        description: spec,
+        status: FeatureStatus::Intake,
+        created_by: "architect".to_string(),
+        targets: vec![RepoTarget::new(&req.repo)],
+    };
+    state.stories.upsert(story).await.map_err(AppError)?;
+
+    // Start a governed run through the SAME pipeline as any development task.
+    let (run_id, mode) = start_governed_run(&state, &story_id).await;
+    Ok(Json(serde_json::json!({
+        "story_id": story_id,
+        "run_id": run_id,
+        "mode": mode,
+        "findings": req.findings.len(),
+    })))
 }
 
 /// Classify the armed rules by scope and save them to the active project (creating
