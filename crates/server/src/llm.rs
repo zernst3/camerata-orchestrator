@@ -209,16 +209,26 @@ impl Llm {
         }
     }
 
-    /// CLI path: `claude -p <prompt> --model <model> --output-format json`, with the
-    /// system prompt appended when present. No MCP / tools — a plain completion.
+    /// CLI path: a PURE text completion, not an agentic loop. The audit hands the model
+    /// the whole code digest in the prompt, so it must NOT load MCP servers (the GitHub
+    /// MCP), spawn sub-agents (Task/Explore), or touch the filesystem — that was wasteful,
+    /// slow, and muddied the output. `--strict-mcp-config` with no `--mcp-config` loads no
+    /// MCP servers; `--disallowedTools` forbids every built-in so the model can only
+    /// reason over the prompt and answer.
     async fn complete_cli(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        const NO_TOOLS: &str =
+            "Task Bash Read Edit Write MultiEdit Glob Grep WebFetch WebSearch NotebookEdit \
+             TodoWrite BashOutput KillShell";
         let mut cmd = tokio::process::Command::new("claude");
         cmd.arg("-p")
             .arg(&req.prompt)
             .arg("--model")
             .arg(model)
             .arg("--output-format")
-            .arg("json");
+            .arg("json")
+            .arg("--strict-mcp-config")
+            .arg("--disallowedTools")
+            .arg(NO_TOOLS);
         if let Some(system) = &req.system {
             cmd.arg("--append-system-prompt").arg(system);
         }
