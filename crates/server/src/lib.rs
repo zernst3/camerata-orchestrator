@@ -164,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
+        .route("/api/onboard/ignore", post(onboard_ignore))
         .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
@@ -702,6 +703,93 @@ async fn onboard_arm(
 
     let results = emit_to_repos(&repos, &repo_local, &custom, &baselines, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+#[derive(serde::Deserialize)]
+struct IgnoreReq {
+    repo: String,
+    findings: Vec<FixFinding>,
+    /// Mandatory justification — a reason-less suppression is rejected (the invariant).
+    reason: String,
+    #[serde(default)]
+    ticket: Option<String>,
+}
+
+/// Fetch and parse a repo's committed `.camerata/baseline.json` (default branch), or an
+/// empty baseline if absent.
+async fn fetch_baseline(
+    owner: &str,
+    repo: &str,
+    token: &str,
+) -> crate::suppression::Baseline {
+    use base64::Engine as _;
+    use camerata_worktracker::{HttpTransport, ReqwestTransport};
+    let Ok(transport) = ReqwestTransport::new(format!("Bearer {token}")) else {
+        return crate::suppression::Baseline::default();
+    };
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/.camerata/baseline.json");
+    let Ok(resp) = transport.get(&url).await else {
+        return crate::suppression::Baseline::default();
+    };
+    if !(200..300).contains(&resp.status) {
+        return crate::suppression::Baseline::default();
+    }
+    let decoded = serde_json::from_str::<serde_json::Value>(&resp.body)
+        .ok()
+        .and_then(|v| v["content"].as_str().map(|s| s.replace('\n', "")))
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    decoded
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Durable, auditable IGNORE: append the selected findings to the repo's central
+/// baseline as reasoned suppressions (reason mandatory; who/when stamped; optional
+/// ticket tie-back), and open a governed PR. NOT a one-time dismissal — it persists,
+/// shows in the diff, and rolls up into the audit registry.
+async fn onboard_ignore(
+    State(_state): State<AppState>,
+    Json(req): Json<IgnoreReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if req.reason.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!(
+            "a reason is required to ignore a finding"
+        )));
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("connect GitHub to record an ignore")));
+    }
+    let (owner, name) = req
+        .repo
+        .split_once('/')
+        .ok_or_else(|| AppError(anyhow::anyhow!("repo must be owner/repo")))?;
+
+    let mut baseline = fetch_baseline(owner, name, &token).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    for f in &req.findings {
+        let fr = crate::suppression::FindingRef {
+            rule_id: f.rule_id.clone(),
+            path: f.path.clone(),
+            line: 0,
+            snippet: f.snippet.clone(),
+        };
+        let mut entry = crate::suppression::baseline_entry(&fr, "architect", &now, req.reason.trim());
+        entry.kind = "ignore".to_string();
+        entry.ticket = req.ticket.clone();
+        baseline.entries.push(entry);
+    }
+    let json = serde_json::to_string_pretty(&baseline)
+        .map_err(|e| AppError(anyhow::anyhow!("serialize baseline: {e}")))?;
+    let url = crate::arm::arm_repo(
+        owner,
+        name,
+        &token,
+        &[(".camerata/baseline.json".to_string(), json)],
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true, "url": url, "ignored": req.findings.len() })))
 }
 
 /// The central suppression registry for a project: every inline waiver + baseline

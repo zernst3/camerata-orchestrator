@@ -1408,6 +1408,8 @@ html, body {
 .sup-ticket { font-size: 11px; font-weight: 600; color: var(--accent-ink); }
 .sup-who { font-size: 11px; color: var(--ink-faint); }
 .sup-stale-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #c0392b; border: 1px solid #e3b7ac; border-radius: 5px; padding: 2px 6px; }
+.ignore-reason { flex: 1; min-width: 160px; }
+.ignore-ticket { width: 130px; flex: none; }
 
 /* ---- local workspace surface ---------------------------------------------- */
 .ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }

@@ -1396,6 +1396,29 @@ fn FixAuditedPanel(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
     }
 }
 
+/// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
+/// Returns the PR URL.
+async fn ignore_findings(
+    repo: &str,
+    findings: &[FindingView],
+    reason: &str,
+    ticket: Option<String>,
+) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/ignore", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo, "findings": findings, "reason": reason, "ticket": ticket }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    v.get("url").and_then(|u| u.as_str()).map(String::from)
+}
+
 /// Fix the audited findings for a repo as a GOVERNED development run (the same
 /// worktree → gate → layer-2 pipeline as any dev task). Returns `(run_id, mode)`.
 async fn fix_audited(repo: &str, findings: &[FindingView]) -> Option<(String, String)> {
@@ -1693,6 +1716,12 @@ fn FindingsTable(
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), finding_columns()));
     let mut busy = use_signal(|| false);
+    // A durable ignore requires a reason (the require-reason invariant); optional ticket.
+    let mut ignore_reason = use_signal(String::new);
+    let mut ignore_ticket = use_signal(String::new);
+    // Separate clones for the ignore button (the tech-debt button moves the originals).
+    let id_map_ig = id_map.clone();
+    let repo_ig = target_repo.clone();
 
     // Hover the rule id in the "type" column to read what it enforces (and, once a
     // rule's alternative is chosen, the chosen alternative) — no memorizing.
@@ -1716,16 +1745,45 @@ fn FindingsTable(
 
     rsx! {
         div { class: "findings-toolbar",
+            input {
+                class: "addressee-input ignore-reason",
+                placeholder: "reason to ignore (required)",
+                value: "{ignore_reason}",
+                oninput: move |e| ignore_reason.set(e.value()),
+            }
+            input {
+                class: "addressee-input ignore-ticket",
+                placeholder: "ticket (optional)",
+                value: "{ignore_ticket}",
+                oninput: move |e| ignore_ticket.set(e.value()),
+            }
             button {
                 class: "btn-restart",
+                disabled: busy(),
                 onclick: move |_| {
                     let sel = handle.selected_ids();
-                    if sel.is_empty() { return; }
-                    let n = sel.len();
-                    handle.remove_rows(&sel);
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Ignored {n} finding(s)."));
+                    let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_ig.get(id).cloned()).collect();
+                    if picked.is_empty() { return; }
+                    let reason = ignore_reason();
+                    if reason.trim().is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to ignore a finding (it's recorded in the baseline).");
+                        return;
+                    }
+                    let repo = repo_ig.clone();
+                    let ticket = { let t = ignore_ticket(); if t.trim().is_empty() { None } else { Some(t) } };
+                    busy.set(true);
+                    spawn(async move {
+                        match ignore_findings(&repo, &picked, &reason, ticket).await {
+                            Some(url) => {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Recorded {} ignore(s) in the baseline (PR): {url}", picked.len()));
+                                handle.remove_rows(&sel);
+                            }
+                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Couldn't record the ignore — needs GitHub + Contents/PR write."),
+                        }
+                        busy.set(false);
+                    });
                 },
-                "Ignore selected"
+                "Ignore selected (with reason)"
             }
             button {
                 class: "btn-restart",
