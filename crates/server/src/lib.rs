@@ -623,11 +623,8 @@ struct DetectRepoReq {
 /// developer navigate to a repo folder instead of typing the identifier.
 async fn detect_repo(Json(req): Json<DetectRepoReq>) -> Json<serde_json::Value> {
     match crate::workspace::detect_remote_repo(std::path::Path::new(&req.path)).await {
-        Some(repo) => Json(serde_json::json!({ "ok": true, "repo": repo })),
-        None => Json(serde_json::json!({
-            "ok": false,
-            "message": "no GitHub `origin` remote found in that folder"
-        })),
+        Ok(repo) => Json(serde_json::json!({ "ok": true, "repo": repo })),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
     }
 }
 

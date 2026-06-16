@@ -154,15 +154,23 @@ pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout
 }
 
 /// Read the GitHub `owner/repo` from a local git checkout's `origin` remote, so the UI
-/// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`.
-pub async fn detect_remote_repo(path: &Path) -> Option<String> {
+/// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
+/// a specific human error so the UI can tell the user exactly what went wrong.
+pub async fn detect_remote_repo(path: &Path) -> Result<String, String> {
     let out = git(Some(path), &["config", "--get", "remote.origin.url"])
         .await
-        .ok()?;
+        .map_err(|e| format!("couldn't run `git` ({e}) — is git installed and on PATH?"))?;
     if !out.status.success() {
-        return None;
+        let stderr = stderr_of(&out);
+        return Err(if stderr.is_empty() {
+            "that folder has no `origin` remote (is it cloned from GitHub?)".to_string()
+        } else {
+            stderr
+        });
     }
-    parse_owner_repo(&String::from_utf8_lossy(&out.stdout))
+    let url = String::from_utf8_lossy(&out.stdout);
+    parse_owner_repo(&url)
+        .ok_or_else(|| format!("the origin remote isn't a GitHub URL: {}", url.trim()))
 }
 
 /// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a

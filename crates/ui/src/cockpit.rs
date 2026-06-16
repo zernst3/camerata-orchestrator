@@ -2399,32 +2399,58 @@ enum OnboardPath {
 /// Connection-gated and honest: the scan/audit/arm engine runs against GitHub, so
 /// the actionable steps light up once a GitHub token is connected. Until then it
 /// explains exactly what each step will do.
+/// The outcome of trying to derive a repo from a navigated-to folder.
+enum RepoDetect {
+    /// The user cancelled the dialog.
+    Cancelled,
+    /// Derived `owner/repo`.
+    Found(String),
+    /// Couldn't derive one — carries a human reason for a toast.
+    Failed(String),
+}
+
 /// Let the user NAVIGATE to a local repo folder; derive its `owner/repo` from the git
-/// origin remote (server-side). Returns the identifier, or None if cancelled / no remote.
-async fn detect_local_repo() -> Option<String> {
-    let folder = rfd::AsyncFileDialog::new()
+/// origin remote (server-side).
+async fn detect_local_repo() -> RepoDetect {
+    let Some(folder) = rfd::AsyncFileDialog::new()
         .set_title("Choose a local repo folder")
         .pick_folder()
-        .await?;
+        .await
+    else {
+        return RepoDetect::Cancelled;
+    };
     let path = folder.path().to_string_lossy().to_string();
-    let v: serde_json::Value = reqwest::Client::new()
+    let resp = match reqwest::Client::new()
         .post(format!("{}/api/git/detect-repo", crate::BFF_URL))
         .json(&serde_json::json!({ "path": path }))
         .send()
         .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
+    {
+        Ok(r) => r,
+        Err(e) => return RepoDetect::Failed(format!("couldn't reach the local server ({e})")),
+    };
+    let v: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return RepoDetect::Failed("unexpected response from the server".to_string()),
+    };
     if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-        v.get("repo").and_then(|r| r.as_str()).map(String::from)
+        match v.get("repo").and_then(|r| r.as_str()) {
+            Some(r) => RepoDetect::Found(r.to_string()),
+            None => RepoDetect::Failed("no repo in the response".to_string()),
+        }
     } else {
-        None
+        RepoDetect::Failed(
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("could not detect a repo in that folder")
+                .to_string(),
+        )
     }
 }
 
 #[component]
 fn OnboardView(connection: Option<ProviderView>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut path = use_signal(|| OnboardPath::Brownfield);
     let mut repo = use_signal(String::new);
     let mut scan = use_signal(|| Option::<ScanReportView>::None);
@@ -2505,17 +2531,24 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                     class: "btn-edit-sm onboard-browse",
                     onclick: move |_| {
                         spawn(async move {
-                            if let Some(found) = detect_local_repo().await {
-                                let mut cur = repo();
-                                let exists = cur
-                                    .split([',', '\n'])
-                                    .any(|s| s.trim() == found);
-                                if !exists {
-                                    if !cur.trim().is_empty() && !cur.ends_with('\n') {
-                                        cur.push('\n');
+                            match detect_local_repo().await {
+                                RepoDetect::Cancelled => {}
+                                RepoDetect::Found(found) => {
+                                    let mut cur = repo();
+                                    let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
+                                    if exists {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{found} is already in the list."));
+                                    } else {
+                                        if !cur.trim().is_empty() && !cur.ends_with('\n') {
+                                            cur.push('\n');
+                                        }
+                                        cur.push_str(&found);
+                                        repo.set(cur);
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} from the folder."));
                                     }
-                                    cur.push_str(&found);
-                                    repo.set(cur);
+                                }
+                                RepoDetect::Failed(msg) => {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a git repo cloned from GitHub — or paste owner/repo above instead."));
                                 }
                             }
                         });
