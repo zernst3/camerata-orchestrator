@@ -23,7 +23,7 @@ use camerata_worktracker::{CanonicalStory, FeatureStatus};
 // Chorale (crates.io, headless table) backs the brownfield audit-findings and
 // proposed-rules tables — the surfaces where the data genuinely scales.
 use chorale_core::{
-    Alignment, BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
+    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
     RenderKind, RowId, TableState,
 };
 use chorale_dioxus::{use_table, CellRenderer, CellRenderers, Table};
@@ -2057,15 +2057,6 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Badge(kind))
         .initial_width(120.0),
-        ColumnDef::new(
-            ColumnId("count"),
-            "Existing violations",
-            |r: &ProposedRuleView| CellValue::Integer(r.finding_count as i64),
-        )
-        .sortable()
-        .render_kind(RenderKind::Number)
-        .alignment(Alignment::Right)
-        .initial_width(150.0),
     ]
 }
 
@@ -2216,114 +2207,6 @@ fn FindingsTable(
     }
 }
 
-/// The alternative-selection step: rules that carry alternatives get a per-rule
-/// picker. Rules with an adopted default pre-select it ("use defaults" sets them
-/// all at once); rules WITHOUT a default must be chosen before they can be armed.
-/// The chosen map (rule id -> option id) is shared via context so the findings
-/// table's rule-id hover can show the chosen alternative.
-#[component]
-fn AlternativesPicker(rules: Vec<ProposedRuleView>, all_repos: Vec<String>) -> Element {
-    let mut chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
-    let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
-    let opt_rules: Vec<ProposedRuleView> =
-        rules.into_iter().filter(|r| !r.options.is_empty()).collect();
-    if opt_rules.is_empty() {
-        return rsx! {};
-    }
-    let defaults: Vec<(String, String)> = opt_rules
-        .iter()
-        .filter_map(|r| r.default_option.clone().map(|d| (r.id.clone(), d)))
-        .collect();
-
-    rsx! {
-        div { class: "alts",
-            div { class: "alts-head",
-                div {
-                    p { class: "scan-section-h", "Choose an alternative per rule" }
-                    p { class: "scan-section-sub", "Some rules ship an adopted default; rules without one require a choice before they can be armed." }
-                }
-                button {
-                    class: "btn-restart",
-                    onclick: move |_| {
-                        for (id, d) in &defaults {
-                            chosen.write().insert(id.clone(), d.clone());
-                        }
-                    },
-                    "Use defaults where available"
-                }
-            }
-            for r in opt_rules.iter() {
-                {
-                    let rid = r.id.clone();
-                    let current = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
-                    let must_choose = r.default_option.is_none() && current.is_none();
-                    let cls = if must_choose { "alt-row must" } else { "alt-row" };
-                    rsx! {
-                        div { class: "{cls}",
-                            div { class: "alt-rule",
-                                span { class: "alt-rule-id", "{r.id}" }
-                                span { class: "alt-rule-title", "{r.title}" }
-                                if must_choose {
-                                    span { class: "alt-must", "choice required" }
-                                }
-                            }
-                            select {
-                                class: "alt-select",
-                                value: current.clone().unwrap_or_default(),
-                                onchange: move |e| { chosen.write().insert(rid.clone(), e.value()); },
-                                if r.default_option.is_none() {
-                                    option { value: "", "— choose an alternative —" }
-                                }
-                                for o in r.options.iter() {
-                                    option {
-                                        value: "{o.id}",
-                                        selected: current.as_deref() == Some(o.id.as_str()),
-                                        title: "{o.directive}",
-                                        if r.default_option.as_deref() == Some(o.id.as_str()) {
-                                            "{o.label} (default)"
-                                        } else {
-                                            "{o.label}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // Per-rule repo placement: the domain-matched suggestion is
-                        // pre-selected; toggle any repo to override (force a domain
-                        // rule into a repo it wouldn't be suggested for, or remove one).
-                        div { class: "alt-repos",
-                            span { class: "alt-repos-label", "installs into:" }
-                            for repo in all_repos.iter() {
-                                {
-                                    let mut placement = placement;
-                                    let rid2 = r.id.clone();
-                                    let repo2 = repo.clone();
-                                    let on = placement.read().get(&r.id).map(|v| v.contains(repo)).unwrap_or(false);
-                                    let chip_cls = if on { "repo-chip on" } else { "repo-chip" };
-                                    rsx! {
-                                        button {
-                                            class: "{chip_cls}",
-                                            onclick: move |_| {
-                                                let mut p = placement.write();
-                                                let entry = p.entry(rid2.clone()).or_default();
-                                                if let Some(pos) = entry.iter().position(|x| x == &repo2) {
-                                                    entry.remove(pos);
-                                                } else {
-                                                    entry.push(repo2.clone());
-                                                }
-                                            },
-                                            "{repo}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
@@ -2347,18 +2230,21 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
     // Click a row to open its full context + alternative picker in a modal (mirrors the
     // camerata-ai rule modal) instead of a wall of pickers below the table.
     let mut detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
+    // STABLE callback (use_callback, not Callback::new) — an inline callback goes stale
+    // across re-renders, which is why the modal only opened the first time.
     let id_map_click = id_map.clone();
+    let row_click = use_callback(move |rid: RowId| {
+        if let Some(r) = id_map_click.get(&rid) {
+            detail_rule.set(Some(r.clone()));
+        }
+    });
 
     rsx! {
         Table {
             handle,
             sort_enabled: true,
             selection_enabled: true,
-            on_row_click: Callback::new(move |rid: RowId| {
-                if let Some(r) = id_map_click.get(&rid) {
-                    detail_rule.set(Some(r.clone()));
-                }
-            }),
+            on_row_click: row_click,
         }
         div { class: "findings-toolbar",
             button {
@@ -2375,7 +2261,10 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
                 onclick: move |_| {
                     let sel = handle.selected_ids();
                     let picked: Vec<ProposedRuleView> = sel.iter().filter_map(|id| id_map.get(id).cloned()).collect();
-                    if picked.is_empty() { return; }
+                    if picked.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) before arming.");
+                        return;
+                    }
                     // Resolve each selected rule to its adopted directive; a rule
                     // with alternatives and no choice yet blocks arming.
                     let mut arm_reqs = Vec::new();
@@ -2823,9 +2712,8 @@ fn ScanResults(report: ScanReportView) -> Element {
             // ── Phase 1 result: the proposed ruleset to pick from ──────────────
             p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
+            p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
             ProposedRulesTable { rules: report.proposed_rules.clone(), findings: findings.clone() }
-
-            AlternativesPicker { rules: report.proposed_rules.clone(), all_repos: report.repos.clone() }
 
             // ── Phase 2: audit the code AGAINST the selected rules ─────────────
             div { class: "audit-cta",

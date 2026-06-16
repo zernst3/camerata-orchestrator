@@ -859,6 +859,17 @@ pub async fn audit_repos(
     let mut notes = Vec::new();
     let llm = crate::llm::Llm::from_env();
 
+    // ROUTE BY ENGINE, not by domain. A rule with a deterministic gate arm
+    // (secrets / raw-SQL / secret-URL / path / secret-files) runs through real
+    // deterministic code (`audit_files`) and must NEVER go to the LLM — fuzzy
+    // keyword-matching a deterministic rule is the flood. Only the SEMANTIC rules
+    // (no arm: layering, idempotency, authz, …) are handed to the model.
+    let semantic: Vec<(String, String)> = selected
+        .iter()
+        .filter(|(id, _)| camerata_gateway::lookup_arm(id).is_none())
+        .cloned()
+        .collect();
+
     for spec in specs {
         let spec = spec.trim();
         if spec.is_empty() {
@@ -874,8 +885,8 @@ pub async fn audit_repos(
                 stacks.push(detect_stack(spec, &files));
                 // Deterministic security floor (always-on): ENFORCED findings.
                 let mut repo_findings = audit_files(spec, &files);
-                // AI audit parameterized by the selected rules: ADVISORY findings.
-                match crate::ai_audit::audit_repo(&llm, spec, &files, selected, feedback).await {
+                // AI audit parameterized by the SEMANTIC rules only: ADVISORY findings.
+                match crate::ai_audit::audit_repo(&llm, spec, &files, &semantic, feedback).await {
                     Ok((ai_findings, _ai_rules)) => repo_findings.extend(ai_findings),
                     Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
                 }

@@ -1160,7 +1160,7 @@ html, body {
 }
 .cockpit-nav-tab:hover { color: var(--ink); }
 .cockpit-nav-tab.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-card); }
-.cockpit-scroll { flex: 1; overflow-y: auto; }
+.cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-width: 0; }
 .cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
 .cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }
 
