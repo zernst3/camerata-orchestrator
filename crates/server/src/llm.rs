@@ -76,6 +76,52 @@ pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const NO_TOOLS: &str = "Task Bash Read Edit Write MultiEdit Glob Grep WebFetch WebSearch \
                         NotebookEdit TodoWrite BashOutput KillShell";
 
+// ── In-flight subprocess registry (shutdown hook) ──────────────────────────────
+// `kill_on_drop(true)` reaps subprocesses when their future is dropped (graceful runtime
+// shutdown, e.g. closing the window). But a SIGNAL-driven quit (Ctrl+C from `cargo run`,
+// SIGTERM) terminates the process WITHOUT running drops, which would orphan any audit
+// `claude` mid-flight. This registry lets the app's signal handler reap them explicitly.
+
+/// PIDs of currently-running `claude` subprocesses.
+fn inflight_claude() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// RAII guard: registers a child PID on construction, removes it on drop (every exit path
+/// of the spawning function — normal completion, early bail, timeout).
+struct ClaudePidGuard(u32);
+impl ClaudePidGuard {
+    fn new(pid: u32) -> Self {
+        if let Ok(mut g) = inflight_claude().lock() {
+            g.insert(pid);
+        }
+        Self(pid)
+    }
+}
+impl Drop for ClaudePidGuard {
+    fn drop(&mut self) {
+        if let Ok(mut g) = inflight_claude().lock() {
+            g.remove(&self.0);
+        }
+    }
+}
+
+/// Kill every in-flight `claude` subprocess. Called from the app's shutdown signal handler
+/// (see `serve`) so quitting never leaves audit subprocesses running. Killing an
+/// already-exited PID is a harmless no-op.
+pub fn kill_inflight_claude() {
+    if let Ok(g) = inflight_claude().lock() {
+        for &pid in g.iter() {
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .status();
+        }
+    }
+}
+
 /// One completion request.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -328,6 +374,8 @@ impl Llm {
         let mut child = cmd.spawn().map_err(|e| {
             anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
         })?;
+        // Track the PID for the shutdown hook; the guard untracks on every exit path.
+        let _pid_guard = child.id().map(ClaudePidGuard::new);
         let stdout = child
             .stdout
             .take()

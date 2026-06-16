@@ -216,6 +216,31 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     );
     crate::notify::spawn_deploy_poller(state.notifications.clone());
 
+    // Shutdown hook: on Ctrl+C / SIGTERM, reap any in-flight `claude` audit subprocesses
+    // before exiting so a signal-driven quit never orphans them (kill_on_drop only covers
+    // graceful runtime shutdown). A hard SIGKILL of the app is uncatchable and not covered.
+    tokio::spawn(async {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut s) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                s.recv().await;
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {
+            () = ctrl_c => {},
+            () = terminate => {},
+        }
+        crate::llm::kill_inflight_claude();
+        std::process::exit(0);
+    });
+
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("camerata-server listening on http://{addr}");
