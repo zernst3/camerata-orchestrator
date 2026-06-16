@@ -400,11 +400,14 @@ fn sec_secrets_regex() -> &'static Regex {
             # Heuristic: a long opaque literal assigned to a SECRET-named identifier —
             # catches provider-agnostic keys (e.g. a Finnhub key) that match no known
             # prefix. The identifier carries key/secret/token/password/credential, then
-            # within a short window a quoted 16+ char alphanumeric literal. Case-insensitive
-            # for the identifier via the inline (?i:...) group.
+            # within a short window a quoted 24+ char CONTIGUOUS-alphanumeric literal.
+            # Precision guards: the literal class excludes / and - (so a file PATH or a
+            # hyphenated secret-NAME like plaid-access-token-item-1 no longer matches), and
+            # 24+ chars drops short env-var names. This is a heuristic, not entropy/AST; the
+            # name-vs-value precision limit is the gitleaks/semgrep path (see BACKLOG).
             | ((?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|credential)[A-Za-z0-9_]*)
                [^\n]{0,40}?
-               \x22[A-Za-z0-9+/_\-]{16,}\x22)
+               \x22[A-Za-z0-9+_]{24,}\x22)
             ",
         )
         .expect("SEC-NO-HARDCODED-SECRETS-1 regex must compile")
@@ -463,10 +466,15 @@ fn sec_sql_concat_regex() -> &'static Regex {
         // WHERE x = '{user_id}'", …)` is the exact shape this missed before).
         Regex::new(
             r#"(?isx)
-            # SQL keyword
-            (?:SELECT|INSERT|UPDATE|DELETE|WHERE)
-            # within ~200 chars (bounded so a stray keyword far from interpolation
-            # doesn't false-match), across lines:
+            # The SQL keyword must OPEN inside a string literal (a `"` just before it) —
+            # this is what raw-SQL-concat looks like (`format!("SELECT … {x}")`,
+            # `"INSERT …" + x`). Requiring the quote kills the precision flood: a Dioxus
+            # `select {}`, a SQL keyword in a comment, or an identifier named `select`
+            # all lack the opening quote and no longer match. (WHERE dropped — too common
+            # in prose.)
+            "\s*
+            (?:SELECT|INSERT|UPDATE|DELETE)
+            # within ~200 chars (bounded; across lines via the `s` flag):
             .{0,200}?
             (?:
                 \{\w*\}         # {} or {named} format interpolation
@@ -676,6 +684,26 @@ mod tests {
         let content = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
         let d = arm_sec_no_hardcoded_secrets_1("", content);
         assert!(d.is_err(), "a long opaque literal on a *_KEY const must be flagged");
+    }
+
+    #[test]
+    fn sql_concat_precision_guards() {
+        // A Dioxus `select {}` (no opening string quote) must NOT match.
+        assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "rsx! { select {} }").is_empty());
+        // A SQL keyword as an identifier/method (no quote) must NOT match.
+        assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "let selected = items.select(|x| x);").is_empty());
+        // The real plant (keyword opens inside a string) STILL matches.
+        assert!(!content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "format!(\"SELECT x WHERE id = {id}\")").is_empty());
+    }
+
+    #[test]
+    fn secrets_precision_guards_paths_and_hyphenated_names() {
+        // A file PATH literal on a token-named var (has `/`) must NOT match.
+        assert!(arm_sec_no_hardcoded_secrets_1("", "let token_path = \"src/some/very/long/path.rs\";").is_ok());
+        // A hyphenated secret NAME (a reference, not a value) must NOT match.
+        assert!(arm_sec_no_hardcoded_secrets_1("", "let k = \"plaid-access-token-item-1\";").is_ok());
+        // The real bare key (24+ contiguous alphanumeric) STILL matches.
+        assert!(arm_sec_no_hardcoded_secrets_1("", "const FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";").is_err());
     }
 
     #[test]

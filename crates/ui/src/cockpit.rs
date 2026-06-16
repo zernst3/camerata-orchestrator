@@ -2250,7 +2250,12 @@ fn FindingsTable(
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 #[component]
-fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) -> Element {
+fn ProposedRulesTable(
+    rules: Vec<ProposedRuleView>,
+    findings: Vec<FindingView>,
+    on_audit: EventHandler<Vec<(String, String)>>,
+    auditing: bool,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
@@ -2272,6 +2277,7 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
     // STABLE callback (use_callback, not Callback::new) — an inline callback goes stale
     // across re-renders, which is why the modal only opened the first time.
     let id_map_click = id_map.clone();
+    let id_map_audit = id_map.clone();
     let row_click = use_callback(move |rid: RowId| {
         if let Some(r) = id_map_click.get(&rid) {
             detail_rule.set(Some(r.clone()));
@@ -2286,6 +2292,34 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
             on_row_click: row_click,
         }
         div { class: "findings-toolbar",
+            button {
+                class: "btn-run",
+                disabled: auditing,
+                onclick: move |_| {
+                    // Read the SELECTED rows at click time and audit ONLY those (their
+                    // chosen/default directive). The audit must scan against the picked
+                    // subset, never all proposed rules.
+                    let sel = handle.selected_ids();
+                    let picked: Vec<ProposedRuleView> = sel.iter().filter_map(|id| id_map_audit.get(id).cloned()).collect();
+                    if picked.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to audit against.");
+                        return;
+                    }
+                    let chosen_rules: Vec<(String, String)> = picked.iter().map(|r| {
+                        let directive = if r.options.is_empty() {
+                            r.title.clone()
+                        } else {
+                            let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                            oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| r.title.clone())
+                        };
+                        (r.id.clone(), directive)
+                    }).collect();
+                    on_audit.call(chosen_rules);
+                },
+                if auditing { "Auditing…" } else { "Audit code against selected rules" }
+            }
             button {
                 class: "btn-edit-sm",
                 onclick: move |_| {
@@ -2752,33 +2786,29 @@ fn ScanResults(report: ScanReportView) -> Element {
             p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
             p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
-            ProposedRulesTable { rules: report.proposed_rules.clone(), findings: findings.clone() }
-
-            // ── Phase 2: audit the code AGAINST the selected rules ─────────────
-            div { class: "audit-cta",
-                p { class: "scan-section-h", "Step 2 — audit the code against your rules" }
-                p { class: "scan-section-sub", "The deterministic security rules (secrets / raw-SQL / secret-URLs) always run; the AI checks the code against the rules above AND flags anything else worth a look (advisory)." }
-                button {
-                    class: "btn-run",
-                    disabled: auditing(),
-                    onclick: {
-                        let repos = report.repos.clone();
-                        let rules: Vec<(String, String)> = report
-                            .proposed_rules
-                            .iter()
-                            .map(|r| (r.id.clone(), descriptions.get(&r.id).cloned().unwrap_or_else(|| r.title.clone())))
-                            .collect();
-                        move |_| {
-                            let (repos, rules) = (repos.clone(), rules.clone());
+            {
+                let repos_audit = report.repos.clone();
+                rsx! {
+                    ProposedRulesTable {
+                        rules: report.proposed_rules.clone(),
+                        findings: findings.clone(),
+                        auditing: auditing(),
+                        on_audit: move |rules: Vec<(String, String)>| {
+                            let repos = repos_audit.clone();
                             auditing.set(true);
                             spawn(async move {
                                 audit.set(audit_against(&repos, &rules).await);
                                 auditing.set(false);
                             });
-                        }
-                    },
-                    if auditing() { "Auditing…" } else { "Audit code against these rules" }
+                        },
+                    }
                 }
+            }
+
+            // ── Phase 2: the audit runs from the table's "Audit selected" button ──
+            div { class: "audit-cta",
+                p { class: "scan-section-h", "Step 2 — audit the code against your selected rules" }
+                p { class: "scan-section-sub", "Tick the rules above, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung).
                 crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }
