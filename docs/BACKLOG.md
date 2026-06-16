@@ -49,6 +49,32 @@ authority split, two-phase flow. The STILL-STAGED items moved to "Staged after t
   residual). Wire the `fix::verify`-style skeptic pass (try to REFUTE each finding) before
   showing AI findings, and calibrate severity for app context (single-user, etc.).
 
+## The deterministic engine: reuse vs build (diagnostic answered 2026-06-16)
+
+You asked how the gate evaluates hardcoded-secret / SQL-concat today, to decide
+reuse-vs-build. Answer from reading `crates/gateway/src/lib.rs`: they are **regex
+heuristics** (compiled `OnceLock<Regex>` per rule), e.g. known token prefixes
+(`ghp_`/`sk-`/`AKIA`) plus a new `*_KEY`-const long-literal heuristic for secrets, and a
+SQL-keyword-near-interpolation pattern for raw SQL. Deterministic, fast, file-checkable —
+so the brownfield scan now REUSES that exact engine (`content_match_lines`), which is why
+the Tier-1 plants are caught.
+
+The honest limit (the "loose" concern): regex secret/SQL detection has real false-positive
+and false-negative edges the per-write gate rarely exercised. The precision upgrade is to
+wrap battle-tested scanners as CheckRunners — **gitleaks/trufflehog** for secrets (they nail
+the env-read-vs-hardcoded and name-vs-value distinctions), **semgrep** for AST patterns
+(SQL-concat, secret-in-URL). That's the build path if the regexes flood; the wiring is the
+same `content_match_lines` seam, swapped for a subprocess. Staged.
+
+## AI output streaming (deferred — you de-prioritized)
+
+The Agent-activity drawer shows the audit's prompt immediately but the OUTPUT only appears
+at the end, because `claude -p --output-format json` returns one blob (no incremental
+tokens). To show the model's output as it generates, switch the CLI path to
+`--output-format stream-json`, read stdout line-by-line, and append each text delta to the
+transcript live. Real but a fair lift; you said "nothing to be done, we wait" — captured
+here in case that changes.
+
 ## Staged after the 2026-06-16 audit overhaul
 
 These are the parts the ADR `two_domain_audit_and_two_phase_flow` explicitly left staged:

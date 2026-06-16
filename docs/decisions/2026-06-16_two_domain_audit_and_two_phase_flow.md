@@ -52,6 +52,14 @@ enforced. Convention discovers; enforcement locks it in.
   and the prompt cites those.
 - **AI over-flagged.** Fixed: an adversarial-verify (refute) pass drops vacuous/theoretical
   findings and recalibrates severity for the app's context, fail-open on model error.
+- **The wrong engine ran the deterministic rules.** Fixed: `audit_repos` ROUTES BY ENGINE
+  — a rule with a deterministic gate arm runs only through `audit_files` (real code) and is
+  STRIPPED from the LLM prompt; only semantic rules (no arm) reach the model. Fuzzy
+  keyword-matching a deterministic rule was the flood; that path is closed.
+- **The audit's `claude -p` was a full agent.** Fixed: it now runs as a pure completion
+  (`--strict-mcp-config` + `--disallowedTools` for every built-in) — no MCP servers, no
+  Task/Explore sub-agents, no filesystem tools. It just reasons over the digest in the
+  prompt. (Observed live: `num_turns:1`, ~1.2s for a trivial prompt.)
 
 ## Honestly staged (NOT yet built — see BACKLOG.md)
 
