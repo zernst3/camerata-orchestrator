@@ -186,6 +186,22 @@ async fn fetch_reconcile(project_id: &str) -> Option<Vec<AppliedRuleView>> {
     serde_json::from_value(v.get("applied").cloned()?).ok()
 }
 
+/// Re-emit the project's ruleset (source of truth) into its repos — one PR per repo.
+async fn emit_project_rules(project_id: &str) -> Option<Vec<ArmResultView>> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/emit", crate::BFF_URL, project_id))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v.get("results").cloned()?).ok()
+}
+
 /// Add or edit (by name) a custom rule on a project.
 async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str) -> bool {
     reqwest::Client::new()
@@ -302,6 +318,7 @@ fn RulesView() -> Element {
     let mut cr_name = use_signal(String::new);
     let mut cr_domain = use_signal(String::new);
     let mut cr_body = use_signal(String::new);
+    let mut emitting = use_signal(|| false);
 
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
@@ -365,12 +382,46 @@ fn RulesView() -> Element {
                     })).unwrap_or_default();
                     let pid = p.id.clone();
                     let pid_rec = p.id.clone();
+                    let pid_emit = p.id.clone();
                     rsx! {
                         div { class: "rules-sections",
                             RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
                             RuleCount { label: "Cross-repo rules (API contracts)", n: p.ruleset.cross_repo.len() }
                             RuleCount { label: "Process rules (commit/PR)", n: p.ruleset.process.len() }
                             RuleCount { label: "Custom rules", n: p.ruleset.custom.len() }
+                        }
+
+                        // Re-emit: rebuild the source-of-truth emit from this project's
+                        // ruleset (base selections + custom) and open a PR per repo.
+                        div { class: "rules-emit",
+                            button {
+                                class: "btn-run",
+                                disabled: emitting(),
+                                onclick: move |_| {
+                                    let id = pid_emit.clone();
+                                    emitting.set(true);
+                                    spawn(async move {
+                                        match emit_project_rules(&id).await {
+                                            Some(results) => {
+                                                if results.is_empty() {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Nothing emitted (no repo-local or custom rules, or repos unreachable).");
+                                                }
+                                                for r in results {
+                                                    if r.ok {
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: emitted \u{2192} {}", r.repo, r.url.unwrap_or_default()));
+                                                    } else {
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
+                                                    }
+                                                }
+                                            }
+                                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Emit failed — needs GitHub Contents + PR write on the connected token."),
+                                        }
+                                        emitting.set(false);
+                                    });
+                                },
+                                if emitting() { "Emitting…" } else { "Emit ruleset to repos (re-emit)" }
+                            }
+                            span { class: "rules-emit-hint", "Rebuilds each repo's AGENTS.md / CONVENTIONS.md / gate config from this project's ruleset. Custom rules are always carried through." }
                         }
 
                         // Reconcile: read what's ACTUALLY in the repos and rehydrate
@@ -1220,6 +1271,7 @@ struct ArmRuleReq {
     #[serde(skip_serializing_if = "Option::is_none")]
     option: Option<String>,
     enforcement: String,
+    scope: String,
     repos: Vec<String>,
 }
 
@@ -1604,6 +1656,7 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
                             directive,
                             option,
                             enforcement: r.enforcement.clone(),
+                            scope: r.scope.clone(),
                             repos,
                         });
                     }

@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
             get(export_project_ruleset).post(import_project_ruleset),
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
+        .route("/api/projects/:id/emit", post(emit_project))
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/provider", get(provider_info))
@@ -561,35 +562,190 @@ async fn onboard_arm(
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to arm." }));
     };
 
-    // The active project's custom rules are ALWAYS carried into the emit, so a
-    // re-emit of base rules can never inadvertently drop them (they go to the repos
-    // their domain applies to; `*` = all). They are dropped only when the user
-    // explicitly removes them from the project.
-    let project_custom = state
-        .projects
-        .active()
-        .map(|p| p.ruleset.custom)
-        .unwrap_or_default();
+    // Save the armed ruleset to the active project (create one if none) so the
+    // project is the source of truth and re-emit works.
+    save_armed_to_project(&state, &req.rules);
 
-    let by_repo = crate::arm::rules_by_repo(&req.rules);
+    // Only repo-local rules emit into repo files; cross-repo + process rules are
+    // project-level (the gates read them from the project store).
+    let repo_local: Vec<crate::arm::ArmRule> = req
+        .rules
+        .iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .cloned()
+        .collect();
+    let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
+    repos.sort();
+    repos.dedup();
+    let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
+
+    let results = emit_to_repos(&repos, &repo_local, &custom, &token).await;
+    Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// Classify the armed rules by scope and save them to the active project (creating
+/// one from the rules' repos if none exists). This is the upsert: it replaces the
+/// project's BASE rules (selections / cross-repo / process) and leaves custom rules
+/// untouched.
+fn save_armed_to_project(state: &AppState, rules: &[crate::arm::ArmRule]) {
+    use crate::project::RuleSelection;
+    let mut selections = Vec::new();
+    let mut cross = Vec::new();
+    let mut process = Vec::new();
+    let mut all_repos = std::collections::BTreeSet::new();
+    for r in rules {
+        let s = RuleSelection {
+            rule_id: r.id.clone(),
+            chosen_option: r.option.clone(),
+            repos: r.repos.clone(),
+        };
+        for repo in &r.repos {
+            all_repos.insert(repo.clone());
+        }
+        match r.scope.as_str() {
+            "cross-repo" => cross.push(s),
+            "process" => process.push(s),
+            _ => selections.push(s),
+        }
+    }
+    let pid = match state.projects.active() {
+        Some(p) => p.id,
+        None => match state.projects.create("My project", all_repos.iter().cloned().collect()) {
+            Some(p) => p.id,
+            None => return,
+        },
+    };
+    state.projects.update(&pid, |p| {
+        p.upsert_base_rules(selections, cross, process);
+        for repo in &all_repos {
+            if !p.repos.contains(repo) {
+                p.repos.push(repo.clone());
+            }
+        }
+    });
+}
+
+/// Emit the repo-local `rules` + the `custom` rules into each repo in `repos`, one
+/// governance PR per repo. Shared by initial arm and re-emit. Each repo receives the
+/// rules bound to it plus the domain-matching custom rules.
+async fn emit_to_repos(
+    repos: &[String],
+    rules: &[crate::arm::ArmRule],
+    custom: &[crate::project::CustomRule],
+    token: &str,
+) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
-    for (repo, rules) in by_repo {
+    for repo in repos {
         let Some((owner, name)) = repo.split_once('/') else {
             results.push(serde_json::json!({ "repo": repo, "ok": false, "message": "not owner/repo" }));
             continue;
         };
-        let custom: Vec<&crate::project::CustomRule> = project_custom
+        let repo_rules: Vec<&crate::arm::ArmRule> =
+            rules.iter().filter(|r| r.repos.iter().any(|x| x == repo)).collect();
+        let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
-            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || c.domain == repo)
+            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
             .collect();
-        let files = crate::arm::arm_files_for_repo(&rules, &custom);
-        match crate::arm::arm_repo(owner, name, &token, &files).await {
+        if repo_rules.is_empty() && repo_custom.is_empty() {
+            continue;
+        }
+        let files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        match crate::arm::arm_repo(owner, name, token, &files).await {
             Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
             Err(e) => {
                 results.push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") }))
             }
         }
     }
+    results
+}
+
+/// Resolve a project's base selections into emittable rules: the directive comes
+/// from the corpus rule's chosen alternative (or default), or the gateway content
+/// rule's description. The rule-bank is the source; the project stores only the
+/// selection (id + chosen option + repos).
+async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<crate::arm::ArmRule> {
+    let corpus_path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
+    let set = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(corpus_path).await.0)
+    } else {
+        None
+    };
+    let mut out = Vec::new();
+    for sel in &project.ruleset.selections {
+        if let Some(rule) = set.as_ref().and_then(|s| s.get_by_id(&sel.rule_id)) {
+            let directive = sel
+                .chosen_option
+                .as_ref()
+                .and_then(|oid| rule.options.iter().find(|o| &o.id == oid))
+                .or_else(|| {
+                    rule.default_option
+                        .as_ref()
+                        .and_then(|d| rule.options.iter().find(|o| &o.id == d))
+                })
+                .map(|o| o.directive.clone())
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| rule.summary.clone());
+            let enforcement = match rule.enforcement {
+                camerata_rules::EnforcementKind::Prose => "prose",
+                camerata_rules::EnforcementKind::Structured => "structured",
+                camerata_rules::EnforcementKind::Mechanical => "mechanical",
+            };
+            out.push(crate::arm::ArmRule {
+                id: sel.rule_id.clone(),
+                title: rule.title.clone(),
+                directive,
+                option: sel.chosen_option.clone(),
+                enforcement: enforcement.to_string(),
+                scope: "repo-local".to_string(),
+                conformance: None,
+                repos: sel.repos.clone(),
+            });
+            continue;
+        }
+        // A gateway content rule (its description is the directive), else a minimal
+        // emit using the id (drift — applied but no rich source).
+        let (title, directive) = camerata_gateway::RULE_REGISTRY
+            .iter()
+            .find(|e| e.id == sel.rule_id)
+            .map(|e| (e.description.to_string(), e.description.to_string()))
+            .unwrap_or_else(|| (sel.rule_id.clone(), sel.rule_id.clone()));
+        out.push(crate::arm::ArmRule {
+            id: sel.rule_id.clone(),
+            title,
+            directive,
+            option: sel.chosen_option.clone(),
+            enforcement: "mechanical".to_string(),
+            scope: "repo-local".to_string(),
+            conformance: None,
+            repos: sel.repos.clone(),
+        });
+    }
+    out
+}
+
+/// Re-emit a project's ruleset (the source of truth) into its repos: rebuild the
+/// emit from the project's base selections + custom rules and open a PR per repo.
+/// Gated on the token. This is "save -> re-emit": editing the ruleset and emitting
+/// produces one updated source-of-truth emit, custom rules preserved.
+async fn emit_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to emit." }));
+    };
+    let rules = resolve_project_arm_rules(&project).await;
+    if rules.is_empty() && project.ruleset.custom.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }));
+    }
+    let results = emit_to_repos(&project.repos, &rules, &project.ruleset.custom, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
@@ -779,6 +935,58 @@ mod tests {
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn arm_rule(id: &str, scope: &str, repos: &[&str]) -> crate::arm::ArmRule {
+        crate::arm::ArmRule {
+            id: id.to_string(),
+            title: format!("T {id}"),
+            directive: format!("D {id}"),
+            option: None,
+            enforcement: "structured".to_string(),
+            scope: scope.to_string(),
+            conformance: None,
+            repos: repos.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn save_armed_classifies_by_scope_and_creates_a_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none(), "clean slate, no project");
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("REPO-1", "repo-local", &["me/api"]),
+                arm_rule("XREPO-1", "cross-repo", &["me/api", "me/web"]),
+                arm_rule("PROC-1", "process", &["me/api"]),
+            ],
+        );
+        let p = state.projects.active().expect("a project was created");
+        assert_eq!(p.ruleset.selections.len(), 1, "repo-local -> selections");
+        assert_eq!(p.ruleset.selections[0].rule_id, "REPO-1");
+        assert_eq!(p.ruleset.cross_repo.len(), 1, "cross-repo -> cross_repo");
+        assert_eq!(p.ruleset.process.len(), 1, "process -> process");
+        assert!(p.repos.contains(&"me/web".to_string()), "repos absorbed into the project");
+    }
+
+    #[test]
+    fn re_arm_preserves_custom_in_the_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Seed a project with a custom rule.
+        let p = state.projects.create("P", vec!["me/api".to_string()]).unwrap();
+        state.projects.update(&p.id, |pr| {
+            pr.merge_custom(&[crate::project::CustomRule {
+                name: "house".into(),
+                body: "Prefer X.".into(),
+                domain: "*".into(),
+            }]);
+        });
+        // Arming (saving base rules) must keep the custom rule.
+        save_armed_to_project(&state, &[arm_rule("REPO-1", "repo-local", &["me/api"])]);
+        let after = state.projects.get(&p.id).unwrap();
+        assert_eq!(after.ruleset.selections.len(), 1);
+        assert_eq!(after.ruleset.custom.len(), 1, "custom survived the re-arm upsert");
     }
 
     #[tokio::test]

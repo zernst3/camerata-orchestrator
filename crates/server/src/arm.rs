@@ -33,6 +33,11 @@ pub struct ArmRule {
     pub option: Option<String>,
     /// `prose` | `structured` | `mechanical` (partitions AGENTS.md vs CONVENTIONS.md).
     pub enforcement: String,
+    /// `repo-local` | `cross-repo` | `process`. Only repo-local rules are emitted
+    /// into repo files; cross-repo + process rules are project-level (the gates read
+    /// them from the project store), so they are saved to the project, not the repos.
+    #[serde(default)]
+    pub scope: String,
     /// Optional conformance test (mechanical rules) -> the `_Conformance:_` line.
     #[serde(default)]
     pub conformance: Option<String>,
@@ -299,6 +304,7 @@ mod tests {
             directive: format!("Directive for {id}."),
             option: None,
             enforcement: enf.to_string(),
+            scope: "repo-local".to_string(),
             conformance: if enf == "mechanical" {
                 Some("a deterministic check".to_string())
             } else {

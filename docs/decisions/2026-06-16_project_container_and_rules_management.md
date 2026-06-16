@@ -116,7 +116,16 @@ rule into AGENTS.md + the gate config. Custom rules are creatable in both surfac
   cross-repo/process/custom rules — the persistence the question identified) +
   ruleset export/import JSON + a project selector. The gates will read project-level
   rules from the store.
-- **Phased:** the full rules-management screen UI, the custom-rule editor, the
-  single-emit upsert wiring into arm (re-emit on edit), and drift detection. The
-  emit format itself (AGENTS.md/CONVENTIONS.md + gate config) is already built in
-  `arm`; the rules view re-uses it.
+- **Built since:** the custom-rule editor (chorale table grouped by domain) and the
+  **single-emit re-emit**. Brownfield arm now SAVES the armed ruleset to the active
+  project (creating one if none), classified by scope — repo-local → `selections`,
+  cross-repo → `cross_repo`, process → `process` — as an upsert that preserves
+  custom. The Rules screen's "Emit ruleset to repos" rebuilds each repo's
+  AGENTS.md/CONVENTIONS.md/gate-config from the project's ruleset (resolving each
+  selection's directive from the rule-bank by id) + the custom rules, one PR per
+  repo. So editing the project ruleset and re-emitting produces one updated
+  source-of-truth emit, custom preserved. Cross-repo + process rules are
+  project-level and are NOT emitted into repo files (the gates read them from the
+  store).
+- **Phased:** an in-screen per-rule base-rule editor (the selections are editable
+  today via import/re-emit; a row editor is the nicety), and drift detection (lock).

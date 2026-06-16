@@ -983,7 +983,9 @@ html, body {
 .proj-none { font-size: 12px; color: var(--ink-faint); font-style: italic; }
 .proj-chip { font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); cursor: pointer; }
 .proj-chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
-.rules-sections { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 20px; }
+.rules-sections { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 16px; }
+.rules-emit { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; flex-wrap: wrap; }
+.rules-emit-hint { font-size: 12px; color: var(--ink-soft); }
 .rule-count { display: flex; flex-direction: column; min-width: 150px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .rule-count-n { font-size: 22px; font-weight: 700; color: var(--ink); }
 .rule-count-l { font-size: 12px; color: var(--ink-soft); }
