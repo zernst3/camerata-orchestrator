@@ -579,6 +579,8 @@ async fn fetch_provider() -> Option<ProviderView> {
 /// verdicts produced so far.
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct RunView {
+    #[serde(default)]
+    id: String,
     story_id: String,
     status: String,
     events: Vec<RunGateEvent>,
@@ -1059,6 +1061,16 @@ pub fn CockpitApp() -> Element {
                                             "▶ Run this story (governed)"
                                         }
                                     }
+                                }
+
+                                // Agent activity: peek at each agent's GENERATED prompt +
+                                // output for the active run (the otherwise-hidden prompting).
+                                {
+                                    let rid = match active_run() {
+                                        Some(ref r) if r.story_id == current.id => r.id.clone(),
+                                        _ => String::new(),
+                                    };
+                                    rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
                                 }
 
                                 // A live run for THIS story (when the user is on its actual

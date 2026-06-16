@@ -79,6 +79,70 @@ pub fn propose(parent: &CanonicalStory, practice: &Practice) -> Vec<ProposedChil
         .collect()
 }
 
+/// AI decomposition: the model reads the parent story + the practice's child-types and
+/// proposes a grounded, specific child per type (titles/descriptions that reflect the
+/// actual feature, not a template). Falls back to the deterministic [`propose`] when the
+/// model is unreachable or returns nothing parseable, so the flow never dead-ends.
+pub async fn propose_ai(
+    parent: &CanonicalStory,
+    practice: &Practice,
+    llm: &crate::llm::Llm,
+) -> Vec<ProposedChild> {
+    let kinds: Vec<String> = practice
+        .children
+        .iter()
+        .map(|ct| format!("{} ({})", ct.kind, ct.title_suffix))
+        .collect();
+    let system = "You are Camerata's lead engineer decomposing a parent work item into its \
+        component child stories. For EACH requested child-type, write a specific, grounded \
+        title and a 1-3 sentence description that reflects the actual feature (not a \
+        template). Return ONLY a JSON array, no prose: \
+        [{\"kind\":\"...\",\"title\":\"...\",\"description\":\"...\"}]. Use exactly the \
+        requested kinds, one object each.";
+    let user = format!(
+        "Parent story: {}\n\nDescription: {}\n\nChild-types to produce (kind = the type): {}",
+        parent.title,
+        parent.description,
+        kinds.join(", ")
+    );
+    let req = crate::llm::LlmRequest::new(user).with_system(system);
+    let Ok(resp) = llm.complete(req).await else {
+        return propose(parent, practice);
+    };
+    match parse_children(&resp.text, practice) {
+        Some(children) if !children.is_empty() => children,
+        _ => propose(parent, practice),
+    }
+}
+
+/// Parse a model JSON array of children, keeping only the practice's known kinds and
+/// ensuring one entry per requested kind (filling any the model omitted from the
+/// deterministic template). Returns None if the response has no JSON array.
+fn parse_children(raw: &str, practice: &Practice) -> Option<Vec<ProposedChild>> {
+    let start = raw.find('[')?;
+    let end = raw.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    let arr: Vec<ProposedChild> = serde_json::from_str(&raw[start..=end]).ok()?;
+    // Re-key to the practice's child-types so the result is always well-formed.
+    let children = practice
+        .children
+        .iter()
+        .map(|ct| {
+            arr.iter()
+                .find(|c| c.kind.eq_ignore_ascii_case(&ct.kind))
+                .cloned()
+                .unwrap_or(ProposedChild {
+                    kind: ct.kind.clone(),
+                    title: format!("{} — {}", ct.kind, ct.title_suffix),
+                    description: String::new(),
+                })
+        })
+        .collect();
+    Some(children)
+}
+
 /// Turn a proposed (possibly edited) child into a real story under `parent_id`.
 pub fn to_story(parent_id: &str, child: &ProposedChild) -> CanonicalStory {
     CanonicalStory {

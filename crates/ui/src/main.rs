@@ -12,8 +12,10 @@
 //!     cargo run -p camerata-ui
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
 
+mod agent_activity;
 mod app_state;
 mod build_run;
+mod chat;
 mod cockpit;
 mod data;
 mod deploy_run;
@@ -166,6 +168,8 @@ fn App() -> Element {
         // position:fixed, pointer-events:none on the layer (so it never blocks the
         // UI behind it) with pointer-events:auto on each toast.
         toast::ToastHost {}
+        // The research chat bubble: a floating, always-available AI scratchpad.
+        chat::ChatBubble {}
     }
 }
 

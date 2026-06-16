@@ -46,7 +46,7 @@ use camerata_gateway::RULE_REGISTRY;
 use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore};
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
-use crate::decompose::{propose, to_story, DecompositionStore, Practice, ProposedChild};
+use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
 use crate::run::{execute_run, live_mode_enabled, Run, RunStore};
@@ -159,6 +159,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
+        .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
@@ -861,7 +862,51 @@ async fn decompose_propose(
         .await
         .map_err(AppError)?
         .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
-    Ok(Json(propose(&parent, &Practice::default_feature())))
+    // AI decomposition (grounded children), with the deterministic propose as fallback.
+    let llm = crate::llm::Llm::from_env();
+    let children =
+        crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm).await;
+    Ok(Json(children))
+}
+
+/// AI-suggested clarifying questions for a story: the questions an engineer genuinely
+/// needs answered before building it. The architect reviews/edits before any is posted
+/// to the team (the clarify-bridge stays review-then-post). Empty on model failure.
+async fn suggest_clarifications(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Result<Json<Vec<String>>, AppError> {
+    let story = state
+        .stories
+        .get(&story_id)
+        .await
+        .map_err(AppError)?
+        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+    let system = "You are the engineer about to build this story. List the clarifying \
+        questions you GENUINELY need answered before writing code: ambiguities, missing \
+        decisions, edge cases, unstated constraints. Be specific to this story. Return \
+        ONLY a JSON array of question strings, e.g. [\"q1\", \"q2\"]. 0-6 questions.";
+    let user = format!("Story: {}\n\nDescription: {}", story.title, story.description);
+    let llm = crate::llm::Llm::from_env();
+    let questions = match llm
+        .complete(crate::llm::LlmRequest::new(user).with_system(system))
+        .await
+    {
+        Ok(resp) => parse_string_array(&resp.text),
+        Err(_) => Vec::new(),
+    };
+    Ok(Json(questions))
+}
+
+/// Extract a JSON array of strings from a model response (tolerant of surrounding prose).
+fn parse_string_array(raw: &str) -> Vec<String> {
+    let (Some(start), Some(end)) = (raw.find('['), raw.rfind(']')) else {
+        return Vec::new();
+    };
+    if end <= start {
+        return Vec::new();
+    }
+    serde_json::from_str::<Vec<String>>(&raw[start..=end]).unwrap_or_default()
 }
 
 /// The edited set of children to commit.
