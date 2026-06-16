@@ -1966,6 +1966,9 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
 
 fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<FindingView>> {
     let sev = BadgeVariantMap::new()
+        // chorale badges support red/yellow/gray/green; critical reuses red (most
+        // alarming available) and is distinguished by its "Critical" label + top sort.
+        .with("critical", BadgeVariant::new("Critical", "red"))
         .with("high", BadgeVariant::new("High", "red"))
         .with("medium", BadgeVariant::new("Medium", "yellow"))
         .with("low", BadgeVariant::new("Low", "gray"));
@@ -1981,7 +1984,12 @@ fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<Find
         })
         .sortable()
         .filter(FilterKind::MultiSelect {
-            options: vec!["high".to_string(), "medium".to_string(), "low".to_string()],
+            options: vec![
+                "critical".to_string(),
+                "high".to_string(),
+                "medium".to_string(),
+                "low".to_string(),
+            ],
         })
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
@@ -2128,15 +2136,17 @@ fn FindingsTable(
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let target_repo = repos.first().cloned().unwrap_or_default();
     // Default order leads triage with what matters: enforced (new) before suppressed
-    // (debt/waived), then by severity (high → medium → low). A flat 200-row dump is
-    // paralysis; this surfaces the critical new violations first.
+    // (debt/waived), then by severity (critical → high → medium → low). A flat 200-row dump
+    // is paralysis; this floats the exploitable-bug criticals to the very top so a
+    // hardcoded secret can never sit below "no mappers crate."
     let mut findings = findings;
     findings.sort_by_key(|f| {
         let enforced = if f.status == "active" { 0 } else { 1 };
         let sev = match f.severity.as_str() {
-            "high" => 0,
-            "medium" => 1,
-            _ => 2,
+            "critical" => 0,
+            "high" => 1,
+            "medium" => 2,
+            _ => 3,
         };
         (enforced, sev)
     });
@@ -2833,7 +2843,12 @@ fn ScanResults(report: ScanReportView) -> Element {
         .map(|a| a.findings.clone())
         .unwrap_or_default();
 
-    let high = findings.iter().filter(|f| f.severity == "high").count();
+    // "High severity" stat covers the top two tiers (critical + high) so the exploitable
+    // criticals are never invisible in the summary.
+    let high = findings
+        .iter()
+        .filter(|f| f.severity == "critical" || f.severity == "high")
+        .count();
     let enforced = findings.iter().filter(|f| f.status == "active").count();
     let suppressed = findings.len().saturating_sub(enforced);
 

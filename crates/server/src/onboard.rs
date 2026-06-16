@@ -161,11 +161,13 @@ impl ScanReport {
 }
 
 /// Severity for a rule id (for grouping/sorting in the table).
-fn severity_for(rule_id: &str) -> &'static str {
-    match rule_id {
-        "SEC-NO-HARDCODED-SECRETS-1" | "ARCH-NO-SECRETS-IN-URL-1" => "high",
-        _ => "medium",
-    }
+fn severity_for(_rule_id: &str) -> &'static str {
+    // Deterministic floor findings are ACTUAL exploitable bugs (a hardcoded credential, a
+    // secret in a URL, SQL built by string concatenation) — not "doesn't follow a preferred
+    // pattern." They rank CRITICAL so they float above the architectural conformance
+    // findings (high/medium/low) and can never be buried under "no mappers crate." Every
+    // rule that reaches the gate's deterministic arm is, by construction, a real defect.
+    "critical"
 }
 
 /// The gate's description for a rule id, or the id if unknown.
@@ -1057,7 +1059,7 @@ mod tests {
         assert_eq!(f.repo, "me/api", "finding tagged with its repo");
         assert_eq!(f.line, 2, "finding on the right line");
         assert_eq!(f.rule_id, "SEC-NO-HARDCODED-SECRETS-1");
-        assert_eq!(f.severity, "high");
+        assert_eq!(f.severity, "critical", "exploitable security defects rank critical");
         assert!(f.path == "src/config.rs");
     }
 
