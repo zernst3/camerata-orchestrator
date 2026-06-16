@@ -1867,6 +1867,7 @@ async fn audit_against(
     repos: &[String],
     rules: &[(String, String)],
     model: &str,
+    mode: &str,
 ) -> Option<ScanReportView> {
     let rule_json: Vec<_> = rules
         .iter()
@@ -1874,7 +1875,7 @@ async fn audit_against(
         .collect();
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "mode": mode }))
         .send()
         .await
         .ok()?
@@ -2854,6 +2855,9 @@ fn ScanResults(report: ScanReportView) -> Element {
             }
         }
     }
+    // Execution mode (speed/scale knob): "parallel" is the efficient default floor;
+    // "sequential" is the gentle/debug fallback. Orthogonal to the model + rule choices.
+    let mut audit_mode = use_signal(|| "parallel".to_string());
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -3017,13 +3021,14 @@ fn ScanResults(report: ScanReportView) -> Element {
                         on_audit: move |rules: Vec<(String, String)>| {
                             let repos = repos_audit.clone();
                             let model = audit_model();
+                            let mode = audit_mode();
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
                             audit.set(None);
                             auditing.set(true);
                             spawn(async move {
-                                audit.set(audit_against(&repos, &rules, &model).await);
+                                audit.set(audit_against(&repos, &rules, &model, &mode).await);
                                 auditing.set(false);
                             });
                         },
@@ -3051,6 +3056,20 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                         span { class: "audit-model-hint", "Faster models finish sooner; stronger models catch more." }
                     }
+                }
+                // Execution mode — speed/scale knob, separate from the model (quality) and
+                // the rule selection (coverage). Parallel is the recommended default.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Scan mode" }
+                    select {
+                        class: "audit-model-select",
+                        disabled: auditing(),
+                        value: "{audit_mode}",
+                        onchange: move |e| audit_mode.set(e.value()),
+                        option { value: "parallel", "Parallel (recommended)" }
+                        option { value: "sequential", "Sequential (slower, gentlest)" }
+                    }
+                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently — same findings, much faster. Sequential is one call at a time." }
                 }
                 // While the audit runs, the Bombe turns — a visible "the AI is thinking"
                 // cue so a multi-second audit doesn't look hung.

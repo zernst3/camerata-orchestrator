@@ -499,6 +499,131 @@ fn build_repo_map(files: &[(String, String)]) -> String {
     out
 }
 
+/// Max concurrent LLM calls + rules-per-batch for the parallel mode. Tunable.
+const PARALLEL_CONCURRENCY: usize = 6;
+const RULE_BATCH_SIZE: usize = 15;
+
+/// How the semantic (LLM) audit executes — the SPEED/SCALE knob, orthogonal to model tier
+/// (quality) and rule selection (coverage). The free deterministic floor is unaffected; it
+/// runs the same in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanMode {
+    /// One call per file-chunk, ALL rules at once, chunks one after another. Simplest,
+    /// gentlest on rate limits — the debug/fallback floor.
+    Sequential,
+    /// Rule-batches × file-chunks run CONCURRENTLY (capped). The default efficient floor:
+    /// wall-clock is the slowest batch, not the sum of all calls.
+    Parallel,
+}
+
+impl ScanMode {
+    /// `(max concurrent calls, rules per batch)`. Sequential = one call, all rules together;
+    /// Parallel = batched + concurrent.
+    fn tuning(self) -> (usize, usize) {
+        match self {
+            ScanMode::Sequential => (1, usize::MAX),
+            ScanMode::Parallel => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
+        }
+    }
+    /// Parse the wire value; unknown / empty → Parallel (the efficient default floor).
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("sequential") => ScanMode::Sequential,
+            _ => ScanMode::Parallel,
+        }
+    }
+}
+
+/// Run a set of file-chunks × rule-batches as passes, up to `concurrency` at once, and
+/// aggregate their findings / proposed rules / needs_files. Each pass registers its OWN
+/// transcript agent (so parallel streams don't clobber each other) and finalizes its own
+/// status. Shared by the main and resolution rounds. `concurrency == 1` => sequential.
+#[allow(clippy::too_many_arguments)]
+async fn run_passes(
+    llm: &Llm,
+    repo: &str,
+    repo_map: &str,
+    adopted: &std::collections::HashSet<String>,
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    chunks: &[&[(String, String)]],
+    batches: &[&[(String, String)]],
+    concurrency: usize,
+    label: &str,
+    session_prefix: &str,
+) -> (
+    Vec<Finding>,
+    Vec<ProposedRule>,
+    std::collections::HashSet<String>,
+    usize,
+    Option<anyhow::Error>,
+) {
+    use futures::stream::StreamExt;
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let n_c = chunks.len();
+    let n_b = batches.len();
+    let work: Vec<(usize, usize)> = (0..n_c)
+        .flat_map(|c| (0..n_b).map(move |b| (c, b)))
+        .collect();
+    type PassOut = (
+        usize,
+        usize,
+        anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
+    );
+    let results: Vec<PassOut> = futures::stream::iter(work)
+        .map(|(ci, bi)| {
+            let digest = &digests[ci];
+            let batch = batches[bi];
+            async move {
+                let rb = build_rules_block(batch);
+                let prompt = format!(
+                    "Repository: {repo} ({label} {}/{n_c}, rules {}/{n_b})\n\n{rb}{repo_map}Audit the file bodies below for conformance to the adopted rules, and flag any other genuine issues. Use the REPO MAP above for cross-file context.\n\n{digest}",
+                    ci + 1,
+                    bi + 1
+                );
+                let session = format!("{session_prefix}-c{ci}-b{bi}");
+                if let Some((store, key)) = feedback {
+                    store.register(
+                        key,
+                        crate::transcript::AgentTranscript {
+                            session_id: session.clone(),
+                            role: format!("{label} {}/{n_c} · rules {}/{n_b} — {repo}", ci + 1, bi + 1),
+                            prompt: prompt.clone(),
+                            output: String::new(),
+                            status: "running".to_string(),
+                        },
+                    );
+                }
+                let r = audit_pass(llm, audit_model, prompt, repo, adopted, feedback, &session).await;
+                if let Some((store, key)) = feedback {
+                    store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
+                }
+                (ci, bi, r)
+            }
+        })
+        .buffer_unordered(concurrency.max(1))
+        .collect()
+        .await;
+
+    let mut findings = Vec::new();
+    let mut proposed = Vec::new();
+    let mut requested = std::collections::HashSet::new();
+    let mut ok = 0usize;
+    let mut last_err = None;
+    for (_ci, _bi, r) in results {
+        match r {
+            Ok((f, p, needs)) => {
+                findings.extend(f);
+                proposed.extend(p);
+                requested.extend(needs);
+                ok += 1;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    (findings, proposed, requested, ok, last_err)
+}
+
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
 ///
 /// The repo is audited in CONTEXT-SIZED CHUNKS (see `chunk_files`): a real repo is far too
@@ -514,95 +639,55 @@ pub async fn audit_repo(
     files: &[(String, String)],
     selected: &[(String, String)],
     model: Option<&str>,
+    mode: ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    let rules_block = build_rules_block(selected);
     // Cross-file context for every chunk (which dirs are which layer, where types live).
     let repo_map = build_repo_map(files);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
         selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
-    // Model selection: the USER's per-audit choice wins (they own the speed/thoroughness
-    // trade-off); else `CAMERATA_AUDIT_MODEL`; else the provider default.
+    // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
     let audit_model = model.map(str::to_string).or_else(|| {
         std::env::var("CAMERATA_AUDIT_MODEL")
             .ok()
             .filter(|s| !s.trim().is_empty())
     });
 
+    // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
+    // rule-batches × file-chunks run concurrently (the default efficient floor).
+    let (concurrency, batch_size) = mode.tuning();
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-    let n_chunks = chunks.len();
-    let session = format!("audit-{repo}");
-    if let Some((store, key)) = feedback {
-        store.register(
-            key,
-            crate::transcript::AgentTranscript {
-                session_id: session.clone(),
-                role: format!("AI audit — {repo}"),
-                prompt: format!(
-                    "Repository: {repo}\n\n{rules_block}[auditing {} files across {n_chunks} context-sized pass(es)]",
-                    files.len()
-                ),
-                output: String::new(),
-                status: "running".to_string(),
-            },
-        );
-    }
+    let batches: Vec<&[(String, String)]> = if selected.is_empty() {
+        vec![selected] // one empty batch -> a single free-form pass per chunk
+    } else {
+        selected.chunks(batch_size.max(1)).collect()
+    };
 
-    let mut all_findings = Vec::new();
-    let mut all_proposed = Vec::new();
-    let mut ok_passes = 0usize;
-    let mut last_err: Option<anyhow::Error> = None;
-    // Files a pass said it needs co-resident to judge a cross-file rule (the resolution
-    // round). A HashSet so duplicate requests across passes collapse.
-    let mut requested: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let digest = build_digest(chunk);
-        let prompt = format!(
-            "Repository: {repo} (pass {}/{n_chunks})\n\n{rules_block}{repo_map}Audit the file bodies below for conformance to the adopted rules, and flag any other genuine issues. Use the REPO MAP above for cross-file context.\n\n{digest}",
-            i + 1
-        );
-        if let Some((store, key)) = feedback {
-            store.append_output(
-                key,
-                &session,
-                &format!("\n── pass {}/{n_chunks} · {} file(s) ──\n", i + 1, chunk.len()),
-            );
-        }
-        match audit_pass(llm, audit_model.as_deref(), prompt, repo, &adopted, feedback, &session).await {
-            Ok((f, p, needs)) => {
-                all_findings.extend(f);
-                all_proposed.extend(p);
-                requested.extend(needs);
-                ok_passes += 1;
-            }
-            Err(e) => {
-                if let Some((store, key)) = feedback {
-                    store.append_output(
-                        key,
-                        &session,
-                        &format!("[pass {}/{n_chunks} failed: {e} — continuing]", i + 1),
-                    );
-                }
-                last_err = Some(e);
-            }
-        }
-    }
+    let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) = run_passes(
+        llm,
+        repo,
+        &repo_map,
+        &adopted,
+        audit_model.as_deref(),
+        feedback,
+        &chunks,
+        &batches,
+        concurrency,
+        "pass",
+        &format!("audit-{repo}"),
+    )
+    .await;
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
-    // (the deterministic findings still return independently). Finalize the transcript
-    // status FIRST so the UI's "analyzing" spinner stops instead of spinning forever.
+    // (the deterministic findings still return independently). Each pass already finalized
+    // its own transcript status, so the UI spinner stops regardless.
     if ok_passes == 0 {
         if let Some(e) = last_err {
-            if let Some((store, key)) = feedback {
-                store.append_output(key, &session, &format!("\n[audit failed: {e}]"));
-                store.set_status(key, &session, "blocked");
-            }
             return Err(e);
         }
     }
@@ -613,6 +698,8 @@ pub async fn audit_repo(
     // files together and re-audit once — so a cross-file rule the model couldn't decide
     // in a single pass gets resolved instead of silently missed. SINGLE round (the
     // resolution passes' own needs_files are ignored) to keep it bounded.
+    // Resolution round: the same parallel engine, over just the files earlier passes asked
+    // for (needs_files). Its own needs_files are ignored — single round, bounded.
     let resolution: Vec<(String, String)> = files
         .iter()
         .filter(|(p, _)| requested.contains(p))
@@ -620,36 +707,22 @@ pub async fn audit_repo(
         .collect();
     if !resolution.is_empty() {
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
-        let r_total = res_chunks.len();
-        for (i, chunk) in res_chunks.iter().enumerate() {
-            let digest = build_digest(chunk);
-            let prompt = format!(
-                "Repository: {repo} (resolution pass {}/{r_total})\n\n{rules_block}{repo_map}These file bodies were flagged by earlier passes as needed TOGETHER to judge a cross-file rule. Re-check the adopted rules across them now that their bodies are present, and report any violations.\n\n{digest}",
-                i + 1
-            );
-            if let Some((store, key)) = feedback {
-                store.append_output(
-                    key,
-                    &session,
-                    &format!("\n── resolution {}/{r_total} · {} file(s) ──\n", i + 1, chunk.len()),
-                );
-            }
-            match audit_pass(llm, audit_model.as_deref(), prompt, repo, &adopted, feedback, &session).await {
-                Ok((f, p, _ignored_needs)) => {
-                    all_findings.extend(f);
-                    all_proposed.extend(p);
-                }
-                Err(e) => {
-                    if let Some((store, key)) = feedback {
-                        store.append_output(
-                            key,
-                            &session,
-                            &format!("[resolution {}/{r_total} failed: {e} — continuing]", i + 1),
-                        );
-                    }
-                }
-            }
-        }
+        let (rf, rp, _rn, _rok, _re) = run_passes(
+            llm,
+            repo,
+            &repo_map,
+            &adopted,
+            audit_model.as_deref(),
+            feedback,
+            &res_chunks,
+            &batches,
+            concurrency,
+            "resolution",
+            &format!("audit-{repo}-res"),
+        )
+        .await;
+        all_findings.extend(rf);
+        all_proposed.extend(rp);
     }
 
     // Cross-chunk dedup: the shared repo map means the same issue can surface in more than
@@ -670,17 +743,6 @@ pub async fn audit_repo(
     } else {
         verify_findings(llm, repo, all_findings).await
     };
-    if let Some((store, key)) = feedback {
-        store.append_output(
-            key,
-            &session,
-            &format!(
-                "\n[done — {ok_passes}/{n_chunks} pass(es); {} finding(s) for review]",
-                verified.len()
-            ),
-        );
-        store.set_status(key, &session, "done");
-    }
     Ok((verified, all_proposed))
 }
 

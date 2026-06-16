@@ -660,6 +660,10 @@ struct AuditReq {
     /// thoroughness-vs-speed trade-off by choosing here.
     #[serde(default)]
     model: Option<String>,
+    /// The execution mode: `parallel` (default) or `sequential`. Speed/scale knob,
+    /// orthogonal to model + rules.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// The transcript key the scan/audit AI activity registers under (the Agent-activity
@@ -698,6 +702,7 @@ async fn onboard_audit(
         .map(|r| (r.id, r.directive))
         .collect();
     let model = req.model.filter(|m| !m.trim().is_empty());
+    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     Json(
@@ -706,6 +711,7 @@ async fn onboard_audit(
             &selected,
             &token,
             model.as_deref(),
+            mode,
             Some((&state.transcripts, SCAN_AUDIT_KEY)),
         )
         .await,
