@@ -2168,6 +2168,11 @@ fn FindingsTable(
     });
     let id_map: std::collections::HashMap<RowId, FindingView> =
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
+    let id_map_click = id_map.clone();
+    // Row click opens the finding-detail modal (hosted by ScanResults, OUTSIDE this table's
+    // subtree — same reason as the rule modal). Shows the violated rule's full directive +
+    // the complete, untruncated explanation that the row cell clips.
+    let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
     let handle = use_table(move || {
         TableState::new(
             rows.clone(),
@@ -2295,7 +2300,19 @@ fn FindingsTable(
                 "Export CSV"
             }
         }
-        Table { handle, sort_enabled: true, filter_enabled: true, selection_enabled: true, resize_enabled: true, cell_renderers: renderers }
+        Table {
+            handle,
+            sort_enabled: true,
+            filter_enabled: true,
+            selection_enabled: true,
+            resize_enabled: true,
+            cell_renderers: renderers,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(f) = id_map_click.get(&rid) {
+                    detail_finding.set(Some(f.clone()));
+                }
+            }),
+        }
     }
 }
 
@@ -2882,6 +2899,11 @@ fn ScanResults(report: ScanReportView) -> Element {
     let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
     use_context_provider(|| detail_rule);
 
+    // The open finding (row-click) — same host-outside-the-table pattern, shared with
+    // FindingsTable. The modal shows the violated rule's directive + the full detail.
+    let detail_finding = use_signal(|| Option::<FindingView>::None);
+    use_context_provider(|| detail_finding);
+
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
     let descriptions: std::collections::HashMap<String, String> = report
@@ -2897,10 +2919,42 @@ fn ScanResults(report: ScanReportView) -> Element {
         })
         .collect();
 
+    let descriptions_modal = descriptions.clone();
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
         RuleDetailModal {}
+        // Finding-detail modal: click any findings row to read the violated rule's full
+        // directive + the complete explanation the row cell truncates.
+        if let Some(f) = detail_finding() {
+            {
+                let directive = descriptions_modal.get(&f.rule_id).cloned();
+                let mut detail_finding = detail_finding;
+                rsx! {
+                    div { class: "rule-modal-overlay", onclick: move |_| detail_finding.set(None),
+                        div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                            div { class: "rule-modal-head",
+                                span { class: "rule-modal-id", "{f.rule_id}" }
+                                button { class: "rule-modal-close", onclick: move |_| detail_finding.set(None), "\u{2715}" }
+                            }
+                            div { class: "rule-modal-meta",
+                                span { class: "rule-modal-tag", "severity · {f.severity}" }
+                                span { class: "rule-modal-tag", "{f.path}:{f.line}" }
+                                span { class: "rule-modal-tag", "{f.status}" }
+                            }
+                            if let Some(d) = directive {
+                                p { class: "rule-modal-label", "Rule violated" }
+                                p { class: "rule-modal-detail", "{d}" }
+                            }
+                            p { class: "rule-modal-label", "Finding" }
+                            p { class: "rule-modal-title", "{f.snippet}" }
+                            p { class: "rule-modal-label", "Explanation" }
+                            p { class: "rule-modal-detail", "{f.detail}" }
+                        }
+                    }
+                }
+            }
+        }
         div { class: "scan-results",
             if let Some(msg) = report.message.clone() {
                 p { class: "scan-note", "{msg}" }

@@ -1528,6 +1528,8 @@ html, body {
 .rule-modal-close { border: none; background: transparent; font-size: 16px; color: var(--ink-soft); cursor: pointer; padding: 2px 6px; }
 .rule-modal-close:hover { color: var(--ink); }
 .rule-modal-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 8px 0 12px; line-height: 1.35; }
+/* Full, wrapping explanation text in the finding-detail modal (the row cell truncates). */
+.rule-modal-detail { font-size: 13.5px; color: var(--ink-soft); margin: 4px 0 12px; line-height: 1.55; white-space: pre-wrap; }
 .rule-modal-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .rule-modal-tag { font-size: 11px; font-weight: 600; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
 .rule-modal-placement { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 16px; line-height: 1.5; }
