@@ -24,7 +24,7 @@ use camerata_worktracker::{CanonicalStory, FeatureStatus};
 // proposed-rules tables — the surfaces where the data genuinely scales.
 use chorale_core::{
     BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
-    RenderKind, RowId, TableState,
+    PaginationMode, RenderKind, RowId, TableState,
 };
 use chorale_dioxus::{use_table, CellRenderer, CellRenderers, Table};
 
@@ -2127,7 +2127,11 @@ fn FindingsTable(
     });
     // Group findings BY FINDING TYPE so same-kind violations sit together (a flat 200-row
     // dump is paralysis); severity / authority / repo / type filter via multi-select.
-    use_hook(move || handle.set_grouping(vec![ColumnId("type")]));
+    use_hook(move || {
+        handle.set_grouping(vec![ColumnId("type")]);
+        handle.set_pagination_mode(PaginationMode::InfiniteScroll);
+        let _ = handle.set_page_size(5000);
+    });
     let mut busy = use_signal(|| false);
     // A durable ignore requires a reason (the require-reason invariant); optional ticket.
     let mut ignore_reason = use_signal(String::new);
@@ -2281,31 +2285,62 @@ fn ProposedRulesTable(
     // swallowed the next click, so the modal wouldn't reopen after being closed.
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let id_map_click = id_map.clone();
-    // Group BY DOMAIN and PRE-SELECT the suggested rules — once, on mount.
+    // Group BY DOMAIN, switch to INFINITE SCROLL (not paginated), LOAD EVERY rule so
+    // selection/audit cover all domains (paginated select-all only grabbed the first
+    // page — that's why whole domains like api-layer were missing from the audit),
+    // and PRE-SELECT the suggested rules. Once, on mount.
     use_hook(move || {
         handle.set_grouping(vec![ColumnId("domain")]);
+        handle.set_pagination_mode(PaginationMode::InfiniteScroll);
+        let _ = handle.set_page_size(5000);
         for rid in &suggested_ids {
             handle.set_selection(*rid, true);
         }
     });
     let mut arming = use_signal(|| false);
+    let mut domain_panel_open = use_signal(|| false);
     let arm_findings = findings;
     let csv_rules = rules.clone();
 
+    // Current selection as a set, read reactively so each domain's checkbox reflects
+    // whether ALL of that domain's rows are selected (tri-state-ish: checked only when
+    // every row in the domain is selected).
+    let selected_set: std::collections::HashSet<RowId> =
+        handle.selected_ids().into_iter().collect();
+
     rsx! {
-        div { class: "domain-select-row",
-            span { class: "domain-select-label", "Select all in:" }
-            for (domain , rids) in domain_rows.iter() {
-                {
-                    let rids = rids.clone();
-                    rsx! {
-                        button {
-                            key: "{domain}",
-                            class: "domain-chip",
-                            onclick: move |_| {
-                                for rid in &rids { handle.set_selection(*rid, true); }
-                            },
-                            "{domain} ({rids.len()})"
+        // Per-domain "select all" — styled like a column's multi-select filter: a
+        // trigger that opens a FIXED-HEIGHT, scrollable checkbox list (so 100 domains
+        // don't blow up the layout). Checking a domain selects every rule in it across
+        // all pages; unchecking clears them.
+        div { class: "domain-select",
+            button {
+                class: "domain-select-trigger",
+                onclick: move |_| { let o = domain_panel_open(); domain_panel_open.set(!o); },
+                "Select rules by domain "
+                span { class: "domain-select-caret", if domain_panel_open() { "\u{25B4}" } else { "\u{25BE}" } }
+            }
+            if domain_panel_open() {
+                div { class: "domain-select-panel",
+                    for (domain , rids) in domain_rows.iter() {
+                        {
+                            let rids = rids.clone();
+                            let all_selected = !rids.is_empty()
+                                && rids.iter().all(|r| selected_set.contains(r));
+                            rsx! {
+                                label { key: "{domain}", class: "domain-select-item",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: all_selected,
+                                        onchange: move |_| {
+                                            let target = !all_selected;
+                                            for rid in &rids { handle.set_selection(*rid, target); }
+                                        },
+                                    }
+                                    span { class: "domain-select-name", "{domain}" }
+                                    span { class: "domain-select-count", "{rids.len()}" }
+                                }
+                            }
                         }
                     }
                 }
@@ -2349,7 +2384,12 @@ fn ProposedRulesTable(
                     }).collect();
                     on_audit.call(chosen_rules);
                 },
-                if auditing { "Auditing…" } else { "Audit code against selected rules" }
+                if auditing {
+                    span { class: "spinner" }
+                    "Auditing\u{2026}"
+                } else {
+                    "Audit code against selected rules"
+                }
             }
             button {
                 class: "btn-edit-sm",
@@ -2847,6 +2887,10 @@ fn ScanResults(report: ScanReportView) -> Element {
                         auditing: auditing(),
                         on_audit: move |rules: Vec<(String, String)>| {
                             let repos = repos_audit.clone();
+                            // Clear the PREVIOUS run's findings so a re-audit starts from a
+                            // blank Findings table instead of showing stale results while
+                            // the new audit runs (the server also clears the transcript).
+                            audit.set(None);
                             auditing.set(true);
                             spawn(async move {
                                 audit.set(audit_against(&repos, &rules).await);

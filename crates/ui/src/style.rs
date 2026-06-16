@@ -1437,22 +1437,45 @@ html, body {
 .audit-cta { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-wash); }
 
 /* ---- rule detail modal (click a row) -------------------------------------- */
-/* Proposed-rules table: per-domain "select all" chips + clickable rule id. */
-.domain-select-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 10px; }
-.domain-select-label { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); letter-spacing: .02em; }
-.domain-chip {
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
-  font-size: 11.5px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
-  cursor: pointer; transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+/* Proposed-rules table: per-domain "select all" as a column-filter-style
+   multi-select. Trigger opens a FIXED-HEIGHT, scrollable checkbox list. */
+.domain-select { position: relative; margin-bottom: 10px; }
+.domain-select-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 12px; font-weight: 600; padding: 6px 11px; border-radius: 8px; cursor: pointer;
+  transition: border-color .15s var(--ease);
 }
-.domain-chip:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
-.rule-id-link {
-  border: none; background: none; padding: 0; cursor: pointer;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 700;
-  color: var(--accent-ink); text-align: left; text-decoration: underline; text-underline-offset: 2px;
-  text-decoration-color: var(--line);
+.domain-select-trigger:hover { border-color: var(--accent); }
+.domain-select-caret { font-size: 10px; color: var(--ink-soft); }
+.domain-select-panel {
+  position: absolute; z-index: 40; margin-top: 4px; min-width: 240px;
+  /* FIXED height: 100 domains scroll, they don't blow up the layout. */
+  max-height: 260px; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: var(--shadow-pop); padding: 5px;
 }
-.rule-id-link:hover { text-decoration-color: var(--accent); }
+.domain-select-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
+  font-size: 12.5px; color: var(--ink); cursor: pointer;
+}
+.domain-select-item:hover { background: var(--accent-wash); }
+.domain-select-item input { cursor: pointer; accent-color: var(--accent); }
+.domain-select-name { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.domain-select-count {
+  font-size: 11px; font-weight: 700; color: var(--ink-soft);
+  background: var(--accent-wash); border-radius: 999px; padding: 1px 8px;
+}
+
+/* "It's working" spinner — paired with Auditing… / running status text. */
+@keyframes camerata-spin { to { transform: rotate(360deg); } }
+.spinner {
+  display: inline-block; width: 13px; height: 13px; vertical-align: -2px;
+  margin-right: 7px; border-radius: 50%;
+  border: 2px solid var(--accent-wash); border-top-color: var(--accent);
+  animation: camerata-spin .7s linear infinite;
+}
+.spinner-sm { width: 10px; height: 10px; margin-right: 5px; border-width: 1.5px; }
 .rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
 .rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

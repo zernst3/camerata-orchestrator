@@ -53,6 +53,7 @@ pub fn AgentActivity(run_id: String) -> Element {
     };
 
     let count = agents().len();
+    let any_running = agents().iter().any(|a| a.status == "running");
 
     rsx! {
         div { class: "agent-activity",
@@ -66,6 +67,9 @@ pub fn AgentActivity(run_id: String) -> Element {
                         start_polling();
                     }
                 },
+                if any_running {
+                    span { class: "spinner spinner-sm" }
+                }
                 if count > 0 {
                     "🤖 Agent activity ({count})"
                 } else {
@@ -93,7 +97,12 @@ pub fn AgentActivity(run_id: String) -> Element {
                                             class: "{cls}",
                                             onclick: move |_| selected.set(i),
                                             span { class: "agent-tab-role", "{a.role}" }
-                                            span { class: "agent-tab-status {a.status}", "{a.status}" }
+                                            span { class: "agent-tab-status {a.status}",
+                                                if a.status == "running" {
+                                                    span { class: "spinner spinner-sm" }
+                                                }
+                                                "{a.status}"
+                                            }
                                         }
                                     }
                                 }

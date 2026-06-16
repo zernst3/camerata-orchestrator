@@ -359,6 +359,16 @@ fn detect_frameworks(path: &str, content: &str, out: &mut std::collections::BTre
             if lc.contains("leptos") {
                 add("Leptos");
             }
+            // ORMs / DB layers — drive the SeaORM + SQL rule domains.
+            if lc.contains("sea-orm") || lc.contains("sea_orm") || lc.contains("seaorm") {
+                add("SeaORM");
+            }
+            if lc.contains("sqlx") {
+                add("sqlx");
+            }
+            if lc.contains("diesel") {
+                add("Diesel");
+            }
         }
         "Gemfile" => {
             if lc.contains("rails") {
@@ -407,11 +417,15 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
 /// The corpus domains ONE repo's stack maps to. Used to bind each rule to only the
 /// repos whose domain it applies to (minimum domains per repo).
 fn domains_for_stack(s: &RepoStack) -> Vec<String> {
+    // Map to the ACTUAL corpus domain taxonomy (see crates/rules/principles/*):
+    // rust, rust:dioxus, rust:seaorm, ui, sql, api-layer, ci-cd, permissions,
+    // javascript:next, fullstack. Earlier this only emitted language domains
+    // (rust/javascript) + a generic "fullstack", so framework-specific domains
+    // (Dioxus / SeaORM / UI / SQL) were never suggested even when obviously present.
     let mut domains = std::collections::BTreeSet::new();
     for lang in &s.languages {
         match lang.as_str() {
             "JavaScript" | "TypeScript" => {
-                domains.insert("javascript");
                 domains.insert("fullstack");
                 domains.insert("api-layer");
             }
@@ -419,14 +433,53 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("rust");
                 domains.insert("api-layer");
             }
+            // A repo with hand-written .sql files clearly has a SQL surface.
+            "SQL" => {
+                domains.insert("sql");
+            }
             // Other backend languages map to the API-layer architecture rules.
             _ => {
                 domains.insert("api-layer");
             }
         }
     }
-    if !s.frameworks.is_empty() {
-        domains.insert("fullstack");
+    for fw in &s.frameworks {
+        match fw.as_str() {
+            "Dioxus" => {
+                domains.insert("rust:dioxus");
+                domains.insert("ui");
+            }
+            "Leptos" => {
+                domains.insert("ui");
+            }
+            // An ORM/DB layer implies both the ORM-specific rules and the SQL +
+            // migration-hygiene (ci-cd) rules.
+            "SeaORM" | "Diesel" | "sqlx" => {
+                domains.insert("rust:seaorm");
+                domains.insert("sql");
+                domains.insert("ci-cd");
+            }
+            "Next.js" => {
+                domains.insert("javascript:next");
+                domains.insert("fullstack");
+                domains.insert("ui");
+            }
+            "React" | "Vue" | "Svelte" | "Angular" => {
+                domains.insert("ui");
+                domains.insert("fullstack");
+            }
+            "Axum" | "Actix" | "Express" | "FastAPI" | "Flask" | "Django" | "Rails"
+            | "ASP.NET" => {
+                domains.insert("api-layer");
+            }
+            _ => {}
+        }
+    }
+    // Any app with a backend API layer almost certainly enforces authorization, so
+    // suggest the permissions rules too. (The `agentic` domain is always-suggested
+    // downstream in propose_corpus_rules, regardless of stack.)
+    if domains.contains("api-layer") {
+        domains.insert("permissions");
     }
     domains.into_iter().map(String::from).collect()
 }
@@ -869,6 +922,12 @@ pub async fn audit_repos(
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
     let llm = crate::llm::Llm::from_env();
+
+    // A re-run must start from a clean transcript: drop the prior audit's per-agent
+    // prompts/output so the Agent-activity drawer shows THIS run, not the last one.
+    if let Some((store, key)) = feedback {
+        store.clear(key);
+    }
 
     // ROUTE BY ENGINE, not by domain. A rule with a deterministic gate arm
     // (secrets / raw-SQL / secret-URL / path / secret-files) runs through real
