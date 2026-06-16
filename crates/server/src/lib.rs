@@ -164,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/onboard/scan", post(onboard_scan))
+        .route("/api/onboard/audit", post(onboard_audit))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
@@ -612,6 +613,52 @@ async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanRepo
         return Json(crate::onboard::ScanReport::gated(&repos));
     };
     Json(crate::onboard::scan_repos(&repos, &token).await)
+}
+
+/// One selected rule the Phase-2 audit runs against.
+#[derive(serde::Deserialize)]
+struct AuditRuleReq {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    directive: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AuditReq {
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    rules: Vec<AuditRuleReq>,
+}
+
+/// Phase 2 — audit the repos AGAINST the selected rules (the deterministic security floor
+/// + the AI audit parameterized by the chosen rules). Returns the findings report.
+async fn onboard_audit(Json(req): Json<AuditReq>) -> Json<crate::onboard::ScanReport> {
+    let repos: Vec<String> = req
+        .repos
+        .into_iter()
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    if repos.is_empty() {
+        let mut r = crate::onboard::ScanReport::gated(&repos);
+        r.gated = false;
+        r.message = Some("No repos to audit.".to_string());
+        return Json(r);
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(crate::onboard::ScanReport::gated(&repos));
+    };
+    let selected: Vec<(String, String)> = req
+        .rules
+        .into_iter()
+        .filter(|r| !r.id.trim().is_empty())
+        .map(|r| (r.id, r.directive))
+        .collect();
+    Json(crate::onboard::audit_repos(&repos, &selected, &token).await)
 }
 
 #[derive(serde::Deserialize)]

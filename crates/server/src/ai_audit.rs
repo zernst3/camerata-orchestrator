@@ -304,13 +304,30 @@ pub async fn audit_repo(
     llm: &Llm,
     repo: &str,
     files: &[(String, String)],
+    selected: &[(String, String)],
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
     let digest = build_digest(files);
+    // PARAMETERIZE by the architect's selected rules: the audit checks the code against
+    // the rules the project actually adopted, THEN flags anything else genuine. Without a
+    // selection it falls back to the free-form investigative audit.
+    let rules_block = if selected.is_empty() {
+        String::new()
+    } else {
+        let mut b = String::from(
+            "The project has ADOPTED these rules — check the code against each, AND flag \
+             any other genuine issues you find:\n",
+        );
+        for (id, directive) in selected {
+            b.push_str(&format!("- [{id}] {directive}\n"));
+        }
+        b.push('\n');
+        b
+    };
     let prompt = format!(
-        "Repository: {repo}\n\nAudit this code for genuine architectural/security violations.\n\n{digest}"
+        "Repository: {repo}\n\n{rules_block}Audit this code for genuine architectural/security violations.\n\n{digest}"
     );
     let resp = llm
         .complete(

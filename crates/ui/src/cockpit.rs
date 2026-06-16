@@ -1854,6 +1854,23 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
         .ok()
 }
 
+/// Phase 2 — audit the repos against the selected rules (`(id, directive)` each).
+async fn audit_against(repos: &[String], rules: &[(String, String)]) -> Option<ScanReportView> {
+    let rule_json: Vec<_> = rules
+        .iter()
+        .map(|(id, directive)| serde_json::json!({ "id": id, "directive": directive }))
+        .collect();
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/audit", crate::BFF_URL))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json }))
+        .send()
+        .await
+        .ok()?
+        .json::<ScanReportView>()
+        .await
+        .ok()
+}
+
 /// A fully-resolved rule sent to arm (the chosen directive + where it installs).
 #[derive(Clone, serde::Serialize)]
 struct ArmRuleReq {
@@ -2626,10 +2643,19 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
 /// chorale tables with fresh rows.
 #[component]
 fn ScanResults(report: ScanReportView) -> Element {
-    let high = report.findings.iter().filter(|f| f.severity == "high").count();
-    let enforced = report.findings.iter().filter(|f| f.status == "active").count();
-    let suppressed = report.findings.len().saturating_sub(enforced);
-    let table_key = format!("{}-{}", report.repos.join(","), report.findings.len());
+    // Phase 2 audit result (findings against the selected rules); None until the
+    // architect picks rules and runs the audit.
+    let mut audit = use_signal(|| Option::<ScanReportView>::None);
+    let mut auditing = use_signal(|| false);
+    let audited = audit.read().clone();
+    let findings: Vec<FindingView> = audited
+        .as_ref()
+        .map(|a| a.findings.clone())
+        .unwrap_or_default();
+
+    let high = findings.iter().filter(|f| f.severity == "high").count();
+    let enforced = findings.iter().filter(|f| f.status == "active").count();
+    let suppressed = findings.len().saturating_sub(enforced);
 
     // The architect's per-rule alternative choices (rule id -> option id), seeded
     // with each rule's default. Shared so the findings hover reads the choice.
@@ -2681,7 +2707,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                     " repos"
                 }
                 span { class: "scan-stat",
-                    span { class: "scan-stat-n", "{report.findings.len()}" }
+                    span { class: "scan-stat-n", "{findings.len()}" }
                     " findings"
                 }
                 span { class: "scan-stat",
@@ -2719,23 +2745,54 @@ fn ScanResults(report: ScanReportView) -> Element {
                 }
             }
 
-            p { class: "scan-section-h", "Findings already in these repos" }
-            p { class: "scan-section-sub", "Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/authority; filter by type or location." }
-            p { class: "scan-domains-note",
-                b { "Two domains, two authorities. " }
-                "“Rule · enforced” findings are deterministic rule violations — high-confidence, gateable, eligible for auto-fix. “AI · advisory” findings are the investigative layer — the agent thinks something's worth a look. They are review-only: they never auto-block work or auto-fix without you confirming. Enforcement is mechanical; advice needs the architect."
-            }
-            FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
-
-            FixAuditedPanel { findings: report.findings.clone(), repos: report.repos.clone() }
-
-            CiRulesPanel { repos: report.repos.clone() }
-
-            p { class: "scan-section-h", "Proposed starter ruleset" }
-            p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
-            ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone(), findings: report.findings.clone() }
+            // ── Phase 1 result: the proposed ruleset to pick from ──────────────
+            p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
+            p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
+            ProposedRulesTable { rules: report.proposed_rules.clone(), findings: findings.clone() }
 
             AlternativesPicker { rules: report.proposed_rules.clone(), all_repos: report.repos.clone() }
+
+            // ── Phase 2: audit the code AGAINST the selected rules ─────────────
+            div { class: "audit-cta",
+                p { class: "scan-section-h", "Step 2 — audit the code against your rules" }
+                p { class: "scan-section-sub", "The deterministic security rules (secrets / raw-SQL / secret-URLs) always run; the AI checks the code against the rules above AND flags anything else worth a look (advisory)." }
+                button {
+                    class: "btn-run",
+                    disabled: auditing(),
+                    onclick: {
+                        let repos = report.repos.clone();
+                        let rules: Vec<(String, String)> = report
+                            .proposed_rules
+                            .iter()
+                            .map(|r| (r.id.clone(), descriptions.get(&r.id).cloned().unwrap_or_else(|| r.title.clone())))
+                            .collect();
+                        move |_| {
+                            let (repos, rules) = (repos.clone(), rules.clone());
+                            auditing.set(true);
+                            spawn(async move {
+                                audit.set(audit_against(&repos, &rules).await);
+                                auditing.set(false);
+                            });
+                        }
+                    },
+                    if auditing() { "Auditing…" } else { "Audit code against these rules" }
+                }
+            }
+
+            // ── Findings (after the audit runs) ────────────────────────────────
+            if audited.is_some() {
+                p { class: "scan-section-h", "Findings" }
+                p { class: "scan-section-sub", "Select rows to Ignore, Resolve, or Accept as tech debt. Sort by severity/authority; filter by type or location." }
+                p { class: "scan-domains-note",
+                    b { "Two domains, two authorities. " }
+                    "“Rule · enforced” findings are deterministic rule violations — high-confidence, gateable, eligible for auto-fix. “AI · advisory” findings are the investigative layer — the agent thinks something's worth a look. They are review-only: they never auto-block work or auto-fix without you confirming. Enforcement is mechanical; advice needs the architect."
+                }
+                FindingsTable { findings: findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
+
+                FixAuditedPanel { findings: findings.clone(), repos: report.repos.clone() }
+            }
+
+            CiRulesPanel { repos: report.repos.clone() }
         }
     }
 }

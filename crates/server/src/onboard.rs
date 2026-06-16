@@ -786,16 +786,68 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
     }
 }
 
+/// Phase 1 — DETECT. Fetch the repos, detect each stack, and PROPOSE a starter ruleset.
+/// It does NOT audit code yet — that's [`audit_repos`], run after the architect picks
+/// which rules to enforce. This is the "scan to determine languages / frameworks /
+/// domains → suggest rules" step the two-phase flow opens with.
 pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
+    let mut stacks = Vec::new();
+    let mut files_total = 0usize;
+    let mut repos_ok = Vec::new();
+    let mut notes = Vec::new();
+
+    for spec in specs {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let Some((owner, repo)) = spec.split_once('/') else {
+            notes.push(format!("{spec}: not `owner/repo`, skipped"));
+            continue;
+        };
+        match fetch_repo_files(owner, repo, token).await {
+            Ok((files, truncated)) => {
+                files_total += files.len();
+                stacks.push(detect_stack(spec, &files));
+                repos_ok.push(spec.to_string());
+                if truncated {
+                    notes.push(format!(
+                        "{spec}: more than {HARD_CAP_FILES} files; truncated at the safety limit"
+                    ));
+                }
+            }
+            Err(e) => notes.push(format!("{spec}: scan failed ({e})")),
+        }
+    }
+
+    let repo_domains: Vec<(String, Vec<String>)> = stacks
+        .iter()
+        .map(|s| (s.repo.clone(), domains_for_stack(s)))
+        .collect();
+    let mut report = build_report(repos_ok, stacks, files_total, Vec::new());
+    report.proposed_rules = propose_corpus_rules(&repo_domains).await;
+    if !notes.is_empty() {
+        report.message = Some(notes.join(" · "));
+    }
+    report
+}
+
+/// Phase 2 — AUDIT against the SELECTED rules. After the architect picks rules (Phase 1),
+/// this audits the code: the deterministic content rules (secrets / raw-SQL / secret-URL)
+/// are the always-on SECURITY floor and produce ENFORCED findings; the AI audit is
+/// PARAMETERIZED by the selected rules' directives (so it checks the code against what the
+/// project actually adopted) and produces ADVISORY findings plus its investigative pass.
+/// `selected` is `(rule_id, directive)` for each adopted rule.
+pub async fn audit_repos(
+    specs: &[String],
+    selected: &[(String, String)],
+    token: &str,
+) -> ScanReport {
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
-    // The AI architectural audit's proposed rules, kept separate so they merge after
-    // the deterministic corpus proposals.
-    let mut ai_proposed = Vec::new();
-    // The model provider for the AI audit tier (CLI locally, API in production).
     let llm = crate::llm::Llm::from_env();
 
     for spec in specs {
@@ -811,21 +863,13 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
             Ok((files, truncated)) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
-                // Tier 1 — deterministic mechanical audit (secrets / raw SQL / path
-                // escapes), precise and line-level.
+                // Deterministic security floor (always-on): ENFORCED findings.
                 let mut repo_findings = audit_files(spec, &files);
-                // Tier 2 — AI architectural audit: the GENUINE violations that need a
-                // model to read the code (missing auth, layering breaches, N+1, etc.).
-                // Graceful: a model failure becomes a note, never blocks the scan.
-                match crate::ai_audit::audit_repo(&llm, spec, &files).await {
-                    Ok((ai_findings, ai_rules)) => {
-                        repo_findings.extend(ai_findings);
-                        ai_proposed.extend(ai_rules);
-                    }
+                // AI audit parameterized by the selected rules: ADVISORY findings.
+                match crate::ai_audit::audit_repo(&llm, spec, &files, selected).await {
+                    Ok((ai_findings, _ai_rules)) => repo_findings.extend(ai_findings),
                     Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
                 }
-                // Suppressions (baseline + inline waivers): REPORT everything, but mark
-                // what's suppressed so enforcement is on the delta (new/changed code).
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
@@ -835,22 +879,11 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
                     ));
                 }
             }
-            Err(e) => notes.push(format!("{spec}: scan failed ({e})")),
+            Err(e) => notes.push(format!("{spec}: audit failed ({e})")),
         }
     }
 
-    // Per-repo domains, so each corpus rule binds to only the repos its domain
-    // applies to (minimum domains per repo).
-    let repo_domains: Vec<(String, Vec<String>)> = stacks
-        .iter()
-        .map(|s| (s.repo.clone(), domains_for_stack(s)))
-        .collect();
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
-    let corpus = propose_corpus_rules(&repo_domains).await;
-    report.proposed_rules.extend(corpus);
-    // The AI architectural rules (the genuine, non-lint violations) join the proposals.
-    report.proposed_rules.extend(ai_proposed);
-
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
