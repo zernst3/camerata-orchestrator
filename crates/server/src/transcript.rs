@@ -86,6 +86,18 @@ impl TranscriptStore {
         }
     }
 
+    /// Append text to an agent's output WITHOUT a leading newline — for streaming token
+    /// deltas, which should concatenate seamlessly.
+    pub fn append_output_raw(&self, run_id: &str, session_id: &str, text: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(list) = g.get_mut(run_id) {
+                if let Some(a) = list.iter_mut().find(|a| a.session_id == session_id) {
+                    a.output.push_str(text);
+                }
+            }
+        }
+    }
+
     /// Set an agent's status (`running` | `done` | `blocked`).
     pub fn set_status(&self, run_id: &str, session_id: &str, status: &str) {
         if let Ok(mut g) = self.inner.lock() {

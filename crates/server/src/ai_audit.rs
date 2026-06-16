@@ -346,17 +346,17 @@ pub async fn audit_repo(
             },
         );
     }
-    let resp = llm
-        .complete(
-            LlmRequest::new(prompt)
-                .with_system(audit_system_prompt())
-                .with_max_tokens(4096),
-        )
-        .await?;
-    if let Some((store, key)) = feedback {
-        store.append_output(key, &session, &resp.text);
-        store.set_status(key, &session, "running");
-    }
+    let req = LlmRequest::new(prompt)
+        .with_system(audit_system_prompt())
+        .with_max_tokens(4096);
+    // With feedback, STREAM the model's output into the transcript as it generates (so the
+    // drawer fills in live instead of staying blank until the end).
+    let resp = if let Some((store, key)) = feedback {
+        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+        llm.complete_streaming(req, &mut on_delta).await?
+    } else {
+        llm.complete(req).await?
+    };
     let (findings, proposed) = parse_ai_findings(repo, &resp.text);
     // Adversarial-verify pass: a fresh skeptic refutes over-flags + recalibrates severity
     // before these advisory findings reach the architect's queue.

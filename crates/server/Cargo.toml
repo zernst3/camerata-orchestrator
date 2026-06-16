@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
 serde = { workspace = true }
 serde_json = { workspace = true }

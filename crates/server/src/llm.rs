@@ -70,6 +70,12 @@ impl Vendor {
 /// per call or via `CAMERATA_LLM_MODEL`.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
+/// Tools forbidden on the CLI path so it stays a PURE text completion (no MCP servers via
+/// `--strict-mcp-config`, no sub-agents, no filesystem). The audit reasons over the digest
+/// in the prompt; it must not wander.
+const NO_TOOLS: &str = "Task Bash Read Edit Write MultiEdit Glob Grep WebFetch WebSearch \
+                        NotebookEdit TodoWrite BashOutput KillShell";
+
 /// One completion request.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
@@ -122,7 +128,7 @@ pub struct LlmResponse {
 }
 
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cli,
     Api,
@@ -191,6 +197,32 @@ impl Llm {
         }
     }
 
+    /// Run a completion, STREAMING text deltas to `on_delta` as they arrive (so the UI can
+    /// show the model producing output instead of a blank panel). Falls back to a single
+    /// `on_delta(full_text)` for the API path / non-Anthropic vendors.
+    pub async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        let model = self.model_for(&req);
+        match (self.vendor, self.backend) {
+            (Vendor::Anthropic, Backend::Cli) => {
+                self.complete_cli_streaming(&req, &model, on_delta).await
+            }
+            (Vendor::Anthropic, Backend::Api) => {
+                let r = self.complete_api(&req, &model).await?;
+                on_delta(&r.text);
+                Ok(r)
+            }
+            _ => {
+                let r = self.complete(req).await?;
+                on_delta(&r.text);
+                Ok(r)
+            }
+        }
+    }
+
     /// Run a completion through the selected vendor + transport. Adding a vendor is a new
     /// match arm here plus its [`MODELS`] entries; the request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
@@ -216,9 +248,6 @@ impl Llm {
     /// MCP servers; `--disallowedTools` forbids every built-in so the model can only
     /// reason over the prompt and answer.
     async fn complete_cli(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
-        const NO_TOOLS: &str =
-            "Task Bash Read Edit Write MultiEdit Glob Grep WebFetch WebSearch NotebookEdit \
-             TodoWrite BashOutput KillShell";
         let mut cmd = tokio::process::Command::new("claude");
         cmd.arg("-p")
             .arg(&req.prompt)
@@ -249,6 +278,81 @@ impl Llm {
             model: model.to_string(),
             backend: "cli".to_string(),
             cost_usd: v["total_cost_usd"].as_f64(),
+        })
+    }
+
+    /// CLI streaming path: `--output-format stream-json --include-partial-messages`. Reads
+    /// stdout line-by-line, calls `on_delta` with each `content_block_delta` text chunk
+    /// (so the UI shows the model writing), and captures the final `result` event.
+    async fn complete_cli_streaming(
+        &self,
+        req: &LlmRequest,
+        model: &str,
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        use tokio::io::AsyncBufReadExt;
+        let mut cmd = tokio::process::Command::new("claude");
+        cmd.arg("-p")
+            .arg(&req.prompt)
+            .arg("--model")
+            .arg(model)
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--include-partial-messages")
+            .arg("--strict-mcp-config")
+            .arg("--disallowedTools")
+            .arg(NO_TOOLS)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(system) = &req.system {
+            cmd.arg("--append-system-prompt").arg(system);
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
+        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+        let mut full = String::new();
+        let mut cost = None;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match v["type"].as_str() {
+                Some("stream_event") => {
+                    let ev = &v["event"];
+                    if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
+                        if let Some(t) = ev["delta"]["text"].as_str() {
+                            full.push_str(t);
+                            on_delta(t);
+                        }
+                    }
+                }
+                Some("result") => {
+                    if let Some(r) = v["result"].as_str() {
+                        if !r.is_empty() {
+                            full = r.to_string();
+                        }
+                    }
+                    cost = v["total_cost_usd"].as_f64();
+                }
+                _ => {}
+            }
+        }
+        let status = child.wait().await?;
+        if !status.success() {
+            anyhow::bail!("claude CLI (stream) exited {status}");
+        }
+        Ok(LlmResponse {
+            text: full,
+            model: model.to_string(),
+            backend: "cli".to_string(),
+            cost_usd: cost,
         })
     }
 
