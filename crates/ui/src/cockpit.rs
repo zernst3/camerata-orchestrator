@@ -1202,6 +1202,15 @@ pub fn CockpitApp() -> Element {
     // so both the NEEDS YOU queue here and the per-story thread refetch together.
     let clarify_refresh = use_signal(|| 0u32);
     use_context_provider(|| clarify_refresh);
+
+    // Onboard state lifted to app scope so it SURVIVES navigating between cockpit views:
+    // the Phase-1 scan result, and the id of an in-flight async audit job. A background
+    // job keeps running server-side regardless; these let the UI re-attach (resume the
+    // poll, re-show the scan) when the user returns to Onboard instead of losing it.
+    let onboard_scan = use_signal(|| Option::<ScanReportView>::None);
+    use_context_provider(|| onboard_scan);
+    let active_audit_job = use_signal(|| Option::<String>::None);
+    use_context_provider(|| active_audit_job);
     let open_clars_res = use_resource(move || {
         let _dep = clarify_refresh();
         async move { fetch_open_clarifications().await }
@@ -1970,6 +1979,54 @@ async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
         .flatten()
 }
 
+/// Drive an async audit job to completion: poll every ~1.5s, update progress + (on done) the
+/// final report, clearing the shared `active_audit_job` so a later mount doesn't re-resume.
+/// Shared by the manual start AND the resume-on-mount path. Gives up after a few misses (the
+/// job vanished, e.g. the server restarted) so it can't spin forever.
+async fn poll_job(
+    jid: String,
+    mut audit: Signal<Option<ScanReportView>>,
+    mut auditing: Signal<bool>,
+    mut job_progress: Signal<Option<(usize, usize, usize)>>,
+    mut active_audit_job: Signal<Option<String>>,
+) {
+    let mut misses = 0u32;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        match audit_job_poll(&jid).await {
+            Some(js) => {
+                misses = 0;
+                job_progress.set(Some((js.done, js.total, js.findings.len())));
+                match js.status.as_str() {
+                    "done" => {
+                        audit.set(js.report);
+                        auditing.set(false);
+                        job_progress.set(None);
+                        active_audit_job.set(None);
+                        break;
+                    }
+                    "failed" => {
+                        auditing.set(false);
+                        job_progress.set(None);
+                        active_audit_job.set(None);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            None => {
+                misses += 1;
+                if misses >= 3 {
+                    auditing.set(false);
+                    job_progress.set(None);
+                    active_audit_job.set(None);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// A fully-resolved rule sent to arm (the chosen directive + where it installs).
 #[derive(Clone, serde::Serialize)]
 struct ArmRuleReq {
@@ -2734,7 +2791,9 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut path = use_signal(|| OnboardPath::Brownfield);
     let mut repo = use_signal(String::new);
-    let mut scan = use_signal(|| Option::<ScanReportView>::None);
+    // The scan result lives in app-scope context so it survives leaving + returning to this
+    // view (a running audit job keeps going server-side; the scan shouldn't vanish).
+    let mut scan = use_context::<Signal<Option<ScanReportView>>>();
     let mut scanning = use_signal(|| false);
     let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
 
@@ -2927,6 +2986,15 @@ fn ScanResults(report: ScanReportView) -> Element {
     let mut audit_mode = use_signal(|| recommended_mode.clone());
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
+    // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
+    // already running when this view (re)mounted, re-attach the poll instead of losing it.
+    let active_audit_job = use_context::<Signal<Option<String>>>();
+    use_future(move || async move {
+        if let Some(jid) = active_audit_job.peek().clone() {
+            auditing.set(true);
+            poll_job(jid, audit, auditing, job_progress, active_audit_job).await;
+        }
+    });
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -3098,30 +3166,17 @@ fn ScanResults(report: ScanReportView) -> Element {
                             job_progress.set(None);
                             auditing.set(true);
                             if mode == "job" {
-                                // Async job: submit, then poll for progress + the final report.
-                                // The server runs it decoupled from any single request.
+                                // Async job: submit, record the id (app-scope, so a later
+                                // mount can resume), then poll. The server runs it decoupled
+                                // from any single request.
+                                let mut active_audit_job = active_audit_job;
                                 spawn(async move {
                                     let Some(jid) = audit_job_start(&repos, &rules, &model, "parallel").await else {
                                         auditing.set(false);
                                         return;
                                     };
-                                    loop {
-                                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                                        if let Some(js) = audit_job_poll(&jid).await {
-                                            job_progress.set(Some((js.done, js.total, js.findings.len())));
-                                            if js.status == "done" {
-                                                audit.set(js.report);
-                                                auditing.set(false);
-                                                job_progress.set(None);
-                                                break;
-                                            }
-                                            if js.status == "failed" {
-                                                auditing.set(false);
-                                                job_progress.set(None);
-                                                break;
-                                            }
-                                        }
-                                    }
+                                    active_audit_job.set(Some(jid.clone()));
+                                    poll_job(jid, audit, auditing, job_progress, active_audit_job).await;
                                 });
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
