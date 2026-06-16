@@ -19,10 +19,13 @@ call (`ai_audit::audit_repo`) should register its prompt/output into the transcr
 (or a per-scan channel) and the UI polls it, the same way the drawer does. That is the
 natural home for the "see the AI's output" modal.
 
-## Findings from the budget-tracker-testrepo run (2026-06-16) — not yet fixed
+## Findings from the budget-tracker-testrepo run (2026-06-16) — MOSTLY FIXED
 
-The answer-key testbed exposed concrete gaps. Evidence captured here so it isn't
-re-derived:
+The deterministic-silence + AI-precision items below were FIXED 2026-06-16 (see ADR
+`two_domain_audit_and_two_phase_flow`): whole-file matching + broadened regexes (the 3
+Tier-1 plants now caught), line-numbered AI digest, adversarial-verify pass, two-domain
+authority split, two-phase flow. The STILL-STAGED items moved to "Staged after the
+2026-06-16 overhaul" below. Original evidence kept for reference:
 
 - **Deterministic Layer-1 was completely silent on all three Tier-1 plants.** Three
   confirmed root causes:
@@ -46,13 +49,30 @@ re-derived:
   residual). Wire the `fix::verify`-style skeptic pass (try to REFUTE each finding) before
   showing AI findings, and calibrate severity for app context (single-user, etc.).
 
-## Two-phase audit workflow (active decision, not yet built)
+## Staged after the 2026-06-16 audit overhaul
 
-The desired flow: scan → detect stack → SUGGEST rules → user picks rules + alternatives →
-a SECOND pass that audits AGAINST the selected rules (deterministic where mechanical; the
-AI prompt PARAMETERIZED by the chosen rules' directives, not free-form) → show violations.
-Today there's one scan with a fixed 3-rule deterministic pass + a generic AI prompt; the
-"audit against the selected rules" phase is missing entirely.
+These are the parts the ADR `two_domain_audit_and_two_phase_flow` explicitly left staged:
+
+- **Per-row selection drives the audit.** Phase 2 currently parameterizes the AI with ALL
+  proposed rules' directives, not the per-row picked subset. Lift the rules-table /
+  modal selection into the `/api/onboard/audit` call.
+- **Advisory AI in the DEVELOPMENT path.** The two-domain split (deterministic enforces /
+  AI advises, non-blocking) should also run during a governed dev run: after the fleet
+  produces a diff, run `ai_audit` over it as advisory warnings, never blocking the build.
+  Seam exists (`ai_audit`); wiring into the live-fleet completion is gated on live runs
+  (opt-in `CAMERATA_LIVE_BUILD=1`).
+- **Live scan feedback.** The scan awaits the AI synchronously (no progress surface). A
+  live prompt/output feed needs the scan's AI calls registered into the transcript store
+  (which already backs the Agent-activity drawer) + a background job the UI polls.
+- **The discover→codify loop.** When an advisory AI finding is verified real + generalizable,
+  offer to codify it into a deterministic rule (advisory → enforced). "Convention discovers;
+  enforcement locks it in."
+
+## Two-phase audit workflow — BUILT 2026-06-16
+
+Detect (Phase 1, `/api/onboard/scan`) → pick rules → audit against selected (Phase 2,
+`/api/onboard/audit`, AI parameterized). See the per-row-selection staged item above for
+the one remaining gap.
 
 ## Local checkout used in place of cloning (deferred 2026-06-16)
 

@@ -6,6 +6,14 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_two_domain_audit_and_two_phase_flow.md** — after a cold answer-key run:
+  TWO DOMAINS mapped to AUTHORITY — enforced (deterministic, gateable, auto-fix-eligible)
+  vs advisory (AI investigative, review-only, never auto-blocks/auto-fixes). TWO-PHASE
+  brownfield flow — detect+propose (Phase 1), pick rules, then audit AGAINST the selected
+  rules (Phase 2, AI parameterized). Precision fixes proven on the testbed: whole-file +
+  broadened deterministic regexes (the 3 Tier-1 plants now caught), line-numbered AI
+  digest, adversarial-verify refute pass. Explicitly lists the staged parts (per-row
+  selection→audit, advisory-AI-in-dev, live scan feedback, the discover→codify loop).
 - **2026-06-16_enforcement_tiers_gate_vs_ci.md** — two enforcement tiers, mapped by what
   the check needs: the write-time deny-before-execute GATE is the SECURITY tier (decidable
   from one write's path/content, near-zero false positives — secrets, path/secret-file
