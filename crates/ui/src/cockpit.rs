@@ -1907,6 +1907,57 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
         .ok()
 }
 
+/// A polled async-audit job (`GET /api/onboard/audit/job/:id`).
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct JobStateView {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    done: usize,
+    #[serde(default)]
+    total: usize,
+    #[serde(default)]
+    findings: Vec<FindingView>,
+    #[serde(default)]
+    report: Option<ScanReportView>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// Mode 3: START an async audit job, returning its id (the request returns immediately).
+async fn audit_job_start(
+    repos: &[String],
+    rules: &[(String, String)],
+    model: &str,
+    exec_mode: &str,
+) -> Option<String> {
+    let rule_json: Vec<_> = rules
+        .iter()
+        .map(|(id, directive)| serde_json::json!({ "id": id, "directive": directive }))
+        .collect();
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "mode": exec_mode }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    v.get("job_id").and_then(|j| j.as_str()).map(String::from)
+}
+
+/// Poll an async audit job for progress + incremental findings + the final report.
+async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
+    reqwest::get(format!("{}/api/onboard/audit/job/{}", crate::BFF_URL, job_id))
+        .await
+        .ok()?
+        .json::<Option<JobStateView>>()
+        .await
+        .ok()
+        .flatten()
+}
+
 /// A fully-resolved rule sent to arm (the chosen directive + where it installs).
 #[derive(Clone, serde::Serialize)]
 struct ArmRuleReq {
@@ -2855,9 +2906,11 @@ fn ScanResults(report: ScanReportView) -> Element {
             }
         }
     }
-    // Execution mode (speed/scale knob): "parallel" is the efficient default floor;
-    // "sequential" is the gentle/debug fallback. Orthogonal to the model + rule choices.
+    // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
+    // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
     let mut audit_mode = use_signal(|| "parallel".to_string());
+    // Live progress for an async job: (passes done, passes total, findings so far).
+    let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -3026,11 +3079,41 @@ fn ScanResults(report: ScanReportView) -> Element {
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
                             audit.set(None);
+                            job_progress.set(None);
                             auditing.set(true);
-                            spawn(async move {
-                                audit.set(audit_against(&repos, &rules, &model, &mode).await);
-                                auditing.set(false);
-                            });
+                            if mode == "job" {
+                                // Async job: submit, then poll for progress + the final report.
+                                // The server runs it decoupled from any single request.
+                                spawn(async move {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, "parallel").await else {
+                                        auditing.set(false);
+                                        return;
+                                    };
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                                        if let Some(js) = audit_job_poll(&jid).await {
+                                            job_progress.set(Some((js.done, js.total, js.findings.len())));
+                                            if js.status == "done" {
+                                                audit.set(js.report);
+                                                auditing.set(false);
+                                                job_progress.set(None);
+                                                break;
+                                            }
+                                            if js.status == "failed" {
+                                                auditing.set(false);
+                                                job_progress.set(None);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                });
+                            } else {
+                                // Synchronous: hold the request until the (shorter) run finishes.
+                                spawn(async move {
+                                    audit.set(audit_against(&repos, &rules, &model, &mode).await);
+                                    auditing.set(false);
+                                });
+                            }
                         },
                     }
                 }
@@ -3068,8 +3151,24 @@ fn ScanResults(report: ScanReportView) -> Element {
                         onchange: move |e| audit_mode.set(e.value()),
                         option { value: "parallel", "Parallel (recommended)" }
                         option { value: "sequential", "Sequential (slower, gentlest)" }
+                        option { value: "job", "Background job (walk away)" }
                     }
-                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently — same findings, much faster. Sequential is one call at a time." }
+                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
+                }
+                // Live progress for an async job: a determinate bar (it grows as repos are
+                // discovered) + a findings-so-far count, so a walk-away scan shows life.
+                if let Some((done, total, nf)) = job_progress() {
+                    {
+                        let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
+                        rsx! {
+                            div { class: "job-progress",
+                                div { class: "job-progress-track",
+                                    div { class: "job-progress-fill", style: "width: {pct}%" }
+                                }
+                                span { class: "job-progress-label", "{done}/{total} passes · {nf} finding(s) so far" }
+                            }
+                        }
+                    }
                 }
                 // While the audit runs, the Bombe turns — a visible "the AI is thinking"
                 // cue so a multi-second audit doesn't look hung.

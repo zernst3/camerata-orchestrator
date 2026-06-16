@@ -1515,6 +1515,21 @@ html, body {
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
 
+/* Async-job live progress bar (Mode 3). */
+.job-progress { display: flex; align-items: center; gap: 11px; margin: 10px 0; }
+.job-progress-track {
+  flex: 1; height: 8px; max-width: 360px; border-radius: 999px;
+  background: var(--accent-wash); overflow: hidden;
+}
+.job-progress-fill {
+  height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width .4s var(--ease);
+}
+.job-progress-label {
+  font-size: 12px; font-weight: 600; color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap;
+}
+
 /* Estimated token-usage badge in the Agent-activity detail. */
 .agent-tokens {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
