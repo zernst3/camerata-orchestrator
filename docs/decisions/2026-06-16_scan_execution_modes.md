@@ -112,16 +112,31 @@ while preserving control.
 
 ## Build order
 
-1. **Parallel execution first** (Modes 1→2). It's the shared engine *both* Mode 2 and Mode 3 need,
-   so it's not throwaway. Rule-batching (split the ruleset across a few concurrent calls, with the
-   digest/repo-map as a cached prefix so cost stays close to today) + concurrent chunks, under a
-   concurrency cap. This alone takes the 5-hour sweep to ~25 min.
-2. **Job / delivery layer second** (Mode 3), when the real multi-huge-repo use case arrives. It is
-   mostly "Mode 2's engine + a job store + progress + incremental findings + resume." Worth doing as
-   its own deliberate step, not bolted onto Mode 2.
+1. **Parallel execution** (Modes 1→2) — **BUILT** (commit `08d95bf`). Rule-batches × file-chunks run
+   concurrently via `futures::buffer_unordered` under a cap; `ScanMode::{Sequential, Parallel}`;
+   `run_passes()` is the shared engine. Sequential = `(1 call, all rules)` (the gentle floor);
+   Parallel `(6, 15)` is the default.
+2. **Job / delivery layer** (Mode 3) — **BUILT** (commits `adc51b7` server, `3825463` UI). An
+   in-memory `JobStore`; `POST /audit/start` spawns the audit in a `tokio` task and returns a
+   `job_id` immediately; `GET /audit/job/:id` returns progress + incremental findings + the final
+   report. The audit threads a job sink (deterministic floor up front, each semantic pass streams as
+   it completes). The UI's "Background job" mode submits, then polls with a live progress bar.
 
-Until then, the **model picker already gives a speed lever today** (pick Haiku for a fast pass), and
-the auto-select can simply choose Mode 1 vs Mode 2 once Mode 2 exists.
+### Mode 3 v1 limitations (refinements, not blockers)
+
+- **In-memory, app-session-scoped** — a job lives in the running server's memory; it does not
+  survive an app restart. (Persisting jobs to disk would make them survive restarts.)
+- **Poll-while-on-screen** — the *work* is decoupled from the request (survives a dropped poll), but
+  the UI only resumes polling if it still holds the `job_id`. Navigating away and back starts a fresh
+  `ScanResults` that doesn't re-attach. Fix: stash the active `job_id` in a context/persisted setting
+  and offer "resume" on mount.
+- **Live findings are a raw preview** — incremental findings are pre-final-dedup/calibration; the
+  `report` set on completion is authoritative (the UI switches the table to it on `done`). The live
+  view today shows a progress bar + count, not a streaming table, to avoid remount flicker.
+- **Cached-prefix cost optimization not yet applied** — the digest/repo-map are re-sent per rule-batch
+  rather than ordered as a stable cached prefix; a reorder would cut Parallel/Job input cost.
+- **Auto-select-by-scale not yet wired** — the UI defaults to Parallel and lets the user pick; it does
+  not yet auto-recommend Job for huge/multi-repo scans. The mode infrastructure is in place for it.
 
 ## Pricing / tiering principles (the dials must add to a complete floor, not gate it)
 
