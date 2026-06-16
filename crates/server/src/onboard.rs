@@ -177,24 +177,26 @@ fn title_for(rule_id: &str) -> String {
 /// gate's own arms. A line the gate would deny becomes a finding tagged with `repo`.
 pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
-    for (i, line) in content.lines().enumerate() {
-        for rule_id in AUDIT_RULES {
-            let Some(arm) = camerata_gateway::lookup_arm(rule_id) else {
-                continue;
-            };
-            if let Err(detail) = arm(path, line) {
-                let snippet: String = line.trim().chars().take(160).collect();
-                findings.push(Finding {
-                    repo: repo.to_string(),
-                    path: path.to_string(),
-                    line: i + 1,
-                    rule_id: rule_id.to_string(),
-                    severity: severity_for(rule_id).to_string(),
-                    snippet,
-                    detail,
-                    status: default_status(),
-                });
-            }
+    let lines: Vec<&str> = content.lines().collect();
+    // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
+    // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
+    // match is attributed to the line where it starts.
+    for rule_id in AUDIT_RULES {
+        for line_no in camerata_gateway::content_match_lines(rule_id, content) {
+            let snippet: String = lines
+                .get(line_no.saturating_sub(1))
+                .map(|l| l.trim().chars().take(160).collect())
+                .unwrap_or_default();
+            findings.push(Finding {
+                repo: repo.to_string(),
+                path: path.to_string(),
+                line: line_no,
+                rule_id: rule_id.to_string(),
+                severity: severity_for(rule_id).to_string(),
+                snippet,
+                detail: title_for(rule_id),
+                status: default_status(),
+            });
         }
     }
     findings
@@ -1004,6 +1006,36 @@ mod tests {
         assert!(stack.frameworks.contains(&"Express".to_string()));
         assert!(stack.frameworks.contains(&".NET".to_string()));
         assert!(stack.frameworks.contains(&"ASP.NET".to_string()));
+    }
+
+    #[test]
+    fn audit_catches_the_testbed_tier1_plants() {
+        // The three Tier-1 plants from budget-tracker-testrepo, in their real shapes.
+        let sql = "        let sql = format!(\n\
+            \x20            \"SELECT category_id, SUM(amount) AS spent \\\n\
+            \x20             FROM transactions \\\n\
+            \x20             WHERE user_id = '{user_id}' \\\n\
+            \x20               AND EXTRACT(YEAR FROM date) = {year}\",\n\
+            \x20            user_id = user_id.value(),\n        );";
+        let sql_findings = audit_content("me/api", "transactions.rs", sql);
+        assert!(
+            sql_findings.iter().any(|f| f.rule_id == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "multi-line named-arg SQL format! must be caught"
+        );
+
+        let key = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
+        let key_findings = audit_content("me/api", "finnhub.rs", key);
+        assert!(
+            key_findings.iter().any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "bare provider-agnostic key on a *_KEY const must be caught"
+        );
+
+        let url = "        format!(\"{base}?symbol={symbol}&token={token}\")";
+        let url_findings = audit_content("me/api", "finnhub.rs", url);
+        assert!(
+            url_findings.iter().any(|f| f.rule_id == "ARCH-NO-SECRETS-IN-URL-1"),
+            "templated URL with a token param must be caught"
+        );
     }
 
     #[test]

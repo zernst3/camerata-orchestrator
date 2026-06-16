@@ -150,6 +150,27 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
     },
 ];
 
+/// For a CONTENT rule, return the 1-based line numbers where it matches in `content`,
+/// scanning the WHOLE content at once (so multi-line constructs — e.g. a `format!`
+/// SQL whose keyword and interpolation are on different lines — are caught, which a
+/// line-by-line scan misses). Path-based rules return empty. The brownfield audit uses
+/// this for per-line findings; the write-time gate still uses the boolean arm.
+pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
+    let re = match rule_id {
+        "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
+        "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
+        "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
+        _ => return Vec::new(),
+    };
+    let mut lines: Vec<usize> = re
+        .find_iter(content)
+        .map(|m| content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1)
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
 /// Look up the arm function for `rule_id`, or `None` when the id is not
 /// implemented (safe no-op).
 pub fn lookup_arm(rule_id: &str) -> Option<RuleArmFn> {
@@ -376,6 +397,14 @@ fn sec_secrets_regex() -> &'static Regex {
             # PEM private key header (RSA PRIVATE KEY, EC PRIVATE KEY, PRIVATE KEY, etc.)
             # \x20 = literal space: Rust regex (?x) strips bare spaces inside [...].
             | (-----BEGIN\s[A-Z\x20]*PRIVATE\s+KEY-----)
+            # Heuristic: a long opaque literal assigned to a SECRET-named identifier —
+            # catches provider-agnostic keys (e.g. a Finnhub key) that match no known
+            # prefix. The identifier carries key/secret/token/password/credential, then
+            # within a short window a quoted 16+ char alphanumeric literal. Case-insensitive
+            # for the identifier via the inline (?i:...) group.
+            | ((?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|credential)[A-Za-z0-9_]*)
+               [^\n]{0,40}?
+               \x22[A-Za-z0-9+/_\-]{16,}\x22)
             ",
         )
         .expect("SEC-NO-HARDCODED-SECRETS-1 regex must compile")
@@ -428,15 +457,19 @@ static SEC_SQL_CONCAT_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn sec_sql_concat_regex() -> &'static Regex {
     SEC_SQL_CONCAT_REGEX.get_or_init(|| {
-        // Match a line that contains a SQL keyword AND either {} or " +
+        // Match a SQL keyword followed (within ~200 chars, ACROSS lines via the `s`
+        // dotall flag) by a format interpolation or string concat. `{\w*}` catches both
+        // empty `{}` and NAMED args like `{user_id}` (a multi-line `format!("SELECT …
+        // WHERE x = '{user_id}'", …)` is the exact shape this missed before).
         Regex::new(
-            r#"(?ix)
-            # SQL keyword present on the line
+            r#"(?isx)
+            # SQL keyword
             (?:SELECT|INSERT|UPDATE|DELETE|WHERE)
-            # AND somewhere on the same line: format placeholder OR concat
-            .*?
+            # within ~200 chars (bounded so a stray keyword far from interpolation
+            # doesn't false-match), across lines:
+            .{0,200}?
             (?:
-                \{\}            # Rust / Python-style format interpolation
+                \{\w*\}         # {} or {named} format interpolation
               | "\s*\+          # closing quote followed by + (string concat)
             )
             "#,
@@ -477,14 +510,17 @@ fn arch_url_secret_regex() -> &'static Regex {
         // (?ix) = case-insensitive + verbose (# comments, whitespace ignored).
         Regex::new(
             r"(?ix)
-            # HTTP or HTTPS URL (stop at whitespace, common terminators)
-            https?://\S+
-            # Query string contains a secret-bearing parameter name
-            [?&]
-            (?:api_?key|token|secret|password|access_token)
-            =
-            # Value: any non-whitespace, non-& chars (stops at next param or end)
-            [^\s&]+
+            (?:
+                # Case A: a literal HTTP/HTTPS URL carrying a secret param.
+                https?://\S+ [?&] (?:api_?key|token|secret|password|access_token) =
+                  [^\s&]+
+              |
+                # Case B: a query-string SHAPE even without a literal scheme — a `?`
+                # query start, then a secret param, e.g. a templated URL like
+                # `{base}?symbol={symbol}&token={token}`. Requires the `?` so it stays
+                # URL-shaped (not any stray `&token=`).
+                \? [^\s\x22]* [?&] (?:api_?key|token|secret|password|access_token) =
+            )
             ",
         )
         .expect("ARCH-NO-SECRETS-IN-URL-1 regex must compile")
@@ -616,6 +652,49 @@ mod tests {
         let subset = vec![gov1_rule()];
         let d = evaluate_call(&subset, &write_call("crates/core/src/lib.rs"));
         assert!(matches!(d, Decision::Allow));
+    }
+
+    // ── deterministic content rules: the testbed plants (multi-line / format gaps) ──
+
+    #[test]
+    fn sql_concat_catches_multiline_named_format_args() {
+        // The exact shape from budget-tracker-testrepo: `format!(` on one line, the
+        // SELECT + `'{user_id}'` on the next — and NAMED args, not `{}`.
+        let content = "        let sql = format!(\n\
+            \x20            \"SELECT category_id, SUM(amount) AS spent \\\n\
+            \x20             FROM transactions \\\n\
+            \x20             WHERE user_id = '{user_id}' \\\n\
+            \x20               AND EXTRACT(YEAR FROM date) = {year}\",\n\
+            \x20            user_id = user_id.value(),\n        );";
+        let lines = content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", content);
+        assert!(!lines.is_empty(), "multi-line named-arg SQL format! must be caught");
+    }
+
+    #[test]
+    fn secrets_catches_bare_key_assigned_to_secret_named_const() {
+        // A provider-agnostic key (no ghp_/sk-/AKIA prefix) assigned to a *_KEY const.
+        let content = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
+        let d = arm_sec_no_hardcoded_secrets_1("", content);
+        assert!(d.is_err(), "a long opaque literal on a *_KEY const must be flagged");
+    }
+
+    #[test]
+    fn secrets_does_not_flag_short_or_namelike_constants() {
+        // A header NAME / env-var NAME on a secret-ish const is not a secret VALUE.
+        assert!(arm_sec_no_hardcoded_secrets_1("", "const TOKEN_HEADER: &str = \"X-Finnhub-Token\";").is_ok());
+        assert!(arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";").is_ok());
+    }
+
+    #[test]
+    fn secret_in_url_catches_templated_query_without_scheme() {
+        // The plant: a format string with no literal http(s):// but a `?…&token={…}`.
+        let content = "format!(\"{base}?symbol={symbol}&token={token}\")";
+        let d = arm_arch_no_secrets_in_url_1("", content);
+        assert!(d.is_err(), "a templated URL query with a token param must be flagged");
+        // And the literal-scheme case still works.
+        assert!(arm_arch_no_secrets_in_url_1("", "https://api.x.com/q?api_key=abc123").is_err());
+        // A bare `&token=` with no query start is NOT flagged (avoids form-body FPs).
+        assert!(arm_arch_no_secrets_in_url_1("", "let body = \"&token=\".to_string();").is_ok());
     }
 
     // ── SEC-NO-SECRET-FILES-1 ────────────────────────────────────────────────
