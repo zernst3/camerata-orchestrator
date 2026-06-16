@@ -2063,8 +2063,10 @@ fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<Find
         })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                .with("enforced", BadgeVariant::new("Rule · enforced", "blue"))
-                .with("advisory", BadgeVariant::new("AI · advisory", "purple")),
+                // chorale badges support green/yellow/red/gray; blue/purple fell back to a
+                // single default gray, making the two authorities indistinguishable.
+                .with("enforced", BadgeVariant::new("Rule · enforced", "green"))
+                .with("advisory", BadgeVariant::new("AI · advisory", "yellow")),
         ))
         .initial_width(170.0),
         ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
@@ -2108,8 +2110,8 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .with("mechanical", BadgeVariant::new("Mechanical", "green"))
         .with("review", BadgeVariant::new("Review", "yellow"));
     let scope = BadgeVariantMap::new()
-        .with("repo-local", BadgeVariant::new("Repo-local", "blue"))
-        .with("cross-repo", BadgeVariant::new("Cross-repo", "purple"))
+        .with("repo-local", BadgeVariant::new("Repo-local", "green"))
+        .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
     vec![
         // The group-by column (the table groups on this). A rule's corpus domain —
