@@ -685,6 +685,11 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
+    // The AI architectural audit's proposed rules, kept separate so they merge after
+    // the deterministic corpus proposals.
+    let mut ai_proposed = Vec::new();
+    // The model provider for the AI audit tier (CLI locally, API in production).
+    let llm = crate::llm::Llm::from_env();
 
     for spec in specs {
         let spec = spec.trim();
@@ -699,7 +704,19 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
             Ok((files, truncated)) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
+                // Tier 1 — deterministic mechanical audit (secrets / raw SQL / path
+                // escapes), precise and line-level.
                 all_findings.extend(audit_files(spec, &files));
+                // Tier 2 — AI architectural audit: the GENUINE violations that need a
+                // model to read the code (missing auth, layering breaches, N+1, etc.).
+                // Graceful: a model failure becomes a note, never blocks the scan.
+                match crate::ai_audit::audit_repo(&llm, spec, &files).await {
+                    Ok((ai_findings, ai_rules)) => {
+                        all_findings.extend(ai_findings);
+                        ai_proposed.extend(ai_rules);
+                    }
+                    Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                }
                 repos_ok.push(spec.to_string());
                 if truncated {
                     notes.push(format!(
@@ -720,6 +737,8 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     let corpus = propose_corpus_rules(&repo_domains).await;
     report.proposed_rules.extend(corpus);
+    // The AI architectural rules (the genuine, non-lint violations) join the proposals.
+    report.proposed_rules.extend(ai_proposed);
 
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));

@@ -13,6 +13,7 @@
 //! Execution endpoints (run a governed fleet on a story) and a live-status stream
 //! land in later phases, behind the same router.
 
+pub mod ai_audit;
 pub mod arm;
 pub mod clarify;
 pub mod connections;
@@ -22,10 +23,12 @@ pub mod onboard;
 pub mod project;
 pub mod reconcile;
 pub mod live_fleet;
+pub mod llm;
 pub mod provider;
 pub mod routine;
 pub mod run;
 pub mod settings;
+pub mod transcript;
 pub mod workspace;
 
 use std::sync::Arc;
@@ -62,6 +65,7 @@ pub struct AppState {
     notifications: crate::notify::NotificationStore,
     projects: crate::project::ProjectStore,
     settings: crate::settings::SettingsStore,
+    transcripts: crate::transcript::TranscriptStore,
 }
 
 impl AppState {
@@ -78,6 +82,7 @@ impl AppState {
             notifications: crate::notify::NotificationStore::new(),
             projects: crate::project::ProjectStore::new(),
             settings: crate::settings::SettingsStore::new(),
+            transcripts: crate::transcript::TranscriptStore::new(),
         }
     }
 
@@ -130,6 +135,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories", get(stories))
         .route("/api/stories/:id/run", post(start_run))
         .route("/api/runs/:id", get(get_run))
+        .route("/api/runs/:id/agents", get(get_run_agents))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -166,6 +172,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/routines/:id/run", post(run_routine_now))
         // Local workspace: the user picks a visible folder; project repos clone under
         // it, the fleet edits there, the dev runs/tests locally, then ship pushes + PRs.
+        // AI: the model provider seam (CLI locally, Anthropic API in production). The
+        // research chat and every AI step call models through this.
+        .route("/api/chat", post(chat))
+        .route("/api/models", get(list_models))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route(
@@ -247,8 +257,10 @@ async fn start_run(
         };
         tokio::spawn(async move { live_fleet::execute_live_run(store, rid, title, desc).await });
     } else {
-        // Token-free scripted path: real gate verdicts over planted calls.
-        tokio::spawn(async move { execute_run(store, rid).await });
+        // Token-free scripted path: real gate verdicts over planted calls, with the
+        // per-agent transcripts (generated prompt + actions + verdicts) populated.
+        let transcripts = state.transcripts.clone();
+        tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
 
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
@@ -264,6 +276,15 @@ async fn get_run(
         .get(&id)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))
+}
+
+/// The per-agent transcripts for a run: the GENERATED prompt each agent was handed and
+/// its output so far. Powers the Agent-activity drawer (the otherwise-hidden prompting).
+async fn get_run_agents(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Vec<crate::transcript::AgentTranscript>> {
+    Json(state.transcripts.get(&id))
 }
 
 /// All OPEN clarifications across every story (the NEEDS YOU queue).
@@ -897,19 +918,37 @@ async fn create_routine(
 }
 
 /// Draft the operational prompt from the user's intent (ADR
-/// routine_authoring_intent_not_prompt). The user describes WHAT they want; this
-/// returns the operational prompt for them to review/edit. Today it returns the
-/// deterministic scaffold (`authored_by: scaffold`); when Claude is connected the
-/// lead-engineer AI authors it for real (`authored_by: claude`) — that hook lives
-/// here.
+/// routine_authoring_intent_not_prompt). The user describes WHAT they want; the
+/// lead-engineer AI authors the operational prompt for them to review/edit
+/// (`authored_by: claude`). If the model is unreachable it falls back to the
+/// deterministic scaffold (`authored_by: scaffold`) so the form never dead-ends.
 async fn draft_routine_prompt(
     Json(req): Json<crate::routine::DraftPromptReq>,
 ) -> Json<crate::routine::DraftPromptResp> {
-    let prompt = crate::routine::scaffold_prompt(&req.intent, &req.scope);
-    Json(crate::routine::DraftPromptResp {
-        prompt,
-        authored_by: "scaffold".to_string(),
-    })
+    let system = "You are Camerata's lead engineer. The user describes WHAT they want a \
+        scheduled, governed agent routine to do. Author the OPERATIONAL PROMPT the agent \
+        will run: concrete directives, the model tier(s) appropriate to the work, the \
+        permission scope, and the governance framing (every write passes the deny-before-\
+        execute gate; the agent cannot run git). Return ONLY the operational prompt text, \
+        ready to run — no preamble, no markdown headers.";
+    let user = format!(
+        "Permission scope: {}\n\nWhat the user wants:\n{}",
+        req.scope, req.intent
+    );
+    let llm = crate::llm::Llm::from_env();
+    match llm
+        .complete(crate::llm::LlmRequest::new(user).with_system(system))
+        .await
+    {
+        Ok(resp) if !resp.text.trim().is_empty() => Json(crate::routine::DraftPromptResp {
+            prompt: resp.text,
+            authored_by: "claude".to_string(),
+        }),
+        _ => Json(crate::routine::DraftPromptResp {
+            prompt: crate::routine::scaffold_prompt(&req.intent, &req.scope),
+            authored_by: "scaffold".to_string(),
+        }),
+    }
 }
 
 /// Enable or disable a routine.
@@ -960,6 +999,41 @@ async fn delete_routine(
     } else {
         Err(AppError(anyhow::anyhow!("routine not found: {id}")))
     }
+}
+
+// ── AI: model provider ────────────────────────────────────────────────────────
+
+/// The models the UI offers in its selector.
+async fn list_models() -> Json<serde_json::Value> {
+    let models: Vec<_> = crate::llm::MODELS
+        .iter()
+        .map(|(label, id)| serde_json::json!({ "label": label, "id": id }))
+        .collect();
+    Json(serde_json::json!({
+        "models": models,
+        "default": crate::llm::DEFAULT_MODEL,
+        "backend": crate::llm::Llm::from_env().backend_label(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct ChatReq {
+    prompt: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    system: Option<String>,
+}
+
+/// The research chat: one completion through the configured backend. The side-by-side
+/// chatbot uses this; it's also the smoke test that the model wiring works.
+async fn chat(Json(req): Json<ChatReq>) -> Result<Json<crate::llm::LlmResponse>, AppError> {
+    let llm = crate::llm::Llm::from_env();
+    let mut r = crate::llm::LlmRequest::new(req.prompt).with_model(req.model);
+    if let Some(system) = req.system {
+        r = r.with_system(system);
+    }
+    Ok(Json(llm.complete(r).await?))
 }
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────

@@ -17,6 +17,8 @@ use serde::Serialize;
 use camerata_core::{Decision, RuleId, ToolCall};
 use camerata_gateway::{enforced_gate_rules, evaluate_call};
 
+use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
+
 /// The lifecycle status of a run, in Camerata's vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,18 +196,97 @@ pub fn run_event_script() -> Vec<GateEvent> {
     ]
 }
 
+/// The agents the scripted run models, and which script events each produced — so the
+/// transcript can show the GENERATED prompt + the agent's actions and the REAL gate
+/// verdict. Index references into [`run_event_script`].
+struct ScriptedAgent {
+    session_id: &'static str,
+    role: &'static str,
+    task: &'static str,
+    /// `(event index, action label)` pairs this agent produced.
+    steps: &'static [(usize, &'static str)],
+}
+
+fn scripted_agents() -> [ScriptedAgent; 2] {
+    [
+        ScriptedAgent {
+            session_id: "frontend-1",
+            role: "Frontend engineer",
+            task: "Wire the member-export action in the UI and its export config.",
+            steps: &[
+                (0, "Write a workspace-relative payload file (attempted path-escape)"),
+                (1, "Write crates/api/src/export_config.rs (attempted hardcoded token)"),
+            ],
+        },
+        ScriptedAgent {
+            session_id: "backend-1",
+            role: "Backend engineer",
+            task: "Implement the members-repository export method.",
+            steps: &[(2, "Write crates/api/src/members_repo.rs (repository method)")],
+        },
+    ]
+}
+
 /// Walk a run to completion, emitting the real gate verdicts with calm pacing so the
 /// cockpit can render the progression live. The verdicts come from
-/// [`run_event_script`] (the real gate); only the pacing lives here.
-pub async fn execute_run(store: RunStore, run_id: String) {
+/// [`run_event_script`] (the real gate); only the pacing lives here. As it walks, it
+/// also fills the per-agent transcripts (the generated prompt + each agent's actions
+/// and the real verdict) so the Agent-activity drawer can show what Camerata told its
+/// agents — the otherwise-hidden prompting.
+pub async fn execute_run(store: RunStore, transcripts: TranscriptStore, run_id: String) {
     let beat = Duration::from_millis(550);
+    let story_id = store.get(&run_id).map(|r| r.story_id).unwrap_or_default();
+    let events = run_event_script();
+    let agents = scripted_agents();
+
+    // Register each agent with its GENERATED prompt up front (status: running).
+    for a in &agents {
+        transcripts.register(
+            &run_id,
+            AgentTranscript {
+                session_id: a.session_id.to_string(),
+                role: a.role.to_string(),
+                prompt: generated_prompt(a.role, &story_id, a.task),
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+    }
 
     store.set_status(&run_id, RunStatus::Executing, false);
     tokio::time::sleep(beat).await;
 
-    for event in run_event_script() {
-        store.push_event(&run_id, event);
+    for (idx, event) in events.iter().enumerate() {
+        // Append this event to the agent that produced it, with the real verdict.
+        if let Some((agent, action)) = agents.iter().find_map(|a| {
+            a.steps
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .map(|(_, act)| (a, *act))
+        }) {
+            transcripts.append_output(&run_id, agent.session_id, &format!("→ {action}"));
+            let line = if event.verdict == "deny" {
+                format!(
+                    "   ✗ GATE DENIED [{}] — {}",
+                    event.rule.clone().unwrap_or_default(),
+                    event.detail
+                )
+            } else {
+                format!("   ✓ gate allowed — {}", event.detail)
+            };
+            transcripts.append_output(&run_id, agent.session_id, &line);
+        }
+        store.push_event(&run_id, event.clone());
         tokio::time::sleep(beat).await;
+    }
+
+    // Final per-agent status: blocked if any of its writes were denied, else done.
+    for a in &agents {
+        let blocked = a
+            .steps
+            .iter()
+            .any(|(i, _)| events.get(*i).map(|e| e.verdict == "deny").unwrap_or(false));
+        transcripts.set_status(&run_id, a.session_id, if blocked { "blocked" } else { "done" });
     }
 
     store.set_status(&run_id, RunStatus::Gating, false);
@@ -250,9 +331,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn execute_run_walks_to_awaiting_qa_with_real_denies() {
         let store = RunStore::new();
+        let transcripts = TranscriptStore::new();
         let id = store.create("CAM-1", "scripted");
         // start_paused auto-advances tokio time, so the sleeps resolve instantly.
-        execute_run(store.clone(), id.clone()).await;
+        execute_run(store.clone(), transcripts.clone(), id.clone()).await;
 
         let run = store.get(&id).expect("run exists");
         assert_eq!(run.status, RunStatus::AwaitingQa);
@@ -260,5 +342,16 @@ mod tests {
         assert_eq!(run.events.len(), 3);
         let denies = run.events.iter().filter(|e| e.verdict == "deny").count();
         assert_eq!(denies, 2);
+
+        // Two agents got generated prompts + their actions/verdicts; the frontend
+        // (which hit two denials) is blocked, the backend (clean) is done.
+        let agents = transcripts.get(&id);
+        assert_eq!(agents.len(), 2);
+        let fe = agents.iter().find(|a| a.session_id == "frontend-1").unwrap();
+        assert!(fe.prompt.contains("CAM-1"));
+        assert!(fe.output.contains("GATE DENIED"));
+        assert_eq!(fe.status, "blocked");
+        let be = agents.iter().find(|a| a.session_id == "backend-1").unwrap();
+        assert_eq!(be.status, "done");
     }
 }
