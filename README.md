@@ -125,7 +125,7 @@ because the intended reader is exactly the person who will run the code and chec
 
 **Verified at runtime (you can reproduce it):**
 
-- A 14-crate workspace, 500+ passing tests, zero warnings, no
+- A 14-crate workspace, 670+ passing tests, zero warnings, no
   `todo!`/`unimplemented!` stubs, governing its OWN source in CI (unsafe forbidden,
   clippy `-D warnings`, fmt, tests; see [`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
 - **The gate denies a real agent.** `camerata -- live-demo` runs a real `claude -p`
