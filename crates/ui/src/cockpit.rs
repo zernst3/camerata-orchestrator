@@ -1325,6 +1325,66 @@ fn CockpitNotice(kind: String) -> Element {
 
 // ── Brownfield scan: data + chorale-backed tables ──────────────────────────────
 
+/// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Pop a native save dialog and write `content`. Returns true on success.
+async fn save_csv(default_name: &str, content: String) -> bool {
+    match rfd::AsyncFileDialog::new()
+        .set_file_name(default_name)
+        .save_file()
+        .await
+    {
+        Some(file) => file.write(content.as_bytes()).await.is_ok(),
+        None => false,
+    }
+}
+
+/// Build CSV for the audit findings table.
+fn findings_csv(findings: &[FindingView]) -> String {
+    let mut out = String::from("repo,severity,status,rule_id,path,line,snippet,detail\n");
+    for f in findings {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            csv_field(&f.repo),
+            csv_field(&f.severity),
+            csv_field(&f.status),
+            csv_field(&f.rule_id),
+            csv_field(&f.path),
+            f.line,
+            csv_field(&f.snippet),
+            csv_field(&f.detail),
+        ));
+    }
+    out
+}
+
+/// Build CSV for the proposed-rules table.
+fn rules_csv(rules: &[ProposedRuleView]) -> String {
+    let mut out =
+        String::from("rule_id,title,kind,scope,enforcement,placement,finding_count,repos\n");
+    for r in rules {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            csv_field(&r.id),
+            csv_field(&r.title),
+            csv_field(&r.kind),
+            csv_field(&r.scope),
+            csv_field(&r.enforcement),
+            csv_field(&r.placement),
+            r.finding_count,
+            csv_field(&r.repos.join(" ")),
+        ));
+    }
+    out
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct FindingView {
     #[serde(default)]
@@ -1722,6 +1782,8 @@ fn FindingsTable(
     // Separate clones for the ignore button (the tech-debt button moves the originals).
     let id_map_ig = id_map.clone();
     let repo_ig = target_repo.clone();
+    // The (sorted) rows for CSV export.
+    let csv_rows = findings.clone();
 
     // Hover the rule id in the "type" column to read what it enforces (and, once a
     // rule's alternative is chosen, the chosen alternative) — no memorizing.
@@ -1817,6 +1879,14 @@ fn FindingsTable(
                     });
                 },
                 if busy() { "Filing…" } else { "Accept as tech debt \u{2192} ticket" }
+            }
+            button {
+                class: "btn-edit-sm",
+                onclick: move |_| {
+                    let csv = findings_csv(&csv_rows);
+                    spawn(async move { let _ = save_csv("camerata-findings.csv", csv).await; });
+                },
+                "Export CSV"
             }
         }
         Table { handle, sort_enabled: true, filter_enabled: true, selection_enabled: true, resize_enabled: true, cell_renderers: renderers }
@@ -1947,10 +2017,19 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
     let mut arming = use_signal(|| false);
     // The findings to snapshot as the baseline on arm; cloned per arm click.
     let arm_findings = findings;
+    let csv_rules = rules.clone();
 
     rsx! {
         Table { handle, sort_enabled: true, selection_enabled: true }
         div { class: "findings-toolbar",
+            button {
+                class: "btn-edit-sm",
+                onclick: move |_| {
+                    let csv = rules_csv(&csv_rules);
+                    spawn(async move { let _ = save_csv("camerata-proposed-rules.csv", csv).await; });
+                },
+                "Export CSV"
+            }
             button {
                 class: "btn-run",
                 disabled: arming(),
