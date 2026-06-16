@@ -99,6 +99,8 @@ DO NOT report: hardcoded secrets, raw SQL string concatenation, or path-escape w
 
 Each line in the digest is prefixed with its line number as `NNNN| `. Cite that exact number in `line` — do not estimate.
 
+Cross-file context: you have the REPO MAP (every file + its public symbols) but only SOME file bodies in this pass. If judging a rule needs the actual BODY of a file that is in the map but NOT included below (e.g. you must read a repository's implementation, or a type defined elsewhere, to decide), do NOT guess and do NOT stay silent — list EVERY file path involved in that deferred judgment (the file under suspicion AND the files it depends on) in `needs_files`. A follow-up pass will include those bodies together so you can decide then.
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "findings": [
@@ -119,9 +121,10 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "severity": "high|medium|low",
       "enforcement": "mechanical|review"
     }
-  ]
+  ],
+  "needs_files": ["relative/path/you/need/the/body/of.rs"]
 }
-If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": []}. Every finding must point at real code at a real line."#
+If the code genuinely conforms everywhere, return {"findings": [], "proposed_rules": [], "needs_files": []}. Every finding must point at real code at a real line."#
         .to_string()
 }
 
@@ -359,6 +362,56 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
+/// The `needs_files` paths a pass asked for (file bodies it needs co-resident to judge a
+/// cross-file rule). Drives the bounded resolution round. Robust to missing/garbled output.
+fn parse_needs_files(raw: &str) -> Vec<String> {
+    let Some(json) = extract_json_object(raw) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    v["needs_files"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One audit pass: build the request, run it (streaming into the transcript when feedback
+/// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
+/// by the primary chunk loop and the resolution round so neither duplicates the call logic.
+#[allow(clippy::too_many_arguments)]
+async fn audit_pass(
+    llm: &Llm,
+    audit_model: Option<&str>,
+    prompt: String,
+    repo: &str,
+    adopted: &std::collections::HashSet<String>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    session: &str,
+) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
+    let mut req = LlmRequest::new(prompt)
+        .with_system(audit_system_prompt())
+        .with_max_tokens(8192);
+    if let Some(m) = audit_model {
+        req = req.with_model(m.to_string());
+    }
+    let resp = if let Some((store, key)) = feedback {
+        let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
+        llm.complete_streaming(req, &mut on_delta).await?
+    } else {
+        llm.complete(req).await?
+    };
+    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+    let needs = parse_needs_files(&resp.text);
+    Ok((f, p, needs))
+}
+
 /// The public symbols a file defines (Rust items + TS/JS exports), for the repo map. A
 /// cheap line scan — no parser — capped so the map stays compact.
 fn extract_public_symbols(content: &str) -> Vec<String> {
@@ -482,6 +535,9 @@ pub async fn audit_repo(
     let mut all_proposed = Vec::new();
     let mut ok_passes = 0usize;
     let mut last_err: Option<anyhow::Error> = None;
+    // Files a pass said it needs co-resident to judge a cross-file rule (the resolution
+    // round). A HashSet so duplicate requests across passes collapse.
+    let mut requested: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (i, chunk) in chunks.iter().enumerate() {
         let digest = build_digest(chunk);
@@ -496,25 +552,11 @@ pub async fn audit_repo(
                 &format!("\n── pass {}/{n_chunks} · {} file(s) ──\n", i + 1, chunk.len()),
             );
         }
-        let mut req = LlmRequest::new(prompt)
-            .with_system(audit_system_prompt())
-            // High-recall conformance emits many findings; cap generously so the list
-            // isn't cut off mid-stream.
-            .with_max_tokens(8192);
-        if let Some(m) = &audit_model {
-            req = req.with_model(m.clone());
-        }
-        let result = if let Some((store, key)) = feedback {
-            let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-            llm.complete_streaming(req, &mut on_delta).await
-        } else {
-            llm.complete(req).await
-        };
-        match result {
-            Ok(resp) => {
-                let (f, p) = parse_ai_findings(repo, &resp.text, &adopted);
+        match audit_pass(llm, audit_model.as_deref(), prompt, repo, &adopted, feedback, &session).await {
+            Ok((f, p, needs)) => {
                 all_findings.extend(f);
                 all_proposed.extend(p);
+                requested.extend(needs);
                 ok_passes += 1;
             }
             Err(e) => {
@@ -535,6 +577,51 @@ pub async fn audit_repo(
     if ok_passes == 0 {
         if let Some(e) = last_err {
             return Err(e);
+        }
+    }
+
+    // ── Resolution round ────────────────────────────────────────────────────────────
+    // Earlier passes may have DEFERRED a judgment because it needed the bodies of files
+    // not in that pass (the residual cross-body limit of chunking). Pull exactly those
+    // files together and re-audit once — so a cross-file rule the model couldn't decide
+    // in a single pass gets resolved instead of silently missed. SINGLE round (the
+    // resolution passes' own needs_files are ignored) to keep it bounded.
+    let resolution: Vec<(String, String)> = files
+        .iter()
+        .filter(|(p, _)| requested.contains(p))
+        .cloned()
+        .collect();
+    if !resolution.is_empty() {
+        let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
+        let r_total = res_chunks.len();
+        for (i, chunk) in res_chunks.iter().enumerate() {
+            let digest = build_digest(chunk);
+            let prompt = format!(
+                "Repository: {repo} (resolution pass {}/{r_total})\n\n{rules_block}{repo_map}These file bodies were flagged by earlier passes as needed TOGETHER to judge a cross-file rule. Re-check the adopted rules across them now that their bodies are present, and report any violations.\n\n{digest}",
+                i + 1
+            );
+            if let Some((store, key)) = feedback {
+                store.append_output(
+                    key,
+                    &session,
+                    &format!("\n── resolution {}/{r_total} · {} file(s) ──\n", i + 1, chunk.len()),
+                );
+            }
+            match audit_pass(llm, audit_model.as_deref(), prompt, repo, &adopted, feedback, &session).await {
+                Ok((f, p, _ignored_needs)) => {
+                    all_findings.extend(f);
+                    all_proposed.extend(p);
+                }
+                Err(e) => {
+                    if let Some((store, key)) = feedback {
+                        store.append_output(
+                            key,
+                            &session,
+                            &format!("[resolution {}/{r_total} failed: {e} — continuing]", i + 1),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -568,6 +655,16 @@ pub async fn audit_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_needs_files_reads_array_and_tolerates_absence() {
+        let with = r#"{"findings":[],"proposed_rules":[],"needs_files":["a/repo.rs"," ","b/svc.rs"]}"#;
+        let n = parse_needs_files(with);
+        assert_eq!(n, vec!["a/repo.rs".to_string(), "b/svc.rs".to_string()]);
+        // Absent / garbage -> empty, never errors.
+        assert!(parse_needs_files(r#"{"findings":[]}"#).is_empty());
+        assert!(parse_needs_files("not json").is_empty());
+    }
 
     #[test]
     fn extract_public_symbols_finds_rust_and_ts_exports() {
