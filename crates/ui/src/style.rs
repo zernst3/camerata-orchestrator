@@ -1504,6 +1504,17 @@ html, body {
   font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
   letter-spacing: .02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+/* Audit model picker (user owns speed/thoroughness). */
+.audit-model-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+.audit-model-label { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.audit-model-select {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 12.5px; font-weight: 600; padding: 5px 9px; border-radius: 8px; cursor: pointer;
+}
+.audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
+.audit-model-select:disabled { opacity: .55; cursor: default; }
+.audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+
 /* Estimated token-usage badge in the Agent-activity detail. */
 .agent-tokens {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;

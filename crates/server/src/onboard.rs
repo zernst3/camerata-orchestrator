@@ -922,6 +922,7 @@ pub async fn audit_repos(
     specs: &[String],
     selected: &[(String, String)],
     token: &str,
+    model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> ScanReport {
     let mut all_findings = Vec::new();
@@ -973,7 +974,9 @@ pub async fn audit_repos(
                 // Deterministic security floor (always-on): ENFORCED findings.
                 let mut repo_findings = audit_files(spec, &files);
                 // AI audit parameterized by the SEMANTIC rules only: ADVISORY findings.
-                match crate::ai_audit::audit_repo(&llm, spec, &files, &semantic, feedback).await {
+                match crate::ai_audit::audit_repo(&llm, spec, &files, &semantic, model, feedback)
+                    .await
+                {
                     Ok((ai_findings, _ai_rules)) => repo_findings.extend(ai_findings),
                     Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
                 }

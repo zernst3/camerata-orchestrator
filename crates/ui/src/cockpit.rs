@@ -1863,18 +1863,45 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
 }
 
 /// Phase 2 — audit the repos against the selected rules (`(id, directive)` each).
-async fn audit_against(repos: &[String], rules: &[(String, String)]) -> Option<ScanReportView> {
+async fn audit_against(
+    repos: &[String],
+    rules: &[(String, String)],
+    model: &str,
+) -> Option<ScanReportView> {
     let rule_json: Vec<_> = rules
         .iter()
         .map(|(id, directive)| serde_json::json!({ "id": id, "directive": directive }))
         .collect();
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model }))
         .send()
         .await
         .ok()?
         .json::<ScanReportView>()
+        .await
+        .ok()
+}
+
+/// One model the audit selector offers (`GET /api/models`).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct AuditModelOption {
+    label: String,
+    id: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct AuditModelsResp {
+    models: Vec<AuditModelOption>,
+    #[serde(default)]
+    default: String,
+}
+
+async fn fetch_audit_models() -> Option<AuditModelsResp> {
+    reqwest::get(format!("{}/api/models", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<AuditModelsResp>()
         .await
         .ok()
 }
@@ -2788,6 +2815,18 @@ fn ScanResults(report: ScanReportView) -> Element {
     // architect picks rules and runs the audit.
     let mut audit = use_signal(|| Option::<ScanReportView>::None);
     let mut auditing = use_signal(|| false);
+    // The model the user picks for the audit — they own the thoroughness/speed trade-off.
+    // Company-agnostic list comes from the server (`/api/models`); seed from its default.
+    let models_res = use_resource(fetch_audit_models);
+    let models = models_res.read().clone().flatten();
+    let mut audit_model = use_signal(String::new);
+    if audit_model().is_empty() {
+        if let Some(m) = &models {
+            if !m.default.is_empty() {
+                audit_model.set(m.default.clone());
+            }
+        }
+    }
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -2908,13 +2947,14 @@ fn ScanResults(report: ScanReportView) -> Element {
                         auditing: auditing(),
                         on_audit: move |rules: Vec<(String, String)>| {
                             let repos = repos_audit.clone();
+                            let model = audit_model();
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
                             audit.set(None);
                             auditing.set(true);
                             spawn(async move {
-                                audit.set(audit_against(&repos, &rules).await);
+                                audit.set(audit_against(&repos, &rules, &model).await);
                                 auditing.set(false);
                             });
                         },
@@ -2926,6 +2966,23 @@ fn ScanResults(report: ScanReportView) -> Element {
             div { class: "audit-cta",
                 p { class: "scan-section-h", "Step 2 — audit the code against your selected rules" }
                 p { class: "scan-section-sub", "Tick the rules above, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
+                // Model picker — the user owns the speed/thoroughness trade-off. List is
+                // company-agnostic, served by /api/models.
+                if let Some(m) = models.as_ref() {
+                    div { class: "audit-model-row",
+                        label { class: "audit-model-label", "Audit model" }
+                        select {
+                            class: "audit-model-select",
+                            disabled: auditing(),
+                            value: "{audit_model}",
+                            onchange: move |e| audit_model.set(e.value()),
+                            for opt in m.models.iter() {
+                                option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                            }
+                        }
+                        span { class: "audit-model-hint", "Faster models finish sooner; stronger models catch more." }
+                    }
+                }
                 // While the audit runs, the Bombe turns — a visible "the AI is thinking"
                 // cue so a multi-second audit doesn't look hung.
                 if auditing() {

@@ -630,6 +630,11 @@ struct AuditReq {
     repos: Vec<String>,
     #[serde(default)]
     rules: Vec<AuditRuleReq>,
+    /// The model the USER picked for this audit (company-agnostic id, e.g.
+    /// `claude-sonnet-4-6`). None / empty → the server default. The user owns the
+    /// thoroughness-vs-speed trade-off by choosing here.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The transcript key the scan/audit AI activity registers under (the Agent-activity
@@ -667,6 +672,7 @@ async fn onboard_audit(
         .filter(|r| !r.id.trim().is_empty())
         .map(|r| (r.id, r.directive))
         .collect();
+    let model = req.model.filter(|m| !m.trim().is_empty());
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     Json(
@@ -674,6 +680,7 @@ async fn onboard_audit(
             &repos,
             &selected,
             &token,
+            model.as_deref(),
             Some((&state.transcripts, SCAN_AUDIT_KEY)),
         )
         .await,

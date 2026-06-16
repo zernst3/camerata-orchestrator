@@ -440,7 +440,12 @@ impl Llm {
             Some(t) => t.await.unwrap_or_default(),
             None => String::new(),
         };
-        if !status.success() {
+        // SALVAGE: if the process exited non-zero (e.g. SIGKILL from a timeout, or an
+        // external kill) but it already streamed a usable response, RETURN that text rather
+        // than discarding it. The model's work is in `full`; throwing it away on a late
+        // interruption is what made a fully-streamed audit collapse to "0/3 findings".
+        // Only fail when there's genuinely nothing to salvage.
+        if !status.success() && full.trim().is_empty() {
             anyhow::bail!("claude CLI (stream) exited {status}: {}", stderr_text.trim());
         }
         Ok(LlmResponse {

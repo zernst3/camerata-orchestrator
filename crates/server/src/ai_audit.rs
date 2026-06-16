@@ -513,6 +513,7 @@ pub async fn audit_repo(
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
+    model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
@@ -525,11 +526,13 @@ pub async fn audit_repo(
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
         selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
-    // Cost lever (ORCH-MODEL-TIERING-1): the high-volume chunk passes can run on a cheaper
-    // model. `CAMERATA_AUDIT_MODEL` overrides per pass; unset = the provider's default.
-    let audit_model = std::env::var("CAMERATA_AUDIT_MODEL")
-        .ok()
-        .filter(|s| !s.trim().is_empty());
+    // Model selection: the USER's per-audit choice wins (they own the speed/thoroughness
+    // trade-off); else `CAMERATA_AUDIT_MODEL`; else the provider default.
+    let audit_model = model.map(str::to_string).or_else(|| {
+        std::env::var("CAMERATA_AUDIT_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    });
 
     let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
     let n_chunks = chunks.len();
@@ -592,9 +595,14 @@ pub async fn audit_repo(
     }
 
     // Every pass failed -> surface the error so the caller notes the AI audit was skipped
-    // (the deterministic findings still return independently).
+    // (the deterministic findings still return independently). Finalize the transcript
+    // status FIRST so the UI's "analyzing" spinner stops instead of spinning forever.
     if ok_passes == 0 {
         if let Some(e) = last_err {
+            if let Some((store, key)) = feedback {
+                store.append_output(key, &session, &format!("\n[audit failed: {e}]"));
+                store.set_status(key, &session, "blocked");
+            }
             return Err(e);
         }
     }
