@@ -1,0 +1,36 @@
+id = "RUST-ENTITIES-4"
+title = "FK relations declared on BOTH sides"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: FK relations declared on BOTH sides?"
+default = "fk-relations-declared-on-both-sides"
+why = "Compile-time validation of the full FK graph, plus find_related working in both directions. The result is self-documenting. Declaring relations only on one side (belongs_to on the child without the reverse on the parent) loses compile-time FK-graph validation in the reverse direction and disables find_related traversal from parent to child, so every parent-to-child read has to be hand-built. Relying on database-level FK enforcement and skipping ORM relation declarations entirely means the DB still rejects bad writes, but find_related ergonomics are gone and every read that needs joined data has to be hand-built, which is exactly the cost the bidirectional declarations were paying down. Declaring relations only as needed for the current code leaves the FK graph perpetually incomplete: each new feature that wants the missing direction triggers a new annotation, and the graph stays partial until every read shape is exercised in code."
+
+[[option]]
+id = "fk-relations-declared-on-both-sides"
+label = "FK relations declared on BOTH sides"
+directive = "Declare each foreign-key relation on both entities: belongs_to on the child plus has_one or has_many on the parent. Variant naming: belongs_to uses the parent singular; has_one uses the child singular; has_many uses the child plural."
+why = "The adopted default. Compile-time validation of the full FK graph, plus find_related working in both directions."
+
+[[option]]
+id = "foreign-key-relations-are-declared-only-on-the-c"
+label = "foreign-key relations are declared only on the child side …"
+directive = "foreign-key relations are declared only on the child side (belongs_to) and not on the parent side, so the FK graph in the entities crate is one-directional"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-entities-crate-declares-no-foreign-key-relat"
+label = "the entities crate declares no foreign-key relations at all …"
+directive = "the entities crate declares no foreign-key relations at all and relies entirely on database-level FK enforcement, so all joined reads are hand-built rather than going through find_related"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "foreign-key-relations-are-added-on-each-side-onl"
+label = "foreign-key relations are added on each side only when …"
+directive = "foreign-key relations are added on each side only when the current code path needs them, so the FK graph in the entities crate grows only as features exercise specific traversal directions"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,30 @@
+id = "ORCH-PRECISION-RECALL-1"
+title = "Autonomous detection defaults to recall, precision-tuning is a per-signal opt-in"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How should autonomous detection signals balance false positives against false negatives?"
+default = "default-to-recall-opt-specific-signals-into-prec"
+why = "False positives are recoverable. The routine pauses, a human takes a minute to investigate, the false positive gets dismissed, the routine resumes. Annoying but cheap. False negatives are silent: the issue slips through, compounds across subsequent runs, and the team never learns it was missed. Cheap upfront, expensive forever. Defaulting to recall keeps the cost of being wrong in the recoverable lane. Defaulting to precision puts it in the silent lane. Tuning detection for strong-tier signals only and accepting missed issues to avoid false-positive halts is defensible when the routine has very high opportunity cost from pauses, but is risky when missed issues compound silently across subsequent runs — exactly the dynamic the recall-default protects against. Accepting whatever recall and precision the detection naturally produces works at small scale but becomes unworkable as routine volume grows and detection signals proliferate, because the un-tuned mix produces neither catching power nor predictable noise floors."
+
+[[option]]
+id = "default-to-recall-opt-specific-signals-into-prec"
+label = "default to recall, opt specific signals into precision-tuning"
+directive = "Detection signals in autonomous routines (tech-debt sniffers, anomaly flags, drift detectors, anything that gates the routine on a judgment call) are tuned broadly. Anything that could plausibly be a real issue triggers a pause, including borderline cases that turn out to be false positives. The cost of stopping to investigate a false positive is small and recoverable. The cost of letting a real issue slip through silently is unbounded. Default posture: catch too much, not too little."
+why = "The adopted default. False positives are recoverable."
+
+[[option]]
+id = "default-to-precision-opt-specific-signals-into-b"
+label = "default to precision, opt specific signals into broader recall"
+directive = "detection signals in autonomous routines default to precision tuning: only strong-tier signals trigger a pause, weaker borderline cases pass without halting, and missed real issues are accepted as the cost of fewer interruptions"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "no-tuning-accept-default-signal-sensitivity"
+label = "no tuning, accept default signal sensitivity"
+directive = "detection signals in autonomous routines are not tuned at all; the routine accepts whatever recall and precision the detection step naturally produces with no per-signal calibration"
+why = "A defensible alternative the project considered and did not adopt as the default."

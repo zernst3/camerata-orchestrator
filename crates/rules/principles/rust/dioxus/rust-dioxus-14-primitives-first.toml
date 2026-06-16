@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-14"
+title = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Common UI elements have one canonical implementation in a primitives layer; views compose primitives?"
+default = "common-ui-elements-have-one-canonical-implementa"
+why = "Per-view reimplementation of common UI elements is the largest single source of visual drift in component-based UIs. Five views that each implement their own button slowly become five subtly different buttons, and design-system changes become a codebase-wide refactor instead of a single-file change. Centralizing primitives means design decisions have exactly one home, reviewers know where to look for design-system questions, and an AI agent porting or generating a view can compose primitives rather than reinvent them. Automated agents in particular fail at the second pattern: an agent given a feature view will inline a hand-rolled button rather than reach for an existing primitive unless the primitive is already there and the rule says to use it. A feature-folder structure where each feature owns its own bespoke buttons, modals, and toasts works for very large UIs with strong team ownership boundaries, but it produces visual drift across features and makes design-system changes a feature-by-feature edit. Adopting a pre-existing third-party component library wholesale loses the project's specific design vocabulary and constrains visual identity to whatever the library exposes, which limits the design system to the library's surface area. Skipping primitives entirely and inlining utility classes in every view works for a ten-page product but produces unreadable churn at any larger scale, and design-system changes become a codebase-wide search-and-replace rather than a single-file edit."
+
+[[option]]
+id = "common-ui-elements-have-one-canonical-implementa"
+label = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
+directive = "The UI crate has two distinct kinds of components: primitives (Button, Modal, Toast, Card, Input, and similar reusable elements) and views (page-level components that compose primitives to express a feature). Every primitive has exactly one canonical implementation in a shared components directory. Views compose those primitives; views never reimplement a primitive inline or fork one for local convenience. Design-system decisions (color palette, corner radii, type system, focus rings, motion) live in the primitive component, so every view that composes the primitive inherits those decisions for free. A view that needs behavior a primitive does not yet expose extends the primitive's API rather than copying the primitive."
+why = "The adopted default. Per-view reimplementation of common UI elements is the largest single source of visual drift in component-based UIs."
+
+[[option]]
+id = "the-ui-is-organized-into-feature-folders-where-e"
+label = "the UI is organized into feature folders where each …"
+directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-ui-adopts-a-pre-existing-third-party-compone"
+label = "the UI adopts a pre-existing third-party component library wholesale …"
+directive = "the UI adopts a pre-existing third-party component library wholesale and composes views directly from that library's components, rather than maintaining its own primitives"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-ui-has-no-primitives-layer-views-inline-util"
+label = "the UI has no primitives layer; views inline utility …"
+directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
+why = "A defensible alternative the project considered and did not adopt as the default."

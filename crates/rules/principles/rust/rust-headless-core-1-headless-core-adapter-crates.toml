@@ -1,0 +1,30 @@
+id = "RUST-HEADLESS-CORE-1"
+title = "A reusable component or UI library splits a framework-agnostic core crate from thin per-framework adapter crates"
+tag = "stack"
+domain = "rust"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is a reusable component or UI library structured so it can serve more than one rendering framework?"
+default = "headless-core-plus-adapters"
+why = "The logic of a component (its state, its computations, its interaction rules) is independent of any rendering framework, while the rendering itself is framework-specific. Putting the framework-agnostic logic in a core crate that holds no rendering dependency, and giving each supported framework a thin adapter crate that depends on the core and wires it to that framework's rendering primitives, lets the hard logic be written and tested once and reused across frameworks. Building the whole library against one framework is simpler until a second framework is needed, at which point the logic has to be disentangled from the rendering after the fact. Duplicating the logic per framework keeps each implementation self-contained but means every fix and feature is written two or more times and the implementations drift."
+
+[[option]]
+id = "headless-core-plus-adapters"
+label = "framework-agnostic core crate plus per-framework adapter crates"
+directive = "A reusable component or UI library is split into a framework-agnostic core crate that owns all logic, state, and computation and carries no dependency on any rendering framework, plus one thin adapter crate per supported framework. Each adapter crate depends on the core and wires the core's state and behavior to that framework's rendering primitives. Framework-specific code lives only in adapter crates; the core stays renderer-free so it can be tested in isolation and reused across every adapter."
+why = "The adopted default. Keeping the logic in a renderer-free core lets it be written and tested once and reused by every framework adapter."
+
+[[option]]
+id = "single-framework-build"
+label = "build the whole library against one framework"
+directive = "The library is built directly against a single rendering framework, with logic and rendering interleaved in the same crate."
+why = "Simpler for one framework, but the logic is entangled with the rendering and must be extracted later if a second framework is ever required."
+
+[[option]]
+id = "duplicate-per-framework"
+label = "duplicate the full implementation per framework"
+directive = "Each supported framework gets its own complete implementation of the library, with the logic re-implemented in each."
+why = "Each implementation is self-contained, but every fix and feature is written multiple times and the copies drift apart over time."

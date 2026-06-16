@@ -1,0 +1,36 @@
+id = "ARCH-REPO-RETURNS-DOMAIN-1"
+title = "Repositories return domain types, never persistence representations"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Repositories return domain types, never persistence representations?"
+default = "repositories-return-domain-types-never-persisten"
+why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes. A schema migration, an ORM upgrade, or a switch to a different storage engine should not require recompiling business logic or rewriting service signatures. When repositories leak persistence types upward, every consumer becomes coupled to the storage library, and the cost of any library change cascades through unrelated code. Exposing the persistence library's row or entity type directly from repository methods is cheaper to write at first but turns every persistence upgrade into a domain-wide refactor, and lazy-loading or session-scoped behavior leaks into business code. Returning a thin wrapper over the persistence type that adds helper methods looks lightweight but still couples consumers to the underlying library's lifecycle, fetch semantics, and inheritance shape. Returning persistence types from some repositories and domain types from others depending on what is convenient loses the architectural property: reviewers cannot tell at a call site whether they are receiving a domain type or a persistence type, so the boundary's value disappears."
+
+[[option]]
+id = "repositories-return-domain-types-never-persisten"
+label = "Repositories return domain types, never persistence representations"
+directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity, or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
+why = "The adopted default. Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes."
+
+[[option]]
+id = "repository-methods-return-the-persistence-librar"
+label = "repository methods return the persistence library's row or entity …"
+directive = "repository methods return the persistence library's row or entity type directly, with no translation into a separate domain type at the boundary"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "repository-methods-return-a-thin-wrapper-over-th"
+label = "repository methods return a thin wrapper over the persistence …"
+directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "repository-methods-return-persistence-types-from"
+label = "repository methods return persistence types from some repositories and …"
+directive = "repository methods return persistence types from some repositories and domain types from others, with the choice made per repository based on what is convenient at the time"
+why = "A defensible alternative the project considered and did not adopt as the default."

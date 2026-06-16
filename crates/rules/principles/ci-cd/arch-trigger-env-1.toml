@@ -1,0 +1,29 @@
+id = "ARCH-TRIGGER-ENV-1"
+title = "Trigger→environment mapping with immutable prod tags"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How do changes map to deploy environments?"
+why = "Direct mapping reduces human error; immutable tags make a release always resolve to the same SHA (auditability/rollback). Selecting the deploy environment manually at deploy time reintroduces the human-error surface the ref-to-env mapping is designed to remove, since the same SHA can be deployed to the wrong environment by a slip. A trunk-based model with everything gated by feature flags is a legitimate alternative strategy but moves the safety surface entirely into the flag layer, where any flag-system outage or misconfiguration becomes a release-control failure."
+
+[[option]]
+id = "git-ref-environment-immutable-prod-tags"
+label = "git-ref → environment, immutable prod tags"
+directive = "Map git refs to environments (push to main → dev; release branch → staging; semver tag → prod). Tags are immutable, never moved. Hotfixes branch from the broken tag."
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+
+[[option]]
+id = "manual-environment-selection"
+label = "manual environment selection"
+directive = "deploys are triggered manually and the target environment is selected by the operator at deploy time, rather than derived from a git ref-to-environment mapping"
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+
+[[option]]
+id = "trunk-based-with-feature-flags"
+label = "trunk-based with feature flags"
+directive = "the project runs trunk-based with no release branches or per-environment ref mapping; environment-specific behavior is controlled entirely by feature flags at runtime"
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."

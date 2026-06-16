@@ -217,7 +217,10 @@ no model credentials), and the gate is model-agnostic.
 
 ## Family
 
-- [camerata-ai](../camerata-ai) — the rule corpus and conventions engine.
+- [camerata-ai](../camerata-ai) — the conventions engine the corpus format originates
+  from. The rule corpus itself is now vendored into this repo at
+  `crates/rules/principles/` (107 TOML rules), so the workspace is self-contained;
+  override the corpus dir with `CAMERATA_CORPUS_PATH`.
 - [rust-chorale](../rust-chorale) — the headless, virtualized Dioxus / Leptos table
   library used for tabular surfaces.
 - this repo — the conductor that leads the ensemble.

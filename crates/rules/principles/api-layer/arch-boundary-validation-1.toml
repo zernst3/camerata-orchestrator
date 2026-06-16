@@ -1,0 +1,30 @@
+id = "ARCH-BOUNDARY-VALIDATION-1"
+title = "Validate every request at the boundary; downstream code trusts only validated values"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Validate every request at the boundary; downstream code trusts only validated values?"
+default = "validate-every-request-at-the-boundary-downstrea"
+why = "Centralizing validation at one tier eliminates the defensive re-validation that otherwise creeps into every service method. Downstream code becomes simpler and faster because every value it receives is, by construction, valid. Validating everywhere (each layer re-checks) hurts performance because the same checks run multiple times, and different layers eventually disagree on what counts as valid, since each layer's checks evolve independently. Trusting incoming data and failing late at the database or external service produces vague errors far from the source, and the request may have already partially succeeded before the failure surfaces, leaving inconsistent state behind."
+
+[[option]]
+id = "validate-every-request-at-the-boundary-downstrea"
+label = "Validate every request at the boundary; downstream code trusts only validated values"
+directive = "All HTTP input (body, query, path, headers) is parsed and validated against a typed schema at the controller layer. Services and repositories never re-validate; they trust the types they receive. Validation produces a typed value (not raw strings or loosely-shaped objects), and fields that fail validation produce a 4xx response with a structured error envelope before any business logic runs."
+why = "The adopted default. Centralizing validation at one tier eliminates the defensive re-validation that otherwise creeps into every service method."
+
+[[option]]
+id = "every-layer-controller-service-repository-re-val"
+label = "every layer (controller, service, repository) re-validates every input it …"
+directive = "every layer (controller, service, repository) re-validates every input it receives, with no canonical boundary that owns the validation pass"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "no-validation-step-runs-at-the-controller-bounda"
+label = "no validation step runs at the controller boundary; the …"
+directive = "no validation step runs at the controller boundary; the request is parsed into typed values minimally and bad data is detected when the database or external service rejects it"
+why = "A defensible alternative the project considered and did not adopt as the default."

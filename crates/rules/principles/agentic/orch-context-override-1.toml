@@ -1,0 +1,29 @@
+id = "ORCH-CONTEXT-OVERRIDE-1"
+title = "Rule overrides driven by project context require explicit human sign-off"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Rule overrides driven by project context require explicit human sign-off?"
+why = "Documented rules exist because an architect made an explicit commit; overriding one without review treats the original commit as casual. The override may still be right (projects evolve, ecosystems shift, downstream constraints can defeat a rule's original rationale), but the rule revision plus the deviating artifact together represent a non-trivial architectural shift that warrants the same review the original commit received. Pausing is the price of preserving rule authority while still allowing rules to evolve. The autonomous-override-then-review-later alternative trades pause cost for review-cadence cost and can be defensible when the project's review process is slower than the agent's iteration cadence, but it lets architectural shifts ship before the architect sees them and accepts that subsequent work may build on a divergence that the eventual review would have caught. The absolute-rules alternative trades agent autonomy for rule stability and can be defensible in regulated or safety-critical contexts where the cost of unreviewed deviation exceeds the cost of slower iteration, but it strands the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."
+
+[[option]]
+id = "rule-overrides-driven-by-project-context-require"
+label = "Rule overrides driven by project context require explicit human sign-off"
+directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project, the agent pauses and escalates the override to a human reviewer before either updating the rule or producing any artifact that diverges from it. Wrong-shaped output here means context-fit failures such as: the rule's stance conflicts with the project's positioning, a downstream constraint defeats the rule's rationale, an ecosystem convention diverges from the rule's stance, or similar misalignments between the rule's assumptions and the project's actual context. The escalation cites the rule by identifier and proposes the override. The agent resumes only after explicit sign-off. Silent override of a documented rule is forbidden."
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+
+[[option]]
+id = "when-the-agent-identifies-that-applying-a-docume"
+label = "When the agent identifies that applying a documented rule …"
+directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project (context-fit failures such as the rule's stance conflicting with the project's positioning, a downstream constraint defeating the rule's rationale, an ecosystem convention diverging from the rule's stance, or similar misalignments), the agent applies the override autonomously, updates the rule's text in the same change, and records the override for asynchronous human review later."
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+
+[[option]]
+id = "documented-rules-are-absolute-the-agent-never-ov"
+label = "Documented rules are absolute; the agent never overrides them …"
+directive = "Documented rules are absolute; the agent never overrides them based on local context, and a poor-fit rule is filed to the decisions log for human revision without the agent producing any artifact in the meantime."
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."

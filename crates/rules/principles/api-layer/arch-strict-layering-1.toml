@@ -1,0 +1,25 @@
+id = "ARCH-STRICT-LAYERING-1"
+title = "Strict layering — services orchestrate, repositories own data access"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check, enforced by an architecture-boundary lint rule that blocks direct database/query calls outside the repository layer (an ESLint rule restricting the DB client to repository files, a Rust visibility or clippy-style restriction, or the stack equivalent), with transaction flow-control in services exempted. Conformance holds when that rule runs in CI and a query issued from a controller or service is rejected; it fails when DB access can happen from any layer with no mechanical boundary."
+
+[decision]
+question = "What position does the project take on: Strict layering — services orchestrate, repositories own data access?"
+default = "strict-layering-services-orchestrate-repositorie"
+why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable. Mixing layers and allowing DB access anywhere leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."
+
+[[option]]
+id = "strict-layering-services-orchestrate-repositorie"
+label = "Strict layering — services orchestrate, repositories own data access"
+directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer). Exception: transaction flow control belongs in services."
+why = "The adopted default. Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
+
+[[option]]
+id = "controllers-services-and-repositories-are-not-se"
+label = "controllers, services, and repositories are not separated by lint …"
+directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
+why = "A defensible alternative the project considered and did not adopt as the default."

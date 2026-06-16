@@ -1,0 +1,30 @@
+id = "ORCH-OUTPUT-DIGEST-1"
+title = "Output discipline — local-mostly + a single consolidated digest"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How should routines report their output?"
+default = "local-artifacts-a-single-consolidated-daily-dige"
+why = "Signal-to-noise: one clean ranked digest is read; N direct pings get muted. A fail-safe (alert if the consolidator hasn't run in over N hours) catches silent failure of the digest itself. Per-routine direct notifications are noisier by construction, because each routine notifies on its own cadence and priority, and the human ends up either filtering manually or muting everything once the noise crosses the attention threshold. Batching everything with no prioritization preserves volume control but loses urgency, because critical items sit in the same queue as routine output and the routine output drowns the signal that needed to break through."
+
+[[option]]
+id = "local-artifacts-a-single-consolidated-daily-dige"
+label = "local artifacts + a single consolidated daily digest"
+directive = "Autonomous routines produce local artifacts (commits, state files) and write to a shared inbox. A single daily consolidator ranks all routines' output by priority and sends one digest, rather than each routine pinging directly. Critical items break through this cadence and notify immediately."
+why = "The adopted default. Signal-to-noise: one clean ranked digest is read; N direct pings get muted."
+
+[[option]]
+id = "per-routine-direct-notifications"
+label = "per-routine direct notifications"
+directive = "each autonomous routine sends its own direct notification on its own cadence, with no consolidator step in between"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "batch-everything"
+label = "batch everything"
+directive = "all autonomous-routine output is batched into one consolidated stream with no ranking or prioritization, and critical items wait for the next batch alongside routine output"
+why = "A defensible alternative the project considered and did not adopt as the default."

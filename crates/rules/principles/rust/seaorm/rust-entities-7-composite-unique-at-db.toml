@@ -1,0 +1,36 @@
+id = "RUST-ENTITIES-7"
+title = "Unique constraints the macro cannot express live at the DB level and are noted in the module doc"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Unique constraints the macro cannot express live at the DB level and are noted in the module doc?"
+default = "unique-constraints-the-macro-cannot-express-live"
+why = "A single-column unique annotation tells every reader, and every consumer of the entity's derived metadata, that the column is independently unique. When the real constraint is composite or partial, that reader has been misled in a way that produces incorrect business logic (an existence check assumes uniqueness that the DB does not guarantee for that column alone). Putting the constraint where it is actually enforced (the migration) and naming it in the module doc keeps the entity honest about its own contract. Annotating one column as unique just to communicate intent is misleading, because it implies a single-column or unconditional uniqueness that the database does not enforce, and downstream code reads the annotation as a contract. Waiting for a custom macro attribute that expresses composite or partial uniques is not actionable today: the macro does not support it and no roadmap signal suggests it is coming. Dropping the uniqueness constraint at the DB level and enforcing it only in application code is a clear regression, since the database loses the ability to reject duplicates atomically and race conditions across concurrent writers become a correctness bug rather than a constraint violation."
+
+[[option]]
+id = "unique-constraints-the-macro-cannot-express-live"
+label = "Unique constraints the macro cannot express live at the DB level and are noted in the module doc"
+directive = "DeriveEntityModel can only express a single-column unconditional unique constraint via #[sea_orm(unique)]. Any uniqueness that does NOT match that shape (composite uniques across two or more columns, partial unique indexes with a WHERE clause, conditional uniques, deferrable uniques) is enforced exclusively in the migration and called out in the entity's module-level doc comment. Do not annotate a column #[sea_orm(unique)] in these cases just to communicate intent; the annotation falsely implies a stronger constraint than is actually present in the database."
+why = "The adopted default. A single-column unique annotation tells every reader, and every consumer of the entity's derived metadata, that the column is independently unique."
+
+[[option]]
+id = "one-column-on-the-entity-is-annotated-sea-orm-un"
+label = "one column on the entity is annotated #[sea_orm(unique)] to …"
+directive = "one column on the entity is annotated #[sea_orm(unique)] to communicate intent, even when the real uniqueness constraint in the database is composite or partial rather than single-column"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-entity-carries-no-uniqueness-annotation-and"
+label = "the entity carries no uniqueness annotation and the rule …"
+directive = "the entity carries no uniqueness annotation and the rule waits for a future macro attribute that expresses composite or partial uniques"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-composite-or-partial-uniqueness-constraint-i"
+label = "the composite or partial uniqueness constraint is dropped at …"
+directive = "the composite or partial uniqueness constraint is dropped at the database level and enforced exclusively in application code instead"
+why = "A defensible alternative the project considered and did not adopt as the default."

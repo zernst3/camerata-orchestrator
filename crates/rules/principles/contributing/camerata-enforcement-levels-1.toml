@@ -1,0 +1,39 @@
+id = "CAMERATA-ENFORCEMENT-LEVELS-1"
+title = "Enforcement levels (prose / structured / mechanical) — what each commits the downstream project to"
+tag = "stack"
+domain = "contributing"
+layer = "universal"
+enforcement = "structured"
+default = false
+
+[decision]
+question = "How should a rule's enforcement ceiling (prose, structured, or mechanical) be classified?"
+default = "enforcement-levels-prose-structured-mechanical-w"
+why = "Different rules have different ceilings on enforceability. Naming that ceiling correctly tells contributors what their rule commits the downstream user (and the AI agent) to. Marking everything mechanical makes the term meaningless; marking everything prose undersells the rules that genuinely admit a hard check. Without an enforcement axis at all, every rule reads the same to the agent and to contributors, and a rule that genuinely admits a lint or hook cannot be distinguished from a heuristic that depends on reviewer judgment. A binary enforced/not split loses the middle structured tier where cite-the-ID discipline (rule ID quoted in commit messages, PR descriptions, and review comments) is the realistic ceiling for many architectural patterns that resist mechanization but are firmer than prose."
+
+[[option]]
+id = "enforcement-levels-prose-structured-mechanical-w"
+label = "Enforcement levels (prose / structured / mechanical) — what each commits the downstream project to"
+directive = """
+The enforcement field declares how strongly the principle CAN be enforced once installed, and tells the AI agent what kind of artifact to produce.
+
+prose — guidance the agent reads and follows, with no automated check. Best for heuristics that resist mechanization (the clear-winner test, robustness over terseness, novelty downgrades authority). The installed artifact is a paragraph in CLAUDE.md / the aicodingrules file; compliance is judgment-based. Weakest, cheapest.
+
+structured — a rule with an ID that the agent and humans cite in commits, PR descriptions, and review comments. Verified by grep and code review, not by an automated gate. Best for clear architectural patterns (one-trait-per-aggregate, mappers in their own crate, newtype IDs). The installed artifact is an entry in CONVENTIONS.md with the rule ID. Catches drift on review, not at write time.
+
+mechanical — a rule that CAN be enforced by a deterministic tool: a lint rule, a hook, a CI check, a type-system constraint, a migration linter. Strongest level. The installed artifact is the convention text PLUS a directive to the agent to set up the actual mechanism.
+
+CRUCIAL caveat for mechanical: declaring enforcement = "mechanical" does NOT create the lint rule, the hook, or the GitHub Action. It is a directive to the AI agent (or dev) to implement that enforcement when scaffolding the project. The principle text describes WHAT the mechanism should check; writing the lint or workflow is still real work. A rule marked mechanical with no mechanism actually wired up is degraded to structured in practice."""
+why = "The adopted default. Different rules have different ceilings on enforceability."
+
+[[option]]
+id = "the-library-has-no-enforcement-axis-on-principle"
+label = "the library has no enforcement axis on principles at …"
+directive = "the library has no enforcement axis on principles at all; every rule emits the same kind of artifact regardless of whether it admits a hard check or only a heuristic read"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-enforcement-axis-is-binary-enforced-or-not-e"
+label = "the enforcement axis is binary (enforced or not enforced) …"
+directive = "the enforcement axis is binary (enforced or not enforced) rather than three-tiered; rules that admit a hard automated check go in one bucket and everything else goes in the other"
+why = "A defensible alternative the project considered and did not adopt as the default."

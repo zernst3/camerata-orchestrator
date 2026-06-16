@@ -1,0 +1,25 @@
+id = "ARCH-SERVER-AUTHZ-1"
+title = "Authorization on the server; UI renders permission hints"
+tag = "stack"
+domain = "permissions"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a lint rule (an ESLint no-restricted-imports / no-restricted-syntax rule or the stack equivalent) that blocks client-side permission introspection: the UI may not import the raw permission-code or role-membership helpers, only read the server-computed permission flags carried on each resource response. Conformance holds when that rule runs in CI and a client component that re-implements an authorization decision from raw codes fails the build; it fails when no rule blocks client-side introspection and the UI can recompute permissions in the browser."
+
+[decision]
+question = "What position does the project take on: Authorization on the server; UI renders permission hints?"
+default = "authorization-on-the-server-ui-renders-permissio"
+why = "UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser. Client-side permission introspection lets the UI drift from server enforcement (the two evolve independently and eventually disagree), and it leaks the project's RBAC internals to the browser, where they become part of the public attack surface."
+
+[[option]]
+id = "authorization-on-the-server-ui-renders-permissio"
+label = "Authorization on the server; UI renders permission hints"
+directive = "Each resource response carries server-computed permission flags (e.g. _can: { manage: true }); the UI gates affordances on those flags and never recomputes permission logic client-side. Block client-side permission introspection with lint."
+why = "The adopted default. UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser."
+
+[[option]]
+id = "the-ui-inspects-raw-permission-codes-or-role-mem"
+label = "the UI inspects raw permission codes or role membership …"
+directive = "the UI inspects raw permission codes or role membership on the client and re-implements the authorization decision in browser code, rather than gating on server-computed permission flags carried by each resource response"
+why = "A defensible alternative the project considered and did not adopt as the default."

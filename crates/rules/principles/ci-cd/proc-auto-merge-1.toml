@@ -1,0 +1,23 @@
+id = "PROC-AUTO-MERGE-1"
+title = "Auto-merge tight, bot-authored PRs"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "prose"
+default = false
+
+[decision]
+question = "Which bot-authored PRs may self-merge?"
+why = "Tight bot PRs don't need human judgment; conventions + CI cover the safety surface. Requiring every PR (including tight bot-authored ones) to receive human review before merge is safer but slower, and it loses the throughput benefit of letting cheap mechanical changes through; reviewer attention gets consumed by changes whose correctness is already guaranteed by conventions and CI. Letting any bot-authored PR auto-merge once CI passes (regardless of scope or whether it touches hard-guard areas) is faster but widens the blast radius: a single bad routine can ship a damaging change before anyone notices, and the hard-guard areas exist precisely because the cost of a wrong autonomous call there is high."
+
+[[option]]
+id = "tight-single-purpose-convention-following-non-ha"
+label = "tight, single-purpose, convention-following, non-hard-guard PRs on green CI"
+directive = "PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard areas, add no new conventions, and pass CI + automated review → auto-merge (tagged). Frees human review for judgment-heavy PRs."
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+
+[[option]]
+id = "require-human-review-on-everything"
+label = "require human review on everything"
+directive = "every pull request including tight bot-authored ones requires explicit human review of the diff before it can merge, with no auto-merge path"
+why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."

@@ -1,0 +1,36 @@
+id = "PROC-CITE-CONVENTION-ID-1"
+title = "Cite the convention ID in commit messages and PR descriptions"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Cite the convention ID in commit messages and PR descriptions?"
+default = "cite-the-convention-id-in-commit-messages-and-pr"
+why = "Makes drift detection and review fast. A reviewer reading a PR sees immediately which rule the change is enacting and can challenge the application on its merits without having to first reconstruct intent. Later, when someone needs to trace how a pattern got established, a single grep on the convention ID surfaces every prior application of it across the repository's history. Omitting citation in commits forces slow archaeology when a pattern needs to be traced and turns reviewers into detectives asking 'is this following X or contradicting it?' instead of seeing the answer in the commit body. Citing only in PR descriptions works for the PR-review pass but breaks down once the change is merged and someone is reading commit history on a branch later, where the PR description is one click further away. Citing in code comments instead of commits couples the citation to the source location forever, even after the convention evolves and the comment goes stale, and means the citation moves around with refactors rather than staying anchored to the change that applied the rule."
+
+[[option]]
+id = "cite-the-convention-id-in-commit-messages-and-pr"
+label = "Cite the convention ID in commit messages and PR descriptions"
+directive = "A commit (or PR description) that applies a documented convention cites its ID in the body, for example 'per ENTITIES-4' or 'follows RUST-DOMAIN-2'. The citation lives in the commit body, not the subject line, so the convention reference does not crowd the headline."
+why = "The adopted default. Makes drift detection and review fast."
+
+[[option]]
+id = "commits-and-pr-descriptions-omit-any-reference-t"
+label = "commits and PR descriptions omit any reference to the …"
+directive = "commits and PR descriptions omit any reference to the convention ID being applied, leaving the rule citation entirely out of the project's written record"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "commits-omit-the-convention-id-citation-and-only"
+label = "commits omit the convention ID citation and only the …"
+directive = "commits omit the convention ID citation and only the PR description carries it"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-convention-id-is-cited-in-a-code-comment-nex"
+label = "the convention ID is cited in a code comment …"
+directive = "the convention ID is cited in a code comment next to the application site rather than in the commit body"
+why = "A defensible alternative the project considered and did not adopt as the default."

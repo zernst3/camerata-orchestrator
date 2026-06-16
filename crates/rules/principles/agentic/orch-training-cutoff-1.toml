@@ -1,0 +1,36 @@
+id = "ORCH-TRAINING-CUTOFF-1"
+title = "Training-data-limited decisions route to human review by category, not by confidence"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Training-data-limited decisions route to human review by category, not by confidence?"
+default = "training-data-limited-decisions-route-to-human-r"
+why = "An agent that decides on training-cutoff-sensitive surfaces with high confidence is calibrating against a stale snapshot, not the current world. The cost of being wrong is usually silent: code that compiles against a version the agent assumed exists, an API call to an endpoint whose shape has since changed, a model identifier that no longer routes anywhere. The sharper form of the rule is that the trigger is category, not confidence; the agent cannot self-assess whether its knowledge of an external surface is current, the project's source tree cannot tell either, and the only authority is a human with access to the current docs or registry. Self-stabilizing surfaces (the compiler edition or stable language features the project anchors via its declared edition or version) stay out of scope because the project itself carries the ground truth, so a stale snapshot is corrected by reading the project. The confidence-gated alternative loses exactly the cases that matter, because high confidence calibrated against a stale snapshot is the failure mode the rule exists to prevent. Routing every version-sensitive question to a human, including the stable self-correcting ones, over-pauses without reducing real risk, since the project's declared version anchors those answers. Having the agent fetch the current state and then auto-decide from the fetched answer is closer to correct than acting on training memory alone, but it still trusts the agent's interpretation of the fetched content and depends on the agent having a fetch capability at all, which is why the rule treats fetch-then-decide as a fallback step inside human review rather than as a replacement for it."
+
+[[option]]
+id = "training-data-limited-decisions-route-to-human-r"
+label = "Training-data-limited decisions route to human review by category, not by confidence"
+directive = "When a decision depends on the current state of something the agent cannot directly observe from inside the project (third-party dependency versions, framework or vendor API shapes, latest model identifiers, current security-advisory state, anything whose ground truth ships outside the project's own source tree and moves faster than the agent's training cutoff), the agent does not decide unilaterally. It surfaces the question to a human reviewer along with the candidate answer and the citation it would use. The trigger is the CATEGORY of question, not the agent's subjective confidence: confidence calibrated against a stale training snapshot is the failure mode the rule exists to prevent. The category is visible, shipped version surfaces with an external ground truth. The rule does NOT cover stable, self-correcting surfaces like the host language's edition or backwards-compatible compiler features, where the project's own declared version anchors the answer."
+why = "The adopted default. An agent that decides on training-cutoff-sensitive surfaces with high confidence is calibrating against a stale snapshot, not the current world."
+
+[[option]]
+id = "the-agent-auto-decides-on-dependency-api-or-late"
+label = "the agent auto-decides on dependency, API, or 'latest X' …"
+directive = "the agent auto-decides on dependency, API, or 'latest X' questions when its own confidence in the answer feels high, without routing to human review"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-agent-routes-every-version-sensitive-questio"
+label = "the agent routes every version-sensitive question to a human …"
+directive = "the agent routes every version-sensitive question to a human reviewer, including questions about the project's own declared compiler edition and other surfaces the project itself anchors"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-agent-fetches-the-current-state-through-what"
+label = "the agent fetches the current state through whatever web …"
+directive = "the agent fetches the current state through whatever web or registry tool it has available and then auto-decides from the fetched answer, treating human review as unnecessary once a fetch is possible"
+why = "A defensible alternative the project considered and did not adopt as the default."

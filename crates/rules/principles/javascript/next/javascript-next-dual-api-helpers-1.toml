@@ -1,0 +1,31 @@
+id = "JAVASCRIPT-NEXT-DUAL-API-1"
+title = "Two sanctioned API helpers: client vs server-only"
+tag = "stack"
+domain = "javascript:next"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by an ESLint no-restricted-imports / no-restricted-globals rule that forbids the raw fetch global (and direct fetch usage) in components and route handlers, routing all calls through the two sanctioned helpers; the server-only helper additionally imports the server-only package so any client-bundle import of it is a build-time error. Conformance holds when the lint rule and the server-only guard are configured and a raw fetch call or a client import of the server helper fails the build; it fails when neither guard is present and call sites can fetch directly."
+
+[decision]
+question = "What position does the project take on: Two sanctioned API helpers: client vs server-only?"
+default = "two-sanctioned-api-helpers-client-vs-server-only"
+why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access. Mixing them silently breaks SSR or leaks secrets. A 'server-only' marker on the server helper enforces the split at compile time. A single isomorphic helper has to compromise on cookies, hostname resolution, and secret handling because no single shape satisfies both contexts at once; any compromise the helper makes leaks a failure mode into one side or the other. Raw fetch at each call site pushes the context handling out to every site and forces each one to re-derive cookies, hostnames, and credential rules; one slip leaks a server-only secret into the client bundle or breaks SSR for a route that worked locally."
+
+[[option]]
+id = "two-sanctioned-api-helpers-client-vs-server-only"
+label = "Two sanctioned API helpers: client vs server-only"
+directive = "All API calls go through one of two helpers: a client-side helper (browser context, attaches credentials, handles auth redirects) or a server-only helper marked 'server-only' (can reach private-network hostnames, never bundled to the client). Direct fetch calls in components and route handlers are forbidden."
+why = "The adopted default. Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access."
+
+[[option]]
+id = "a-single-isomorphic-api-helper-covers-both-brows"
+label = "a single isomorphic API helper covers both browser and …"
+directive = "a single isomorphic API helper covers both browser and server contexts, with the same code path handling cookies, hostname resolution, and secret access across both runtimes"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "api-calls-are-made-via-raw-fetch-at-each-call-si"
+label = "API calls are made via raw fetch at each …"
+directive = "API calls are made via raw fetch at each call site, with each call site responsible for attaching its own credentials, choosing its own hostnames, and handling its own context-specific concerns"
+why = "A defensible alternative the project considered and did not adopt as the default."

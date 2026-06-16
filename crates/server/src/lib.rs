@@ -990,9 +990,9 @@ async fn emit_to_repos(
 /// rule's description. The rule-bank is the source; the project stores only the
 /// selection (id + chosen option + repos).
 async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<crate::arm::ArmRule> {
-    let corpus_path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
+    let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(corpus_path).await.0)
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
     } else {
         None
     };

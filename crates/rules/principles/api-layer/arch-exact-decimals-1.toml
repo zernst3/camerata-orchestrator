@@ -1,0 +1,37 @@
+id = "ARCH-EXACT-DECIMALS-1"
+title = "Monetary and quantity values use exact decimal types in code; never floats"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "A disallowed-types lint or a grep gate fails the build if a binary floating-point type (f64, double, Number, and equivalents) appears in any type, field, or column whose role requires exact arithmetic, and a property test asserts that a long chain of additions and roundings over those values loses zero precision against an exact-decimal oracle. Conformance holds when the float ban runs in CI over the exactness-sensitive surface and the precision property test passes; it fails when float types reach those values or no precision oracle exists."
+
+[decision]
+question = "What position does the project take on: Monetary and quantity values use exact decimal types in code; never floats?"
+default = "monetary-and-quantity-values-use-exact-decimal-t"
+why = "Binary floating-point cannot represent most decimal fractions exactly. 0.1 + 0.2 silently equals 0.30000000000000004; rounding 1.225 silently produces 1.22 in some cases and 1.23 in others. In any context where exactness is required (currency, regulated quantities, billing), floating-point introduces silent correctness bugs that surface as off-by-one-cent discrepancies, failed reconciliations, and audit findings. Exact-decimal types do the math the way humans expect; the type choice is the safety net. Using floating-point everywhere silently loses precision: the failure mode is wrong numbers that look right and only surface at reconciliation time, which is far more expensive than catching the type error up front. Representing currency as integer-cents is workable for single-currency contexts but falls over when multiple currencies with different minor-unit conventions enter the picture, or when intermediate calculations need sub-cent precision. Representing decimal values as strings and parsing at compute time gives up arithmetic at the type level and pushes the precision problem into every consumer who has to remember to parse and round consistently."
+
+[[option]]
+id = "monetary-and-quantity-values-use-exact-decimal-t"
+label = "Monetary and quantity values use exact decimal types in code; never floats"
+directive = "Any value that represents money, a counted quantity, a percentage with decimal precision, or any other domain where exact arithmetic matters is represented in code by the language's exact-decimal type (BigDecimal, Decimal, rust_decimal, decimal.Decimal, depending on language), never by binary floating-point (f64, double, Number, etc.). The persistence layer uses NUMERIC or DECIMAL columns for these values, not REAL or DOUBLE. Strings or integer-cents representations are not substitutes; they remove the ability to do arithmetic at the type level."
+why = "The adopted default. Binary floating-point cannot represent most decimal fractions exactly."
+
+[[option]]
+id = "monetary-and-quantity-values-are-represented-in"
+label = "monetary and quantity values are represented in code as …"
+directive = "monetary and quantity values are represented in code as binary floating-point (f64, double, Number) and stored as REAL or DOUBLE in the database"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "monetary-values-are-represented-in-code-as-integ"
+label = "monetary values are represented in code as integer-cents (or …"
+directive = "monetary values are represented in code as integer-cents (or minor-unit integers) rather than as the language's exact-decimal type"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "monetary-and-quantity-values-are-represented-as"
+label = "monetary and quantity values are represented as strings throughout, …"
+directive = "monetary and quantity values are represented as strings throughout, and consumers parse and re-format them at each compute step"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,30 @@
+id = "ARCH-TYPED-PATH-PARAMS-1"
+title = "Path and query parameters are extracted into typed values at the framework boundary"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How are route path and query parameters turned into values the handler uses?"
+default = "typed-extraction"
+why = "A path parameter arrives as text. If each handler parses that text itself, the parsing and its error handling are duplicated across every route, and a handler that forgets to validate operates on a malformed value. Extracting parameters into typed values at the framework boundary, with a parse failure producing a uniform error response before the handler runs, means the handler receives values it can trust and the parse-error path is written once. Parsing inside each handler is flexible but scatters the same logic and invites inconsistent error shapes. Passing raw strings deep into the application defers the failure to wherever the value is finally used, far from the request."
+
+[[option]]
+id = "typed-extraction"
+label = "extract typed parameters at the boundary"
+directive = "Route path and query parameters are extracted into typed values at the framework boundary (the routing or controller layer), using the framework's typed-extraction mechanism. A parameter that cannot be parsed into its declared type produces a uniform 4xx error response before the handler body runs. Handlers receive already-parsed, typed parameters and never parse raw parameter strings themselves."
+why = "The adopted default. Boundary extraction writes the parse-error path once and hands every handler values it can trust."
+
+[[option]]
+id = "parse-in-handler"
+label = "each handler parses its own parameters"
+directive = "Each handler receives raw parameter strings and parses and validates them in the handler body, defining its own error response when parsing fails."
+why = "Flexible per handler but duplicates the parsing logic across routes and produces inconsistent error shapes."
+
+[[option]]
+id = "raw-strings-throughout"
+label = "pass raw parameter strings through the app"
+directive = "Path and query parameters are passed as raw strings from the handler into services and parsed wherever the value is eventually consumed."
+why = "Defers the parse failure far from the request boundary, making malformed input surface deep in the application where it is hard to map back to a 4xx response."

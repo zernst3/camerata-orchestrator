@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-11"
+title = "Single binary serves server-rendered HTML, the client bundle, and server-function endpoints"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Single binary serves server-rendered HTML, the client bundle, and server-function endpoints?"
+default = "single-binary-serves-server-rendered-html-the-cl"
+why = "Public-content pages need server-rendered HTML for indexability: search-engine rendering of JavaScript-only pages has improved over the years but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic. The fullstack feature provides server-rendering, hydration, and the back-end in the same process the rest of the system already runs in, with no extra infrastructure. A client-only single-page application with no server-rendered initial paint wins on architectural simplicity but loses indexability on every public route; it is defensible for behind-login products and wrong for products with public content. Running a separate frontend process under a JavaScript framework reintroduces the dual-deploy and inter-service latency that the single-binary approach exists to delete, and doubles the languages and runtimes the team has to maintain. Rendering HTML on demand via a separate Rust binary distinct from the API binary splits the runtime for no operational gain; it doubles deploy units without a corresponding boundary benefit."
+
+[[option]]
+id = "single-binary-serves-server-rendered-html-the-cl"
+label = "Single binary serves server-rendered HTML, the client bundle, and server-function endpoints"
+directive = "The Dioxus project enables the framework's fullstack feature so that one server binary handles three concerns in one process. It renders the initial HTML on the server (so public content is indexable and first paint is fast). It serves the client bundle, which hydrates the server-rendered HTML on the client. And it mounts the server-function endpoints (per the server-function rule) and any remaining first-class HTTP endpoints (webhooks, health checks, authentication) on the same router. A separate frontend process running a different framework is forbidden. A client-only single-page application with no server-rendered initial paint is permitted only for fully-behind-login products where indexability has no value."
+why = "The adopted default. Public-content pages need server-rendered HTML for indexability: search-engine rendering of JavaScript-only pages has improved over the years but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic."
+
+[[option]]
+id = "the-ui-is-a-client-only-single-page-application"
+label = "the UI is a client-only single-page application with no …"
+directive = "the UI is a client-only single-page application with no server-rendered initial paint, with the application rendering entirely on the client after the bundle loads"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-frontend-runs-as-a-separate-process-under-a"
+label = "the frontend runs as a separate process under a …"
+directive = "the frontend runs as a separate process under a JavaScript framework, with the Rust API binary serving only the server-function and HTTP endpoints over the wire"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "html-rendering-is-handled-by-a-separate-rust-bin"
+label = "HTML rendering is handled by a separate Rust binary …"
+directive = "HTML rendering is handled by a separate Rust binary distinct from the API binary, with the two binaries deployed independently rather than as a single process"
+why = "A defensible alternative the project considered and did not adopt as the default."

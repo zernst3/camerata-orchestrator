@@ -1,0 +1,24 @@
+id = "SPIRIT-OPTIMIZE-1"
+title = "Optimization by default"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Optimization by default?"
+default = "optimization-by-default"
+why = "When AI carries the cost of writing the performant version, the Knuth-era 'premature optimization' calculus flips: the optimization is now nearly free and prevents the firefighting that reactive perf work costs later (5x+). Reactive optimization after problems surface is the known-expensive negative case: by the time a perf problem is observable to users or operators, the bad pattern has usually been copied across the codebase and the cleanup has to follow it everywhere, at far higher cost than baking the performant pattern in from day one."
+
+[[option]]
+id = "optimization-by-default"
+label = "Optimization by default"
+directive = "Bake performant patterns (parallel async, caching, indexing, no N+1) into conventions from day one, as the default shape of new code, not a reactive fix after profiling."
+why = "The adopted default. When AI carries the cost of writing the performant version, the Knuth-era 'premature optimization' calculus flips: the optimization is now nearly free and prevents the firefighting that reactive perf work costs later (5x+)."
+
+[[option]]
+id = "performant-patterns-are-added-reactively-after-p"
+label = "performant patterns are added reactively after problems surface, with …"
+directive = "performant patterns are added reactively after problems surface, with code written in whatever shape is convenient first and tuned later when profiling identifies the hot path"
+why = "A defensible alternative the project considered and did not adopt as the default."

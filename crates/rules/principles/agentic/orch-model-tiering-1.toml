@@ -1,0 +1,30 @@
+id = "ORCH-MODEL-TIERING-1"
+title = "Model tiering — cheap for bulk, top-tier for decisions"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How should models be tiered?"
+default = "tiered"
+why = "Top-tier judgment where it matters (data-model-shaping calls), cheap throughput on the bulk. Running the top model for everything multiplies cost without changing the human-escalation outcomes, since the bulk of agentic work is applying documented rules and other mechanical tasks where a cheaper model produces the same result. Running the cheap model for everything saves cost on the bulk but misses one-way-door misclassifications, where a cheaper model can confidently produce a structurally wrong answer on the rare hard call and ship it past the clear-winner test."
+
+[[option]]
+id = "tiered"
+label = "tiered"
+directive = "Run high-volume mechanical work (applying documented rules, repetitive porting) on a cheaper model; reserve the top model for genuinely new decisions and one-way-door validation."
+why = "The adopted default. Top-tier judgment where it matters (data-model-shaping calls), cheap throughput on the bulk."
+
+[[option]]
+id = "top-for-everything"
+label = "top-for-everything"
+directive = "every step of the autonomous run uses the top-tier model, regardless of whether the step is bulk mechanical work or a genuinely new decision"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "cheap-for-everything"
+label = "cheap-for-everything"
+directive = "every step of the autonomous run uses the cheaper model, regardless of whether the step is bulk mechanical work or a one-way-door decision"
+why = "A defensible alternative the project considered and did not adopt as the default."

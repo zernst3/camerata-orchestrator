@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
+title = "App Router pages live under the gated route group, not at the top level"
+tag = "stack"
+domain = "javascript:next"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: App Router pages live under the gated route group, not at the top level?"
+default = "app-router-pages-live-under-the-gated-route-grou"
+why = "Route groups in App Router are how layout composition is opt-in. Placing pages outside the gated group silently skips the auth checks and layout chrome the rest of the app assumes. The error is invisible until a user reaches the page. Allowing pages to live anywhere under app/ that is convenient trades the structural guarantee for short-term ergonomics; the page that ends up outside (gated) bypasses auth and layout wiring entirely, the build still succeeds, and the bug surfaces in production on whichever page slipped through rather than at compile time."
+
+[[option]]
+id = "app-router-pages-live-under-the-gated-route-grou"
+label = "App Router pages live under the gated route group, not at the top level"
+directive = "Pages live under app/(gated)/(main)/... (for the main chrome) or app/(gated)/admin/... (for admin chrome). Pages placed directly under app/(main)/, app/admin/, or outside (gated)/ render with only the root layout and miss their intended auth wrapper, header, and sidebar."
+why = "The adopted default. Route groups in App Router are how layout composition is opt-in."
+
+[[option]]
+id = "pages-live-anywhere-under-app-that-is-convenient"
+label = "pages live anywhere under app/ that is convenient at …"
+directive = "pages live anywhere under app/ that is convenient at the time, with no required (gated) route group housing all authenticated pages"
+why = "A defensible alternative the project considered and did not adopt as the default."

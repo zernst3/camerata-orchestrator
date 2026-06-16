@@ -1,0 +1,36 @@
+id = "ARCH-UTC-TIMESTAMPS-1"
+title = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary?"
+default = "domain-timestamps-are-anchored-to-utc-mappers-no"
+why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise. Letting offset-bearing or naive timestamps propagate past the persistence boundary means every downstream layer has to remember to handle the timezone question, and the answer drifts across the codebase. Normalizing once at the boundary gives the domain a single canonical clock and turns 'is this timestamp UTC?' from a runtime question into a type-level fact. Letting timestamps carry their fixed offset through the domain propagates a representational detail past the boundary, and every consumer becomes responsible for normalizing the same way, which they will not. Using naive timezone-less timestamps in the domain loses the UTC fact entirely and produces silent off-by-hours bugs when the storage layer or a downstream consumer assumes a different timezone. Storing and passing timestamps as raw integers or strings sheds the language's date-time API and adds a parsing or conversion bug surface at every layer that touches the value."
+
+[[option]]
+id = "domain-timestamps-are-anchored-to-utc-mappers-no"
+label = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
+directive = "Timestamps in the domain layer use the language's UTC-anchored type, never an offset-bearing or naive type. The persistence boundary (the mapper between the storage representation and the domain type) is responsible for normalizing whatever the storage layer returns into UTC before the value reaches the domain. Locale and timezone presentation happen at the rendering boundary, never inside the domain."
+why = "The adopted default. TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise."
+
+[[option]]
+id = "the-domain-holds-timestamps-as-offset-bearing-va"
+label = "the domain holds timestamps as offset-bearing values that carry …"
+directive = "the domain holds timestamps as offset-bearing values that carry whatever offset the storage layer returned, and downstream code normalizes case by case"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-domain-holds-timestamps-as-naive-timezone-le"
+label = "the domain holds timestamps as naive (timezone-less) values with …"
+directive = "the domain holds timestamps as naive (timezone-less) values with no timezone information attached, and consumers assume UTC by convention rather than by type"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-domain-holds-timestamps-as-raw-integers-epoc"
+label = "the domain holds timestamps as raw integers (epoch seconds …"
+directive = "the domain holds timestamps as raw integers (epoch seconds or milliseconds) or as strings, bypassing the language's date-time type entirely"
+why = "A defensible alternative the project considered and did not adopt as the default."

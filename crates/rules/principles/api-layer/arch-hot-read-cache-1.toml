@@ -1,0 +1,36 @@
+id = "ARCH-HOT-READ-CACHE-1"
+title = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = false
+
+[decision]
+question = "What position does the project take on: Hot reads sit behind a TTL cache with explicit write-side invalidation?"
+default = "hot-reads-sit-behind-a-ttl-cache-with-explicit-w"
+why = "Cache hits are typically sub-millisecond while a database round trip is tens of milliseconds; the speedup is on the order of 20 to 50 times for the common path, free per request once warmed. Explicit invalidation on the write side keeps stale-read windows short, and the TTL catches the cases the invalidation logic misses: cross-service writes, missed code paths, schema-level changes, manual DB edits. TTL length is a per-service call against staleness tolerance; the rule commits to having a TTL, not to a specific value. Skipping the cache layer entirely makes every request pay the database round trip; it works fine at low volume but accumulates latency cost as the system grows, and there is no graceful migration once the hot reads become a bottleneck. Cache with TTL only and no write-side invalidation is simpler to implement but produces longer windows of stale reads, and a request that just made a change cannot reflect it until the TTL expires, which surfaces as 'why did my update not stick' UX bugs. Cache with invalidation only and no TTL is correct under explicit writes but unsafe when something changes outside the invalidation paths (backfill scripts, replication catch-up, manual DB edits, third-party data ingest), because the cache then carries indefinitely stale data with no backstop."
+
+[[option]]
+id = "hot-reads-sit-behind-a-ttl-cache-with-explicit-w"
+label = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
+directive = "Read paths with high request volume and slowly-changing data sit behind a cache with a TTL. Writes that affect those reads explicitly invalidate the relevant cache keys. The TTL is the backstop for missed invalidations, not the primary mechanism. Apply to directory listings, profile lookups, RBAC and permission resolutions, and similar read-heavy endpoints. Do NOT apply to mutating paths, reads that are unsafe if stale (in-flight auth decisions, idempotency-key lookups), or paths where the caller expects to see their own just-completed change immediately."
+why = "The adopted default. Cache hits are typically sub-millisecond while a database round trip is tens of milliseconds; the speedup is on the order of 20 to 50 times for the common path, free per request once warmed."
+
+[[option]]
+id = "hot-reads-run-directly-against-the-database-with"
+label = "hot reads run directly against the database with no …"
+directive = "hot reads run directly against the database with no cache layer; every read request pays the full database round trip"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "hot-reads-sit-behind-a-ttl-cache-with-no-write-s"
+label = "hot reads sit behind a TTL cache with no …"
+directive = "hot reads sit behind a TTL cache with no write-side invalidation; the TTL is the only mechanism that controls staleness"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "hot-reads-sit-behind-a-cache-with-explicit-write"
+label = "hot reads sit behind a cache with explicit write-side …"
+directive = "hot reads sit behind a cache with explicit write-side invalidation but no TTL; the cache trusts the invalidation paths to cover every change"
+why = "A defensible alternative the project considered and did not adopt as the default."

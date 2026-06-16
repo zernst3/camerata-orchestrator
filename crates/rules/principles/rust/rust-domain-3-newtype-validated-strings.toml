@@ -1,0 +1,36 @@
+id = "RUST-DOMAIN-3"
+title = "Newtype validated strings (Email, Url, Slug, …)"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Newtype validated strings (Email, Url, Slug, …)?"
+default = "newtype-validated-strings-email-url-slug"
+why = "Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time. Validating at each call site is repetitive and easy to miss, since the rule's existence becomes a discipline check at every consumer rather than a guarantee carried by the type. A metadata tag on a plain String holds the validation status at runtime but not at compile time, so the type system stops helping and a forgotten check produces a silent invalid-state bug rather than a build failure. Treating validated and raw text as the same type loses the guarantee entirely; there is no signal in the type system that a string was ever validated, and downstream consumers must re-check or trust."
+
+[[option]]
+id = "newtype-validated-strings-email-url-slug"
+label = "Newtype validated strings (Email, Url, Slug, …)"
+directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
+why = "The adopted default. Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time."
+
+[[option]]
+id = "every-call-site-that-needs-a-validated-string-ru"
+label = "every call site that needs a validated string runs …"
+directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "validation-status-is-recorded-as-a-metadata-tag"
+label = "validation status is recorded as a metadata tag attached …"
+directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-codebase-makes-no-distinction-between-valida"
+label = "the codebase makes no distinction between validated and raw …"
+directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
+why = "A defensible alternative the project considered and did not adopt as the default."

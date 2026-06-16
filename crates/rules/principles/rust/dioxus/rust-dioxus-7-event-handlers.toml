@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-7"
+title = "Event handlers are move closures in templates; callback props use the framework EventHandler type"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Event handlers are move closures in templates; callback props use the framework EventHandler type?"
+default = "event-handlers-are-move-closures-in-templates-ca"
+why = "Bare closure types in props break the equality derive that the framework uses for component diffing, because closures are not comparable. The result is one of two failures: either compilation breaks, or diffing degrades to always-re-render and the resulting performance regression hides under unrelated symptoms. The framework's EventHandler type is the designed-for-purpose abstraction; it composes with the props derive cleanly and produces the correct comparison semantics. Using a boxed function-trait object as the callback prop type breaks the equality derive on the props struct, and component diffing degrades to always-re-render every time the parent updates. Indirecting through callback IDs registered in a central table is drastically more complex than the framework-native event handler type and loses type-safety on the call site, since the table erases the value type the handler delivers. Synchronous function-pointer props work only for stateless callbacks and do not compose with closures that capture signals or other state, which is most real callbacks in a reactive UI."
+
+[[option]]
+id = "event-handlers-are-move-closures-in-templates-ca"
+label = "Event handlers are move closures in templates; callback props use the framework EventHandler type"
+directive = "Inline event handlers in the template are move closures, because the closure outlives the template expression and must own any state it captures. The framework's signal type is copyable, so capture is cheap. When a component exposes a callback as a prop, the prop is typed as the framework's EventHandler type parameterized by the value the callback delivers; the parent receives it as part of the props derive. The child invokes it through the call method. Bare function-trait closures, boxed function-trait objects, and bare function pointers in props are forbidden because they break the prop derives that the diffing pipeline depends on."
+why = "The adopted default. Bare closure types in props break the equality derive that the framework uses for component diffing, because closures are not comparable."
+
+[[option]]
+id = "callback-props-are-typed-as-a-boxed-function-tra"
+label = "callback props are typed as a boxed function-trait object …"
+directive = "callback props are typed as a boxed function-trait object (Box-of-dyn-Fn) rather than as the framework's EventHandler type"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "callbacks-are-passed-indirectly-the-prop-carries"
+label = "callbacks are passed indirectly: the prop carries an ID …"
+directive = "callbacks are passed indirectly: the prop carries an ID that the child looks up in a central handler-registration table at call time, rather than carrying the handler value itself"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "callback-props-are-typed-as-synchronous-function"
+label = "callback props are typed as synchronous function pointers (fn) …"
+directive = "callback props are typed as synchronous function pointers (fn) that do not capture state, rather than as the framework's EventHandler type"
+why = "A defensible alternative the project considered and did not adopt as the default."

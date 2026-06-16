@@ -1,0 +1,24 @@
+id = "PROC-HIDE-DEAD-END-1"
+title = "Hide dead-end affordances"
+tag = "stack"
+domain = "permissions"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Hide dead-end affordances?"
+default = "hide-dead-end-affordances"
+why = "The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do. Rendering every action regardless of the user's permissions and relying on the endpoint to reject unauthorized attempts produces a 403 then error-page redirect on click, and that redirect IS the bug the rule exists to prevent; it's a poor user experience and reveals which capabilities exist without granting them."
+
+[[option]]
+id = "hide-dead-end-affordances"
+label = "Hide dead-end affordances"
+directive = "For permission-gated UIs: never render a UI action the user's permissions can't execute. Gate each affordance's render on the same permission its endpoint requires. A button that 403s drives the user to an error page; that redirect IS the bug."
+why = "The adopted default. The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do."
+
+[[option]]
+id = "the-ui-renders-every-action-regardless-of-the-cu"
+label = "the UI renders every action regardless of the current …"
+directive = "the UI renders every action regardless of the current user's permissions, and unauthorized clicks are caught at the endpoint with a 403 response that drives the user to an error page"
+why = "A defensible alternative the project considered and did not adopt as the default."

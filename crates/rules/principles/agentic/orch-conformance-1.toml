@@ -1,0 +1,37 @@
+id = "ORCH-CONFORMANCE-1"
+title = "Codified architectural commitments are enforced gates, not advisory documents"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check: a deterministic gate (a lint rule, a type-system constraint, an AST scan, a CI-run AI reviewer reading against the codified commitments, or a combination) is wired into the change pipeline, and a durable waiver log exists. Conformance holds when the pipeline configuration names that gate and a change that violates a known commitment is demonstrably blocked, escalated, or waivered with the violation and reviewer recorded, rather than merged silently. It fails when the commitments live only as documents that reviewers cite ad hoc with no mechanical step on the agent's output."
+
+[decision]
+question = "What position does the project take on: Codified architectural commitments are enforced gates, not advisory documents?"
+default = "codified-architectural-commitments-are-enforced"
+why = "A commitment that nobody checks degrades into a commitment nobody respects. The reason architectural commitments get codified upstream of the agent is to constrain the autonomous output downstream; that constraint requires a checking step, or the codification adds no signal beyond a verbal preference the agent may or may not respect on any given run. The waiver mechanism is the relief valve: real edge cases get acknowledged and recorded, not silently violated, so the rule library learns over time which commitments needed refinement and which held up. Holding commitments as advisory and citing them ad hoc when reviewers happen to notice violations works at small human-review scale but degrades at AI throughput, as ad hoc citations become inconsistent and selective across hundreds of changes. Enforcing mechanically with no waiver mechanism is overrigid and pushes legitimate edge cases into rule-rewriting cycles or silent bypasses outside the recorded path, defeating the very durability the enforcement step was meant to create. Keeping commitments only in the agent's prompt context with no separate check lets the rules drift between runs because nothing verifies adherence after the agent's turn ends; the next session may simply have forgotten or selectively recalled them."
+
+[[option]]
+id = "codified-architectural-commitments-are-enforced"
+label = "Codified architectural commitments are enforced gates, not advisory documents"
+directive = "The architectural commitments the project codifies for its autonomous agents are enforced as gates on changes, not held as advisory documents. A deterministic check (a lint rule, a type-system constraint, an AST scan, an AI reviewer reading against the rules, or a combination of those) is wired into the change pipeline. A change that violates a commitment is rejected, escalated, or carries an explicit waiver naming the commitment, the violation, and the reviewer who waived it. Waivers are recorded in a durable log so periodic human review can sweep them and decide whether the commitment needs refinement."
+why = "The adopted default. A commitment that nobody checks degrades into a commitment nobody respects."
+
+[[option]]
+id = "architectural-commitments-are-held-as-advisory-d"
+label = "architectural commitments are held as advisory documents that reviewers …"
+directive = "architectural commitments are held as advisory documents that reviewers cite ad hoc when they happen to notice violations during code review, with no mechanical or systematic enforcement step"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "architectural-commitments-are-mechanically-enfor"
+label = "architectural commitments are mechanically enforced on every change with …"
+directive = "architectural commitments are mechanically enforced on every change with no waiver mechanism; a violation either rewrites the rule upstream or is rejected outright"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "architectural-commitments-live-only-in-the-agent"
+label = "architectural commitments live only in the agent's prompt context …"
+directive = "architectural commitments live only in the agent's prompt context for each run, with no separate verification step on the agent's output"
+why = "A defensible alternative the project considered and did not adopt as the default."

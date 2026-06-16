@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-3"
+title = "Local component state is a Signal, read via call or read, written via set or with_mut"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Local component state is a Signal, read via call or read, written via set or with_mut?"
+default = "local-component-state-is-a-signal-read-via-call"
+why = "Signals are the framework's reactivity primitive: they automatically subscribe components that read them and integrate with template interpolation. Older state APIs are deprecated or removed and produce subtly different change-tracking behavior. Passing mutable references through props recreates a class-component anti-pattern from other ecosystems and breaks the framework's automatic re-render tracking, making the resulting bugs hard to attribute back to a specific call site. Reaching for legacy hook-based state APIs from earlier framework versions is forbidden in 0.7-era code because those APIs are deprecated or removed and the AI agent must not introduce them. A lock-protected value wrapped in a shared pointer inside props compiles fine but loses automatic subscription tracking, so manual change notification becomes a per-component burden that the rule exists to remove. Manual force-rerender via a dummy signal is an anti-pattern: signals exist precisely to remove this code smell, and the workaround acknowledges that the rule was not followed."
+
+[[option]]
+id = "local-component-state-is-a-signal-read-via-call"
+label = "Local component state is a Signal, read via call or read, written via set or with_mut"
+directive = "Local component state uses the framework's signal primitive. Display interpolation reads the signal directly via call syntax or the read accessor. Replacing a value uses the set method; in-place mutation of a contained collection uses with_mut. Legacy state hooks from earlier framework versions are forbidden. Threading mutable state through props as a borrowed reference is forbidden. When state is shared across siblings, lift it to a common ancestor; when state is genuinely app-wide, use the cross-tree context pattern rather than passing signals through every layer."
+why = "The adopted default. Signals are the framework's reactivity primitive: they automatically subscribe components that read them and integrate with template interpolation."
+
+[[option]]
+id = "local-component-state-uses-the-legacy-hook-based"
+label = "local component state uses the legacy hook-based state APIs …"
+directive = "local component state uses the legacy hook-based state APIs from earlier framework versions rather than the current signal primitive"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "local-component-state-is-held-in-a-lock-protecte"
+label = "local component state is held in a lock-protected value …"
+directive = "local component state is held in a lock-protected value wrapped in a shared pointer (Arc/Mutex or equivalent) inside props, rather than in a signal"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "a-dummy-signal-is-incremented-manually-to-force"
+label = "a dummy signal is incremented manually to force a …"
+directive = "a dummy signal is incremented manually to force a re-render whenever component state changes, rather than letting the signal primitive's automatic subscription tracking drive re-renders"
+why = "A defensible alternative the project considered and did not adopt as the default."

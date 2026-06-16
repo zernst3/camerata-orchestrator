@@ -3,8 +3,8 @@
 //!
 //! # Responsibilities
 //!
-//! 1. Recursively load TOML rule files from a corpus directory
-//!    (`/path/to/camerata-ai/principles` by default).
+//! 1. Recursively load TOML rule files from a corpus directory (the bundled
+//!    `crates/rules/principles/` by default; override with `CAMERATA_CORPUS_PATH`).
 //! 2. Parse each file into a [`Rule`] with the fields that the orchestrator
 //!    cares about: `id`, `title`, `enforcement`, `domain`, `summary`.
 //! 3. Index all loaded rules into a [`RuleSet`] — queryable by id or domain.
@@ -241,8 +241,21 @@ impl RuleSet {
 // Loader (async I/O — RUST-DOMAIN-5)
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Default corpus path shipped with the camerata-ai repo.
-pub const DEFAULT_CORPUS_PATH: &str = "/Users/zacharyernst/Documents/Repos/camerata-ai/principles";
+/// Default corpus path: the rule TOML bundled IN this repo, under
+/// `crates/rules/principles/`. Resolved from the crate's manifest dir so it works from
+/// any working directory and the repo is self-contained (no external checkout needed).
+/// Override at runtime with `CAMERATA_CORPUS_PATH` (see [`corpus_path`]).
+pub const DEFAULT_CORPUS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/principles");
+
+/// The corpus directory to load: the `CAMERATA_CORPUS_PATH` env override if set and
+/// non-empty, else the bundled [`DEFAULT_CORPUS_PATH`].
+pub fn corpus_path() -> std::path::PathBuf {
+    std::env::var("CAMERATA_CORPUS_PATH")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_CORPUS_PATH))
+}
 
 /// Load the full rule corpus from `corpus_dir`, walking it recursively.
 ///

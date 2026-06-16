@@ -1,0 +1,30 @@
+id = "ARCH-FETCH-THEN-AUTHORIZE-1"
+title = "Authorization reads the fetched resource and produces an authorized-typed value"
+tag = "stack"
+domain = "permissions"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does per-resource authorization happen relative to fetching the resource and running business logic?"
+default = "fetch-then-authorize"
+why = "Many authorization decisions depend on the resource itself: who owns it, what state it is in, which organization it belongs to. A check that runs before the resource is loaded cannot see those facts, so it either under-checks (authorizes on the request alone and lets ownership violations through) or duplicates a fetch. Loading the resource first, then authorizing against it, and then handing business logic a value whose type encodes that the check passed makes the authorization a precondition the rest of the code can trust. Scattering ad hoc checks inside business logic works but spreads the policy across the codebase and makes it easy to forget one path. Authorizing only on the request shape before any fetch cannot enforce resource-level rules at all."
+
+[[option]]
+id = "fetch-then-authorize"
+label = "fetch the resource, authorize against it, pass an authorized value"
+directive = "Per-resource authorization runs after the resource is fetched and before business logic runs. A dedicated authorization step reads the fetched resource, applies the policy, and on success produces a value whose type marks it as authorized. Business logic accepts only that authorized-typed value, so an unauthorized resource cannot reach it. The fetch-authorize-act order is fixed; business logic never re-checks and never receives an unchecked resource."
+why = "The adopted default. Resource-level policy can only be evaluated once the resource is loaded, and encoding the passed check in the type makes authorization a precondition the rest of the code can rely on."
+
+[[option]]
+id = "checks-in-business-logic"
+label = "ad hoc checks inside business logic"
+directive = "Business logic fetches the resource and performs authorization checks inline wherever a decision is needed, without a dedicated authorization step or an authorized-typed value."
+why = "Works but scatters the policy across every code path, making it easy to omit a check on one branch and hard to audit."
+
+[[option]]
+id = "request-only-authz"
+label = "authorize on the request before fetching"
+directive = "Authorization is decided entirely from the request (caller identity, route, and parameters) before the resource is loaded, and the resource is fetched only after the request-level check passes."
+why = "Cannot enforce ownership or resource-state rules, because the deciding facts live in the resource that has not been loaded yet."

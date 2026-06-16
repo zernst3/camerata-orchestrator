@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-6"
+title = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Async UI data goes through the resource hook; fire-and-forget work goes through spawn?"
+default = "async-ui-data-goes-through-the-resource-hook-fir"
+why = "Conflating data fetching with side effects is the largest single source of state-synchronization bugs in component-based UIs. The resource hook collapses fetch, loading, error, and retry into a single helper whose value type is correct by construction. Spawn is the correct primitive when no UI state needs to reflect the work, and using it there avoids the overhead of resource tracking for something nothing reads. Expressing a resource through a manual effect plus spawn plus state-setting works mechanically but forces every component to re-implement the loading-state plumbing, and bugs hide in the boilerplate. Data fetching in the component body outside any hook runs on every render and produces request storms and inconsistent in-flight state, which is the exact failure mode the resource hook exists to prevent. Adding a global request-cache library on top of resource hooks is premature for most projects; the resource hook is sufficient for the common data-fetching shapes, and a cache layer should be added only when a specific need surfaces."
+
+[[option]]
+id = "async-ui-data-goes-through-the-resource-hook-fir"
+label = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
+directive = "Two patterns, two helpers. Data that the UI displays (a profile fetched from the server, a list rendered after a query) is acquired through the framework's resource hook. The hook tracks dependencies the same way an effect does: signals read inside the async closure auto-subscribe, and the resource re-fetches when those signals change. The result is a three-state value (loading, success, failure) that the UI matches on directly. Fire-and-forget work that has no UI consumer (analytics, audit log entry, send-and-forget mutation) uses the spawn primitive. The two patterns are not interchangeable: spawning from an effect for data that the UI needs to display is the legacy effect-plus-fetch pattern this rule exists to replace."
+why = "The adopted default. Conflating data fetching with side effects is the largest single source of state-synchronization bugs in component-based UIs."
+
+[[option]]
+id = "ui-data-fetching-is-expressed-as-a-manual-effect"
+label = "UI data fetching is expressed as a manual effect …"
+directive = "UI data fetching is expressed as a manual effect that spawns an async task and writes the loading, success, and error states into separate signals by hand, rather than going through the resource hook"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "ui-data-fetching-runs-directly-in-the-component"
+label = "UI data fetching runs directly in the component body …"
+directive = "UI data fetching runs directly in the component body outside any hook, with no automatic loading-state plumbing"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-project-adopts-a-global-request-cache-librar"
+label = "the project adopts a global request-cache library on top …"
+directive = "the project adopts a global request-cache library on top of resource hooks from day one, regardless of whether a specific caching need has surfaced"
+why = "A defensible alternative the project considered and did not adopt as the default."

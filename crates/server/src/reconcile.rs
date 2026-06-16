@@ -76,9 +76,9 @@ async fn read_gate_config(owner: &str, repo: &str, token: &str) -> anyhow::Resul
 /// rule's source from the corpus (or mark it custom/drift). The token is required.
 pub async fn reconcile_repos(repos: &[String], token: &str) -> Vec<AppliedRule> {
     // Load the corpus once (the rule-bank source).
-    let corpus_path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
+    let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
-        Some(camerata_rules::load_corpus_lenient(corpus_path).await.0)
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
     } else {
         None
     };

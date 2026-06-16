@@ -431,11 +431,11 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
 ///
 /// `repo_domains` is each repo paired with the corpus domains its stack maps to.
 pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec<ProposedRule> {
-    let path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
+    let path = camerata_rules::corpus_path();
     if !path.exists() {
         return Vec::new();
     }
-    let (set, _errs) = camerata_rules::load_corpus_lenient(path).await;
+    let (set, _errs) = camerata_rules::load_corpus_lenient(&path).await;
     // The union of all repos' domains selects the candidate rules from the corpus.
     let mut all_domains = std::collections::BTreeSet::new();
     for (_, ds) in repo_domains {

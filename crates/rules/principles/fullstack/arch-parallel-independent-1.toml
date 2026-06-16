@@ -1,0 +1,36 @@
+id = "ARCH-PARALLEL-INDEPENDENT-1"
+title = "Independent concurrent calls in any code path run in parallel, not sequentially"
+tag = "stack"
+domain = "fullstack"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Independent concurrent calls in any code path run in parallel, not sequentially?"
+default = "independent-concurrent-calls-in-any-code-path-ru"
+why = "Sequential awaits sum the latency of each call (three 50ms calls take 150ms); parallel awaits take the max (three 50ms calls take 50ms). The cost of getting this wrong scales with the slowest call in the group. At network or database latency this difference is directly visible to end users in a UI and shows up as a tail-latency bump in a service. The parallel-await primitive in every modern concurrent runtime is the natural shape for this work; doing it sequentially is a positive choice that should require justification, not the default. Sequentially awaiting independent calls sums latencies needlessly, and the slowdown shows up as a percentile-tail bump in service code and as visible lag in UI code, both hard to attribute back to the specific site that mis-shaped the awaits. Deciding the concurrency pattern case by case with no documented default works while someone is actively thinking about performance and silently regresses when they are not, so throughput drifts down between performance focus periods. Firing the slower calls in the background and returning early changes the contract from synchronous to eventually consistent, which is the right answer in a few specific places (write-side fan-out, telemetry, cache warming) but is not a substitute for parallel awaits on calls whose results the caller actually needs in the response."
+
+[[option]]
+id = "independent-concurrent-calls-in-any-code-path-ru"
+label = "Independent concurrent calls in any code path run in parallel, not sequentially"
+directive = "Wherever code awaits two or more calls that have no data dependency on each other (independent repository lookups in a service, independent backend fetches in a UI component, independent third-party API calls, independent cache fetches), the calls run concurrently via the language's parallel-await primitive (try_join, Promise.all, asyncio.gather, errgroup, or equivalent). Sequential awaits on calls without a dependency are a violation. Real exceptions: calls with a true data dependency, calls that must be serialized inside the same transaction, and writes whose ordering matters semantically."
+why = "The adopted default. Sequential awaits sum the latency of each call (three 50ms calls take 150ms); parallel awaits take the max (three 50ms calls take 50ms)."
+
+[[option]]
+id = "independent-concurrent-calls-in-any-code-path-ar"
+label = "independent concurrent calls in any code path are awaited …"
+directive = "independent concurrent calls in any code path are awaited sequentially by default; the parallel-await primitive is used only when an author explicitly reaches for it on a case-by-case basis"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "concurrency-strategy-is-decided-case-by-case-at"
+label = "concurrency strategy is decided case by case at each …"
+directive = "concurrency strategy is decided case by case at each call site with no project-wide default, so each author chooses sequential or parallel based on their own judgment in the moment"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-slower-independent-calls-are-fired-in-the-ba"
+label = "the slower independent calls are fired in the background …"
+directive = "the slower independent calls are fired in the background and the response returns before they complete, treating the work as eventually consistent rather than awaiting all calls synchronously"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,37 @@
+id = "ARCH-STRUCTURED-ERRORS-1"
+title = "Error responses use a structured envelope with stable machine-readable codes"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check: a single error-rendering middleware owns all 4xx/5xx responses, and a contract test asserts every error response carries the envelope shape (a top-level error object with a stable code, a human message, and optional details). The realistic mechanism is a test that hits representative failure paths and validates the response body against the envelope schema, plus a review or lint check that handlers throw typed errors rather than writing ad hoc bodies. Conformance holds when such a test runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
+
+[decision]
+question = "What position does the project take on: Error responses use a structured envelope with stable machine-readable codes?"
+default = "error-responses-use-a-structured-envelope-with-s"
+why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans. Stable machine-readable codes let clients build reliable retry, fallback, and UX behavior without coupling to wording. Returning plain string error messages forces clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording. Returning HTTP status codes only without a body envelope does not carry enough resolution to distinguish between three different validation failures that share the same status, so clients cannot react appropriately. Per-endpoint custom error shapes force clients to write per-endpoint parsing, and the surface area grows with every new endpoint, instead of shrinking to a single shape across the API."
+
+[[option]]
+id = "error-responses-use-a-structured-envelope-with-s"
+label = "Error responses use a structured envelope with stable machine-readable codes"
+directive = "Every 4xx and 5xx response uses the same shape: a top-level error object containing a code (a stable identifier like INVALID_EMAIL or RATE_LIMITED), a message (a human-readable description), and an optional details object for field-level errors or context. Codes are documented and remain stable across releases; messages may evolve freely. Clients pattern-match on code, never on message. Enforced at the controller layer with a single error-rendering middleware that all handlers route through."
+why = "The adopted default. Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
+
+[[option]]
+id = "error-responses-are-plain-strings-or-contain-onl"
+label = "error responses are plain strings (or contain only a …"
+directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "error-responses-use-only-the-http-status-code-wi"
+label = "error responses use only the HTTP status code with …"
+directive = "error responses use only the HTTP status code with an empty body, and clients distinguish failure modes by status code alone"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "each-endpoint-defines-its-own-custom-error-respo"
+label = "each endpoint defines its own custom error response shape, …"
+directive = "each endpoint defines its own custom error response shape, and clients implement per-endpoint error parsing rather than a single shared parser"
+why = "A defensible alternative the project considered and did not adopt as the default."

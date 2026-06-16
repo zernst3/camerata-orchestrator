@@ -1,0 +1,30 @@
+id = "RUST-SEAORM-RAW-SQL-ESCAPE-1"
+title = "Raw-SQL queries are wrapped in a typed domain projection at the repository boundary"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "When the typed query builder cannot express a repository query, how may raw SQL be used at the repository boundary?"
+default = "typed-domain-projection-at-boundary"
+why = "Raw SQL is genuinely necessary for query shapes the typed builder cannot express, so banning the escape hatch forces either unmaintainable typed-join contortions or service-layer round-trip patterns that pay an N+1 cost. Allowing raw SQL without the typed-projection requirement silently desynchronizes repository code from the schema: a migration that drops or renames a column the raw SQL selects produces a stale result rather than a loud error, because the untyped row never validates that the columns it expected are present. Requiring the result to flow through a struct that derives the framework's result-mapping trait converts that silent drift into a visible runtime error at the first call, because the derive's generated code returns a database error when an expected column is missing. The upstream-source comment is the second half of the safety story: it gives the schema-drift review process a deterministic pointer from repository code to the migrations it depends on."
+
+[[option]]
+id = "typed-domain-projection-at-boundary"
+label = "Raw SQL allowed, but only parsed into a typed domain projection"
+directive = "When a repository method's query cannot be expressed through the SeaORM typed query builder (for example JSON-path extraction, conditional aggregates, window functions, or correlated subqueries the typed API cannot chain), the implementation may use the raw-statement escape hatch only when the result is parsed into a typed domain projection struct that derives the SeaORM result-mapping trait. The raw result-set types and untyped row types of the ORM do not appear in the repository trait surface; only typed domain types cross the trait boundary. Each raw-SQL block carries a one-line comment naming the upstream source it mirrors so schema-drift review can connect repository code to migrations that touch its tables and columns."
+why = "The adopted default. Raw SQL is sometimes unavoidable, but routing its result through a struct that derives the result-mapping trait converts silent schema drift into a loud runtime error, and the upstream-source comment ties repository code back to the migrations it depends on."
+
+[[option]]
+id = "return-raw-result-types"
+label = "Return the ORM's raw result/row types through the trait"
+directive = "Repository methods that need queries outside the typed builder return the framework's raw result-set or row types directly through the repository trait surface, and callers parse field values out of those raw types themselves."
+why = "Trades schema-drift detection at the type-system boundary for direct access to the result and saves the cost of declaring a projection struct; the typed-domain commitment is downgraded to a per-caller responsibility."
+
+[[option]]
+id = "ban-raw-sql-entirely"
+label = "Repository refuses raw SQL entirely"
+directive = "The repository layer refuses raw SQL entirely; methods whose upstream source uses raw SQL are redesigned as service-layer compositions of multiple typed queries."
+why = "Trades single-query performance for keeping the entire repository surface inside the typed query builder; accepts that some query shapes require N round trips instead of one."

@@ -1,0 +1,36 @@
+id = "UI-QUERY-LIBRARY-1"
+title = "All UI data fetches go through a query library, never ad-hoc fetch and store"
+tag = "stack"
+domain = "ui"
+layer = "universal"
+enforcement = "structured"
+default = false
+
+[decision]
+question = "What position does the project take on: All UI data fetches go through a query library, never ad-hoc fetch and store?"
+default = "all-ui-data-fetches-go-through-a-query-library-n"
+why = "Modern query libraries solve a list of problems that components otherwise re-solve inconsistently per call site: stale data, double-fired requests, no revalidation policy, manual invalidation after every mutation, no shared cache across components reading the same key. Adopting one is mostly a default-acceptance move; declining it means re-implementing the same machinery worse, in each consumer. The library is also where SSR or hydration behavior gets configured once, rather than at every call site. Ad-hoc fetch-and-store at each call site has no de-dup, no shared cache between components reading the same data, manual invalidation everywhere, and subtle bugs around effect dependencies and race conditions on remounts. A global store with imperative loaders works for slow-moving data but every component that reads must subscribe explicitly, and invalidation and refetch policy bolt on awkwardly and are easy to get wrong. Server-side rendering only with no client cache is acceptable for fully-static or fully-streamed UIs but falls over the moment a single interaction needs to re-read a value."
+
+[[option]]
+id = "all-ui-data-fetches-go-through-a-query-library-n"
+label = "All UI data fetches go through a query library, never ad-hoc fetch and store"
+directive = "Read paths in components go through a query library (TanStack Query, SWR, dioxus-query, Vue Query, or equivalent for the framework). Mutations explicitly invalidate the cache keys they affect. Ad-hoc fetch-and-store inside each component (manual useState plus useEffect plus fetch) is forbidden. The query library owns request de-duplication, response caching, stale-while-revalidate behavior, refetch on focus or reconnect, and the single point of invalidation."
+why = "The adopted default. Modern query libraries solve a list of problems that components otherwise re-solve inconsistently per call site: stale data, double-fired requests, no revalidation policy, manual invalidation after every mutation, no shared cache across components reading the same key."
+
+[[option]]
+id = "each-component-manages-its-own-fetch-and-store-c"
+label = "each component manages its own fetch-and-store cycle (useState, useEffect, …"
+directive = "each component manages its own fetch-and-store cycle (useState, useEffect, fetch, manual error handling) with no shared cache, no de-duplication, and no library-provided invalidation"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "data-lives-in-a-global-store-with-imperative-loa"
+label = "data lives in a global store with imperative loaders …"
+directive = "data lives in a global store with imperative loaders that components call to populate the store, with no library-provided cache, revalidation, or per-key invalidation"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-ui-relies-on-server-side-rendering-for-all-d"
+label = "the UI relies on server-side rendering for all data …"
+directive = "the UI relies on server-side rendering for all data and maintains no client-side cache, so any value that needs to update after the initial render triggers a full re-render or a separate ad-hoc fetch"
+why = "A defensible alternative the project considered and did not adopt as the default."

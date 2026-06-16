@@ -1,0 +1,42 @@
+id = "RUST-DOMAIN-6"
+title = "Errors are category-scoped, one shared enum per failure category at the crate boundary"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Errors are category-scoped, one shared enum per failure category at the crate boundary?"
+default = "errors-are-category-scoped-one-shared-enum-per-f"
+why = "Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling. Category-shaped errors stay coherent: callers exhaustive-match within a category, and the boundary between categories (persistence versus business rule versus validation versus parsing) is preserved in types rather than collapsed into a single grab-bag enum or scattered across dozens of per-call types. Mapping framework or driver errors into the category at the boundary keeps the crate's public surface stable when the underlying framework changes. Per-function or per-aggregate error enums make duplication scale with the API surface: callers handle the same NotFound shape in twenty places, and refactoring across aggregates touches every error type. A single error enum per crate that mixes all failure categories collapses orthogonal concerns; callers cannot distinguish a validation failure from a persistence failure without inspecting the variant string. Re-exporting framework or driver errors directly from the public API breaks the boundary entirely, because the crate inherits the framework's error semantics and its public surface breaks every time the framework upgrades. Type erasure via Box of dyn Error or anyhow Error in a library's public API eliminates exhaustive matching; consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary."
+
+[[option]]
+id = "errors-are-category-scoped-one-shared-enum-per-f"
+label = "Errors are category-scoped, one shared enum per failure category at the crate boundary"
+directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly. Per-function or per-aggregate error types are not used."
+why = "The adopted default. Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling."
+
+[[option]]
+id = "each-function-or-aggregate-defines-its-own-error"
+label = "each function or aggregate defines its own error enum, …"
+directive = "each function or aggregate defines its own error enum, so the crate's public surface exposes many small per-call error types rather than a small number of shared category enums"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-crate-exposes-a-single-error-enum-that-mixes"
+label = "the crate exposes a single error enum that mixes …"
+directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into one enum per category"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-crate-re-exports-the-underlying-framework-s"
+label = "the crate re-exports the underlying framework's or driver's error …"
+directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned category enum at the boundary"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-crate-s-public-functions-return-box-of-dyn-e"
+label = "the crate's public functions return Box of dyn Error …"
+directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
+why = "A defensible alternative the project considered and did not adopt as the default."

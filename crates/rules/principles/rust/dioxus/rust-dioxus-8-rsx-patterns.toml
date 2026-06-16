@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-8"
+title = "Templates use native control flow; iterated children must carry a stable key"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Templates use native control flow; iterated children must carry a stable key?"
+default = "templates-use-native-control-flow-iterated-child"
+why = "Native Rust control flow inside the template means contributors do not have to learn a separate expression-mode dialect: the language they already know IS the template language. Stable keys on iterated children are the single most common subtle bug in component-tree UIs: visually the list renders correctly without them, but reorders silently rebuild every row's children, losing focus state, scroll position, and any in-progress input. The cost of catching this after launch is significantly higher than the cost of writing the key in the first place. Building an iterator chain into a vector of elements and interpolating the vector works mechanically but is harder to read than a direct for expression, and reviewers have to mentally re-derive the loop structure; it is reserved for cases that need iterator-style transformations the macro does not support inline. String-template rendering that bypasses the framework's diffing loses every benefit of the virtual DOM, including reactivity, and is not a viable substitute for the rsx-based template at all. Omitting keys on lists that look stable in practice works visually until the first reorder, at which point child state vanishes silently and the cause is hard to trace after the fact, often surfacing as 'why did my input lose focus' bug reports."
+
+[[option]]
+id = "templates-use-native-control-flow-iterated-child"
+label = "Templates use native control flow; iterated children must carry a stable key"
+directive = "Inside the framework's template macro, conditional rendering uses native if expressions, optional rendering uses native if-let expressions, iteration uses native for expressions, and multi-branch rendering uses native match expressions. Signal and string interpolation happens through curly-brace placeholders in attribute and text positions. Every child produced by a for expression carries a stable key derived from a property of the underlying data, never the loop index. Without a stable key, the framework cannot diff list reorders and every row remounts, destroying child state."
+why = "The adopted default. Native Rust control flow inside the template means contributors do not have to learn a separate expression-mode dialect: the language they already know IS the template language."
+
+[[option]]
+id = "iteration-in-templates-is-expressed-by-building"
+label = "iteration in templates is expressed by building a vector …"
+directive = "iteration in templates is expressed by building a vector of elements through an iterator chain and interpolating the vector, rather than using a native for expression inside the rsx macro"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "templates-are-rendered-as-concatenated-strings-t"
+label = "templates are rendered as concatenated strings that bypass the …"
+directive = "templates are rendered as concatenated strings that bypass the framework's diffing entirely, rather than going through the rsx macro and the virtual DOM"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "lists-rendered-in-templates-omit-the-key-attribu"
+label = "lists rendered in templates omit the key attribute on …"
+directive = "lists rendered in templates omit the key attribute on iterated children when the list looks stable in practice, rather than always supplying a stable key derived from the underlying data"
+why = "A defensible alternative the project considered and did not adopt as the default."

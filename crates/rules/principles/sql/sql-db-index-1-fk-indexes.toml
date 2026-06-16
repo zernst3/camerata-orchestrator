@@ -1,0 +1,37 @@
+id = "SQL-DB-INDEX-1"
+title = "Every foreign-key column gets an index in the same migration"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a migration linter that scans each migration for foreign-key declarations (REFERENCES clauses or the ORM's FK helper) and verifies a matching index on the same column lands in the same change. The linter can also run as a one-shot audit query against the live schema that lists every FK-constrained column with no covering index and returns rows for any gap. Conformance holds when the per-migration check runs in CI and the audit query returns zero rows; it fails when an FK column ships with no index in the same migration."
+
+[decision]
+question = "What position does the project take on: Every foreign-key column gets an index in the same migration?"
+default = "every-foreign-key-column-gets-an-index-in-the-sa"
+why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join. The rule is also worth applying on databases that do auto-index FKs (MySQL with InnoDB is the only major exception): the explicit declaration makes the intent reviewable, survives a future engine swap, and gives reviewers a stable rule ID to cite without having to first ask which engine is in use. Relying on the database to auto-index foreign keys works for MySQL with InnoDB only and is silently brittle on PostgreSQL, SQL Server, Oracle, and SQLite. Adding FK indexes reactively after performance degrades surfaces the slowdown in production, and the fix is still a migration, just at a worse moment. Declaring FK indexes in a separate follow-up migration creates a window where the FK exists without the index, and the second migration is easy to forget across context switches."
+
+[[option]]
+id = "every-foreign-key-column-gets-an-index-in-the-sa"
+label = "Every foreign-key column gets an index in the same migration"
+directive = "When a migration adds a foreign-key column, the same migration adds an index on it. Declare the index adjacent to the FK in the file so a reviewer can see them together. The pair is enforceable by a migration linter that scans for FK declarations and verifies a matching index in the same change."
+why = "The adopted default. Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join."
+
+[[option]]
+id = "the-project-relies-on-the-database-engine-to-aut"
+label = "the project relies on the database engine to auto-index …"
+directive = "the project relies on the database engine to auto-index foreign-key columns and does not declare explicit indexes on FK columns in migrations"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "fk-indexes-are-added-reactively-in-later-migrati"
+label = "FK indexes are added reactively in later migrations after …"
+directive = "FK indexes are added reactively in later migrations after production performance degrades, rather than being added in the same migration that introduces the FK column"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "fk-indexes-are-declared-in-a-follow-up-migration"
+label = "FK indexes are declared in a follow-up migration that …"
+directive = "FK indexes are declared in a follow-up migration that ships after the migration introducing the FK column, rather than in the same atomic change"
+why = "A defensible alternative the project considered and did not adopt as the default."

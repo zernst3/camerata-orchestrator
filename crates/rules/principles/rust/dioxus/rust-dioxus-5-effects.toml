@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-5"
+title = "Side effects run inside use_effect; dependencies auto-track from signal reads in the closure"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Side effects run inside use_effect; dependencies auto-track from signal reads in the closure?"
+default = "side-effects-run-inside-use-effect-dependencies"
+why = "Auto-tracking from signal reads is more correct than the manual dependency arrays seen in other frameworks because a contributor cannot forget to list a dependency: the effect simply does not re-run if the value was not read. But the property only holds if the rule is followed: every piece of state the effect depends on must be a signal it reads inside the closure. Spawning async work for data fetching from an effect is the legacy fetch-from-effect pattern from other ecosystems; the resource hook exists precisely to remove that boilerplate and to centralize the loading and error lifecycle. Passing a manual dependency array to the effect hook is an anti-pattern the framework actively wants the code not to use, since the framework's auto-tracking already handles the dependency question correctly and the manual array reintroduces the forget-a-dependency bug. Fetching data inside an effect rather than the resource hook works mechanically but forces every component to re-implement the loading-and-error-and-refresh plumbing the resource hook already provides, and bugs leak in the re-implementation. Placing side effects in the component body outside any effect hook runs them on every render, which produces double-fires and state desync that the effect hook exists to prevent."
+
+[[option]]
+id = "side-effects-run-inside-use-effect-dependencies"
+label = "Side effects run inside use_effect; dependencies auto-track from signal reads in the closure"
+directive = "Side effects (telemetry emission, scroll-to-top on route change, manual DOM measurement, third-party widget initialization) run inside the framework's effect hook. Dependencies are tracked automatically from the signals the closure reads; there is no manual dependency array. Data fetching does NOT belong in an effect; use the resource hook for that. Cleanup runs through the drop implementation of state captured by the closure, the same way the framework cleans up any other state when a tracked signal changes."
+why = "The adopted default. Auto-tracking from signal reads is more correct than the manual dependency arrays seen in other frameworks because a contributor cannot forget to list a dependency: the effect simply does not re-run if the value was not read."
+
+[[option]]
+id = "side-effects-use-the-framework-s-effect-hook-wit"
+label = "side effects use the framework's effect hook with a …"
+directive = "side effects use the framework's effect hook with a manually maintained dependency array, rather than relying on auto-tracking from signal reads inside the closure"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "data-fetching-for-the-ui-runs-inside-an-effect-h"
+label = "data fetching for the UI runs inside an effect …"
+directive = "data fetching for the UI runs inside an effect hook with manual loading/error/refresh state, rather than going through the resource hook"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "side-effects-run-directly-in-the-component-body"
+label = "side effects run directly in the component body outside …"
+directive = "side effects run directly in the component body outside any effect hook, executing on every render"
+why = "A defensible alternative the project considered and did not adopt as the default."

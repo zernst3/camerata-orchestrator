@@ -1,0 +1,54 @@
+id = "CAMERATA-ANATOMY-1"
+title = "Anatomy of a camerata principle (read this before adding one)"
+tag = "stack"
+domain = "contributing"
+layer = "universal"
+enforcement = "structured"
+default = false
+
+[decision]
+question = "How does a contributor learn the schema and conventions for adding a camerata principle?"
+default = "in-tool-anatomy-rule"
+why = "Surfacing the schema as a rule inside the tool itself is the lowest-friction onboarding for contributors. A new file in the right folder plus this template is the whole bar. Keeping the schema only in CONTRIBUTING.md leaves it invisible to contributors browsing the GUI, and the doc drifts from the actual TOML shape over time because nothing forces them to stay aligned. Asking new contributors to infer the schema by reading existing rule files works while the library is small but breaks once the rule count grows enough that the conventions are scattered across many files, and it slows every new contributor's first PR by making them reverse-engineer the contract."
+
+[[option]]
+id = "in-tool-anatomy-rule"
+label = "an in-tool anatomy rule documents the schema"
+directive = """
+A canonical rule is a principle that ships in the camerata-ai library itself, added by a domain SME via a pull request to the open-source repo. (For rules you only want to keep in your own project, use the + custom rule button on any non-contributing domain instead.)
+
+The canonical rule itself is a small TOML file in principles/<domain>/.
+
+Top-level required fields: id, title, tag, domain, layer, enforcement, default.
+The rule then carries a [decision] block (question, optional default, why) and one or more [[option]] entries (id, label, directive, why). Optional top-level fields: qualifies and emits.
+
+The qualifies field is a deterministic conformance test that proves a project adheres to the rule's adopted directive: prose describing the check, or a runnable command (a grep pattern, a clippy or eslint lint, a CI invocation, a test). It is REQUIRED on mechanical rules (the linter enforces it) and is emitted as the rule's Conformance line in CONVENTIONS.md; it is accepted but never emitted on prose and structured rules. qualifies is the field that operationalizes ORCH-CONFORMANCE-1: a codified commitment is an enforced gate only when a deterministic check is named. Write a real command only when it is genuinely correct on the target stack; otherwise write precise prose.
+
+A rule models one architectural DECISION with a uniform list of OPTIONS. Each option's directive is a single self-contained instruction the downstream agent reads at code-author time; everything else (the decision block, option labels, option whys, and the non-adopted options) is architect-facing curation scaffolding and is never emitted.
+
+The decision.default field names the option id adopted when the rule is taken as-is. Omitting it means the decision has no default: the rule does not emit until the architect resolves it, which is the route-to-human state for genuinely open decisions.
+
+The id field MUST be unique across the entire library and traceable. Format: AREA-TOPIC-NUMBER (e.g., UI-CONSENT-GATED-1, RUST-DOMAIN-4). The PR linter (camerata-lint, run by .github/workflows/lint-principles.yml) rejects contributions missing an id, duplicating an existing id, or using a non-traceable id. Option ids must be unique within a rule and decision.default must name an existing option. Profiles store selections by id, so stable ids are the contract that lets a saved profile survive future content edits. When a rule needs major revision that changes its meaning, ship a new id (RULE-2) rather than mutating the old one in place.
+
+The top-level default field MUST be set explicitly on every rule (true or false). It controls whether the rule's checkbox auto-checks when its domain is selected, and is distinct from decision.default, which names the adopted option. Set default = true for rules any team adopting this domain should ship; set default = false for opinionated extras a team opts into deliberately. SMEs decide this per rule.
+
+Note on default-selected domains: whether a domain itself ships pre-selected when the GUI launches is controlled by a curated DEFAULT_SELECTED_DOMAINS const in the camerata-ai source, NOT by anything in rule TOML. Currently only Universal (*) and Agentic ship pre-selected. SMEs contributing a new stack profile or capability domain cannot promote their own domain into the default-selected set; that requires a separate, deliberate change to camerata-ai itself, and the PR linter enforces this boundary by failing any PR whose diff modifies the DEFAULT_SELECTED_DOMAINS lines in src/lib.rs.
+
+tag values: universal (always on), stack (gated by domain selection).
+layer values: universal | language | library | framework (the precedence order).
+enforcement values: prose | structured | mechanical (what kind of artifact the rule emits when installed).
+
+Every rule states its options, a why for the decision, and a why for each option, so a reader can disagree on the merits rather than guess at intent."""
+why = "The adopted default. An in-tool anatomy rule is the lowest-friction onboarding and stays aligned with the actual TOML shape because it lives in the same library it documents."
+
+[[option]]
+id = "contributing-md-only"
+label = "the schema lives only in CONTRIBUTING.md"
+directive = "the principle schema is documented only in CONTRIBUTING.md; the tool itself does not surface a rule that explains how to add a new principle"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "infer-from-examples"
+label = "contributors infer the schema from existing files"
+directive = "new contributors learn the principle schema by reading existing files in principles/ and inferring the conventions, with no in-tool reference rule and no centralized schema document"
+why = "A defensible alternative the project considered and did not adopt as the default."

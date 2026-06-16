@@ -1,0 +1,30 @@
+id = "ORCH-ONE-WAY-DOOR-1"
+title = "One-way-door routing — blast radius gates autonomy"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: One-way-door routing — blast radius gates autonomy?"
+default = "one-way-door-routing-blast-radius-gates-autonomy"
+why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes. Reversibility, not confidence, gates autonomy. The confidence-gated alternative misses exactly the irreversible calls the rule exists to catch, because high confidence on a structural change is still wrong when the change is hard to reverse. The file-count-gated alternative fails for the same reason in the opposite direction: a 99-file mechanical move can be safer than a 3-file data migration, so file count tracks the wrong axis."
+
+[[option]]
+id = "one-way-door-routing-blast-radius-gates-autonomy"
+label = "One-way-door routing — blast radius gates autonomy"
+directive = "Even with a clear winner, STOP and escalate the decision to a human reviewer if the call is hard to reverse: it shapes the data model, a public/API contract, or a pattern that gets copied. Two-way doors (local, encapsulated, trivially refactored) you may auto-decide. Structural/topology changes (new/moved crate or module boundary, changed public trait/API surface) always pause for a human, even with a clear winner: reversibility decays as downstream code adopts the new shape. Decaying reversibility, not file count, is the real property. (\"Routing\" in the title refers to where the decision goes: to the AI to auto-apply, or to a human to review, based on the blast radius of getting it wrong.)"
+why = "The adopted default. A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes."
+
+[[option]]
+id = "the-agent-auto-decides-whenever-the-winner-feels"
+label = "the agent auto-decides whenever the winner feels obvious, regardless …"
+directive = "the agent auto-decides whenever the winner feels obvious, regardless of whether the call is hard to reverse"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-agent-gates-autonomy-on-the-size-of-the-chan"
+label = "the agent gates autonomy on the size of the …"
+directive = "the agent gates autonomy on the size of the change in files rather than on its reversibility, auto-deciding small changes and pausing for large ones"
+why = "A defensible alternative the project considered and did not adopt as the default."

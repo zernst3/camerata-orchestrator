@@ -1,0 +1,37 @@
+id = "UI-IMAGE-COMPONENT-1"
+title = "Images render through a single project-level component, not framework primitives directly"
+tag = "stack"
+domain = "ui"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by an ESLint no-restricted-imports / no-restricted-syntax rule (or the stack's equivalent) that forbids framework image primitives and raw image elements in feature code (next/image, the Vue or Flutter Image widget, raw img tags), routing every image through the single project-level image component. Conformance holds when that lint rule runs in CI and a feature file using a framework primitive or raw img fails the build; it fails when no rule blocks direct primitive use and call sites can render images however they like."
+
+[decision]
+question = "What position does the project take on: Images render through a single project-level component, not framework primitives directly?"
+default = "images-render-through-a-single-project-level-com"
+why = "Image delivery carries several policy decisions baked in: which CDN URL pattern, which transform parameters, which formats to negotiate, default sizes and breakpoints, lazy-loading thresholds, fallback behavior, accessibility defaults. Letting every call site reach for the raw framework primitive spreads those decisions across the codebase and makes them impossible to evolve without touching every file. Centralizing them in one component means changing CDN strategy, adding AVIF support, or fixing an accessibility default is a single-file change. Using the framework image primitive everywhere leaves delivery policy implicit and spread across the codebase, so any future strategy change is a codebase-wide refactor. Using raw HTML img elements or native equivalents loses framework-provided lazy loading, responsive variants, and format negotiation, and produces measurable cumulative-layout-shift and bandwidth regressions. Wrapping the primitive in a helper used by some teams and not others makes the rule a culture rather than a contract, and new code drifts back to the raw primitive whenever an author has not internalized the rule."
+
+[[option]]
+id = "images-render-through-a-single-project-level-com"
+label = "Images render through a single project-level component, not framework primitives directly"
+directive = "All images in feature code render through a single project-level image component that wires the CDN's variants (format negotiation, no upscaling, responsive sizes), lazy-loading defaults, fallback handling, and any A11Y defaults. Direct use of framework image primitives (next/image, Image from Vue, raw <img>, platform-native Image widgets) in feature code is forbidden and enforced with a no-restricted-imports or equivalent lint rule. The project-level component is the one place image-delivery policy lives."
+why = "The adopted default. Image delivery carries several policy decisions baked in: which CDN URL pattern, which transform parameters, which formats to negotiate, default sizes and breakpoints, lazy-loading thresholds, fallback behavior, accessibility defaults."
+
+[[option]]
+id = "feature-code-renders-images-directly-through-the"
+label = "feature code renders images directly through the framework's image …"
+directive = "feature code renders images directly through the framework's image primitive (next/image, Vue's Image, Flutter's Image, or equivalent) at every call site, with no project-level wrapper component"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "feature-code-renders-images-as-raw-html-img-elem"
+label = "feature code renders images as raw HTML img elements …"
+directive = "feature code renders images as raw HTML img elements or platform-native image widgets, without going through the framework's image primitive or a project-level component"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-project-provides-a-project-level-image-compo"
+label = "the project provides a project-level image component but its …"
+directive = "the project provides a project-level image component but its use is optional, and some call sites continue to use the framework primitive directly while others wrap it"
+why = "A defensible alternative the project considered and did not adopt as the default."

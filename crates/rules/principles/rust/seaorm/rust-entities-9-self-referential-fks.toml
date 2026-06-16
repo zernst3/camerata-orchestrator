@@ -1,0 +1,30 @@
+id = "RUST-ENTITIES-9"
+title = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Self-referential FKs: single belongs_to + impl Related<Entity> for Entity?"
+default = "self-referential-fks-single-belongs-to-impl-rela"
+why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation. Trying to declare both belongs_to and has_many variants is blocked by the macro's coherence rule and will not compile, so it is not a viable alternative even if it reads as the more uniform shape. Omitting impl Related entirely is mechanically possible but produces worse ergonomics, because every caller that wants to traverse the relation has to spell out the join inline at the call site rather than going through the framework's relation hooks."
+
+[[option]]
+id = "self-referential-fks-single-belongs-to-impl-rela"
+label = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
+directive = "Declare only the belongs_to (with explicit from/to) and add impl Related<Entity> for Entity. Reverse traversal is done via find().filter(...). Use role-based variant naming (e.g. Inviter, not User)."
+why = "The adopted default. DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation."
+
+[[option]]
+id = "the-self-referential-entity-declares-both-a-belo"
+label = "the self-referential entity declares both a belongs_to and a …"
+directive = "the self-referential entity declares both a belongs_to and a has_many variant on the same pair, attempting bidirectional macro-driven traversal"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-self-referential-entity-declares-the-belongs"
+label = "the self-referential entity declares the belongs_to but omits impl …"
+directive = "the self-referential entity declares the belongs_to but omits impl Related, and every caller spells out the join inline at the call site"
+why = "A defensible alternative the project considered and did not adopt as the default."

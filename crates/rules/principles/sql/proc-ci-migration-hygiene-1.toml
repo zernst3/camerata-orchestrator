@@ -1,0 +1,25 @@
+id = "PROC-CI-MIGRATION-HYGIENE-1"
+title = "CI hygiene — enforce migration idempotency + safety at the gate"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a CI migration-lint step that scans every migration in the change before the build: it requires idempotency guards (IF NOT EXISTS on creates), requires an explicit opt-in marker for destructive operations (DROP, TRUNCATE, column removal), and checks for migration-journal index/sequence-number collisions. Conformance holds when that lint job runs on every PR and a migration missing an IF NOT EXISTS guard, containing an unmarked destructive op, or colliding on the journal index fails the gate; it fails when migrations rely on human review alone with no mechanical CI check."
+
+[decision]
+question = "What position does the project take on: CI hygiene — enforce migration idempotency + safety at the gate?"
+default = "ci-hygiene-enforce-migration-idempotency-safety"
+why = "Preventive enforcement catches what code review misses under pressure; migrations are append-only, so a silent skip corrupts state downstream. Relying on code review alone to catch unsafe migrations misses cases under pressure: a reviewer with five minutes between meetings is not the right venue for catching a missing IF NOT EXISTS guard or a destructive operation slipping through, and migrations cannot be undone once they have shipped."
+
+[[option]]
+id = "ci-hygiene-enforce-migration-idempotency-safety"
+label = "CI hygiene — enforce migration idempotency + safety at the gate"
+directive = "For SQL systems: lint every migration in CI. Require idempotency (IF NOT EXISTS), require explicit opt-in for destructive ops, and guard against migration-journal index collisions, all before the build."
+why = "The adopted default. Preventive enforcement catches what code review misses under pressure; migrations are append-only, so a silent skip corrupts state downstream."
+
+[[option]]
+id = "the-project-relies-on-human-code-review-alone-to"
+label = "the project relies on human code review alone to …"
+directive = "the project relies on human code review alone to catch unsafe migrations, with no mechanical CI lint enforcing idempotency, destructive-op opt-in, or migration-journal index collisions"
+why = "A defensible alternative the project considered and did not adopt as the default."

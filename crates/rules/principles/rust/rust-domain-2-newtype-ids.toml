@@ -1,0 +1,36 @@
+id = "RUST-DOMAIN-2"
+title = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[[emits]]
+target = "CONVENTIONS.md"
+[[emits]]
+target = "aicodingrules"
+scope = "**/*.rs"
+
+[decision]
+question = "What position does the project take on: Newtype IDs (every ID is a wrapper, never a bare Uuid)?"
+default = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
+why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time. The idea is universal; Rust enforces it via the type system. Using bare Uuid everywhere loses the compile-time safety entirely, because every ID becomes the same type and any function taking a UserId cheerfully accepts an OrganizationId or any other Uuid. A generic EntityId-of-T parameterized on a phantom type catches some bugs at compile time but has no runtime distinction, so any code path that converts between representations (a JSON payload, a SQL row, a log line) collapses the parameter and loses the guarantee at the boundary."
+
+[[option]]
+id = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
+label = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
+directive = "UserId(Uuid), OrganizationId(Uuid); bare Uuid only at persistence and HTTP boundaries."
+why = "The adopted default. Moves wrong-ID-to-wrong-function bugs from runtime to compile time."
+
+[[option]]
+id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
+label = "every ID in the codebase is a bare Uuid, …"
+directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "all-ids-use-a-single-generic-entityid-of-t-type"
+label = "all IDs use a single generic EntityId-of-T type parameterized …"
+directive = "all IDs use a single generic EntityId-of-T type parameterized on a phantom marker, rather than each ID being its own concrete newtype"
+why = "A defensible alternative the project considered and did not adopt as the default."

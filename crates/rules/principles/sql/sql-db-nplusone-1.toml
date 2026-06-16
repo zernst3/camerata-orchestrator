@@ -1,0 +1,25 @@
+id = "SQL-DB-NPLUSONE-1"
+title = "No N+1 query patterns"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check: a query-count assertion in tests exercises each list-returning code path and fails when the number of database round-trips grows with the size of the result set rather than staying constant (the textbook N+1 signature). The realistic mechanism is a test-harness query counter (an ORM query-log assertion, a per-request query-count budget, or a strict-loading mode that raises on lazy N+1 access) plus review for loops issuing a per-item query. Conformance holds when such a query-count guard runs in CI and a loop-with-per-item-query path fails it; it fails when no per-path query-count check exists and N+1 patterns can merge unnoticed."
+
+[decision]
+question = "What position does the project take on: No N+1 query patterns?"
+default = "no-n-1-query-patterns"
+why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes. Looping over a fetched list and issuing a database call per item is the textbook N+1 footgun: it looks correct in a unit test with five rows, then degrades by orders of magnitude as production data grows, with no warning until the slowdown surfaces in latency dashboards or user complaints."
+
+[[option]]
+id = "no-n-1-query-patterns"
+label = "No N+1 query patterns"
+directive = "Iterating a collection with a per-item database call is banned. Use a single batched query (or 1-2 queries with a join / eager-load), never N+1."
+why = "The adopted default. N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes."
+
+[[option]]
+id = "code-fetches-a-list-of-rows-and-then-loops-over"
+label = "code fetches a list of rows and then loops …"
+directive = "code fetches a list of rows and then loops over the list, issuing a database call per item to fetch related data, rather than using a single batched query or an eager-load with a join"
+why = "A defensible alternative the project considered and did not adopt as the default."

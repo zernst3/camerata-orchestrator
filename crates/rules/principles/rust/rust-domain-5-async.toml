@@ -1,0 +1,30 @@
+id = "RUST-DOMAIN-5"
+title = "Async all the way down"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Async all the way down?"
+default = "async-all-the-way-down"
+why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss. Going sync-first and using block_on at the layer boundaries fights the ecosystem at every layer, produces measurable perf regressions, and creates the runtime-pinning bugs that block_on-inside-an-async-context is famous for. Maintaining dual sync and async APIs doubles the public surface and forces every consumer to choose which variant to call, which is a recurring point of confusion and a maintenance burden for very little gain in the Rust ecosystem."
+
+[[option]]
+id = "async-all-the-way-down"
+label = "Async all the way down"
+directive = "I/O functions, repo traits, service methods, and handlers are async; no block_on in layered code."
+why = "The adopted default. The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss."
+
+[[option]]
+id = "the-project-s-i-o-functions-repo-traits-service"
+label = "the project's I/O functions, repo traits, service methods, and …"
+directive = "the project's I/O functions, repo traits, service methods, and handlers are sync, and async runtime use is wrapped in block_on at the layer boundaries"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-project-exposes-both-sync-and-async-variants"
+label = "the project exposes both sync and async variants of …"
+directive = "the project exposes both sync and async variants of its I/O functions, repo traits, service methods, and handlers as parallel public APIs"
+why = "A defensible alternative the project considered and did not adopt as the default."

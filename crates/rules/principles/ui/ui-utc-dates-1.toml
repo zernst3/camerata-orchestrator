@@ -1,0 +1,37 @@
+id = "UI-UTC-DATES-1"
+title = "Render dates through a project-level helper that pins UTC; never format inline"
+tag = "stack"
+domain = "ui"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by an ESLint no-restricted-syntax / no-restricted-properties rule (or the stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without a timeZone option, strftime with no timezone), routing all date rendering through the single project-level helper that pins the timezone. Conformance holds when that lint rule runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
+
+[decision]
+question = "What position does the project take on: Render dates through a project-level helper that pins UTC; never format inline?"
+default = "render-dates-through-a-project-level-helper-that"
+why = "When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's. The mismatch causes hydration warnings or crashes under server-side rendering, and produces silent visible-time inconsistencies even without SSR. Pinning the timezone at the rendering boundary makes both sides agree by construction, and centralizing the call site means a future timezone or locale policy change is one edit, not many. Formatting dates inline at each call site lets every site drift on timezone handling, and the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time. Rendering dates client-only via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode. Relying on the platform to pick a timezone means the default-locale behavior varies by browser, OS, region, and even browser version, so the rule's outcome becomes 'whatever the platform happened to decide today'."
+
+[[option]]
+id = "render-dates-through-a-project-level-helper-that"
+label = "Render dates through a project-level helper that pins UTC; never format inline"
+directive = "All date and time rendering in the UI goes through a single project-level helper that pins the timezone explicitly (commonly UTC, sometimes a known display-tz). Direct calls to the platform's locale-aware formatting (toLocaleString, strftime with no tz, Intl.DateTimeFormat with no timeZone option) in feature code are forbidden and lint-enforced. The helper is the one place timezone decisions live."
+why = "The adopted default. When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's."
+
+[[option]]
+id = "feature-code-formats-dates-inline-at-each-call-s"
+label = "feature code formats dates inline at each call site …"
+directive = "feature code formats dates inline at each call site using the platform's locale-aware formatting (toLocaleString, strftime, Intl.DateTimeFormat) without going through a project-level helper that pins the timezone"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "feature-code-renders-dates-only-on-the-client-vi"
+label = "feature code renders dates only on the client via …"
+directive = "feature code renders dates only on the client via a post-mount effect, with the server rendering a placeholder until the client picks up the value"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "feature-code-calls-the-platform-s-date-formattin"
+label = "feature code calls the platform's date-formatting APIs without specifying …"
+directive = "feature code calls the platform's date-formatting APIs without specifying a timezone, letting the platform's default locale and timezone control the result at each site"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,36 @@
+id = "RUST-ENTITIES-3"
+title = "One file per entity under entities/, named for the table"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: One file per entity under entities/, named for the table?"
+default = "one-file-per-entity-under-entities-named-for-the"
+why = "SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge. Re-export preludes add a level of indirection that buys nothing until the crate is large enough to justify a public API surface that is not just the entity list. Grouping entities by domain concept inside the entities crate forces a reader who knows the table name to first map it to whichever grouping the project chose, which adds a project-specific lookup step that the flat shape does not require. Adding a prelude module re-exporting many entities under shorter paths is extra indirection without payoff until the crate becomes a published public API, which an internal entities crate generally never is. Inlining multiple small entities into a single file saves a few files but breaks the table-name-to-file-name lookup the generator output relies on, so the convenience of one less file is paid back at every navigation event afterwards."
+
+[[option]]
+id = "one-file-per-entity-under-entities-named-for-the"
+label = "One file per entity under entities/, named for the table"
+directive = "Inside the entities crate, every entity lives in its own file under entities/<table_name>.rs. No prelude module that re-exports many entities under one name, no grouping by domain concept inside the crate. The flat shape matches SeaORM's code-generator output and lets a reader find an entity by its table name without learning a project-specific organization."
+why = "The adopted default. SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge."
+
+[[option]]
+id = "entities-are-grouped-by-domain-concept-inside-th"
+label = "entities are grouped by domain concept inside the entities …"
+directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-entities-crate-exposes-a-prelude-module-that"
+label = "the entities crate exposes a prelude module that re-exports …"
+directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "multiple-small-related-entities-are-inlined-into"
+label = "multiple small related entities are inlined into a single …"
+directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
+why = "A defensible alternative the project considered and did not adopt as the default."

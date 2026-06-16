@@ -1,0 +1,36 @@
+id = "ORCH-CONFLICTING-ROBUSTNESS-1"
+title = "Conflicting robustness is a real tradeoff, not a clear winner"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Conflicting robustness is a real tradeoff, not a clear winner?"
+default = "conflicting-robustness-is-a-real-tradeoff-not-a"
+why = "Robustness is plural; picking one dimension unilaterally silently accepts the other failure mode. Treating the first robust option encountered as the winner reduces the choice to whichever option the search order surfaced first rather than a real judgment, and silently accepts the unaddressed failure mode every time. Letting the agent pick based on which failure mode has cheaper recovery in the project's context is a defensible heuristic but rarely has enough domain knowledge to judge recovery cost accurately; that lens is exactly the one a human reviewer should apply. Adopting every option by combining their protections in the same artifact is sometimes possible but doubles the complexity surface and trades a single decision for ongoing maintenance of every code path, which is usually a worse deal than picking one consciously."
+
+[[option]]
+id = "conflicting-robustness-is-a-real-tradeoff-not-a"
+label = "Conflicting robustness is a real tradeoff, not a clear winner"
+directive = "When options are each robust against different failures (rigid constraints vs. bad data; flexibility vs. changing requirements), name both failure modes and pause to escalate the decision to a human reviewer. That is a genuine tradeoff, not a clear winner. Let the human pick which failure mode their context cares about more."
+why = "The adopted default. Robustness is plural; picking one dimension unilaterally silently accepts the other failure mode."
+
+[[option]]
+id = "when-options-are-each-robust-against-different-f"
+label = "when options are each robust against different failures, the …"
+directive = "when options are each robust against different failures, the agent treats the first robust option it encounters as the winner and proceeds"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "when-options-are-each-robust-against-different-f-2"
+label = "when options are each robust against different failures, the …"
+directive = "when options are each robust against different failures, the agent picks autonomously based on which option's failure mode has a cheaper recovery in the project's context"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "when-options-are-each-robust-against-different-f-3"
+label = "when options are each robust against different failures, the …"
+directive = "when options are each robust against different failures, the agent combines every option's protections in the same artifact rather than picking one"
+why = "A defensible alternative the project considered and did not adopt as the default."

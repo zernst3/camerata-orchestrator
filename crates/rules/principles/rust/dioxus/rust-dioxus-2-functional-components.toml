@@ -1,0 +1,36 @@
+id = "RUST-DIOXUS-2"
+title = "Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq"
+tag = "stack"
+domain = "rust:dioxus"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq?"
+default = "components-are-free-functions-returning-element"
+why = "Functional components with derived Props are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for. Deviations cost reviewer time (every contributor re-learns the project's bespoke shape) and break IDE refactor support. Clone and PartialEq on Props are required for diffing to work; diffing without PartialEq forces a re-render on every parent update, which compounds quickly into measurable jank. Defining components as structs implementing a Component trait adds boilerplate, blocks the component-attribute macro, and produces worse error messages on misuse, since the tooling is tuned for the free-function shape. Passing props as untyped value bags kills compile-time checking on prop names and types and defeats the entire reason to use a typed language for the UI. Declaring props inline as function arguments regardless of count is fine for one or two props but past that the function signature becomes unreadable, and the derive pattern is clearly cleaner once a third prop appears."
+
+[[option]]
+id = "components-are-free-functions-returning-element"
+label = "Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq"
+directive = "Every component is a free function whose body returns Element, annotated with the component attribute. Single-prop or two-prop components may declare props inline as function arguments. Components with three or more props, or with any non-trivial prop, declare a dedicated props struct that derives the Props, Clone, and PartialEq traits. Struct-based components implementing a component trait, trait-object wrappers, and the legacy Scope-bearing signature from earlier framework versions are forbidden. Untyped value bags as props are forbidden."
+why = "The adopted default. Functional components with derived Props are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for."
+
+[[option]]
+id = "every-component-is-defined-as-a-struct-implement"
+label = "every component is defined as a struct implementing a …"
+directive = "every component is defined as a struct implementing a Component trait, rather than as a free function annotated with the component attribute"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "props-are-passed-to-components-as-untyped-value"
+label = "props are passed to components as untyped value bags …"
+directive = "props are passed to components as untyped value bags (a HashMap-shaped or map-like container) rather than as a typed Props struct with derived Props, Clone, and PartialEq"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "every-component-declares-its-props-inline-as-fun"
+label = "every component declares its props inline as function arguments …"
+directive = "every component declares its props inline as function arguments regardless of count, with no dedicated Props struct even when the component has three or more props"
+why = "A defensible alternative the project considered and did not adopt as the default."

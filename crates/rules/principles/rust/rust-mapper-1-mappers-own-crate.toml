@@ -1,0 +1,30 @@
+id = "RUST-MAPPER-1"
+title = "Mappers live in their own crate"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Mappers live in their own crate?"
+default = "mappers-live-in-their-own-crate"
+why = "Enforces strict hexagonal layering: each side absorbs churn independently, and translation has one clear home. Putting mappers inside the entity crate couples entities to the domain shape, since the entity crate then has to know the domain types and breaks every time the domain evolves. Putting mappers inside the domain crate pulls persistence concerns into the domain, since the domain crate then has to know the entity shapes and gains a transitive dependency on the persistence layer, defeating the hexagonal commitment that domain has zero framework deps."
+
+[[option]]
+id = "mappers-live-in-their-own-crate"
+label = "Mappers live in their own crate"
+directive = "A dedicated mappers crate depends on both the domain crate and the persistence-entities crate; neither of those depends on the other."
+why = "The adopted default. Enforces strict hexagonal layering: each side absorbs churn independently, and translation has one clear home."
+
+[[option]]
+id = "the-project-s-mappers-live-in-the-persistence-en"
+label = "the project's mappers live in the persistence-entities crate alongside …"
+directive = "the project's mappers live in the persistence-entities crate alongside the entity types, rather than in a dedicated mappers crate"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "the-project-s-mappers-live-in-the-domain-crate-a"
+label = "the project's mappers live in the domain crate alongside …"
+directive = "the project's mappers live in the domain crate alongside the domain types, rather than in a dedicated mappers crate"
+why = "A defensible alternative the project considered and did not adopt as the default."

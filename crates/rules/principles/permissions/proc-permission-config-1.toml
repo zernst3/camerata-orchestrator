@@ -1,0 +1,30 @@
+id = "PROC-PERMISSION-CONFIG-1"
+title = "A missing grant is configuration; a missing permission is code"
+tag = "stack"
+domain = "permissions"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: A missing grant is configuration; a missing permission is code?"
+default = "a-missing-grant-is-configuration-a-missing-permi"
+why = "The two failure modes look identical to the person filing the report ('I cannot do X'), but they have different fixes and different reviewers. Triaging by which category the gap falls into routes the work to the right tool and the right person, instead of defaulting to a code change because that is what engineers reach for first. Treating every access gap as a code change multiplies handoffs: every config-only issue gets a PR and a deploy when a single grant would have sufficed. Treating every access gap as a configuration change overlooks undefined permissions: ad-hoc grants get added without the schema or code to back them, drifting from the system's actual model."
+
+[[option]]
+id = "a-missing-grant-is-configuration-a-missing-permi"
+label = "A missing grant is configuration; a missing permission is code"
+directive = "When an access gap is reported, classify it before reaching for code. If the underlying permission already exists in the schema and the gap is that the role or user does not have it granted, the fix is a configuration change. The tool for making the grant varies by system (an admin UI when one exists, configuration-as-code, a role-seed migration, or a direct write to the role-permission table when no higher-level tool is available); the principle is just that this is configuration, not engineering work. If the underlying permission does not exist in the schema at all, the fix is code: the permission has to be defined and the migration that adds it has to seed grants for applicable roles."
+why = "The adopted default. The two failure modes look identical to the person filing the report ('I cannot do X'), but they have different fixes and different reviewers."
+
+[[option]]
+id = "every-access-gap-is-treated-as-a-code-change-acc"
+label = "every access gap is treated as a code change; …"
+directive = "every access gap is treated as a code change; access reports flow into engineering and result in a PR and a deploy regardless of whether the underlying permission already exists"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "every-access-gap-is-treated-as-a-configuration-c"
+label = "every access gap is treated as a configuration change; …"
+directive = "every access gap is treated as a configuration change; access reports flow into role configuration regardless of whether the underlying permission actually exists in the schema"
+why = "A defensible alternative the project considered and did not adopt as the default."

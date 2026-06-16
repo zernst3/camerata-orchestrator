@@ -1,0 +1,30 @@
+id = "ARCH-SERVICE-DI-1"
+title = "Services depend on repository abstractions injected at the composition root"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How do services obtain the repositories they use?"
+default = "inject-abstractions"
+why = "A service that constructs its own concrete repository binds itself to a specific persistence implementation and to whatever that implementation needs to be built (a connection pool, a client handle, configuration). That binding makes the service impossible to unit-test without the real datastore and impossible to reuse against a different backing store. Depending on an abstraction and receiving it from the outside inverts that dependency: the service states what capability it needs, and the single composition root decides what satisfies it. Letting services build their own concretes is simpler at first but spreads construction logic and backend assumptions across every service. A global singleton or service-locator removes the constructor boilerplate but hides each service's real dependencies and reintroduces the same test-isolation problem through a different door."
+
+[[option]]
+id = "inject-abstractions"
+label = "inject repository abstractions at the composition root"
+directive = "Services depend on repository abstractions (interfaces or traits), never on concrete persistence implementations. The concrete implementations are constructed once at the application's composition root and passed into services as dependencies. A service never instantiates its own repository, opens its own connection, or reads its own datastore configuration; it receives an already-constructed abstraction that satisfies the capability it declares."
+why = "The adopted default. Depending on an abstraction makes services testable in isolation and decoupled from the backing store, and centralizing construction keeps backend assumptions in one place."
+
+[[option]]
+id = "construct-concretes-inline"
+label = "services construct their own concrete repositories"
+directive = "Each service constructs the concrete repository it needs directly, including acquiring whatever connection or client that repository requires."
+why = "Simpler with no wiring layer, but binds every service to a specific persistence implementation and makes unit testing without the real datastore impossible."
+
+[[option]]
+id = "global-service-locator"
+label = "a global service locator resolves dependencies"
+directive = "Services resolve their repositories from a global singleton or service-locator registry at call time rather than receiving them as constructor dependencies."
+why = "Removes constructor boilerplate but hides each service's real dependencies and reintroduces the test-isolation problem through global state."

@@ -1,0 +1,24 @@
+id = "SPIRIT-DOC-DECISIONS-1"
+title = "Document decisions immediately"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Document decisions immediately?"
+default = "document-decisions-immediately"
+why = "Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them. A multi-actor, multi-session system depends on durable artifacts, not memory. Batching documentation into a later pass reliably causes drift and re-litigation, because memory fades faster than the documentation pass arrives, so by the time the batched pass runs the decisions have already been silently re-derived or contradicted in subsequent work."
+
+[[option]]
+id = "document-decisions-immediately"
+label = "Document decisions immediately"
+directive = "Every decision (architectural, process, convention, even small) is written to a persistent artifact the moment it is made: a conventions file with a rule ID for code, a dated decision doc for process."
+why = "The adopted default. Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them."
+
+[[option]]
+id = "decisions-accumulate-in-conversation-as-they-are"
+label = "decisions accumulate in conversation as they are made and …"
+directive = "decisions accumulate in conversation as they are made and are written to durable artifacts in a documentation pass later, batched by week, sprint, or feature shipment"
+why = "A defensible alternative the project considered and did not adopt as the default."

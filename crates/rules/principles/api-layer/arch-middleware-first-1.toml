@@ -1,0 +1,36 @@
+id = "ARCH-MIDDLEWARE-FIRST-1"
+title = "If a cross-cutting concern can be expressed as middleware, it must be"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: If a cross-cutting concern can be expressed as middleware, it must be?"
+default = "if-a-cross-cutting-concern-can-be-expressed-as-m"
+why = "Cross-cutting logic that lives inside individual handlers drifts. Five handlers that each do their own auth check eventually have five subtly different auth checks; one new handler omits the check entirely and the gap is invisible until a security review catches it. A single middleware implementation can be reviewed once, hardened once, and changed once; every route mounted under it gets the new behavior for free. The middleware itself becomes the auditable artifact for the cross-cutting concern, and 'is this enforced everywhere?' reduces to 'is this middleware mounted at the right router level?' Inlining the cross-cutting logic in each handler is the duplicated-logic failure mode: the handlers slowly diverge into subtly different implementations of the same concern, and new handlers omit the logic entirely by accident. Extracting a helper function and calling it from each handler is better than inline but still requires every handler to remember to call it; one new handler skips the call and the gap is invisible to the type system and to most code review. Using middleware sparingly only for universally-recognized cases like CORS leaves the line between 'obvious middleware case' and 'leave it in the handler' arbitrary, drifting per reviewer, and accumulating exceptions over time."
+
+[[option]]
+id = "if-a-cross-cutting-concern-can-be-expressed-as-m"
+label = "If a cross-cutting concern can be expressed as middleware, it must be"
+directive = "Cross-cutting concerns that apply to more than one handler (authentication, authorization gates, request logging, tracing, request ID generation, rate limiting, body size limits, CORS, security headers, error-envelope rendering, idempotency-key lookup, response compression) are implemented as reusable middleware once and attached to the route or router. Inlining the same logic across handlers is forbidden, and so is per-handler helper-function calls that depend on every handler remembering to make the call. New handlers inherit the cross-cutting behavior by virtue of where they are mounted, not by virtue of what each handler's author remembers to write."
+why = "The adopted default. Cross-cutting logic that lives inside individual handlers drifts."
+
+[[option]]
+id = "cross-cutting-concerns-are-inlined-in-each-handl"
+label = "cross-cutting concerns are inlined in each handler that needs …"
+directive = "cross-cutting concerns are inlined in each handler that needs them, with no shared middleware layer responsible for any of them"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "cross-cutting-concerns-are-extracted-into-helper"
+label = "cross-cutting concerns are extracted into helper functions that each …"
+directive = "cross-cutting concerns are extracted into helper functions that each handler explicitly calls at the top of its body, rather than being mounted as middleware"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "middleware-is-used-only-for-universally-recogniz"
+label = "middleware is used only for universally-recognized cross-cutting cases (CORS, …"
+directive = "middleware is used only for universally-recognized cross-cutting cases (CORS, body parsing) and other concerns live inside individual handlers regardless of how many handlers share them"
+why = "A defensible alternative the project considered and did not adopt as the default."

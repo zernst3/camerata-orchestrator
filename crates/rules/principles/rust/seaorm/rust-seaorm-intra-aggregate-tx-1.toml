@@ -1,0 +1,30 @@
+id = "RUST-SEAORM-INTRA-AGGREGATE-TX-1"
+title = "Intra-aggregate atomicity stays inside the repository implementation"
+tag = "stack"
+domain = "rust:seaorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does atomicity for multiple writes within a single aggregate live: inside the repository method, or surfaced as a unit-of-work parameter on the repository trait?"
+default = "repository-owns-intra-aggregate-transaction"
+why = "Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern that the service layer should know about. Forcing the service to construct a unit of work solely so the repository can guarantee an internal invariant leaks the abstraction across the aggregate boundary without buying any service-level coordination benefit. Two repositories that participate in the same business transaction do need the unit-of-work handoff (that is what the cross-aggregate rule covers), but a single repository whose method needs three writes to land together does not. Keeping the boundary at the aggregate matches the broader convention that the repository owns persistence-side invariants and the service owns business-process coordination."
+
+[[option]]
+id = "repository-owns-intra-aggregate-transaction"
+label = "Repository opens and commits its own transaction"
+directive = "Repository methods that require multiple writes to be atomic within a single aggregate open and commit their own database transaction inside the method, rather than requiring callers to supply a unit-of-work handle. The unit-of-work parameter on the repository trait is reserved for cross-aggregate coordination owned by the service layer; intra-aggregate atomicity is the repository's own responsibility and does not appear in the method signature."
+why = "The adopted default. Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern the service layer should know about, so the transaction stays where the invariant lives."
+
+[[option]]
+id = "uniform-unit-of-work-parameter"
+label = "One unit-of-work parameter for intra- and cross-aggregate writes alike"
+directive = "Even intra-aggregate atomicity is expressed through the same unit-of-work parameter the cross-aggregate writes use, so every repository method that needs to land multiple writes atomically exposes a transaction-handle parameter in its trait signature and refuses to open its own transaction."
+why = "Trades a leaky abstraction across the aggregate boundary for uniformity of method signatures; the service layer must construct a unit of work even for operations it does not coordinate."
+
+[[option]]
+id = "no-repository-transaction-boundaries"
+label = "No repository transaction boundaries at all"
+directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
+why = "Trades architectural simplicity for accepting partial-write states as a normal failure mode the rest of the system has to be defensive against."

@@ -1,0 +1,31 @@
+id = "ORCH-BUDGET-MONITOR-1"
+title = "Budget self-monitoring"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+
+default = true
+
+[decision]
+question = "How should an autonomous run cap its spend?"
+default = "rolling-window-plus-per-session-caps"
+why = "An unattended routine needs a real ceiling; per-run caps prevent runaway, and the rolling cap is the operational guard. Running with no budget caps is acceptable only for attended, short runs where a human can intervene before spend escalates; an unattended routine has neither property, and one stuck loop or runaway request pattern can burn arbitrarily much money before the next human glance at the monitor. A per-session cap alone bounds any single run but lets independent runs accumulate unbounded spend across a window, so it leaves the aggregate runaway case uncovered."
+
+[[option]]
+id = "rolling-window-plus-per-session-caps"
+label = "rolling-window + per-session caps, enforced by a wrapper"
+directive = "Track spend in a rolling window against a safety threshold, with per-session caps, and self-check periodically during a run. A wrapper enforces hard limits before invoking the model."
+why = "The adopted default. A rolling-window cap plus per-session caps covers both the single-run runaway and the cross-run accumulation cases, and the wrapper makes the limit non-bypassable."
+
+[[option]]
+id = "per-session-cap-only"
+label = "per-session cap only"
+directive = "Each autonomous run enforces a single per-session spend cap and halts when it is reached, with no rolling-window safety threshold across runs."
+why = "A defensible alternative that bounds any single run but leaves independent runs free to accumulate unbounded spend across a window, so it does not cover the aggregate runaway case."
+
+[[option]]
+id = "no-budget-caps"
+label = "no budget caps"
+directive = "The autonomous run operates with no budget caps and no rolling-window safety threshold."
+why = "A defensible alternative for attended, short runs where a human can intervene before spend escalates, but unsafe for unattended routines that have neither property."

@@ -1,0 +1,30 @@
+id = "ARCH-MONOLITH-FIRST-1"
+title = "Deploy as a single service and add a message broker only on measured need"
+tag = "stack"
+domain = "fullstack"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What is the default deployment topology, and when is a separate message broker introduced?"
+default = "monolith-first"
+why = "A single deployable that calls its own components in-process and runs background work on its own scheduler has no network hops, no broker to operate, and no cross-service consistency problem to design around. Most products never reach the scale at which a broker or a service split pays for its operational cost. Introducing a broker or splitting into services up front buys scaling headroom the product does not yet need while immediately taking on delivery semantics, retry handling, dead-letter management, and a new piece of infrastructure to run. Conversely, refusing ever to add a broker becomes a real constraint once a genuine decoupling need appears (a slow third-party integration, a fan-out workload, a burst that must be absorbed); the rule is monolith-first, not monolith-only. The trigger for adding one is a measured need, not anticipation."
+
+[[option]]
+id = "monolith-first"
+label = "single service first; broker only on measured need"
+directive = "The system deploys as a single service by default. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced only when a measured need justifies it (a throughput ceiling that profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons, or a decoupling requirement an in-process design genuinely cannot satisfy). Adding broker infrastructure on anticipation alone is avoided."
+why = "The adopted default. A single service avoids the operational and consistency costs of a broker until the product reaches a scale that actually requires one."
+
+[[option]]
+id = "broker-up-front"
+label = "introduce a message broker from the start"
+directive = "The system uses a dedicated message broker for inter-component communication and background work from the start, regardless of current scale."
+why = "Buys scaling headroom early but takes on delivery semantics, retry and dead-letter handling, and a broker to operate before the product needs any of it."
+
+[[option]]
+id = "services-from-start"
+label = "split into independent services from the start"
+directive = "The system is split into independently deployed services communicating over the network from the start, regardless of current scale."
+why = "Provides independent scaling and deployment but introduces network hops and cross-service consistency problems the product may never need to solve."

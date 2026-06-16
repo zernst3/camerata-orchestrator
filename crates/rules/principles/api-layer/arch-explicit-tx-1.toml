@@ -1,0 +1,36 @@
+id = "ARCH-EXPLICIT-TX-1"
+title = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Services own the transaction lifecycle; repositories receive the handle as a parameter?"
+default = "services-own-the-transaction-lifecycle-repositor"
+why = "Making the transaction handle an explicit parameter makes the unit-of-work boundary visible at every call site. A reviewer can see at a glance which calls are inside the transaction and which are outside, without having to reason about middleware order, annotation precedence, or whether the current execution context still holds the same handle as when it started. Implicit context is also a leading source of bugs in async or multithreaded code, where the execution context can move between threads or coroutines and the ambient transaction can become attached to the wrong unit of work. Implicit or ambient transaction context held in thread-local or request-scoped state works fine for the synchronous request-response shape but becomes a leading source of bugs in async, concurrent, or background-job code where the context can travel separately from the call stack. Annotations or decorators that the framework injects transactions for hide the boundary at the call site, and subtle bugs arise from annotation precedence, propagation modes, and self-invocation defeats. Repositories opening their own short transactions per call gives no unit-of-work guarantee across related writes, so partial failure leaves the database in an inconsistent state with no atomic rollback path."
+
+[[option]]
+id = "services-own-the-transaction-lifecycle-repositor"
+label = "Services own the transaction lifecycle; repositories receive the handle as a parameter"
+directive = "When a unit of work spans multiple repository calls, the service layer opens the transaction, passes the transaction handle to each repository method as an explicit parameter, and commits or rolls back the transaction itself. Repositories never open or close transactions; they accept a handle and use it. Implicit or ambient transaction context (thread-local, request-scoped, AOP-injected, framework-magic) is forbidden, because the boundary then becomes invisible at the call site and unreliable under concurrency or async re-entry."
+why = "The adopted default. Making the transaction handle an explicit parameter makes the unit-of-work boundary visible at every call site."
+
+[[option]]
+id = "the-transaction-handle-is-held-in-thread-local-o"
+label = "the transaction handle is held in thread-local or request-scoped …"
+directive = "the transaction handle is held in thread-local or request-scoped ambient state, and repositories read it implicitly at call time rather than receiving it as a parameter"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "transactions-are-opened-by-framework-level-annot"
+label = "transactions are opened by framework-level annotations or decorators (such …"
+directive = "transactions are opened by framework-level annotations or decorators (such as @Transactional or equivalent) that wrap service methods, rather than by explicit calls in the service body"
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "each-repository-call-opens-and-commits-its-own-s"
+label = "each repository call opens and commits its own short …"
+directive = "each repository call opens and commits its own short transaction internally, and the service layer does not coordinate any cross-repository unit of work"
+why = "A defensible alternative the project considered and did not adopt as the default."

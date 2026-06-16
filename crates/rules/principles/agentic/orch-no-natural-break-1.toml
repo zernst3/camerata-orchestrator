@@ -1,0 +1,24 @@
+id = "ORCH-NO-NATURAL-BREAK-1"
+title = "Never stop on a \"natural break\""
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Never stop on a \"natural break\"?"
+default = "never-stop-on-a-natural-break"
+why = "For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode. Stopping at milestones or other natural seams feels disciplined but in practice under-uses the available budget, because the routine treats a completed-chunk feeling as a stop signal rather than as a self-check that confirms forward progress and then continues. The budget cap, the real escalation triggers, an empty queue, and unrecoverable errors are the only signals that mean stop; anything else is a false stop that wastes paid-for capacity."
+
+[[option]]
+id = "never-stop-on-a-natural-break"
+label = "Never stop on a \"natural break\""
+directive = "A completed chunk, a milestone, or a periodic self-check is NOT a valid stop. The only valid exits are: budget/time cap, a real escalation trigger, queue genuinely empty, or unrecoverable error. Don't wrap early with budget unspent."
+why = "The adopted default. For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode."
+
+[[option]]
+id = "the-routine-treats-milestones-completed-chunks-o"
+label = "the routine treats milestones, completed chunks, or other natural …"
+directive = "the routine treats milestones, completed chunks, or other natural seams as valid stops, even when budget and queue still permit continuing"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,30 @@
+id = "RUST-PURE-STATE-TRANSITIONS-1"
+title = "Core state changes are pure functions from old state to new state, with side effects pushed to the edges"
+tag = "stack"
+domain = "rust"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How does the core of a library compute a state change in response to an event?"
+default = "pure-transitions"
+why = "A state transition expressed as a pure function (it takes the current state and an input and returns the next state, touching nothing else) is deterministic, trivially unit-testable without any environment, and reusable by any caller that holds a state value. Performing input-output, scheduling, or mutation of shared resources inside the transition couples the core logic to a runtime and makes the transition impossible to test or reuse without that runtime. Keeping side effects at the edges (the caller applies the returned state and performs any resulting effects) preserves the core's purity. Mutating state in place is sometimes faster to write but loses the ability to compare, snapshot, or replay states and makes change detection harder. Embedding effects in the transition is convenient until the logic must be tested or run somewhere the effects cannot happen."
+
+[[option]]
+id = "pure-transitions"
+label = "pure transition functions; effects at the edges"
+directive = "Core state changes are expressed as pure functions that take the current state and an input and return the next state, with no input-output, no scheduling, and no mutation of anything outside the returned value. Side effects (rendering, persistence, network, logging) are performed by the caller at the edges after applying the returned state, never inside the transition. The core's transition functions are deterministic and testable in isolation with no environment."
+why = "The adopted default. Pure transitions are deterministic, testable without a runtime, and reusable by any caller holding a state value."
+
+[[option]]
+id = "mutate-in-place"
+label = "mutate state in place"
+directive = "State changes are applied by mutating the existing state value in place rather than returning a new state from a pure function."
+why = "Sometimes faster to write, but loses cheap comparison, snapshotting, and replay, and makes change detection harder."
+
+[[option]]
+id = "effects-in-core"
+label = "perform side effects inside the transition"
+directive = "The core transition performs its own side effects (input-output, scheduling, shared-resource mutation) as part of computing the state change."
+why = "Convenient, but couples the core logic to a runtime and makes the transition impossible to test or reuse where those effects cannot occur."

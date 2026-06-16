@@ -1,0 +1,25 @@
+id = "SQL-DB-INDEX-2"
+title = "Every WHERE-clause column has a supporting index"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check, enforced by query-plan inspection in CI: representative queries run under EXPLAIN (or the engine's plan tool) and the gate fails on a sequential/full-table scan over a filtered, ordered, or joined column that should be index-backed, with composite indexes ordered most-selective-column-first. The realistic mechanism is a slow-query / missing-index audit (pg_stat_statements plus an unused-or-missing-index report, or the engine equivalent) run on a representative dataset. Conformance holds when that audit runs and surfaces no unindexed WHERE/ORDER BY/JOIN column on hot paths; it fails when indexes are only added reactively after production queries slow down."
+
+[decision]
+question = "What position does the project take on: Every WHERE-clause column has a supporting index?"
+default = "every-where-clause-column-has-a-supporting-index"
+why = "After missing FK indexes, missing WHERE-column indexes are the second-most-common source of large query slowdowns at scale. Adding indexes reactively after queries get slow surfaces the slowdown in production, where it costs significantly more to triage and fix than the original migration would have cost to author correctly."
+
+[[option]]
+id = "every-where-clause-column-has-a-supporting-index"
+label = "Every WHERE-clause column has a supporting index"
+directive = "Columns used in WHERE predicates (and in ORDER BY/JOIN keys) have a supporting index. For composite filters, the most-selective column comes first in the index."
+why = "The adopted default. After missing FK indexes, missing WHERE-column indexes are the second-most-common source of large query slowdowns at scale."
+
+[[option]]
+id = "indexes-on-where-clause-order-by-and-join-key-co"
+label = "indexes on WHERE-clause, ORDER BY, and JOIN-key columns are …"
+directive = "indexes on WHERE-clause, ORDER BY, and JOIN-key columns are added reactively in later migrations after queries get slow, rather than alongside the schema that introduces the columns"
+why = "A defensible alternative the project considered and did not adopt as the default."
