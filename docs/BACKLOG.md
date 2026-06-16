@@ -3,6 +3,27 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Scan execution modes — parallel, then job/streaming (designed 2026-06-16)
+
+Decision + plain-English design in `docs/decisions/2026-06-16_scan_execution_modes.md`.
+The audit is sequential + synchronous; at scale (5 huge repos, max model) that's a ~5-hour
+single blocking request. Two ceilings: sequential wall-clock (fix = parallel execution) and
+synchronous all-or-nothing delivery (fix = a job model with incremental findings + resume).
+Build order: **(1) parallel rule-batching + concurrent chunks** (5h → ~25min; the shared
+engine), then **(2) the job/streaming delivery layer** when multi-huge-repo is the real case.
+Auto-select the mode by scale with a manual override (model-picker philosophy). The job model
+is OUR orchestration, backend-agnostic — the CLI does it fine (it's the transcript-store/poll
+pattern generalized to findings + progress).
+
+Also queued from the same fixture verdict (AI audit quality, not execution):
+- **Applicability-scoping** — a rule should only fire when the pattern is actually present to
+  violate (e.g. don't flag "no cursor pagination" on a repo method with no list endpoint). The
+  model already self-labels these "borderline / no endpoint yet" — a prompt instruction to omit
+  hypotheticals.
+- **Bug-vs-ideal tiering in the AI layer** — deterministic security findings are now Critical
+  (done), but the *architectural* findings are still flattened into "high". Tier "actual defect"
+  vs "doesn't implement a preferred pattern" so the signal-to-noise holds on big repos.
+
 ## Chorale-separable items (flagged 2026-06-16)
 
 Surfaced while reworking the proposed-rules table. These belong in the **rust-chorale**
