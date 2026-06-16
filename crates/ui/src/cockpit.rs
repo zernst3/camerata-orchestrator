@@ -1242,6 +1242,13 @@ struct FindingView {
     severity: String,
     snippet: String,
     detail: String,
+    /// `active` (enforced), `suppressed-inline`, or `suppressed-baseline`.
+    #[serde(default = "default_finding_status")]
+    status: String,
+}
+
+fn default_finding_status() -> String {
+    "active".to_string()
 }
 
 /// The "fix the audited items" panel: one governed remediation run per repo. Fixing
@@ -1479,6 +1486,23 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(250.0),
+        // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
+        // an inline waiver). Report shows all; the gate blocks only the enforced ones.
+        ColumnDef::new(ColumnId("status"), "Enforcement", |f: &FindingView| {
+            CellValue::Text(match f.status.as_str() {
+                "suppressed-baseline" => "baseline".to_string(),
+                "suppressed-inline" => "waived".to_string(),
+                _ => "enforced".to_string(),
+            })
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(
+            BadgeVariantMap::new()
+                .with("enforced", BadgeVariant::new("Enforced", "red"))
+                .with("baseline", BadgeVariant::new("Baseline debt", "gray"))
+                .with("waived", BadgeVariant::new("Waived", "yellow")),
+        ))
+        .initial_width(150.0),
         ColumnDef::new(ColumnId("loc"), "Location", |f: &FindingView| {
             CellValue::Text(format!("{}:{}", f.path, f.line))
         })
@@ -1987,6 +2011,8 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
 #[component]
 fn ScanResults(report: ScanReportView) -> Element {
     let high = report.findings.iter().filter(|f| f.severity == "high").count();
+    let enforced = report.findings.iter().filter(|f| f.status == "active").count();
+    let suppressed = report.findings.len().saturating_sub(enforced);
     let table_key = format!("{}-{}", report.repos.join(","), report.findings.len());
 
     // The architect's per-rule alternative choices (rule id -> option id), seeded
@@ -2045,6 +2071,14 @@ fn ScanResults(report: ScanReportView) -> Element {
                 span { class: "scan-stat",
                     span { class: "scan-stat-n high", "{high}" }
                     " high severity"
+                }
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n high", "{enforced}" }
+                    " enforced (new)"
+                }
+                span { class: "scan-stat",
+                    span { class: "scan-stat-n", "{suppressed}" }
+                    " suppressed (debt/waived)"
                 }
                 span { class: "scan-stat",
                     span { class: "scan-stat-n", "{report.files_scanned}" }

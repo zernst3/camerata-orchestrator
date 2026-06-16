@@ -6,6 +6,17 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_baseline_ratchet_and_suppressions.md** — the make-or-break brownfield
+  decision: REPORT every existing violation but ENFORCE on the delta (new/changed code),
+  like eslint/ruff/sonar baselines — otherwise onboarding freezes a legacy team and
+  nobody adopts. Two homes: inline `// camerata:allow RULE -- reason [, TICKET]` for
+  surgical per-line waivers (shows in the PR diff, git-blame who/when, travels through
+  refactors) and a central `.camerata/baseline.json` for bulk/legacy/policy. Three
+  invariants: reason required + gated (reason-less waiver is itself a violation), indexed
+  centrally (one queryable registry), stale ones surfaced (dead directives flagged).
+  Content-fingerprinted so touching debt un-baselines it (the ratchet). Waivers carry the
+  debt ticket (ignore + create-story = one act). `suppression.rs` built + fully tested;
+  wired into the scan; arm-writes-baseline + registry UI next.
 - **2026-06-16_ai_native_and_agent_agnostic.md** — Camerata is AI-native: the audit,
   story investigation/decomposition, clarifications, and code-gen are all model work;
   the ONLY deterministic thing is the deny-before-execute enforcement gate (the backstop

@@ -41,6 +41,16 @@ pub struct Finding {
     pub snippet: String,
     /// The gate's own explanation of the violation.
     pub detail: String,
+    /// Suppression status: `active` (NEW/changed — the gate enforces), `suppressed-inline`
+    /// (waived by a `camerata:allow` comment), or `suppressed-baseline` (accepted
+    /// pre-existing debt / policy). Report shows all; enforcement is on `active` only.
+    #[serde(default = "default_status")]
+    pub status: String,
+}
+
+/// Findings default to `active` (enforced) until classified against suppressions.
+fn default_status() -> String {
+    "active".to_string()
 }
 
 /// One alternative the architect can codify for a proposed rule.
@@ -182,6 +192,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                     severity: severity_for(rule_id).to_string(),
                     snippet,
                     detail,
+                    status: default_status(),
                 });
             }
         }
@@ -679,6 +690,59 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
 /// worker, a frontend) is one scan. A per-repo failure (bad name, no access) is
 /// noted in the report message and does not abort the others; the scan returns
 /// what it could read. The token is required (the caller gates on it).
+/// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
+/// parsed from the files + the committed `.camerata/baseline.json`), setting each
+/// finding's `status`. Also appends a `CAM-WAIVER-NEEDS-REASON` finding for every
+/// reason-less waiver (the require-reason invariant). REPORT everything; the `status`
+/// is what lets enforcement act on the delta only.
+fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(String, String)]) {
+    use crate::suppression::{
+        classify_one, parse_inline_waivers, reasonless_waivers, Baseline, FindingRef, Status,
+        REASONLESS_RULE_ID,
+    };
+
+    let mut inline = Vec::new();
+    for (path, content) in files {
+        inline.extend(parse_inline_waivers(path, content));
+    }
+    let baseline = files
+        .iter()
+        .find(|(p, _)| p == ".camerata/baseline.json")
+        .and_then(|(_, c)| serde_json::from_str::<Baseline>(c).ok())
+        .unwrap_or_default();
+
+    for f in findings.iter_mut() {
+        let fr = FindingRef {
+            rule_id: f.rule_id.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            snippet: f.snippet.clone(),
+        };
+        f.status = match classify_one(&fr, &inline, &baseline) {
+            Status::Active => "active",
+            Status::SuppressedInline => "suppressed-inline",
+            Status::SuppressedBaseline => "suppressed-baseline",
+        }
+        .to_string();
+    }
+
+    // A reason-less waiver is itself a violation (the un-auditable hole this prevents).
+    for w in reasonless_waivers(&inline) {
+        findings.push(Finding {
+            repo: repo.to_string(),
+            path: w.path.clone(),
+            line: w.line,
+            rule_id: REASONLESS_RULE_ID.to_string(),
+            severity: "high".to_string(),
+            snippet: "camerata:allow without a reason".to_string(),
+            detail: "A waiver must carry a justification (`-- reason`); a reason-less \
+                     suppression is itself a violation."
+                .to_string(),
+            status: "active".to_string(),
+        });
+    }
+}
+
 pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
@@ -706,17 +770,21 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
                 stacks.push(detect_stack(spec, &files));
                 // Tier 1 — deterministic mechanical audit (secrets / raw SQL / path
                 // escapes), precise and line-level.
-                all_findings.extend(audit_files(spec, &files));
+                let mut repo_findings = audit_files(spec, &files);
                 // Tier 2 — AI architectural audit: the GENUINE violations that need a
                 // model to read the code (missing auth, layering breaches, N+1, etc.).
                 // Graceful: a model failure becomes a note, never blocks the scan.
                 match crate::ai_audit::audit_repo(&llm, spec, &files).await {
                     Ok((ai_findings, ai_rules)) => {
-                        all_findings.extend(ai_findings);
+                        repo_findings.extend(ai_findings);
                         ai_proposed.extend(ai_rules);
                     }
                     Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
                 }
+                // Suppressions (baseline + inline waivers): REPORT everything, but mark
+                // what's suppressed so enforcement is on the delta (new/changed code).
+                classify_repo_findings(&mut repo_findings, spec, &files);
+                all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
                     notes.push(format!(
@@ -898,6 +966,57 @@ mod tests {
     }
 
     #[test]
+    fn classify_marks_baseline_inline_and_reasonless() {
+        use crate::suppression::{fingerprint, Baseline, BaselineEntry};
+        let snippet = "let token = \"ghp_x\";";
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "SEC-NO-HARDCODED-SECRETS-1".into(),
+                path: "a.rs".into(),
+                fingerprint: fingerprint("SEC-NO-HARDCODED-SECRETS-1", snippet),
+                reason: "pre-existing".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
+        let files = vec![
+            (
+                ".camerata/baseline.json".to_string(),
+                serde_json::to_string(&baseline).unwrap(),
+            ),
+            (
+                "b.rs".to_string(),
+                "danger(); // camerata:allow SEC-NO-HARDCODED-SECRETS-1 -- vetted\n\
+                 bare(); // camerata:allow SEC-NO-RAW-SQL-CONCAT-1\n"
+                    .to_string(),
+            ),
+        ];
+        let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
+            repo: "me/api".into(),
+            path: path.into(),
+            line,
+            rule_id: rule.into(),
+            severity: "high".into(),
+            snippet: snip.into(),
+            detail: "d".into(),
+            status: "active".into(),
+        };
+        let mut findings = vec![
+            mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
+            mk("b.rs", 1, "SEC-NO-HARDCODED-SECRETS-1", "danger()"), // inline-waived
+        ];
+        classify_repo_findings(&mut findings, "me/api", &files);
+        assert_eq!(findings[0].status, "suppressed-baseline");
+        assert_eq!(findings[1].status, "suppressed-inline");
+        // The reason-less waiver on b.rs:2 surfaced as its own violation.
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "CAM-WAIVER-NEEDS-REASON" && f.status == "active"));
+    }
+
+    #[test]
     fn tech_debt_body_groups_by_repo() {
         let findings = vec![
             Finding {
@@ -908,6 +1027,7 @@ mod tests {
                 severity: "high".into(),
                 snippet: "x".into(),
                 detail: "d".into(),
+                status: "active".into(),
             },
             Finding {
                 repo: "me/web".into(),
@@ -917,6 +1037,7 @@ mod tests {
                 severity: "high".into(),
                 snippet: "y".into(),
                 detail: "d".into(),
+                status: "active".into(),
             },
         ];
         let body = tech_debt_issue_body(&findings);

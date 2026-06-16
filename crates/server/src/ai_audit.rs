@@ -145,6 +145,7 @@ pub fn parse_ai_findings(repo: &str, raw: &str) -> (Vec<Finding>, Vec<ProposedRu
                 severity: severity.to_string(),
                 snippet: title,
                 detail,
+                status: "active".to_string(),
             });
         }
     }

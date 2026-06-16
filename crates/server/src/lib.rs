@@ -28,6 +28,7 @@ pub mod provider;
 pub mod routine;
 pub mod run;
 pub mod settings;
+pub mod suppression;
 pub mod transcript;
 pub mod workspace;
 
