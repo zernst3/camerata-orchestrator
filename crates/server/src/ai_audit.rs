@@ -204,6 +204,99 @@ pub fn parse_ai_findings(repo: &str, raw: &str) -> (Vec<Finding>, Vec<ProposedRu
     (findings, proposed)
 }
 
+/// The skeptic system prompt for the adversarial-verify pass: try to REFUTE each
+/// finding, and calibrate severity to the app's real context. This is the precision
+/// guard — AI security analysis over-flags (a negligible timing residual, a single-user
+/// authz "gap"), and advisory findings shouldn't carry noise into the architect's queue.
+pub fn verify_system_prompt() -> String {
+    r#"You are a hard-to-convince security reviewer auditing an AUTOMATED tool's findings.
+For EACH finding, decide: is it a REAL, concrete, actionable issue in THIS codebase's
+context, or should it be DROPPED as vacuous / theoretical / over-flagged?
+
+Drop (keep=false) the classic over-flags:
+- a timing "oracle" whose delta is negligible (e.g. one HMAC compare against a deliberately
+  slow Argon2 baseline + network jitter) — not realistically measurable;
+- an authorization "gap" in a SINGLE-USER app where only one user exists (low/no impact);
+- anything the surrounding code already mitigates, or that needs a precondition the app
+  makes impossible.
+
+Keep (keep=true) only findings that point at a concrete, exploitable-or-clearly-wrong
+issue, and assign a CALIBRATED severity (high/medium/low) for the real context — a real
+but low-impact issue is keep=true with severity=low, not a drop.
+
+Return ONLY JSON, no prose:
+{"verdicts":[{"index":0,"keep":true,"severity":"high|medium|low","reason":"one line"}]}
+One verdict per finding, addressed by its [index]."#
+        .to_string()
+}
+
+/// Apply the skeptic's verdicts: drop refuted findings, recalibrate severity, and append
+/// the verifier's one-line reason. Robust — unparseable verdicts keep all findings as-is
+/// (fail-open: never silently lose a finding to a parse error).
+pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
+    let Some(json) = extract_json_object(raw) else {
+        return findings;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return findings;
+    };
+    let Some(arr) = v["verdicts"].as_array() else {
+        return findings;
+    };
+    let mut out = Vec::new();
+    for (i, mut f) in findings.into_iter().enumerate() {
+        match arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
+            Some(verdict) => {
+                if !verdict["keep"].as_bool().unwrap_or(true) {
+                    continue; // refuted -> drop
+                }
+                if let Some(sev) = verdict["severity"].as_str() {
+                    f.severity = match sev {
+                        "high" => "high",
+                        "low" => "low",
+                        _ => "medium",
+                    }
+                    .to_string();
+                }
+                if let Some(reason) = verdict["reason"].as_str().filter(|s| !s.is_empty()) {
+                    f.detail = format!("{} [verified: {reason}]", f.detail);
+                }
+                out.push(f);
+            }
+            // No verdict for this finding -> keep it (fail-open).
+            None => out.push(f),
+        }
+    }
+    out
+}
+
+/// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
+/// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
+/// code minutiae). Graceful: on any model failure the findings pass through unchanged.
+pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> Vec<Finding> {
+    if findings.is_empty() {
+        return findings;
+    }
+    let mut prompt = format!("Repository: {repo}\n\nScrutinize these findings:\n");
+    for (i, f) in findings.iter().enumerate() {
+        prompt.push_str(&format!(
+            "[{i}] (severity {}) {}:{} — {} :: {}\n",
+            f.severity, f.path, f.line, f.snippet, f.detail
+        ));
+    }
+    match llm
+        .complete(
+            LlmRequest::new(prompt)
+                .with_system(verify_system_prompt())
+                .with_max_tokens(2048),
+        )
+        .await
+    {
+        Ok(resp) => apply_verdicts(&resp.text, findings),
+        Err(_) => findings,
+    }
+}
+
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
 /// A model/transport failure surfaces as an error the caller turns into a scan note,
 /// so the deterministic findings always still return.
@@ -226,7 +319,11 @@ pub async fn audit_repo(
                 .with_max_tokens(4096),
         )
         .await?;
-    Ok(parse_ai_findings(repo, &resp.text))
+    let (findings, proposed) = parse_ai_findings(repo, &resp.text);
+    // Adversarial-verify pass: a fresh skeptic refutes over-flags + recalibrates severity
+    // before these advisory findings reach the architect's queue.
+    let verified = verify_findings(llm, repo, findings).await;
+    Ok((verified, proposed))
 }
 
 #[cfg(test)]
@@ -276,6 +373,47 @@ mod tests {
         assert_eq!(rules[0].enforcement_point, "integration");
         // The rule's finding_count picks up its matching finding.
         assert_eq!(rules[0].finding_count, 1);
+    }
+
+    fn finding(rule: &str, sev: &str) -> Finding {
+        Finding {
+            repo: "me/api".into(),
+            path: "a.rs".into(),
+            line: 1,
+            rule_id: rule.into(),
+            severity: sev.into(),
+            snippet: "x".into(),
+            detail: "d".into(),
+            status: "active".into(),
+        }
+    }
+
+    #[test]
+    fn apply_verdicts_drops_refuted_and_recalibrates() {
+        let findings = vec![
+            finding("AI-TIMING", "medium"), // index 0 -> refuted
+            finding("AI-AUTHZ", "high"),    // index 1 -> kept, downgraded to low
+            finding("AI-REAL", "high"),     // index 2 -> kept as-is
+        ];
+        let raw = r#"{"verdicts":[
+            {"index":0,"keep":false,"reason":"negligible timing residual"},
+            {"index":1,"keep":true,"severity":"low","reason":"single-user, low impact"},
+            {"index":2,"keep":true,"severity":"high","reason":"concrete"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(out.len(), 2, "the refuted finding is dropped");
+        assert!(out.iter().all(|f| f.rule_id != "AI-TIMING"));
+        let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
+        assert_eq!(authz.severity, "low", "recalibrated down");
+        assert!(authz.detail.contains("[verified:"), "carries the verifier reason");
+    }
+
+    #[test]
+    fn apply_verdicts_fail_open_on_garbage() {
+        let findings = vec![finding("AI-X", "high")];
+        // Unparseable verdicts -> keep all (never silently lose a finding).
+        let out = apply_verdicts("the model rambled", findings);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
