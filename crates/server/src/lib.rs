@@ -1052,7 +1052,7 @@ async fn delete_routine(
 async fn list_models() -> Json<serde_json::Value> {
     let models: Vec<_> = crate::llm::MODELS
         .iter()
-        .map(|(label, id)| serde_json::json!({ "label": label, "id": id }))
+        .map(|m| serde_json::json!({ "vendor": m.vendor, "label": m.label, "id": m.id }))
         .collect();
     Json(serde_json::json!({
         "models": models,

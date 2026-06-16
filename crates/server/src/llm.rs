@@ -1,25 +1,70 @@
 //! The LLM provider seam: every AI step in Camerata (the brownfield audit, story
 //! investigation, clarification authoring, routine-prompt authoring, the research
-//! chat) calls a model through ONE type with two interchangeable backends:
+//! chat) calls a model through ONE vendor-agnostic type.
 //!
-//! - **ClaudeCli** — shells out to the `claude` CLI. This is the LOCAL path: a human
-//!   driving the app uses their own CLI login, no API key, no separate billing.
-//! - **AnthropicApi** — calls the Anthropic API with a key. This is the PRODUCTION
-//!   path: a multi-user product can't ride one person's CLI session.
+//! **Agent-agnostic by design.** Camerata HAPPENS to ship with Anthropic wired, but the
+//! end state is vendor-neutral: a user picks whatever model they want — Anthropic,
+//! OpenAI, Google, others. The request/response shapes here ([`LlmRequest`] /
+//! [`LlmResponse`]) are deliberately vendor-neutral; a new vendor is a new match arm in
+//! [`Llm::complete`] plus its entries in [`MODELS`], NOT a rewrite. Today only Anthropic
+//! is implemented; the other vendors are reserved knobs that return a clear
+//! "not wired yet" message pointing at the seam.
 //!
-//! Both ship out of the box; the backend is selected by env
-//! (`CAMERATA_LLM_BACKEND=cli|api`, default `cli`) and the model by
-//! `CAMERATA_LLM_MODEL`. Per-call overrides let the research chat pick a model.
+//! Two axes:
+//! - **Vendor** (`CAMERATA_LLM_VENDOR`, default `anthropic`) — which provider.
+//! - **Transport** (`CAMERATA_LLM_BACKEND`, default `cli`) — for a vendor that offers
+//!   both: `cli` shells the vendor's CLI (the LOCAL path: a human's own login, no key);
+//!   `api` calls the vendor's HTTP API with a key (the PRODUCTION / multi-user path).
+//!   Anthropic offers both; other vendors are API-only.
+//!
+//! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
 
 use serde::Serialize;
 
-/// The models the UI offers in a selector (label, model id). Latest/most capable first.
-pub const MODELS: &[(&str, &str)] = &[
-    ("Opus 4.8", "claude-opus-4-8"),
-    ("Sonnet 4.6", "claude-sonnet-4-6"),
-    ("Haiku 4.5", "claude-haiku-4-5-20251001"),
-    ("Fable 5", "claude-fable-5"),
+/// One model the UI offers, tagged with its vendor so the selector can group/extend.
+pub struct ModelInfo {
+    pub vendor: &'static str,
+    pub label: &'static str,
+    pub id: &'static str,
+}
+
+/// The models the UI offers. Anthropic today; add a vendor's models here when its arm
+/// is wired in [`Llm::complete`]. Latest/most capable first.
+pub const MODELS: &[ModelInfo] = &[
+    ModelInfo { vendor: "anthropic", label: "Opus 4.8", id: "claude-opus-4-8" },
+    ModelInfo { vendor: "anthropic", label: "Sonnet 4.6", id: "claude-sonnet-4-6" },
+    ModelInfo { vendor: "anthropic", label: "Haiku 4.5", id: "claude-haiku-4-5-20251001" },
+    ModelInfo { vendor: "anthropic", label: "Fable 5", id: "claude-fable-5" },
 ];
+
+/// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
+/// reserved so the env knob + extension point are explicit (selecting them returns a
+/// clear "not wired yet" message rather than silently falling back).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vendor {
+    Anthropic,
+    OpenAi,
+    Google,
+}
+
+impl Vendor {
+    /// Parse the `CAMERATA_LLM_VENDOR` value; unknown / empty -> Anthropic (the default).
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("openai") => Vendor::OpenAi,
+            Some("google" | "gemini") => Vendor::Google,
+            _ => Vendor::Anthropic,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Vendor::Anthropic => "anthropic",
+            Vendor::OpenAi => "openai",
+            Vendor::Google => "google",
+        }
+    }
+}
 
 /// The default model when none is configured / requested. Capable by default; override
 /// per call or via `CAMERATA_LLM_MODEL`.
@@ -96,18 +141,21 @@ pub fn select_backend(pref: Option<&str>, has_api_key: bool) -> Backend {
     }
 }
 
-/// The configured provider.
+/// The configured provider: a vendor + transport + model.
 #[derive(Debug, Clone)]
 pub struct Llm {
+    vendor: Vendor,
     backend: Backend,
     default_model: String,
     api_key: Option<String>,
 }
 
 impl Llm {
-    /// Build from env: `CAMERATA_LLM_BACKEND` (cli|api, default cli),
-    /// `ANTHROPIC_API_KEY` (required for api), `CAMERATA_LLM_MODEL` (default model).
+    /// Build from env: `CAMERATA_LLM_VENDOR` (default anthropic), `CAMERATA_LLM_BACKEND`
+    /// (cli|api, default cli), `ANTHROPIC_API_KEY` (for the Anthropic api transport),
+    /// `CAMERATA_LLM_MODEL` (default model).
     pub fn from_env() -> Self {
+        let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
         let pref = std::env::var("CAMERATA_LLM_BACKEND").ok();
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
@@ -118,17 +166,21 @@ impl Llm {
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         Self {
+            vendor,
             backend,
             default_model,
             api_key,
         }
     }
 
-    pub fn backend_label(&self) -> &'static str {
-        match self.backend {
+    /// A short label for the active provider, e.g. `anthropic/cli` — shown honestly in
+    /// the UI so the user knows which vendor + transport is serving.
+    pub fn backend_label(&self) -> String {
+        let t = match self.backend {
             Backend::Cli => "cli",
             Backend::Api => "api",
-        }
+        };
+        format!("{}/{t}", self.vendor.label())
     }
 
     fn model_for(&self, req: &LlmRequest) -> String {
@@ -139,12 +191,21 @@ impl Llm {
         }
     }
 
-    /// Run a completion through the selected backend.
+    /// Run a completion through the selected vendor + transport. Adding a vendor is a new
+    /// match arm here plus its [`MODELS`] entries; the request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req);
-        match self.backend {
-            Backend::Cli => self.complete_cli(&req, &model).await,
-            Backend::Api => self.complete_api(&req, &model).await,
+        match self.vendor {
+            Vendor::Anthropic => match self.backend {
+                Backend::Cli => self.complete_cli(&req, &model).await,
+                Backend::Api => self.complete_api(&req, &model).await,
+            },
+            Vendor::OpenAi | Vendor::Google => anyhow::bail!(
+                "model vendor `{}` is not wired yet — the provider seam is ready (add an \
+                 arm in llm.rs::complete + its MODELS entries). Set CAMERATA_LLM_VENDOR=anthropic \
+                 to use the wired vendor.",
+                self.vendor.label()
+            ),
         }
     }
 
@@ -253,6 +314,7 @@ mod tests {
     #[test]
     fn model_defaulting() {
         let llm = Llm {
+            vendor: Vendor::Anthropic,
             backend: Backend::Cli,
             default_model: "claude-sonnet-4-6".to_string(),
             api_key: None,
@@ -280,7 +342,31 @@ mod tests {
 
     #[test]
     fn models_list_has_known_ids() {
-        assert!(MODELS.iter().any(|(_, id)| *id == "claude-opus-4-8"));
-        assert!(MODELS.iter().any(|(_, id)| *id == DEFAULT_MODEL));
+        assert!(MODELS.iter().any(|m| m.id == "claude-opus-4-8"));
+        assert!(MODELS.iter().any(|m| m.id == DEFAULT_MODEL));
+        // Every model is tagged with a vendor (the agent-agnostic axis).
+        assert!(MODELS.iter().all(|m| !m.vendor.is_empty()));
+    }
+
+    #[test]
+    fn vendor_parsing_defaults_to_anthropic() {
+        assert_eq!(Vendor::parse(Some("openai")), Vendor::OpenAi);
+        assert_eq!(Vendor::parse(Some("Google")), Vendor::Google);
+        assert_eq!(Vendor::parse(Some("gemini")), Vendor::Google);
+        assert_eq!(Vendor::parse(Some("anthropic")), Vendor::Anthropic);
+        assert_eq!(Vendor::parse(None), Vendor::Anthropic);
+        assert_eq!(Vendor::parse(Some("nonsense")), Vendor::Anthropic);
+    }
+
+    #[tokio::test]
+    async fn unwired_vendor_fails_clearly_without_calling_out() {
+        let llm = Llm {
+            vendor: Vendor::OpenAi,
+            backend: Backend::Api,
+            default_model: "gpt".to_string(),
+            api_key: None,
+        };
+        let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
+        assert!(err.to_string().contains("not wired yet"));
     }
 }

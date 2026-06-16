@@ -6,6 +6,17 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_ai_native_and_agent_agnostic.md** — Camerata is AI-native: the audit,
+  story investigation/decomposition, clarifications, and code-gen are all model work;
+  the ONLY deterministic thing is the deny-before-execute enforcement gate (the backstop
+  a hallucinating AI can't talk past). Brownfield is two tiers — deterministic mechanical
+  (secrets/SQL/path-escape) + an AI architectural audit for the genuine, non-lint
+  violations (missing auth, layering breaches, N+1, ...). One vendor-agnostic provider
+  seam (`llm.rs`): vendor axis (`CAMERATA_LLM_VENDOR`, anthropic wired; openai/google
+  reserved) × transport axis (`CAMERATA_LLM_BACKEND`, cli for local human / api for
+  production). Adding a vendor is a new match arm + MODELS entries, not a rewrite. Model
+  selectable per call. BUILT (Anthropic CLI + API; AI wired into scan, draft-prompt,
+  decomposition, clarify-suggest, research chat); live code-gen default is next.
 - **2026-06-16_local_checkout_subsystem.md** — repo CONTENTS live on disk in a local
   working copy (only project pointers persist server-side); the lifecycle is clone/pull
   → fleet edits on a working branch → developer runs/tests LOCALLY → explicit ship
