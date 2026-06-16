@@ -1816,8 +1816,9 @@ struct ProposedRuleView {
     repos: Vec<String>,
     #[serde(default)]
     placement: String,
+    #[serde(default)]
     finding_count: usize,
-    #[allow(dead_code)]
+    #[serde(default)]
     recommended: bool,
 }
 
@@ -1931,21 +1932,25 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
     }
 }
 
-fn finding_columns() -> Vec<ColumnDef<FindingView>> {
+fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<FindingView>> {
     let sev = BadgeVariantMap::new()
         .with("high", BadgeVariant::new("High", "red"))
-        .with("medium", BadgeVariant::new("Medium", "yellow"));
+        .with("medium", BadgeVariant::new("Medium", "yellow"))
+        .with("low", BadgeVariant::new("Low", "gray"));
     vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
             CellValue::Text(f.repo.clone())
         })
         .sortable()
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelect { options: repos })
         .initial_width(180.0),
         ColumnDef::new(ColumnId("severity"), "Severity", |f: &FindingView| {
             CellValue::Text(f.severity.clone())
         })
         .sortable()
+        .filter(FilterKind::MultiSelect {
+            options: vec!["high".to_string(), "medium".to_string(), "low".to_string()],
+        })
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
         // AUTHORITY, not just provenance: a deterministic rule hit is ENFORCED
@@ -1961,6 +1966,9 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
             })
         })
         .sortable()
+        .filter(FilterKind::MultiSelect {
+            options: vec!["enforced".to_string(), "advisory".to_string()],
+        })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
                 .with("enforced", BadgeVariant::new("Rule · enforced", "blue"))
@@ -1971,7 +1979,7 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
             CellValue::Text(f.rule_id.clone())
         })
         .sortable()
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelect { options: types })
         .initial_width(250.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
@@ -2024,6 +2032,22 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(150.0),
+        // Suggested = the rule's domain matched the scanned stack; the rest are the full
+        // library, available to arm but not recommended for this stack.
+        ColumnDef::new(ColumnId("suggested"), "For this stack", |r: &ProposedRuleView| {
+            CellValue::Text(if r.recommended {
+                "suggested".to_string()
+            } else {
+                "available".to_string()
+            })
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(
+            BadgeVariantMap::new()
+                .with("suggested", BadgeVariant::new("Suggested", "green"))
+                .with("available", BadgeVariant::new("Available", "gray")),
+        ))
+        .initial_width(130.0),
         ColumnDef::new(ColumnId("id"), "Rule", |r: &ProposedRuleView| {
             CellValue::Text(r.id.clone())
         })
@@ -2084,11 +2108,26 @@ fn FindingsTable(
         };
         (enforced, sev)
     });
+    // Distinct values for the multi-select filters (repo + finding type).
+    let mut filter_repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
+    filter_repos.sort();
+    filter_repos.dedup();
+    let mut filter_types: Vec<String> = findings.iter().map(|f| f.rule_id.clone()).collect();
+    filter_types.sort();
+    filter_types.dedup();
     let rows: Vec<(RowId, FindingView)> =
         findings.iter().map(|f| (RowId::new(), f.clone())).collect();
     let id_map: std::collections::HashMap<RowId, FindingView> =
         rows.iter().map(|(r, f)| (*r, f.clone())).collect();
-    let handle = use_table(move || TableState::new(rows.clone(), finding_columns()));
+    let handle = use_table(move || {
+        TableState::new(
+            rows.clone(),
+            finding_columns(filter_repos.clone(), filter_types.clone()),
+        )
+    });
+    // Group findings BY FINDING TYPE so same-kind violations sit together (a flat 200-row
+    // dump is paralysis); severity / authority / repo / type filter via multi-select.
+    use_hook(move || handle.set_grouping(vec![ColumnId("type")]));
     let mut busy = use_signal(|| false);
     // A durable ignore requires a reason (the require-reason invariant); optional ticket.
     let mut ignore_reason = use_signal(String::new);

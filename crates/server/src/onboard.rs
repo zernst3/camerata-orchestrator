@@ -452,17 +452,15 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
             all_domains.insert(d.clone());
         }
     }
-    let domain_refs: Vec<&str> = all_domains.iter().map(String::as_str).collect();
-    camerata_rules::select_for_domains(&set, &domain_refs)
-        .into_iter()
-        // Only the rules that actually have alternatives to choose among.
-        .filter(|r| !r.options.is_empty())
-        .filter_map(|r| {
-            // Bind to ONLY the repos whose domains include this rule's domain.
-            // Universal (`*`) rules bind to every repo. A domain rule matching no
-            // repo is dropped (it doesn't apply here).
-            let suggested: Vec<String> = if r.domain == "*" {
-                repo_domains.iter().map(|(repo, _)| repo.clone()).collect()
+    let all_repos: Vec<String> = repo_domains.iter().map(|(repo, _)| repo.clone()).collect();
+    // ALL corpus rules, not just the domain-matched ones — the architect should see the
+    // whole library and the suggested subset in one place. A rule whose domain matches the
+    // scanned stack is SUGGESTED (recommended) and pre-bound to its matching repos; the
+    // rest are AVAILABLE (recommended=false), bound to all repos so they can still be armed.
+    set.iter()
+        .map(|r| {
+            let matched_repos: Vec<String> = if r.domain == "*" {
+                all_repos.clone()
             } else {
                 repo_domains
                     .iter()
@@ -470,12 +468,15 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                     .map(|(repo, _)| repo.clone())
                     .collect()
             };
-            if suggested.is_empty() {
-                return None;
-            }
-            Some((r, suggested))
+            let suggested = !matched_repos.is_empty();
+            let repos = if suggested {
+                matched_repos
+            } else {
+                all_repos.clone()
+            };
+            (r, repos, suggested)
         })
-        .map(|(r, suggested)| {
+        .map(|(r, repos, is_suggested)| {
             let options = r
                 .options
                 .iter()
@@ -505,12 +506,12 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 scope: "repo-local".to_string(),
                 domain: r.domain.clone(),
                 enforcement_point: "content".to_string(),
-                repos: suggested,
+                repos,
                 placement: "CI gate + gate config in each repo this rule's domain applies to".to_string(),
                 finding_count: 0,
-                // Recommend the ones with a default; the no-default ones still
-                // appear (the architect MUST choose an alternative for them).
-                recommended: r.has_default(),
+                // SUGGESTED = the rule's domain matches the scanned stack. The rest are
+                // available to arm but not recommended for this stack.
+                recommended: is_suggested,
             }
         })
         .collect()
