@@ -89,6 +89,29 @@ impl Project {
         self.ruleset.process = process;
         // self.ruleset.custom is intentionally untouched.
     }
+
+    /// Merge incoming custom rules by name: an incoming rule with an existing name
+    /// REPLACES it (an explicit edit); a new name is ADDED. Existing custom rules
+    /// NOT named in `incoming` are KEPT — an import/upsert never drops a custom rule
+    /// the user didn't touch. (Deletion is an explicit `remove_custom`, never a
+    /// side effect of an upsert.)
+    pub fn merge_custom(&mut self, incoming: &[CustomRule]) {
+        for c in incoming {
+            if let Some(existing) = self.ruleset.custom.iter_mut().find(|x| x.name == c.name) {
+                *existing = c.clone();
+            } else {
+                self.ruleset.custom.push(c.clone());
+            }
+        }
+    }
+
+    /// Explicitly remove a custom rule by name (the ONLY way a custom rule leaves
+    /// the project). Returns true if one was removed.
+    pub fn remove_custom(&mut self, name: &str) -> bool {
+        let before = self.ruleset.custom.len();
+        self.ruleset.custom.retain(|c| c.name != name);
+        self.ruleset.custom.len() != before
+    }
 }
 
 /// In-memory project store + the active selection. Clone-shareable.
@@ -217,6 +240,55 @@ mod tests {
         // Custom rule survived the base upsert.
         assert_eq!(p.ruleset.custom.len(), 1);
         assert_eq!(p.ruleset.custom[0].name, "house-style");
+    }
+
+    fn custom(name: &str, body: &str) -> CustomRule {
+        CustomRule {
+            name: name.to_string(),
+            body: body.to_string(),
+            domain: "*".to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_custom_keeps_untouched_edits_named_and_never_drops() {
+        let mut p = Project {
+            id: "p".into(),
+            name: "P".into(),
+            repos: vec![],
+            ruleset: ProjectRuleset {
+                custom: vec![custom("a", "A1"), custom("b", "B1")],
+                ..Default::default()
+            },
+        };
+        // An import that only mentions "a" (edited) and a new "c" — "b" is untouched.
+        p.merge_custom(&[custom("a", "A2"), custom("c", "C1")]);
+        let by_name = |n: &str| p.ruleset.custom.iter().find(|c| c.name == n).cloned();
+        assert_eq!(by_name("a").unwrap().body, "A2", "named custom rule was edited");
+        assert_eq!(by_name("b").unwrap().body, "B1", "untouched custom rule REMAINS");
+        assert!(by_name("c").is_some(), "new custom rule added");
+        assert_eq!(p.ruleset.custom.len(), 3, "nothing dropped");
+    }
+
+    #[test]
+    fn custom_rules_only_leave_on_explicit_remove() {
+        let mut p = Project {
+            id: "p".into(),
+            name: "P".into(),
+            repos: vec![],
+            ruleset: ProjectRuleset {
+                custom: vec![custom("keep", "K"), custom("gone", "G")],
+                ..Default::default()
+            },
+        };
+        // A base-rule upsert does NOT remove custom rules.
+        p.upsert_base_rules(vec![sel("X")], vec![], vec![]);
+        assert_eq!(p.ruleset.custom.len(), 2, "upsert never drops custom");
+        // Only an explicit remove does.
+        assert!(p.remove_custom("gone"));
+        assert!(!p.remove_custom("nope"));
+        assert_eq!(p.ruleset.custom.len(), 1);
+        assert_eq!(p.ruleset.custom[0].name, "keep");
     }
 
     #[test]

@@ -73,6 +73,43 @@ Adopt these in:
 So the rules view is the ongoing control surface over the same project ruleset the
 brownfield flow first populates.
 
+## Reconciliation: the repos are ground truth; the bank rehydrates the source
+
+The Rules screen (post-brownfield) must show what is **actually applied** — read from
+each repo's emitted `.camerata/rules.json` gate config — not what the project store
+assumes. But the emitted files are **lossy** (the adopted directive only), so each
+applied rule is **rehydrated by id**:
+
+- a base rule id → the **corpus** source rule (its alternatives + context), so the
+  architect sees the full rule and which alternative is chosen, not just the directive;
+- a `CUSTOM-*` id → the **project** (its source is the project; see below);
+- an id in neither → **drift** (applied in the repo but not in the bank), surfaced.
+
+For the chosen alternative to survive the round trip, the gate config records
+`{ id, option }` per rule (not just the id). The reconcile reads the repos (gated on
+the token) and rehydrates; `/api/projects/:id/reconcile` returns the applied rules.
+
+## Custom rules: no source, never dropped by an upsert
+
+Custom rules are user-authored: they have **no corpus source** and live only in the
+project store (the source of truth). The hard invariant:
+
+> **An upsert/emit must never inadvertently delete a custom rule.** The engine must
+> KNOW the custom rule exists in the emit and carry it forward. A custom rule changes
+> ONLY when the user explicitly edits it, and leaves ONLY when the user explicitly
+> deletes it.
+
+Mechanism: **the emit is always built from the project's full ruleset (base +
+custom)**, and `arm` ALWAYS writes the project's custom rules into each repo (as
+`### CUSTOM-{name}` in AGENTS.md and as a `CUSTOM-{name}` entry in the gate config,
+so reconcile sees them). Re-emitting base rules therefore cannot drop custom — they
+are included every time. `Project::merge_custom` (import/edit) replaces a custom rule
+by name and never drops an untouched one; `Project::remove_custom` is the only path
+that removes one. Tests lock both: a base upsert keeps all custom; `merge_custom`
+edits the named one, keeps the untouched one, adds the new one; arm emits the custom
+rule into AGENTS.md + the gate config. Custom rules are creatable in both surfaces
+(brownfield + the Rules screen — the editor UI is phased).
+
 ## Honest current state / phasing
 
 - **This foundation:** the `Project` container + project store (the home for

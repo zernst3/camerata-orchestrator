@@ -140,6 +140,52 @@ async fn set_active_project(id: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct AppliedOptionView {
+    id: String,
+    label: String,
+    #[serde(default)]
+    directive: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct AppliedRuleView {
+    id: String,
+    repo: String,
+    title: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    chosen_option: Option<String>,
+    #[serde(default)]
+    chosen_label: Option<String>,
+    #[serde(default)]
+    options: Vec<AppliedOptionView>,
+    #[serde(default)]
+    is_custom: bool,
+    #[serde(default)]
+    in_corpus: bool,
+}
+
+/// Reconcile the project's repos with the rule-bank: what's actually applied,
+/// rehydrated with the full source rule (alternatives + context).
+async fn fetch_reconcile(project_id: &str) -> Option<Vec<AppliedRuleView>> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/reconcile",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v.get("applied").cloned()?).ok()
+}
+
 /// Import a ruleset JSON (upsert base rules; the server preserves custom).
 async fn import_ruleset(project_id: &str, json: String) -> bool {
     reqwest::Client::new()
@@ -170,6 +216,8 @@ fn RulesView() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut new_name = use_signal(String::new);
     let mut import_text = use_signal(String::new);
+    let mut applied = use_signal(|| Option::<Vec<AppliedRuleView>>::None);
+    let mut reconciling = use_signal(|| false);
 
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
@@ -232,12 +280,70 @@ fn RulesView() -> Element {
                         "custom": p.ruleset.custom.iter().map(|c| serde_json::json!({"name": c.name, "body": c.body, "domain": c.domain})).collect::<Vec<_>>(),
                     })).unwrap_or_default();
                     let pid = p.id.clone();
+                    let pid_rec = p.id.clone();
                     rsx! {
                         div { class: "rules-sections",
                             RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
                             RuleCount { label: "Cross-repo rules (API contracts)", n: p.ruleset.cross_repo.len() }
                             RuleCount { label: "Process rules (commit/PR)", n: p.ruleset.process.len() }
                             RuleCount { label: "Custom rules", n: p.ruleset.custom.len() }
+                        }
+
+                        // Reconcile: read what's ACTUALLY in the repos and rehydrate
+                        // each rule's source (alternatives + context) from the rule-bank.
+                        p { class: "section-label", "Applied in the repos (reconciled with the rule-bank)" }
+                        p { class: "section-hint", "Reads each repo's emitted gate config (the ground truth of what's applied) and matches every rule id back to its source rule — so you see the alternatives and context, not just the adopted directive. Needs GitHub connected." }
+                        button {
+                            class: "btn-restart",
+                            disabled: reconciling(),
+                            onclick: move |_| {
+                                let id = pid_rec.clone();
+                                reconciling.set(true);
+                                spawn(async move {
+                                    applied.set(fetch_reconcile(&id).await);
+                                    reconciling.set(false);
+                                });
+                            },
+                            if reconciling() { "Reconciling…" } else { "Reconcile with repos" }
+                        }
+                        if let Some(rules) = applied() {
+                            div { class: "applied-list",
+                                if rules.is_empty() {
+                                    p { class: "section-hint", "No rules found in the repos yet (none armed, or GitHub not connected)." }
+                                }
+                                for r in rules.iter() {
+                                    div { class: "applied-rule",
+                                        div { class: "applied-rule-head",
+                                            span { class: "applied-rule-id", "{r.id}" }
+                                            span { class: "applied-rule-repo", "{r.repo}" }
+                                            if r.is_custom { span { class: "applied-tag custom", "custom" } }
+                                            if !r.in_corpus && !r.is_custom { span { class: "applied-tag drift", "not in rule-bank" } }
+                                        }
+                                        if !r.title.is_empty() && r.title != r.id {
+                                            p { class: "applied-rule-title", "{r.title}" }
+                                        }
+                                        if !r.summary.is_empty() {
+                                            p { class: "applied-rule-summary", "{r.summary}" }
+                                        }
+                                        if !r.options.is_empty() {
+                                            div { class: "applied-options",
+                                                for o in r.options.iter() {
+                                                    {
+                                                        let is_chosen = r.chosen_option.as_deref() == Some(o.id.as_str());
+                                                        let cls = if is_chosen { "applied-option chosen" } else { "applied-option" };
+                                                        rsx! {
+                                                            div { class: "{cls}", title: "{o.directive}",
+                                                                span { class: "applied-option-mark", if is_chosen { "● chosen" } else { "○" } }
+                                                                span { class: "applied-option-label", "{o.label}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         p { class: "section-label", "Export ruleset (source of truth)" }
                         textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
@@ -995,6 +1101,8 @@ struct ArmRuleReq {
     id: String,
     title: String,
     directive: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    option: Option<String>,
     enforcement: String,
     repos: Vec<String>,
 }
@@ -1361,12 +1469,12 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
                     let mut arm_reqs = Vec::new();
                     let mut unresolved = Vec::new();
                     for r in &picked {
-                        let directive = if r.options.is_empty() {
-                            r.title.clone()
+                        let (directive, option) = if r.options.is_empty() {
+                            (r.title.clone(), None)
                         } else {
                             let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
-                            match oid.and_then(|oid| r.options.iter().find(|o| o.id == oid).map(|o| o.directive.clone())) {
-                                Some(d) if !d.is_empty() => d,
+                            match oid.clone().and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone())) {
+                                Some(d) if !d.is_empty() => (d, oid),
                                 _ => { unresolved.push(r.id.clone()); continue; }
                             }
                         };
@@ -1378,6 +1486,7 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
                             id: r.id.clone(),
                             title: r.title.clone(),
                             directive,
+                            option,
                             enforcement: r.enforcement.clone(),
                             repos,
                         });

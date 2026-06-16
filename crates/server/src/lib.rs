@@ -20,6 +20,7 @@ pub mod decompose;
 pub mod notify;
 pub mod onboard;
 pub mod project;
+pub mod reconcile;
 pub mod live_fleet;
 pub mod provider;
 pub mod routine;
@@ -128,6 +129,7 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/ruleset",
             get(export_project_ruleset).post(import_project_ruleset),
         )
+        .route("/api/projects/:id/reconcile", get(reconcile_project))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -363,20 +365,35 @@ async fn import_project_ruleset(
             incoming.cross_repo.clone(),
             incoming.process.clone(),
         );
-        // Merge imported custom rules in by name (imported wins), never dropping
+        // Merge imported custom rules by name (imported wins), never dropping
         // existing ones that aren't in the import.
-        for c in &incoming.custom {
-            if let Some(existing) = p.ruleset.custom.iter_mut().find(|x| x.name == c.name) {
-                *existing = c.clone();
-            } else {
-                p.ruleset.custom.push(c.clone());
-            }
-        }
+        p.merge_custom(&incoming.custom);
     });
     match updated {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
+}
+
+/// Reconcile a project's repos with the rule-bank: read each repo's emitted gate
+/// config (ground truth of what's applied) and rehydrate the full source rule
+/// (alternatives + context) by id. Gated on the token (reads the repos). Returns
+/// the applied rules with their source rehydrated.
+async fn reconcile_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to reconcile." }));
+    };
+    let applied = crate::reconcile::reconcile_repos(&project.repos, &token).await;
+    Json(serde_json::json!({ "ok": true, "applied": applied }))
 }
 
 /// Connection health for the optional integrations (GitHub, Claude). Probes
@@ -474,7 +491,10 @@ struct ArmReq {
 /// Arm: install the approved ruleset into each repo via a governance PR (AGENTS.md
 /// / CONVENTIONS.md / gate config), per the camerata-ai emit format. Gated on the
 /// token (needs Contents + PR write). Returns a per-repo result list.
-async fn onboard_arm(Json(req): Json<ArmReq>) -> Json<serde_json::Value> {
+async fn onboard_arm(
+    State(state): State<AppState>,
+    Json(req): Json<ArmReq>,
+) -> Json<serde_json::Value> {
     if req.rules.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "No rules selected to arm." }));
     }
@@ -485,6 +505,16 @@ async fn onboard_arm(Json(req): Json<ArmReq>) -> Json<serde_json::Value> {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to arm." }));
     };
 
+    // The active project's custom rules are ALWAYS carried into the emit, so a
+    // re-emit of base rules can never inadvertently drop them (they go to the repos
+    // their domain applies to; `*` = all). They are dropped only when the user
+    // explicitly removes them from the project.
+    let project_custom = state
+        .projects
+        .active()
+        .map(|p| p.ruleset.custom)
+        .unwrap_or_default();
+
     let by_repo = crate::arm::rules_by_repo(&req.rules);
     let mut results = Vec::new();
     for (repo, rules) in by_repo {
@@ -492,7 +522,11 @@ async fn onboard_arm(Json(req): Json<ArmReq>) -> Json<serde_json::Value> {
             results.push(serde_json::json!({ "repo": repo, "ok": false, "message": "not owner/repo" }));
             continue;
         };
-        let files = crate::arm::arm_files_for_repo(&rules);
+        let custom: Vec<&crate::project::CustomRule> = project_custom
+            .iter()
+            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || c.domain == repo)
+            .collect();
+        let files = crate::arm::arm_files_for_repo(&rules, &custom);
         match crate::arm::arm_repo(owner, name, &token, &files).await {
             Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
             Err(e) => {
