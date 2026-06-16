@@ -22,6 +22,7 @@ mod routines;
 mod screens;
 mod style;
 mod toast;
+mod workspace;
 
 use std::sync::Arc;
 

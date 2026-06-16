@@ -6,6 +6,17 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_local_checkout_subsystem.md** — repo CONTENTS live on disk in a local
+  working copy (only project pointers persist server-side); the lifecycle is clone/pull
+  → fleet edits on a working branch → developer runs/tests LOCALLY → explicit ship
+  (push + open PR), nothing auto-merges. Checkouts live under a single VISIBLE workspace
+  folder the architect picks (native `rfd` dialog), at `<root>/<owner>/<repo>`, so the
+  dev can open and run them normally; the choice persists in `settings.json`. Git is
+  shelled out (`tokio::process`), the token injected only into transient clone/fetch/push
+  commands and scrubbed from the persisted `origin`. Governance metadata stays
+  API-direct-to-PR; this path is exclusively for code work. Server `settings.rs` +
+  `workspace.rs` + 5 endpoints; UI **Workspace** cockpit tab. BUILT (46 server tests incl.
+  a local git round-trip).
 - **2026-06-16_project_container_and_rules_management.md** — the PROJECT is the
   foundational data container (the Azure-resource-group of Camerata): repos + the
   full ruleset (per-repo base selections, cross-repo rules, process rules, custom
@@ -135,6 +146,8 @@ written down, so the trail is navigable, not just buried in commit messages.
 | Cross-agent / integration gate (third tier, contract enforcement) | ADR `cross_agent_integration_gate`; `ENFORCEMENT.md` |
 | Story decomposition (parent -> component stories by practice) | ADR `story_decomposition_by_practice` |
 | Routine dashboard (manage scheduled governed routines) | ADR `routine_dashboard` |
+| Project container (repos + ruleset + settings, switchable; non-repo rule persistence) | ADR `project_container_and_rules_management` |
+| Local checkout / run-before-push (workspace folder, clone, branch, ship) | ADR `local_checkout_subsystem` |
 | Credential-delegated scope + multi-repo + story source/target split | ADR `credential_delegated_scope_and_build_targets`; `WORKTRACKER_INTEGRATION.md` |
 | Process rules + the VCS-action gate (`AB#{id}`); the rule taxonomy | ADR `process_rules_and_vcs_action_gate`; `ENFORCEMENT.md` |
 | The stack top-to-bottom | `ARCHITECTURE.md` |

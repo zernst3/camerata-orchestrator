@@ -27,6 +27,8 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 # Auto-load a gitignored .env at the repo root (standalone-server path).
 dotenvy = "0.15"
+# Resolve the per-user data dir to persist projects across launches.
+dirs = "6"
 # Whole-repo brownfield scan: download the repo tarball in ONE request and
 # gunzip + untar it locally (no per-file API calls / rate-limit blowup), and a
 # direct reqwest client for the binary download (the shared transport is text-only).

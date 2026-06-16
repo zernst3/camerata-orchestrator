@@ -204,6 +204,35 @@ impl RoutineStore {
         routine
     }
 
+    /// Edit a routine's user-facing fields in place (name / schedule / intent /
+    /// prompt / scope). Mirrors `create`'s rule: an empty reviewed prompt is
+    /// re-scaffolded from the intent so a routine never runs the raw intent as-is.
+    /// `enabled` and `last_run` are preserved.
+    pub fn update(&self, id: &str, req: &CreateRoutineReq) -> Option<Routine> {
+        let mut guard = self.items.lock().ok()?;
+        let r = guard.iter_mut().find(|r| r.id == id)?;
+        r.name = req.name.clone();
+        r.schedule = req.schedule.clone();
+        r.intent = req.intent.clone();
+        r.scope = req.scope.clone();
+        r.prompt = if req.prompt.trim().is_empty() {
+            scaffold_prompt(&req.intent, &req.scope)
+        } else {
+            req.prompt.clone()
+        };
+        Some(r.clone())
+    }
+
+    /// Delete a routine by id. Returns true if one was removed.
+    pub fn delete(&self, id: &str) -> bool {
+        let Ok(mut guard) = self.items.lock() else {
+            return false;
+        };
+        let before = guard.len();
+        guard.retain(|r| r.id != id);
+        guard.len() != before
+    }
+
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Option<Routine> {
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
@@ -271,5 +300,48 @@ mod tests {
         assert_eq!(summary.allows, 1);
 
         assert!(store.run_now("nope").is_none());
+    }
+
+    #[test]
+    fn update_edits_fields_and_preserves_enabled_and_last_run() {
+        let store = RoutineStore::seeded();
+        // Record a run on rt-1 so we can prove last_run survives an edit.
+        store.run_now("rt-1").unwrap();
+
+        let edited = store
+            .update(
+                "rt-1",
+                &CreateRoutineReq {
+                    name: "Renamed".to_string(),
+                    schedule: "weekly Mon,Wed 09:00".to_string(),
+                    intent: "new intent".to_string(),
+                    prompt: String::new(), // empty -> re-scaffolded from intent
+                    scope: "write (gated)".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(edited.name, "Renamed");
+        assert_eq!(edited.schedule, "weekly Mon,Wed 09:00");
+        assert_eq!(edited.scope, "write (gated)");
+        assert!(edited.prompt.contains("new intent"), "empty prompt re-scaffolded");
+        assert!(edited.enabled, "enabled flag preserved across edit");
+        assert!(edited.last_run.is_some(), "last_run preserved across edit");
+
+        assert!(store.update("nope", &CreateRoutineReq {
+            name: "x".into(), schedule: "daily 09:00".into(), intent: "x".into(),
+            prompt: String::new(), scope: "read-only".into(),
+        }).is_none());
+    }
+
+    #[test]
+    fn delete_removes_only_the_named_routine() {
+        let store = RoutineStore::seeded();
+        assert_eq!(store.list().len(), 3);
+        assert!(store.delete("rt-2"));
+        assert_eq!(store.list().len(), 2);
+        assert!(store.list().iter().all(|r| r.id != "rt-2"));
+        // Deleting a missing id is a no-op false.
+        assert!(!store.delete("rt-2"));
+        assert!(!store.delete("nope"));
     }
 }

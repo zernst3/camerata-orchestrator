@@ -38,8 +38,17 @@ project. (This generalizes the per-process single-context model we have today.)
 This answers the open question: the **non-repo rules have no home in any repo** — by
 construction they span repos or are account-level, so they live at the **project
 level** (the engine's gates read them from the project store), NOT in a `.camerata/`
-file. Today the orchestrator has `camerata-persistence` (SQLite); the project store
-rides it.
+file.
+
+**Persistence mechanism (built 2026-06-16):** the project store persists to a JSON
+file, `projects.json`, in the per-user data dir (`dirs::data_dir()/camerata/`), via
+`ProjectStore::load_or_new(path)` — loaded in `AppState::from_env`, saved after every
+create/set-active/update. App-level settings (the workspace root) persist the same way
+in `settings.json` (`SettingsStore`). Only project CONFIGS + POINTERS persist here, not
+repo contents (those clone to the local workspace — see ADR `local_checkout_subsystem`).
+This is deliberately NOT on `camerata-persistence` (SQLite): the project set is a small
+document that maps cleanly to one JSON file and wants to be hand-inspectable; the SQLite
+event-sourced store is for the versioned artifact history, a different shape.
 
 ## 3. The ruleset is one source of truth; edits are an upsert
 

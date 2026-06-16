@@ -36,6 +36,10 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* The window itself never scrolls — the app fills the viewport exactly and
+     scrolling happens inside the content panes (e.g. .cockpit-scroll). This kills
+     the persistent ~95%-height page scrollbar. */
+  overflow: hidden;
   background: var(--paper);
   color: var(--ink);
   font-family: system-ui, BlinkMacSystemFont, "Segoe UI",
@@ -45,7 +49,8 @@ html, body {
 }
 
 .app-root {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -892,7 +897,7 @@ html, body {
 /* ===================================================================== */
 /* The enterprise cockpit — a dense, single-pane control surface.        */
 /* ===================================================================== */
-.cockpit { display: flex; flex-direction: column; height: calc(100vh - 44px); width: 100%; background: var(--paper); }
+.cockpit { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; background: var(--paper); }
 
 /* Top bar */
 .cockpit-topbar { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -1264,4 +1269,68 @@ html, body {
 .routine-draft-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .routine-authored { font-size: 12px; color: var(--ink-soft); font-style: italic; }
 .routine-prompt-input { width: 100%; box-sizing: border-box; margin-bottom: 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; resize: vertical; }
+
+/* Empty / edit states + row action buttons. */
+.routine-empty { padding: 16px; font-size: 13px; color: var(--ink-soft); }
+.routine-row.editing { background: var(--accent-wash); }
+.btn-edit-sm {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 600;
+  padding: 5px 11px; border-radius: 7px; cursor: pointer;
+}
+.btn-edit-sm:hover { border-color: var(--accent); color: var(--accent-ink); }
+.btn-delete-sm {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); font-size: 12px; font-weight: 600;
+  padding: 5px 11px; border-radius: 7px; cursor: pointer;
+}
+.btn-delete-sm:hover { border-color: #c0392b; color: #c0392b; }
+.btn-delete-sm.confirm { background: #c0392b; border-color: #c0392b; color: #fff; }
+
+/* Structured schedule picker. */
+.sched-picker { margin: 4px 0 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: #fbfaf7; }
+.sched-freq { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.sched-freq-btn {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); font-size: 12.5px; font-weight: 600;
+  padding: 6px 14px; border-radius: 999px; cursor: pointer; transition: all .15s var(--ease);
+}
+.sched-freq-btn:hover { border-color: var(--accent); color: var(--accent-ink); }
+.sched-freq-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sched-detail { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px; }
+.sched-dow { display: flex; gap: 5px; flex-wrap: wrap; }
+.sched-dow-btn {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); font-size: 11.5px; font-weight: 600;
+  width: 38px; padding: 6px 0; border-radius: 7px; cursor: pointer; text-align: center;
+}
+.sched-dow-btn:hover { border-color: var(--accent); }
+.sched-dow-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sched-field { display: flex; flex-direction: column; gap: 4px; }
+.sched-field > span { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--ink-faint); text-transform: uppercase; }
+.sched-field .addressee-input { flex: none; min-width: 0; }
+.sched-num { width: 80px; }
+.sched-scope-field { flex: 1; min-width: 200px; }
+.sched-scope-hint { margin: -2px 0 12px; line-height: 1.5; }
+.sched-preview { margin: 12px 0 0; font-size: 12.5px; color: var(--ink-soft); }
+.sched-preview-val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); font-weight: 600; }
+.routine-save-row { display: flex; gap: 10px; align-items: center; }
+
+/* ---- local workspace surface ---------------------------------------------- */
+.ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.ws-folder-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.ws-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); flex: 1; min-width: 200px; word-break: break-all; }
+.ws-path.none { color: var(--ink-faint); font-style: italic; font-family: inherit; }
+.ws-hint { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0; }
+.ws-project { margin-top: 18px; }
+.ws-project-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
+.ws-repo { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; background: var(--surface); }
+.ws-repo-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ws-repo-name { font-size: 14px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ws-repo-state { font-size: 12.5px; color: var(--ink-faint); }
+.ws-repo-state.cloned { color: var(--good); font-weight: 600; }
+.ws-repo-path { font-size: 11.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0 10px; word-break: break-all; }
+.ws-repo-actions { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.ws-branch { width: 180px; }
+.ws-title-field { flex: 1; min-width: 180px; }
+.ws-repo-dirty { font-size: 12.5px; color: var(--accent-ink); margin: 10px 0 0; }
+.ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
+.ws-repo-pr a { color: var(--accent-ink); }
+.ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
 "#;

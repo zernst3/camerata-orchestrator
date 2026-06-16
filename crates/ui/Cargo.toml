@@ -59,6 +59,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Locate the per-user data directory so the SQLite version history persists across
 # launches (platform-correct: ~/Library/Application Support on macOS, etc.).
 dirs = "6"
+# Native OS folder picker for choosing the local workspace root (the visible folder
+# where project repos are cloned). Async API integrates with the desktop event loop.
+rfd = "0.15"
 # Auto-load a gitignored .env at the repo root so secrets (the GitHub token) don't
 # have to be exported into the shell before launching.
 dotenvy = "0.15"

@@ -114,13 +114,17 @@ impl Project {
     }
 }
 
-/// In-memory project store + the active selection. Clone-shareable.
+/// Project store + the active selection, persisted to a JSON file so projects
+/// (their configs + pointers, NOT repo contents) survive across launches.
+/// Clone-shareable.
 #[derive(Clone, Default)]
 pub struct ProjectStore {
     inner: std::sync::Arc<Mutex<State>>,
+    /// Where the store persists. `None` = in-memory only (tests).
+    path: Option<std::sync::Arc<std::path::PathBuf>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct State {
     projects: Vec<Project>,
     active: Option<String>,
@@ -128,9 +132,40 @@ struct State {
 }
 
 impl ProjectStore {
-    /// An empty store (clean slate).
+    /// An empty, NON-persisted store (tests / clean in-memory use).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load the store from `path` (or start empty if it doesn't exist yet), and
+    /// persist every change back to it. This is what the running app uses, so
+    /// projects survive restarts.
+    pub fn load_or_new(path: std::path::PathBuf) -> Self {
+        let state = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<State>(&s).ok())
+            .unwrap_or_default();
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(state)),
+            path: Some(std::sync::Arc::new(path)),
+        }
+    }
+
+    /// Write the current state to disk (best-effort; a write failure does not break
+    /// the running store).
+    fn save(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let Ok(state) = self.inner.lock() else {
+            return;
+        };
+        if let Ok(json) = serde_json::to_string_pretty(&*state) {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(path.as_path(), json);
+        }
     }
 
     /// All projects.
@@ -155,40 +190,54 @@ impl ProjectStore {
 
     /// Create a project and make it active.
     pub fn create(&self, name: &str, repos: Vec<String>) -> Option<Project> {
-        let mut s = self.inner.lock().ok()?;
-        s.counter += 1;
-        let id = format!("proj-{}", s.counter);
-        let project = Project {
-            id: id.clone(),
-            name: name.to_string(),
-            repos,
-            ruleset: ProjectRuleset::default(),
+        let project = {
+            let mut s = self.inner.lock().ok()?;
+            s.counter += 1;
+            let id = format!("proj-{}", s.counter);
+            let project = Project {
+                id: id.clone(),
+                name: name.to_string(),
+                repos,
+                ruleset: ProjectRuleset::default(),
+            };
+            s.projects.push(project.clone());
+            s.active = Some(id);
+            project
         };
-        s.projects.push(project.clone());
-        s.active = Some(id);
+        self.save();
         Some(project)
     }
 
     /// Set the active project.
     pub fn set_active(&self, id: &str) -> bool {
-        let mut s = match self.inner.lock() {
-            Ok(s) => s,
-            Err(_) => return false,
+        let ok = {
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            if s.projects.iter().any(|p| p.id == id) {
+                s.active = Some(id.to_string());
+                true
+            } else {
+                false
+            }
         };
-        if s.projects.iter().any(|p| p.id == id) {
-            s.active = Some(id.to_string());
-            true
-        } else {
-            false
+        if ok {
+            self.save();
         }
+        ok
     }
 
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
-        let mut s = self.inner.lock().ok()?;
-        let p = s.projects.iter_mut().find(|p| p.id == id)?;
-        f(p);
-        Some(p.clone())
+        let updated = {
+            let mut s = self.inner.lock().ok()?;
+            let p = s.projects.iter_mut().find(|p| p.id == id)?;
+            f(p);
+            p.clone()
+        };
+        self.save();
+        Some(updated)
     }
 }
 

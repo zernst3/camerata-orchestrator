@@ -25,6 +25,8 @@ pub mod live_fleet;
 pub mod provider;
 pub mod routine;
 pub mod run;
+pub mod settings;
+pub mod workspace;
 
 use std::sync::Arc;
 
@@ -59,6 +61,7 @@ pub struct AppState {
     routines: RoutineStore,
     notifications: crate::notify::NotificationStore,
     projects: crate::project::ProjectStore,
+    settings: crate::settings::SettingsStore,
 }
 
 impl AppState {
@@ -74,6 +77,7 @@ impl AppState {
             routines: RoutineStore::new(),
             notifications: crate::notify::NotificationStore::new(),
             projects: crate::project::ProjectStore::new(),
+            settings: crate::settings::SettingsStore::new(),
         }
     }
 
@@ -95,6 +99,15 @@ impl AppState {
     pub fn from_env() -> Self {
         let mut state = Self::new(Arc::new(InMemoryStoryStore::new()));
         state.provider = ProviderHandle::from_env();
+        // Projects (their configs + pointers, NOT repo contents) persist across
+        // launches in the per-user data dir, so an architect's projects survive a
+        // restart. Falls back to an in-memory store if the data dir can't be
+        // resolved (the app still runs; it just won't persist that session).
+        if let Some(data) = dirs::data_dir() {
+            let dir = data.join("camerata");
+            state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
+            state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+        }
         state
     }
 }
@@ -145,8 +158,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/children", get(list_children))
         .route("/api/routines", get(list_routines).post(create_routine))
         .route("/api/routines/draft-prompt", post(draft_routine_prompt))
+        .route(
+            "/api/routines/:id",
+            axum::routing::put(update_routine).delete(delete_routine),
+        )
         .route("/api/routines/:id/enable", post(set_routine_enabled))
         .route("/api/routines/:id/run", post(run_routine_now))
+        // Local workspace: the user picks a visible folder; project repos clone under
+        // it, the fleet edits there, the dev runs/tests locally, then ship pushes + PRs.
+        .route("/api/settings", get(get_settings))
+        .route("/api/settings/workspace", post(set_workspace_root))
+        .route(
+            "/api/projects/:id/checkout",
+            get(checkout_status).post(checkout_project),
+        )
+        .route("/api/projects/:id/branch", post(checkout_branch))
+        .route("/api/projects/:id/ship", post(ship_repo))
         .with_state(state)
 }
 
@@ -910,6 +937,159 @@ async fn run_routine_now(
         .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
 }
 
+/// Edit an existing routine (name / schedule / intent / prompt / scope).
+async fn update_routine(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateRoutineReq>,
+) -> Result<Json<Routine>, AppError> {
+    state
+        .routines
+        .update(&id, &req)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+}
+
+/// Delete a routine.
+async fn delete_routine(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if state.routines.delete(&id) {
+        Ok(Json(serde_json::json!({ "deleted": id })))
+    } else {
+        Err(AppError(anyhow::anyhow!("routine not found: {id}")))
+    }
+}
+
+// ── local workspace (checkouts) ───────────────────────────────────────────────
+
+/// The current app settings (incl. the workspace root).
+async fn get_settings(State(state): State<AppState>) -> Json<crate::settings::Settings> {
+    Json(state.settings.get())
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceRootReq {
+    path: Option<String>,
+}
+
+/// Set the workspace root (the visible folder where repos are cloned).
+async fn set_workspace_root(
+    State(state): State<AppState>,
+    Json(req): Json<WorkspaceRootReq>,
+) -> Json<crate::settings::Settings> {
+    Json(state.settings.set_workspace_root(req.path))
+}
+
+/// Read-only checkout status for every repo in a project (no network).
+async fn checkout_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+    let project = state
+        .projects
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let Some(root) = state.settings.workspace_root() else {
+        return Err(AppError(anyhow::anyhow!(
+            "no workspace folder is set — pick one first"
+        )));
+    };
+    let root = std::path::PathBuf::from(root);
+    let mut out = Vec::with_capacity(project.repos.len());
+    for repo in &project.repos {
+        out.push(crate::workspace::checkout_status(&root, repo).await);
+    }
+    Ok(Json(out))
+}
+
+/// Clone (or fast-forward) every repo in a project into the workspace.
+async fn checkout_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::workspace::RepoCheckout>>, AppError> {
+    let project = state
+        .projects
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let Some(root) = state.settings.workspace_root() else {
+        return Err(AppError(anyhow::anyhow!(
+            "no workspace folder is set — pick one first"
+        )));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN to clone"
+        )));
+    }
+    let root = std::path::PathBuf::from(root);
+    let mut out = Vec::with_capacity(project.repos.len());
+    for repo in &project.repos {
+        out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
+    }
+    Ok(Json(out))
+}
+
+#[derive(serde::Deserialize)]
+struct BranchReq {
+    repo: String,
+    branch: String,
+}
+
+/// Create (or switch to) a working branch in a project's local clone.
+async fn checkout_branch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<BranchReq>,
+) -> Result<Json<crate::workspace::RepoCheckout>, AppError> {
+    let _project = state
+        .projects
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let Some(root) = state.settings.workspace_root() else {
+        return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
+    };
+    let root = std::path::PathBuf::from(root);
+    crate::workspace::create_branch(&root, &req.repo, &req.branch).await?;
+    Ok(Json(crate::workspace::checkout_status(&root, &req.repo).await))
+}
+
+#[derive(serde::Deserialize)]
+struct ShipReq {
+    repo: String,
+    branch: String,
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+/// Ship a repo: push its working branch and open a PR. Returns the PR URL.
+async fn ship_repo(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShipReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let _project = state
+        .projects
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let Some(root) = state.settings.workspace_root() else {
+        return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!(
+            "no GitHub token — set CAMERATA_GITHUB_TOKEN to push"
+        )));
+    }
+    let root = std::path::PathBuf::from(root);
+    let url = crate::workspace::ship(&req.repo, &req.branch, &req.title, &req.body, &root, &token)
+        .await?;
+    Ok(Json(serde_json::json!({ "pr_url": url })))
+}
+
 // ── error type ──────────────────────────────────────────────────────────────
 
 /// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
@@ -919,6 +1099,12 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let body = Json(serde_json::json!({ "error": self.0.to_string() }));
         (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(e: anyhow::Error) -> Self {
+        AppError(e)
     }
 }
 

@@ -1,7 +1,7 @@
 # Routine dashboard: manage scheduled, governed agent routines
 
 Date: 2026-06-15
-Status: Accepted (design); NOT built.
+Status: Accepted; dashboard + CRUD BUILT (2026-06-16). Auto-fire scheduler still pending.
 Deciders: Zach (architect), Claude (architect)
 
 Companion docs: [`ENFORCEMENT.md`](../ENFORCEMENT.md), [`VISION.md`](../VISION.md),
@@ -52,9 +52,30 @@ execution and governance are the existing engine.
 
 ## Honest current state
 
-Design only; not built. Prerequisites: the run model (Phase 3, in progress), a routine
-definition + store, and a scheduler that fires them. Today there is no routine concept
-in the codebase.
+The dashboard and its full CRUD are BUILT (`crates/ui/src/routines.rs`,
+`crates/server/src/routine.rs`): list with loading/empty states, create, **edit**,
+**delete** (two-click confirm), enable/disable, run-now (real-gate verdict summary).
+The remaining gap is the **auto-fire scheduler** — the dashboard manages routines and
+run-now executes them, but nothing fires them on their schedule yet (see Open
+questions). Endpoints: `GET/POST /api/routines`, `PUT/DELETE /api/routines/:id`,
+`POST /api/routines/:id/{enable,run}`, `POST /api/routines/draft-prompt`.
+
+### Schedule + scope are STRUCTURED inputs (2026-06-16)
+
+Two UX decisions made when building the create/edit form, both because free text is the
+wrong input for a value with a small known shape:
+
+- **Schedule** is a frequency picker (One-off / Daily / Weekly / Monthly) with the
+  controls each frequency needs — weekday toggles, day-of-month, a one-off calendar
+  date — plus a native time input, with a live preview of the serialized string. The
+  BFF still STORES a human-readable schedule string (`daily 09:00`,
+  `weekly Mon,Wed 09:00`, `monthly day 15 09:00`, `once 2026-06-20 14:00`); the UI owns
+  the shape and parses it back for Edit prefill. (When the auto-fire scheduler lands it
+  will parse this same string — or the picker can emit cron directly then.)
+- **Scope** is a select of meaningful permission levels — Read-only (inspect, no
+  writes), Write (gated edits on a branch, no push), Write + open PR (pushes a branch,
+  opens a PR; nothing auto-merges) — with an inline explanation, not an opaque free-text
+  field.
 
 ## Open questions
 

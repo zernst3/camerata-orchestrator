@@ -6,6 +6,91 @@
 
 use dioxus::prelude::*;
 
+/// Weekday labels, Sunday-first (matches the `weekdays` toggle vector order).
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Serialize the structured schedule picker into the human-readable schedule string
+/// the BFF stores (e.g. `daily 09:00`, `weekly Mon,Wed 09:00`, `monthly day 15 09:00`,
+/// `once 2026-06-20 14:00`). The empty-field fallbacks keep the string well-formed
+/// even before every control is touched.
+fn build_schedule(freq: &str, time: &str, date: &str, weekdays: &[bool], monthday: u32) -> String {
+    let t = if time.is_empty() { "09:00" } else { time };
+    match freq {
+        "once" => {
+            if date.is_empty() {
+                format!("once {t}")
+            } else {
+                format!("once {date} {t}")
+            }
+        }
+        "weekly" => {
+            let days: Vec<&str> = weekdays
+                .iter()
+                .enumerate()
+                .filter(|(_, on)| **on)
+                .map(|(i, _)| WEEKDAYS[i])
+                .collect();
+            let days_str = if days.is_empty() {
+                "Mon".to_string()
+            } else {
+                days.join(",")
+            };
+            format!("weekly {days_str} {t}")
+        }
+        "monthly" => format!("monthly day {monthday} {t}"),
+        _ => format!("daily {t}"),
+    }
+}
+
+/// Parse a stored schedule string back into the picker state, for Edit prefill.
+/// Returns `(freq, time, date, weekdays, monthday)`. Anything that doesn't match a
+/// known shape falls back to a daily-09:00 default (the schedule string is still
+/// shown verbatim in the row, so nothing is lost — the picker just starts neutral).
+fn parse_schedule(s: &str) -> (String, String, String, Vec<bool>, u32) {
+    let default_days = vec![false, true, false, false, false, false, false];
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    match parts.as_slice() {
+        ["daily", time] => (
+            "daily".into(),
+            (*time).into(),
+            String::new(),
+            default_days,
+            1,
+        ),
+        ["weekly", days, time] => {
+            let mut wd = vec![false; 7];
+            for d in days.split(',') {
+                if let Some(i) = WEEKDAYS.iter().position(|w| w.eq_ignore_ascii_case(d)) {
+                    wd[i] = true;
+                }
+            }
+            ("weekly".into(), (*time).into(), String::new(), wd, 1)
+        }
+        ["monthly", "day", n, time] => (
+            "monthly".into(),
+            (*time).into(),
+            String::new(),
+            default_days,
+            n.parse::<u32>().unwrap_or(1).clamp(1, 31),
+        ),
+        ["once", date, time] => (
+            "once".into(),
+            (*time).into(),
+            (*date).into(),
+            default_days,
+            1,
+        ),
+        ["once", time] => (
+            "once".into(),
+            (*time).into(),
+            String::new(),
+            default_days,
+            1,
+        ),
+        _ => ("daily".into(), "09:00".into(), String::new(), default_days, 1),
+    }
+}
+
 /// A routine as the BFF reports it (`/api/routines`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct RoutineView {
@@ -83,6 +168,36 @@ async fn create_routine(
         .ok()
 }
 
+async fn update_routine(
+    id: &str,
+    name: &str,
+    schedule: &str,
+    intent: &str,
+    prompt: &str,
+    scope: &str,
+) -> Option<RoutineView> {
+    reqwest::Client::new()
+        .put(format!("{}/api/routines/{}", crate::BFF_URL, id))
+        .json(&serde_json::json!({
+            "name": name, "schedule": schedule, "intent": intent, "prompt": prompt, "scope": scope
+        }))
+        .send()
+        .await
+        .ok()?
+        .json::<RoutineView>()
+        .await
+        .ok()
+}
+
+async fn delete_routine(id: &str) -> bool {
+    reqwest::Client::new()
+        .delete(format!("{}/api/routines/{}", crate::BFF_URL, id))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Draft the operational prompt from the user's intent. Returns (prompt, authored_by).
 async fn draft_prompt(intent: &str, scope: &str) -> Option<(String, String)> {
     let v: serde_json::Value = reqwest::Client::new()
@@ -112,14 +227,29 @@ pub fn RoutineDashboard() -> Element {
     });
 
     let mut name = use_signal(String::new);
-    let mut schedule = use_signal(|| "daily 09:00".to_string());
+    // Structured schedule builder. These drive a typical frequency picker (one-off /
+    // daily / weekly / monthly) and serialize to the `schedule` string on save —
+    // the BFF stores a human-readable schedule, so the UI owns the shape.
+    let mut freq = use_signal(|| "daily".to_string());
+    let mut sched_time = use_signal(|| "09:00".to_string());
+    let mut sched_date = use_signal(String::new);
+    // One toggle per weekday, Sun..Sat; Mon on by default.
+    let mut weekdays = use_signal(|| vec![false, true, false, false, false, false, false]);
+    let mut monthday = use_signal(|| 1u32);
     // The user writes INTENT; the AI drafts the operational PROMPT for review.
     let mut intent = use_signal(String::new);
     let mut prompt = use_signal(String::new);
     let mut authored_by = use_signal(String::new);
     let mut drafting = use_signal(|| false);
     let mut scope = use_signal(|| "read-only".to_string());
+    // When Some(id), the form is EDITING that routine (Save updates it) rather than
+    // creating a new one. `pending_delete` holds the id awaiting a confirm click.
+    let mut editing = use_signal(|| Option::<String>::None);
+    let mut pending_delete = use_signal(|| Option::<String>::None);
 
+    // Distinguish "still fetching" (outer None) from "resolved, but there are
+    // genuinely none" — so an empty list shows its own state, not a stuck "Loading…".
+    let loading = routines_res.read().is_none();
     let routines = routines_res.read().clone().flatten().unwrap_or_default();
 
     rsx! {
@@ -136,16 +266,26 @@ pub fn RoutineDashboard() -> Element {
                     span { "Last run" }
                     span { "" }
                 }
-                if routines.is_empty() {
+                if loading {
                     p { class: "section-hint", "Loading…" }
+                } else if routines.is_empty() {
+                    p { class: "routine-empty", "No routines yet. Add one below to schedule a governed run." }
                 }
                 for r in routines.iter() {
                     {
                         let id_toggle = r.id.clone();
                         let id_run = r.id.clone();
+                        let id_del = r.id.clone();
+                        let r_edit = r.clone();
                         let enabled = r.enabled;
                         let last = r.last_run.clone();
-                        let row_cls = if enabled { "routine-row" } else { "routine-row off" };
+                        let is_pending_delete = pending_delete().as_deref() == Some(r.id.as_str());
+                        let is_editing_row = editing().as_deref() == Some(r.id.as_str());
+                        let row_cls = match (enabled, is_editing_row) {
+                            (_, true) => "routine-row editing",
+                            (true, _) => "routine-row",
+                            (false, _) => "routine-row off",
+                        };
                         rsx! {
                             div { class: "{row_cls}",
                                 div { class: "routine-name",
@@ -189,6 +329,46 @@ pub fn RoutineDashboard() -> Element {
                                         },
                                         "Run now"
                                     }
+                                    button {
+                                        class: "btn-edit-sm",
+                                        onclick: move |_| {
+                                            // Prefill the form with this routine and switch it to edit mode.
+                                            let rt = r_edit.clone();
+                                            let (f, t, d, wd, md) = parse_schedule(&rt.schedule);
+                                            name.set(rt.name.clone());
+                                            freq.set(f);
+                                            sched_time.set(t);
+                                            sched_date.set(d);
+                                            weekdays.set(wd);
+                                            monthday.set(md);
+                                            intent.set(rt.intent.clone());
+                                            prompt.set(rt.prompt.clone());
+                                            scope.set(rt.scope.clone());
+                                            authored_by.set(String::new());
+                                            editing.set(Some(rt.id.clone()));
+                                            pending_delete.set(None);
+                                        },
+                                        "Edit"
+                                    }
+                                    button {
+                                        class: if is_pending_delete { "btn-delete-sm confirm" } else { "btn-delete-sm" },
+                                        onclick: move |_| {
+                                            let id = id_del.clone();
+                                            if pending_delete().as_deref() == Some(id.as_str()) {
+                                                // Second click — actually delete.
+                                                pending_delete.set(None);
+                                                spawn(async move {
+                                                    if delete_routine(&id).await {
+                                                        refresh += 1;
+                                                    }
+                                                });
+                                            } else {
+                                                // First click — arm the confirm.
+                                                pending_delete.set(Some(id));
+                                            }
+                                        },
+                                        if is_pending_delete { "Confirm?" } else { "Delete" }
+                                    }
                                 }
                             }
                         }
@@ -197,12 +377,126 @@ pub fn RoutineDashboard() -> Element {
             }
 
             div { class: "routine-create",
-                p { class: "section-label", "Add a routine" }
+                p { class: "section-label",
+                    if editing().is_some() { "Edit routine" } else { "Add a routine" }
+                }
                 p { class: "section-hint", "Describe what you want the routine to do. Camerata's lead engineer drafts the operational prompt (model tiering, directives, scope) from it — you review and edit before it runs." }
                 div { class: "routine-create-row",
                     input { class: "addressee-input", placeholder: "name", value: "{name}", oninput: move |e| name.set(e.value()) }
-                    input { class: "addressee-input", placeholder: "schedule (e.g. daily 09:00)", value: "{schedule}", oninput: move |e| schedule.set(e.value()) }
-                    input { class: "addressee-input", placeholder: "scope", value: "{scope}", oninput: move |e| scope.set(e.value()) }
+                    label { class: "sched-field sched-scope-field",
+                        span { "Permissions" }
+                        select {
+                            class: "addressee-input",
+                            value: "{scope}",
+                            onchange: move |e| scope.set(e.value()),
+                            option { value: "read-only", "Read-only — inspect & report, no file changes" }
+                            option { value: "write (gated)", "Write — gated edits on a branch, no push" }
+                            option { value: "write + open PR", "Write + open PR — gated edits, pushed for review" }
+                        }
+                    }
+                }
+                p { class: "section-hint sched-scope-hint",
+                    "Permissions cap what the unattended run may do. "
+                    b { "Read-only" }
+                    " can analyze the repo but writes nothing. "
+                    b { "Write" }
+                    " lets it edit files on a working branch (every write still passes the governance gate) without pushing. "
+                    b { "Write + open PR" }
+                    " also pushes that branch and opens a pull request for your review. Nothing auto-merges."
+                }
+                // Structured schedule picker — frequency, then the controls that
+                // frequency needs (weekday toggles / day-of-month / one-off date),
+                // plus a time. Serialized to the schedule string on save.
+                div { class: "sched-picker",
+                    div { class: "sched-freq",
+                        {
+                            let opts = [("once", "One-off"), ("daily", "Daily"), ("weekly", "Weekly"), ("monthly", "Monthly")];
+                            rsx! {
+                                for (val, label) in opts.iter() {
+                                    {
+                                        let v = val.to_string();
+                                        let on = freq() == *val;
+                                        let cls = if on { "sched-freq-btn on" } else { "sched-freq-btn" };
+                                        rsx! {
+                                            button {
+                                                key: "{val}",
+                                                class: "{cls}",
+                                                onclick: move |_| freq.set(v.clone()),
+                                                "{label}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "sched-detail",
+                        // Weekly: per-day toggles.
+                        if freq() == "weekly" {
+                            div { class: "sched-dow",
+                                for i in 0..7usize {
+                                    {
+                                        let on = weekdays().get(i).copied().unwrap_or(false);
+                                        let cls = if on { "sched-dow-btn on" } else { "sched-dow-btn" };
+                                        rsx! {
+                                            button {
+                                                key: "{i}",
+                                                class: "{cls}",
+                                                onclick: move |_| {
+                                                    let mut w = weekdays();
+                                                    if i < w.len() { w[i] = !w[i]; }
+                                                    weekdays.set(w);
+                                                },
+                                                "{WEEKDAYS[i]}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Monthly: day-of-month.
+                        if freq() == "monthly" {
+                            label { class: "sched-field",
+                                span { "Day of month" }
+                                input {
+                                    class: "addressee-input sched-num",
+                                    r#type: "number", min: "1", max: "31",
+                                    value: "{monthday}",
+                                    oninput: move |e| {
+                                        if let Ok(n) = e.value().parse::<u32>() {
+                                            monthday.set(n.clamp(1, 31));
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                        // One-off: a calendar date.
+                        if freq() == "once" {
+                            label { class: "sched-field",
+                                span { "Date" }
+                                input {
+                                    class: "addressee-input",
+                                    r#type: "date",
+                                    value: "{sched_date}",
+                                    oninput: move |e| sched_date.set(e.value()),
+                                }
+                            }
+                        }
+                        // Time applies to every frequency.
+                        label { class: "sched-field",
+                            span { "Time" }
+                            input {
+                                class: "addressee-input",
+                                r#type: "time",
+                                value: "{sched_time}",
+                                oninput: move |e| sched_time.set(e.value()),
+                            }
+                        }
+                    }
+                    p { class: "sched-preview",
+                        "Schedule: "
+                        span { class: "sched-preview-val", "{build_schedule(&freq(), &sched_time(), &sched_date(), &weekdays(), monthday())}" }
+                    }
                 }
                 // INTENT: what the user wants (their words).
                 textarea {
@@ -251,24 +545,60 @@ pub fn RoutineDashboard() -> Element {
                     value: "{prompt}",
                     oninput: move |e| prompt.set(e.value()),
                 }
-                button {
-                    class: "btn-run",
-                    onclick: move |_| {
-                        let (n, s, i, p, sc) = (name(), schedule(), intent(), prompt(), scope());
-                        if n.is_empty() || i.trim().is_empty() {
-                            return;
-                        }
-                        spawn(async move {
-                            if create_routine(&n, &s, &i, &p, &sc).await.is_some() {
-                                refresh += 1;
+                div { class: "routine-save-row",
+                    button {
+                        class: "btn-run",
+                        onclick: move |_| {
+                            let s = build_schedule(&freq(), &sched_time(), &sched_date(), &weekdays(), monthday());
+                            let (n, i, p, sc) = (name(), intent(), prompt(), scope());
+                            if n.is_empty() || i.trim().is_empty() {
+                                return;
                             }
-                        });
-                        name.set(String::new());
-                        intent.set(String::new());
-                        prompt.set(String::new());
-                        authored_by.set(String::new());
-                    },
-                    "Add routine"
+                            let edit_id = editing();
+                            spawn(async move {
+                                let ok = match &edit_id {
+                                    Some(id) => update_routine(id, &n, &s, &i, &p, &sc).await.is_some(),
+                                    None => create_routine(&n, &s, &i, &p, &sc).await.is_some(),
+                                };
+                                if ok {
+                                    refresh += 1;
+                                }
+                            });
+                            // Reset the form back to a fresh "create" state.
+                            name.set(String::new());
+                            intent.set(String::new());
+                            prompt.set(String::new());
+                            authored_by.set(String::new());
+                            freq.set("daily".to_string());
+                            sched_time.set("09:00".to_string());
+                            sched_date.set(String::new());
+                            weekdays.set(vec![false, true, false, false, false, false, false]);
+                            monthday.set(1);
+                            scope.set("read-only".to_string());
+                            editing.set(None);
+                        },
+                        if editing().is_some() { "Save changes" } else { "Add routine" }
+                    }
+                    if editing().is_some() {
+                        button {
+                            class: "btn-restart",
+                            onclick: move |_| {
+                                // Cancel edit: clear the form and drop edit mode.
+                                name.set(String::new());
+                                intent.set(String::new());
+                                prompt.set(String::new());
+                                authored_by.set(String::new());
+                                freq.set("daily".to_string());
+                                sched_time.set("09:00".to_string());
+                                sched_date.set(String::new());
+                                weekdays.set(vec![false, true, false, false, false, false, false]);
+                                monthday.set(1);
+                                scope.set("read-only".to_string());
+                                editing.set(None);
+                            },
+                            "Cancel"
+                        }
+                    }
                 }
             }
         }

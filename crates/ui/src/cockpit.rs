@@ -792,6 +792,9 @@ enum CockpitView {
     Rules,
     /// The scheduled-routine dashboard.
     Routines,
+    /// The local workspace: clone the active project's repos into the chosen folder,
+    /// see their checkout status, and ship a branch (push + PR).
+    Workspace,
 }
 
 /// The cockpit's internal nav: switch between the control surface (stories) and the
@@ -816,12 +819,17 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             button {
                 class: cls(CockpitView::Onboard),
                 onclick: move |_| view.set(CockpitView::Onboard),
-                "Onboard a repo"
+                "Onboard repos"
             }
             button {
                 class: cls(CockpitView::Rules),
                 onclick: move |_| view.set(CockpitView::Rules),
                 "Rules"
+            }
+            button {
+                class: cls(CockpitView::Workspace),
+                onclick: move |_| view.set(CockpitView::Workspace),
+                "Workspace"
             }
             button {
                 class: cls(CockpitView::Routines),
@@ -897,6 +905,16 @@ pub fn CockpitApp() -> Element {
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     crate::routines::RoutineDashboard {}
+                }
+            }
+        };
+    }
+    if view() == CockpitView::Workspace {
+        return rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    crate::workspace::WorkspaceView {}
                 }
             }
         };
@@ -1172,7 +1190,7 @@ fn CockpitNotice(kind: String) -> Element {
         ),
         _ => (
             "No stories yet — clean slate",
-            "Nothing is seeded. Connect GitHub, then onboard a repo (the \u{201c}Onboard a repo\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
+            "Nothing is seeded. Connect GitHub, then onboard one or more repos (the \u{201c}Onboard repos\u{201d} tab) or adopt a tracker issue to bring real stories into the spine.",
         ),
     };
     rsx! {
@@ -1734,7 +1752,7 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     rsx! {
         div { class: "onboard",
             div { class: "onboard-head",
-                p { class: "onboard-title", "Onboard a repo into governance" }
+                p { class: "onboard-title", "Onboard repos into governance" }
                 p { class: "onboard-sub", "Bring a repo new to Camerata under the gate. This sets up the REPO's rules and CI enforcement — separate from a story's Investigation phase, which refines one piece of work." }
             }
 
