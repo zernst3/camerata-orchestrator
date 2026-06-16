@@ -952,8 +952,13 @@ html, body {
 .onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
 .onboard-repos-input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; }
-.onboard-cta { align-self: flex-start; }
-.onboard-cta { padding: 9px 16px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; }
+.onboard-cta {
+  align-self: flex-start;
+  padding: 9px 16px; border-radius: 8px; border: none;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer;
+  transition: background .15s var(--ease);
+}
+.onboard-cta:hover:not(:disabled) { background: var(--accent-ink); }
 .onboard-cta:disabled { background: var(--line); color: var(--ink-faint); cursor: not-allowed; }
 .onboard-steps { display: flex; flex-direction: column; gap: 12px; }
 .onboard-step { display: flex; gap: 12px; align-items: flex-start; }
@@ -1167,11 +1172,16 @@ html, body {
 /* Run control + live governed run (Phase 3 execution). */
 .btn-run {
   border: none; background: var(--accent); color: #fff;
-  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 9px;
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 8px;
   cursor: pointer; margin-bottom: 14px;
   transition: background .15s var(--ease);
 }
 .btn-run:hover { background: var(--accent-ink); }
+.btn-run:disabled { background: var(--line); color: var(--ink-faint); cursor: not-allowed; }
+/* In a button row, drop btn-run's standalone bottom margin so it aligns with the
+   secondary buttons beside it (the margin is for standalone primary buttons). */
+.findings-toolbar { align-items: center; }
+.findings-toolbar .btn-run { margin-bottom: 0; }
 .live-run { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 14px 16px; }
 .live-run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .live-run-title { font-size: 15px; font-weight: 700; color: var(--ink); }
@@ -1262,7 +1272,7 @@ html, body {
 .routine-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .btn-run-sm {
   border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
-  padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  padding: 5px 11px; border-radius: 8px; cursor: pointer;
 }
 .btn-run-sm:hover { background: var(--accent-ink); }
 .routine-create { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
@@ -1278,7 +1288,7 @@ html, body {
 .routine-row.editing { background: var(--accent-wash); }
 .btn-edit-sm {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 600;
-  padding: 5px 11px; border-radius: 7px; cursor: pointer;
+  padding: 5px 11px; border-radius: 8px; cursor: pointer;
 }
 .btn-edit-sm:hover { border-color: var(--accent); color: var(--accent-ink); }
 .btn-delete-sm {
