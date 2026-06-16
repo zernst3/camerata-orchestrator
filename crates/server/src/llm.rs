@@ -251,7 +251,11 @@ impl Llm {
         let mut cmd = tokio::process::Command::new("claude");
         // kill_on_drop: if the caller's future is dropped (e.g. a timeout fires), the
         // spawned `claude` subprocess is killed rather than orphaned and left running.
+        // stdin(null): `claude -p` blocks on inherited piped stdin until EOF (see the
+        // streaming path for the full explanation). `.output()` already nulls stdin, but
+        // set it explicitly so the behavior doesn't depend on that detail.
         cmd.kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
             .arg("-p")
             .arg(&req.prompt)
             .arg("--model")
@@ -297,7 +301,14 @@ impl Llm {
         let mut cmd = tokio::process::Command::new("claude");
         // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
         // leaving a stalled `claude` running in the background.
+        // stdin(null): CRITICAL. `claude -p` reads piped stdin and blocks until EOF before
+        // responding. spawn() INHERITS the parent's stdin, and the desktop app's inherited
+        // stdin is an open pipe that never EOFs — so the audit hung for minutes producing
+        // nothing (shell tests were fast only because their stdin was a TTY/closed).
+        // Redirecting stdin to /dev/null gives an immediate EOF so claude uses the -p arg
+        // and responds at once.
         cmd.kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
             .arg("-p")
             .arg(&req.prompt)
             .arg("--model")
