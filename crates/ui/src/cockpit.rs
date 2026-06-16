@@ -2263,33 +2263,64 @@ fn ProposedRulesTable(
         rules.iter().map(|r| (RowId::new(), r.clone())).collect();
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
         rows.iter().map(|(r, p)| (*r, p.clone())).collect();
-    let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
-    // Group the proposed rules BY DOMAIN (a real Chorale feature) so a long ruleset is
-    // navigable: sql / ui / security / architecture / … each under its own header.
-    use_hook(move || handle.set_grouping(vec![ColumnId("domain")]));
-    let mut arming = use_signal(|| false);
-    // The findings to snapshot as the baseline on arm; cloned per arm click.
-    let arm_findings = findings;
-    let csv_rules = rules.clone();
-    // Click a row to open its full context + alternative picker in a modal (mirrors the
-    // camerata-ai rule modal) instead of a wall of pickers below the table.
-    let mut detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
-    // STABLE callback (use_callback, not Callback::new) — an inline callback goes stale
-    // across re-renders, which is why the modal only opened the first time.
-    let id_map_click = id_map.clone();
     let id_map_audit = id_map.clone();
-    let row_click = use_callback(move |rid: RowId| {
-        if let Some(r) = id_map_click.get(&rid) {
-            detail_rule.set(Some(r.clone()));
+    // Suggested rows (pre-selected on load) and a domain -> rows map (per-domain
+    // "select all" chips). Both derived BEFORE use_table consumes `rows`.
+    let suggested_ids: Vec<RowId> =
+        rows.iter().filter(|(_, p)| p.recommended).map(|(r, _)| *r).collect();
+    let mut domain_rows: std::collections::BTreeMap<String, Vec<RowId>> = Default::default();
+    for (rid, p) in &rows {
+        let d = if p.domain.is_empty() { "general".to_string() } else { p.domain.clone() };
+        domain_rows.entry(d).or_default().push(*rid);
+    }
+    let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
+    // The row-detail modal is hosted by ScanResults (OUTSIDE this table's subtree)
+    // via a shared signal: a row click writes the rule here, ScanResults renders the
+    // modal. Hosting the full-screen overlay outside the Table avoids a Dioxus-desktop
+    // quirk where mounting it as a SIBLING of the table left a ghost node that
+    // swallowed the next click, so the modal wouldn't reopen after being closed.
+    let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
+    let id_map_click = id_map.clone();
+    // Group BY DOMAIN and PRE-SELECT the suggested rules — once, on mount.
+    use_hook(move || {
+        handle.set_grouping(vec![ColumnId("domain")]);
+        for rid in &suggested_ids {
+            handle.set_selection(*rid, true);
         }
     });
+    let mut arming = use_signal(|| false);
+    let arm_findings = findings;
+    let csv_rules = rules.clone();
 
     rsx! {
+        div { class: "domain-select-row",
+            span { class: "domain-select-label", "Select all in:" }
+            for (domain , rids) in domain_rows.iter() {
+                {
+                    let rids = rids.clone();
+                    rsx! {
+                        button {
+                            key: "{domain}",
+                            class: "domain-chip",
+                            onclick: move |_| {
+                                for rid in &rids { handle.set_selection(*rid, true); }
+                            },
+                            "{domain} ({rids.len()})"
+                        }
+                    }
+                }
+            }
+        }
         Table {
             handle,
             sort_enabled: true,
             selection_enabled: true,
-            on_row_click: row_click,
+            filter_enabled: true,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(r) = id_map_click.get(&rid) {
+                    detail_rule.set(Some(r.clone()));
+                }
+            }),
         }
         div { class: "findings-toolbar",
             button {
@@ -2391,43 +2422,55 @@ fn ProposedRulesTable(
                 if arming() { "Arming…" } else { "Arm selected rules \u{2192} governance PR" }
             }
         }
+    }
+}
 
-        // ── Row-click detail modal: full rule context + alternative picker ──────
-        if let Some(r) = detail_rule() {
-            div { class: "rule-modal-overlay", onclick: move |_| detail_rule.set(None),
-                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
-                    div { class: "rule-modal-head",
-                        span { class: "rule-modal-id", "{r.id}" }
-                        button { class: "rule-modal-close", onclick: move |_| detail_rule.set(None), "\u{2715}" }
-                    }
-                    p { class: "rule-modal-title", "{r.title}" }
-                    div { class: "rule-modal-meta",
-                        span { class: "rule-modal-tag", "domain · {r.domain}" }
-                        span { class: "rule-modal-tag", "scope · {r.scope}" }
-                        span { class: "rule-modal-tag", "kind · {r.kind}" }
-                    }
-                    p { class: "rule-modal-placement", "Enforced via: {r.placement}" }
-                    if r.options.is_empty() {
-                        p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
-                    } else {
-                        p { class: "rule-modal-label", "Choose the alternative to adopt" }
-                        div { class: "rule-modal-opts",
-                            for o in r.options.iter() {
-                                {
-                                    let rid = r.id.clone();
-                                    let oid = o.id.clone();
-                                    let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
-                                    let picked = cur.as_deref() == Some(o.id.as_str());
-                                    let cls = if picked { "rule-opt on" } else { "rule-opt" };
-                                    let mut chosen = chosen;
-                                    rsx! {
-                                        button {
-                                            key: "{o.id}",
-                                            class: "{cls}",
-                                            onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
-                                            span { class: "rule-opt-label", "{o.label}" }
-                                            span { class: "rule-opt-directive", "{o.directive}" }
-                                        }
+/// The row-click detail modal: full rule context + alternative picker. Hosted by
+/// `ScanResults` so it renders OUTSIDE the chorale table's subtree — see the note in
+/// `ProposedRulesTable` for why (a sibling-of-table overlay left a ghost click-eater
+/// in the desktop webview, breaking modal reopen). Reads the open rule and the
+/// per-rule choice from context.
+#[component]
+fn RuleDetailModal() -> Element {
+    let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
+    let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let Some(r) = detail_rule() else {
+        return rsx! {};
+    };
+    rsx! {
+        div { class: "rule-modal-overlay", onclick: move |_| detail_rule.set(None),
+            div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                div { class: "rule-modal-head",
+                    span { class: "rule-modal-id", "{r.id}" }
+                    button { class: "rule-modal-close", onclick: move |_| detail_rule.set(None), "\u{2715}" }
+                }
+                p { class: "rule-modal-title", "{r.title}" }
+                div { class: "rule-modal-meta",
+                    span { class: "rule-modal-tag", "domain · {r.domain}" }
+                    span { class: "rule-modal-tag", "scope · {r.scope}" }
+                    span { class: "rule-modal-tag", "kind · {r.kind}" }
+                }
+                p { class: "rule-modal-placement", "Enforced via: {r.placement}" }
+                if r.options.is_empty() {
+                    p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
+                } else {
+                    p { class: "rule-modal-label", "Choose the alternative to adopt" }
+                    div { class: "rule-modal-opts",
+                        for o in r.options.iter() {
+                            {
+                                let rid = r.id.clone();
+                                let oid = o.id.clone();
+                                let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                                let picked = cur.as_deref() == Some(o.id.as_str());
+                                let cls = if picked { "rule-opt on" } else { "rule-opt" };
+                                let mut chosen = chosen;
+                                rsx! {
+                                    button {
+                                        key: "{o.id}",
+                                        class: "{cls}",
+                                        onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
+                                        span { class: "rule-opt-label", "{o.label}" }
+                                        span { class: "rule-opt-directive", "{o.directive}" }
                                     }
                                 }
                             }
@@ -2718,6 +2761,12 @@ fn ScanResults(report: ScanReportView) -> Element {
     });
     use_context_provider(|| placement);
 
+    // The open row-detail rule, shared with ProposedRulesTable. Provided HERE (not in
+    // the table) so the modal renders at this subtree's root, outside the chorale
+    // table — see RuleDetailModal / ProposedRulesTable for the reopen-bug rationale.
+    let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
+    use_context_provider(|| detail_rule);
+
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
     let descriptions: std::collections::HashMap<String, String> = report
@@ -2734,6 +2783,9 @@ fn ScanResults(report: ScanReportView) -> Element {
         .collect();
 
     rsx! {
+        // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
+        // sibling of the chorale table (see RuleDetailModal for why).
+        RuleDetailModal {}
         div { class: "scan-results",
             if let Some(msg) = report.message.clone() {
                 p { class: "scan-note", "{msg}" }

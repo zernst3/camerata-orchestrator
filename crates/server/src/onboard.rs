@@ -457,7 +457,8 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
     // whole library and the suggested subset in one place. A rule whose domain matches the
     // scanned stack is SUGGESTED (recommended) and pre-bound to its matching repos; the
     // rest are AVAILABLE (recommended=false), bound to all repos so they can still be armed.
-    set.iter()
+    let mut proposed = set
+        .iter()
         .map(|r| {
             let matched_repos: Vec<String> = if r.domain == "*" {
                 all_repos.clone()
@@ -509,12 +510,21 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 repos,
                 placement: "CI gate + gate config in each repo this rule's domain applies to".to_string(),
                 finding_count: 0,
-                // SUGGESTED = the rule's domain matches the scanned stack. The rest are
-                // available to arm but not recommended for this stack.
-                recommended: is_suggested,
+                // SUGGESTED = the rule's domain matches the scanned stack. AGENTIC rules
+                // are ALWAYS suggested by design (they govern how the AI fleet builds,
+                // regardless of stack). The rest are available but not recommended here.
+                recommended: is_suggested || r.domain == "agentic",
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Order SUGGESTED rules first, then the rest — grouped by domain, the suggested
+    // domains surface at the top.
+    proposed.sort_by(|a, b| {
+        b.recommended
+            .cmp(&a.recommended)
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+    proposed
 }
 
 /// Build a report from already-aggregated findings + per-repo stacks. Pure.

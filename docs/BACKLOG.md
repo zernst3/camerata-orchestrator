@@ -3,6 +3,28 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Chorale-separable items (flagged 2026-06-16)
+
+Surfaced while reworking the proposed-rules table. These belong in the **rust-chorale**
+repo, not here — tracked so they aren't lost.
+
+- **Per-group "select all" (enhancement, not a bug).** When grouping is on, chorale's
+  group headers have no select-all checkbox, so the cockpit builds its own per-domain
+  "select all in:" chips above the table. A group-header select-all (toggle every row
+  under a group) would let consumers drop that workaround. Candidate chorale feature.
+- **Row-click → full-screen-modal reopen (SUSPECTED, NOT CONFIRMED).** Symptom: open a
+  modal from `on_row_click`, close it, click any row → modal won't reopen. Root-caused
+  to the cockpit side: the overlay was mounted as a *sibling of the `Table`* inside the
+  same component, and the desktop webview left a ghost node swallowing the next click.
+  Fixed cockpit-side by hosting the modal OUTSIDE the table subtree (a shared context
+  signal; modal rendered by `ScanResults`). Chorale's `on_row_click` itself is correct —
+  it fires `cb.call(row_id)` on every plain click with no open-state gate (verified in
+  `components.rs` cell `onclick` + `should_fire_row_click`). **If the bug recurs even
+  with the modal relocated**, it's a chorale event-delegation issue (the cell's two
+  `signal.set` writes before `cb.call` re-render the table mid-click) worth filing
+  against rust-chorale. Until then, nothing to file. NB: a cell-renderer button can't be
+  the trigger — `CellRenderer` is `Send + Sync` so it cannot capture a Dioxus signal.
+
 ## Scan / AI feedback modal (deferred 2026-06-16 — user is mid-testing)
 
 When a user presses **Scan**, the brownfield audit awaits a real `claude -p` call

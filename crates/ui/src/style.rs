@@ -1437,6 +1437,22 @@ html, body {
 .audit-cta { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-wash); }
 
 /* ---- rule detail modal (click a row) -------------------------------------- */
+/* Proposed-rules table: per-domain "select all" chips + clickable rule id. */
+.domain-select-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-bottom: 10px; }
+.domain-select-label { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); letter-spacing: .02em; }
+.domain-chip {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 11.5px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+  cursor: pointer; transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+}
+.domain-chip:hover { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-wash); }
+.rule-id-link {
+  border: none; background: none; padding: 0; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 700;
+  color: var(--accent-ink); text-align: left; text-decoration: underline; text-underline-offset: 2px;
+  text-decoration-color: var(--line);
+}
+.rule-id-link:hover { text-decoration-color: var(--accent); }
 .rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
 .rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
