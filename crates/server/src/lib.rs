@@ -163,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/fix", post(onboard_fix))
+        .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
@@ -701,6 +702,25 @@ async fn onboard_arm(
 
     let results = emit_to_repos(&repos, &repo_local, &custom, &baselines, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// The central suppression registry for a project: every inline waiver + baseline
+/// entry across its repos, with stale flags. The auditable "everything we've waived" view.
+async fn project_suppressions(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::suppression::SuppressionRecord>>, AppError> {
+    let project = state
+        .projects
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+    Ok(Json(
+        crate::onboard::suppression_registry(&project.repos, &token).await,
+    ))
 }
 
 /// One audited finding to remediate (the subset the UI sends to the fix run).

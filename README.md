@@ -72,6 +72,48 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
    abstracted designs and bug fixes from prior apps make future builds faster, more
    consistent, and easier to maintain. A network effect a lone owner could never have.
 
+## Brownfield onboarding: report everything, enforce the delta
+
+Pointing Camerata at an existing repo runs a two-tier audit: a deterministic mechanical
+scan (secrets, raw SQL, path escapes) and an AI architectural audit (missing auth on a
+write path, services bypassing the repository layer, N+1, cross-boundary imports, and
+the like). The report shows **every** existing violation, but onboarding does **not**
+freeze your team on day one: arming snapshots the current violations into a committed
+`.camerata/baseline.json` as accepted pre-existing debt, and the gate then enforces only
+on **new or changed** code (the eslint/ruff/sonar baseline model). Touching a baselined
+line un-baselines it — fix it or waive it. Fixing audited items runs as a normal governed
+development task (the same worktree → gate → checks → bounce loop as any other work).
+
+### Suppressing a rule
+
+Two homes, by intent:
+
+- **Per-line, surgical waiver — an inline comment**, co-located with the code:
+
+  ```rust
+  let key = SANDBOX_PUBLIC_KEY; // camerata:allow SEC-NO-HARDCODED-SECRETS-1 -- public sandbox value, JIRA-123
+  ```
+
+  The waiver applies to the offending line it trails (or the line directly below it). It
+  shows up in the PR diff, so silencing a rule is a reviewable, challengeable act, and
+  `git blame` records who/when for free.
+
+- **Bulk / legacy / policy — the central `.camerata/baseline.json`** (written for you at
+  onboarding; also where an org-wide "waive rule X until Q3" policy lives).
+
+Three rules hold regardless of where a suppression lives:
+
+1. **A reason is mandatory.** A bare `// camerata:allow SEC-X` with no `-- reason`
+   suppresses nothing and is itself flagged as a violation (`CAM-WAIVER-NEEDS-REASON`).
+2. **Everything is indexed centrally.** Inline waivers and baseline entries roll up into
+   one auditable registry — "show me everything we've waived, by rule / age / who" is a
+   lookup, not a grep.
+3. **Stale waivers are surfaced.** A waiver whose violation no longer exists is a dead
+   directive that would silently mask the next one; Camerata flags it for removal.
+
+A waiver can carry its tracked ticket (`-- accepted as debt, JIRA-123`), linking the
+suppression to the tracked story, so "ignore" and "open a debt story" are one act.
+
 ## Status: what runs today, and what is staged
 
 This is a compiling, tested, all-Rust workspace, not a design folder. The line between

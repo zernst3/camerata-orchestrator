@@ -299,6 +299,96 @@ async fn import_ruleset(project_id: &str, json: String) -> bool {
 /// cross-repo, process, custom) + export/import. The full per-rule editor + re-emit
 /// is phased (see the ADR); this is the project-scoped management surface and the
 /// home for the non-repo rules.
+/// One suppression in the audit registry (`GET /api/projects/:id/suppressions`).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct SuppressionView {
+    rule_id: String,
+    path: String,
+    #[serde(default)]
+    line: Option<usize>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    ticket: Option<String>,
+    source: String,
+    #[serde(default)]
+    accepted_by: Option<String>,
+    stale: bool,
+}
+
+async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
+    reqwest::get(format!(
+        "{}/api/projects/{}/suppressions",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json::<Vec<SuppressionView>>()
+    .await
+    .ok()
+}
+
+/// The central suppression audit view: everything waived across the project's repos
+/// (inline waivers + baseline), with stale ones flagged. The require-indexing invariant.
+#[component]
+fn SuppressionsPanel(project_id: String) -> Element {
+    let pid = project_id.clone();
+    let mut loaded = use_signal(|| false);
+    let sups = use_resource(move || {
+        let pid = pid.clone();
+        let _ = loaded();
+        async move { fetch_suppressions(&pid).await }
+    });
+    let list = sups.read().clone().flatten();
+
+    rsx! {
+        div { class: "sups-panel",
+            div { class: "sups-head",
+                p { class: "section-label", "Suppressions — everything waived" }
+                button {
+                    class: "btn-edit-sm",
+                    onclick: move |_| loaded.toggle(),
+                    "Refresh"
+                }
+            }
+            p { class: "section-hint", "Inline waivers + baseline entries across this project's repos. Stale ones (no live violation) should be removed." }
+            match list {
+                None => rsx! { p { class: "section-hint", "Loading… (needs GitHub connected)" } },
+                Some(v) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
+                Some(v) => rsx! {
+                    div { class: "sups-list",
+                        for (i , s) in v.iter().enumerate() {
+                            div { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
+                                span { class: "sup-rule", "{s.rule_id}" }
+                                span { class: "sup-source {s.source}", "{s.source}" }
+                                span { class: "sup-loc",
+                                    {
+                                        match s.line {
+                                            Some(l) => format!("{}:{}", s.path, l),
+                                            None => s.path.clone(),
+                                        }
+                                    }
+                                }
+                                span { class: "sup-reason", {s.reason.clone().unwrap_or_default()} }
+                                if let Some(t) = &s.ticket {
+                                    span { class: "sup-ticket", "{t}" }
+                                }
+                                if let Some(who) = &s.accepted_by {
+                                    span { class: "sup-who", "{who}" }
+                                }
+                                if s.stale {
+                                    span { class: "sup-stale-tag", "stale" }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -383,6 +473,7 @@ fn RulesView() -> Element {
                     let pid = p.id.clone();
                     let pid_rec = p.id.clone();
                     let pid_emit = p.id.clone();
+                    let pid_sup = p.id.clone();
                     rsx! {
                         div { class: "rules-sections",
                             RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
@@ -390,6 +481,8 @@ fn RulesView() -> Element {
                             RuleCount { label: "Process rules (commit/PR)", n: p.ruleset.process.len() }
                             RuleCount { label: "Custom rules", n: p.ruleset.custom.len() }
                         }
+
+                        SuppressionsPanel { project_id: pid_sup }
 
                         // Re-emit: rebuild the source-of-truth emit from this project's
                         // ruleset (base selections + custom) and open a PR per repo.
@@ -1581,6 +1674,19 @@ fn FindingsTable(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let target_repo = repos.first().cloned().unwrap_or_default();
+    // Default order leads triage with what matters: enforced (new) before suppressed
+    // (debt/waived), then by severity (high → medium → low). A flat 200-row dump is
+    // paralysis; this surfaces the critical new violations first.
+    let mut findings = findings;
+    findings.sort_by_key(|f| {
+        let enforced = if f.status == "active" { 0 } else { 1 };
+        let sev = match f.severity.as_str() {
+            "high" => 0,
+            "medium" => 1,
+            _ => 2,
+        };
+        (enforced, sev)
+    });
     let rows: Vec<(RowId, FindingView)> =
         findings.iter().map(|f| (RowId::new(), f.clone())).collect();
     let id_map: std::collections::HashMap<RowId, FindingView> =

@@ -1394,6 +1394,21 @@ html, body {
 .fix-count { font-size: 12.5px; color: var(--ink-soft); }
 .fix-msg { font-size: 12.5px; color: var(--accent-ink); margin: 10px 0 0; line-height: 1.5; }
 
+/* ---- suppression registry (audit view) ------------------------------------ */
+.sups-panel { margin: 18px 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.sups-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.sups-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.sup-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; font-size: 12.5px; }
+.sup-row.stale { opacity: .7; }
+.sup-rule { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; color: var(--ink); }
+.sup-source { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 6px; border-radius: 5px; background: var(--paper); border: 1px solid var(--line); color: var(--ink-soft); }
+.sup-source.inline { color: var(--accent-ink); border-color: var(--accent-wash); }
+.sup-loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-faint); }
+.sup-reason { color: var(--ink-soft); flex: 1; min-width: 120px; }
+.sup-ticket { font-size: 11px; font-weight: 600; color: var(--accent-ink); }
+.sup-who { font-size: 11px; color: var(--ink-faint); }
+.sup-stale-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #c0392b; border: 1px solid #e3b7ac; border-radius: 5px; padding: 2px 6px; }
+
 /* ---- local workspace surface ---------------------------------------------- */
 .ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .ws-folder-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }

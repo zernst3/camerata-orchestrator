@@ -690,6 +690,47 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
 /// worker, a frontend) is one scan. A per-repo failure (bad name, no access) is
 /// noted in the report message and does not abort the others; the scan returns
 /// what it could read. The token is required (the caller gates on it).
+/// Build the central suppression registry across a project's repos: every inline
+/// `camerata:allow` waiver + every `.camerata/baseline.json` entry, each flagged stale
+/// against the current deterministic findings. This is the "show me everything we've
+/// waived" audit view (the require-indexing invariant). Uses the cheap mechanical audit
+/// for stale-detection (free, deterministic).
+pub async fn suppression_registry(
+    repos: &[String],
+    token: &str,
+) -> Vec<crate::suppression::SuppressionRecord> {
+    use crate::suppression::{parse_inline_waivers, registry, Baseline, FindingRef};
+    let mut out = Vec::new();
+    for spec in repos {
+        let Some((owner, repo)) = spec.split_once('/') else {
+            continue;
+        };
+        let Ok((files, _)) = fetch_repo_files(owner, repo, token).await else {
+            continue;
+        };
+        let mut inline = Vec::new();
+        for (path, content) in &files {
+            inline.extend(parse_inline_waivers(path, content));
+        }
+        let baseline = files
+            .iter()
+            .find(|(p, _)| p == ".camerata/baseline.json")
+            .and_then(|(_, c)| serde_json::from_str::<Baseline>(c).ok())
+            .unwrap_or_default();
+        let findings: Vec<FindingRef> = audit_files(spec, &files)
+            .into_iter()
+            .map(|f| FindingRef {
+                rule_id: f.rule_id,
+                path: f.path,
+                line: f.line,
+                snippet: f.snippet,
+            })
+            .collect();
+        out.extend(registry(&inline, &baseline, &findings));
+    }
+    out
+}
+
 /// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
 /// parsed from the files + the committed `.camerata/baseline.json`), setting each
 /// finding's `status`. Also appends a `CAM-WAIVER-NEEDS-REASON` finding for every
