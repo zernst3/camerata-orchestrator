@@ -546,6 +546,7 @@ async fn run_passes(
     adopted: &std::collections::HashSet<String>,
     audit_model: Option<&str>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
     chunks: &[&[(String, String)]],
     batches: &[&[(String, String)]],
     concurrency: usize,
@@ -598,6 +599,15 @@ async fn run_passes(
                 if let Some((store, key)) = feedback {
                     store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
                 }
+                // Stream this pass's findings + progress into the job (live preview) as it
+                // completes — so a Mode-3 poller sees findings appear incrementally. A failed
+                // pass still counts toward `done` so the progress bar can reach 100%.
+                if let Some((jstore, jid)) = job {
+                    if let Ok((f, _, _)) = &r {
+                        jstore.add_findings(jid, f.clone());
+                    }
+                    jstore.inc_done(jid, 1);
+                }
                 (ci, bi, r)
             }
         })
@@ -633,6 +643,7 @@ async fn run_passes(
 /// never in the input. Every chunk is audited against the full ruleset and the findings are
 /// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
 /// single bad pass never discards the others.
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &Llm,
     repo: &str,
@@ -641,6 +652,7 @@ pub async fn audit_repo(
     model: Option<&str>,
     mode: ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -667,6 +679,10 @@ pub async fn audit_repo(
     } else {
         selected.chunks(batch_size.max(1)).collect()
     };
+    // Tell the job how many passes this repo adds (the denominator climbs per repo).
+    if let Some((jstore, jid)) = job {
+        jstore.add_total(jid, chunks.len() * batches.len());
+    }
 
     let (mut all_findings, mut all_proposed, requested, ok_passes, last_err) = run_passes(
         llm,
@@ -675,6 +691,7 @@ pub async fn audit_repo(
         &adopted,
         audit_model.as_deref(),
         feedback,
+        job,
         &chunks,
         &batches,
         concurrency,
@@ -707,6 +724,9 @@ pub async fn audit_repo(
         .collect();
     if !resolution.is_empty() {
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
+        if let Some((jstore, jid)) = job {
+            jstore.add_total(jid, res_chunks.len() * batches.len());
+        }
         let (rf, rp, _rn, _rok, _re) = run_passes(
             llm,
             repo,
@@ -714,6 +734,7 @@ pub async fn audit_repo(
             &adopted,
             audit_model.as_deref(),
             feedback,
+            job,
             &res_chunks,
             &batches,
             concurrency,

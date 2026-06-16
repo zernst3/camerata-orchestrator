@@ -920,6 +920,7 @@ fn is_code_auditable_rule(id: &str) -> bool {
     !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     specs: &[String],
     selected: &[(String, String)],
@@ -927,6 +928,7 @@ pub async fn audit_repos(
     model: Option<&str>,
     mode: crate::ai_audit::ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> ScanReport {
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
@@ -974,11 +976,15 @@ pub async fn audit_repos(
             Ok((files, truncated)) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
-                // Deterministic security floor (always-on): ENFORCED findings.
+                // Deterministic security floor (always-on): ENFORCED findings. Push them to
+                // the job up front so the live preview shows the criticals immediately.
                 let mut repo_findings = audit_files(spec, &files);
+                if let Some((jstore, jid)) = job {
+                    jstore.add_findings(jid, repo_findings.clone());
+                }
                 // AI audit parameterized by the SEMANTIC rules only: ADVISORY findings.
                 match crate::ai_audit::audit_repo(
-                    &llm, spec, &files, &semantic, model, mode, feedback,
+                    &llm, spec, &files, &semantic, model, mode, feedback, job,
                 )
                 .await
                 {

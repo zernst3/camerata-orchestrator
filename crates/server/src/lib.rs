@@ -19,6 +19,7 @@ pub mod clarify;
 pub mod connections;
 pub mod decompose;
 pub mod fix;
+pub mod jobs;
 pub mod notify;
 pub mod onboard;
 pub mod project;
@@ -70,6 +71,7 @@ pub struct AppState {
     projects: crate::project::ProjectStore,
     settings: crate::settings::SettingsStore,
     transcripts: crate::transcript::TranscriptStore,
+    jobs: crate::jobs::JobStore,
 }
 
 impl AppState {
@@ -87,6 +89,7 @@ impl AppState {
             projects: crate::project::ProjectStore::new(),
             settings: crate::settings::SettingsStore::new(),
             transcripts: crate::transcript::TranscriptStore::new(),
+            jobs: crate::jobs::JobStore::new(),
         }
     }
 
@@ -165,6 +168,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/adopt", post(adopt_story))
         .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/onboard/audit", post(onboard_audit))
+        .route("/api/onboard/audit/start", post(onboard_audit_start))
+        .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
@@ -713,9 +718,75 @@ async fn onboard_audit(
             model.as_deref(),
             mode,
             Some((&state.transcripts, SCAN_AUDIT_KEY)),
+            None,
         )
         .await,
     )
+}
+
+/// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
+/// job id IMMEDIATELY, so the request never blocks for the (possibly many-minute) run. The
+/// UI polls `GET /api/onboard/audit/job/:id` for progress + incremental findings, then the
+/// final report. The work is decoupled from this request — it survives a dropped poll.
+async fn onboard_audit_start(
+    State(state): State<AppState>,
+    Json(req): Json<AuditReq>,
+) -> Json<serde_json::Value> {
+    let repos: Vec<String> = req
+        .repos
+        .into_iter()
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    let selected: Vec<(String, String)> = req
+        .rules
+        .into_iter()
+        .filter(|r| !r.id.trim().is_empty())
+        .map(|r| (r.id, r.directive))
+        .collect();
+    let model = req.model.filter(|m| !m.trim().is_empty());
+    let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let job_id = state.jobs.create();
+    state.transcripts.clear(SCAN_AUDIT_KEY);
+
+    let jobs = state.jobs.clone();
+    let transcripts = state.transcripts.clone();
+    let jid = job_id.clone();
+    tokio::spawn(async move {
+        let Some(token) = token else {
+            jobs.fail(&jid, "No GitHub token connected (set CAMERATA_GITHUB_TOKEN).");
+            return;
+        };
+        if repos.is_empty() {
+            jobs.fail(&jid, "No repos to audit.");
+            return;
+        }
+        let report = crate::onboard::audit_repos(
+            &repos,
+            &selected,
+            &token,
+            model.as_deref(),
+            mode,
+            Some((&transcripts, SCAN_AUDIT_KEY)),
+            Some((&jobs, &jid)),
+        )
+        .await;
+        jobs.finish(&jid, report);
+    });
+
+    Json(serde_json::json!({ "job_id": job_id }))
+}
+
+/// Poll an async audit job: status, progress (done/total passes), incremental findings, and
+/// the final report once done. `null` for an unknown id.
+async fn onboard_audit_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<Option<crate::jobs::JobState>> {
+    Json(state.jobs.get(&id))
 }
 
 #[derive(serde::Deserialize)]
