@@ -6,6 +6,8 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Auto-load the gitignored .env (standalone-server path).
+    let _ = dotenvy::dotenv();
     let addr =
         std::env::var("CAMERATA_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
     camerata_server::serve(&addr).await

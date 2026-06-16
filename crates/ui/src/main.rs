@@ -56,6 +56,10 @@ pub const BFF_ADDR: &str = "127.0.0.1:8787";
 pub const BFF_URL: &str = "http://127.0.0.1:8787";
 
 fn main() {
+    // Auto-load the gitignored .env at the repo root (and any parent), so the
+    // GitHub token etc. are available to the embedded BFF without exporting them.
+    // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.
+    let _ = dotenvy::dotenv();
     dioxus::launch(App);
 }
 

@@ -30,6 +30,9 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
+# Auto-load a gitignored .env (so `cargo run -p camerata -- worktracker-live` etc.
+# pick up the GitHub token without exporting it).
+dotenvy = "0.15"
 
 [dev-dependencies]
 tokio = { workspace = true }

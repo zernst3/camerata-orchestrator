@@ -10,6 +10,8 @@ use camerata_core::Decision;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Auto-load the gitignored .env (so the live commands pick up the token).
+    let _ = dotenvy::dotenv();
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "acceptance" => run_acceptance_cmd().await,

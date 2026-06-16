@@ -388,6 +388,7 @@ dependencies = [
  "camerata-rules",
  "camerata-worktracker",
  "chrono",
+ "dotenvy",
  "serde_json",
  "tokio",
 ]
@@ -543,6 +544,7 @@ dependencies = [
  "camerata-intake",
  "camerata-rules",
  "camerata-worktracker",
+ "dotenvy",
  "flate2",
  "http-body-util",
  "reqwest",
@@ -570,6 +572,7 @@ dependencies = [
  "chrono",
  "dioxus",
  "dirs",
+ "dotenvy",
  "reqwest",
  "serde",
  "serde_json",
