@@ -164,6 +164,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/fix", post(onboard_fix))
+        .route("/api/onboard/ci-rules", post(onboard_ci_rules))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/onboard/ignore", post(onboard_ignore))
         .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
@@ -831,6 +832,63 @@ struct FixFinding {
 struct FixReq {
     repo: String,
     findings: Vec<FixFinding>,
+}
+
+#[derive(serde::Deserialize)]
+struct CiRulesReq {
+    repo: String,
+}
+
+/// Wire the mechanical (CI-tier) governance rules into a repo's CI — as a GOVERNED
+/// DEVELOPMENT TASK. Arming emits `.camerata/ci-checks.json` (the declared mechanical
+/// rules) but a config doesn't enforce itself; turning each declared check into a real
+/// CI mechanism (an ESLint rule, a migration/index audit, an AST lint) is development
+/// work. So it runs through the SAME governed pipeline as any dev task: the agent reads
+/// the declared checks, sees which are already enforced in CI, and implements the rest,
+/// every write passing the gate.
+async fn onboard_ci_rules(
+    State(state): State<AppState>,
+    Json(req): Json<CiRulesReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let spec = format!(
+        "Wire Camerata's mechanical governance rules into {}'s CI so a pull request that \
+         violates one FAILS the build. This is development work, governed: every write \
+         passes the deny-before-execute gate.\n\n\
+         The rules to enforce are declared in `.camerata/ci-checks.json` (id, title, \
+         directive, conformance). For EACH rule:\n\
+         1. Check whether it is ALREADY enforced in CI (inspect `.github/workflows/`, the \
+         linter config, package scripts).\n\
+         2. If it is, leave it.\n\
+         3. If not, implement the enforcement using THIS repo's stack — e.g. an ESLint \
+         `no-restricted-syntax`/`no-restricted-imports` rule, a migration/index audit \
+         step, or an AST lint — following the rule's `conformance` description, and wire it \
+         into the `camerata-governance` workflow so it runs on every PR.\n\n\
+         Do not weaken or delete existing checks. Add a focused, minimal enforcement per \
+         rule.",
+        req.repo
+    );
+    let slug: String = req
+        .repo
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let story_id = format!("ci-{slug}");
+    let story = CanonicalStory {
+        id: story_id.clone(),
+        external_ref: None,
+        title: format!("Wire CI governance — {}", req.repo),
+        description: spec,
+        status: FeatureStatus::Intake,
+        created_by: "architect".to_string(),
+        targets: vec![RepoTarget::new(&req.repo)],
+    };
+    state.stories.upsert(story).await.map_err(AppError)?;
+    let (run_id, mode) = start_governed_run(&state, &story_id).await;
+    Ok(Json(serde_json::json!({
+        "story_id": story_id,
+        "run_id": run_id,
+        "mode": mode,
+    })))
 }
 
 /// Fix the audited items — as a GOVERNED DEVELOPMENT TASK, not a special path.

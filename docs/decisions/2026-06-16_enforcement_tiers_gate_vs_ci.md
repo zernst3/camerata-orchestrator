@@ -43,6 +43,18 @@ philosophy, applied at the stage where each check can be precise.
 - `crates/server/src/arm.rs`: `arm_files_for_repo` emits `.camerata/ci-checks.json` +
   the governance workflow for mechanical rules. Tested.
 
+## Wiring the CI rules is a governed dev task ("Add CI-enforced rules")
+
+A config doesn't enforce itself — turning each declared check in `.camerata/ci-checks.json`
+into a real CI mechanism (an ESLint rule, a migration/index audit, an AST lint) is
+DEVELOPMENT work, not enforcement. So it's an explicit governed action, not a hidden
+side effect: `POST /api/onboard/ci-rules` creates a story ("the agent reads the declared
+checks, sees which are already enforced in CI, and implements the rest, wiring them into
+the `camerata-governance` workflow") and runs it through `start_governed_run` — the SAME
+worktree → gate → layer-2 → bounce pipeline as any dev task. Surfaced as an
+"Add CI-enforced rules" button in both the brownfield onboarding results and the Rules
+view. Same shape as the fix-audited action: a goal → a governed dev run.
+
 ## Next
 
 A `camerata ci` runner that consumes `.camerata/ci-checks.json` + `.camerata/rules.json`

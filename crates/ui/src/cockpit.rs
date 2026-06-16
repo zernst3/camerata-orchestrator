@@ -484,6 +484,8 @@ fn RulesView() -> Element {
 
                         SuppressionsPanel { project_id: pid_sup }
 
+                        CiRulesPanel { repos: p.repos.clone() }
+
                         // Re-emit: rebuild the source-of-truth emit from this project's
                         // ruleset (base selections + custom) and open a PR per repo.
                         div { class: "rules-emit",
@@ -1402,6 +1404,76 @@ struct FindingView {
 
 fn default_finding_status() -> String {
     "active".to_string()
+}
+
+/// Wire the mechanical (CI-tier) governance rules into a repo's CI as a governed dev run.
+/// Returns `(run_id, mode)`.
+async fn wire_ci_rules(repo: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/ci-rules", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let run = v.get("run_id")?.as_str()?.to_string();
+    let mode = v
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((run, mode))
+}
+
+/// The "wire CI-enforced rules" panel: spawns a governed dev run per repo that
+/// implements the declared mechanical rules' CI enforcement (checks what's already
+/// enforced, adds what's missing). This is development work, so it runs the same
+/// governed pipeline as any dev task. Reused in onboarding and the Rules view.
+#[component]
+fn CiRulesPanel(repos: Vec<String>) -> Element {
+    let mut msg = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    rsx! {
+        div { class: "fix-panel",
+            p { class: "scan-section-h", "Add CI-enforced rules" }
+            p { class: "scan-section-sub", "Mechanical rules are declared in .camerata/ci-checks.json at arm time, but a config doesn't enforce itself. This spawns a governed development run that checks what's already enforced in CI and implements the rest (ESLint rule, query-plan/migration audit, AST lint) — same gate-governed pipeline as any dev task." }
+            for repo in repos.iter() {
+                {
+                    let repo = repo.clone();
+                    let repo_click = repo.clone();
+                    rsx! {
+                        div { class: "fix-row", key: "{repo}",
+                            span { class: "fix-repo", "{repo}" }
+                            button {
+                                class: "btn-run",
+                                disabled: busy(),
+                                onclick: move |_| {
+                                    let repo = repo_click.clone();
+                                    busy.set(true);
+                                    msg.set(String::new());
+                                    spawn(async move {
+                                        match wire_ci_rules(&repo).await {
+                                            Some((run, mode)) => msg.set(format!(
+                                                "Started a governed {mode} run ({run}) to wire CI governance for {repo}. Watch it in the control surface (Agent activity)."
+                                            )),
+                                            None => msg.set(format!("Could not start the CI-wiring run for {repo}.")),
+                                        }
+                                        busy.set(false);
+                                    });
+                                },
+                                "Wire CI rules (governed)"
+                            }
+                        }
+                    }
+                }
+            }
+            if !msg().is_empty() {
+                p { class: "fix-msg", "{msg}" }
+            }
+        }
+    }
 }
 
 /// The "fix the audited items" panel: one governed remediation run per repo. Fixing
@@ -2354,6 +2426,8 @@ fn ScanResults(report: ScanReportView) -> Element {
             FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
 
             FixAuditedPanel { findings: report.findings.clone(), repos: report.repos.clone() }
+
+            CiRulesPanel { repos: report.repos.clone() }
 
             p { class: "scan-section-h", "Proposed starter ruleset" }
             p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
