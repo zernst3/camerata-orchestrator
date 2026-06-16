@@ -74,6 +74,11 @@ pub fn sec_no_path_escape_1_rule() -> RuleId {
     RuleId("SEC-NO-PATH-ESCAPE-1".to_string())
 }
 
+/// The id for the secret-files rule.
+pub fn sec_no_secret_files_1_rule() -> RuleId {
+    RuleId("SEC-NO-SECRET-FILES-1".to_string())
+}
+
 // ─── public rule registry ─────────────────────────────────────────────────────
 
 /// A pure rule-arm function: `Ok(())` = allow, `Err(reason)` = deny.
@@ -135,6 +140,13 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
                       traversal segment, or targets version-control / SSH internals \
                       (a `.git` or `.ssh` directory component).",
         arm: arm_sec_no_path_escape_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-SECRET-FILES-1",
+        description: "Deny writing a secret-bearing file by name: a real `.env` (not a \
+                      template), a private-key file (.pem/.key/.p12/.pfx/id_rsa/…), or a \
+                      keystore. Secrets belong in a secret manager, never the repo.",
+        arm: arm_sec_no_secret_files_1,
     },
 ];
 
@@ -277,6 +289,46 @@ fn arm_sec_no_path_escape_1(path: &str, _content: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ── SEC-NO-SECRET-FILES-1 ─────────────────────────────────────────────────────
+
+/// SEC-NO-SECRET-FILES-1: deny writing a file whose NAME marks it as secret-bearing —
+/// a real `.env` (not a template), a private-key file, or a keystore. Secrets belong in
+/// a secret manager, never committed to the repo. Path-based and high-precision: these
+/// names are secrets by convention, so the false-positive rate is near zero.
+fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+
+    // `.env` and `.env.<env>` ARE denied, but templates (no real secrets) are allowed.
+    const ENV_TEMPLATE_SUFFIXES: &[&str] =
+        &["example", "sample", "template", "dist", "defaults", "tpl"];
+    let is_env = lower == ".env"
+        || (lower.starts_with(".env.")
+            && !ENV_TEMPLATE_SUFFIXES
+                .iter()
+                .any(|suf| lower.ends_with(suf)));
+
+    // Private-key / keystore file extensions.
+    const KEY_EXTS: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc"];
+    let is_key_ext = KEY_EXTS.iter().any(|ext| lower.ends_with(ext));
+
+    // Conventional SSH / signing private-key filenames.
+    let is_private_key_file = matches!(
+        lower.as_str(),
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | ".npmrc" | ".pgpass"
+    );
+
+    if is_env || is_key_ext || is_private_key_file {
+        Err(format!(
+            "SEC-NO-SECRET-FILES-1: refusing to write a secret-bearing file (path={path}); \
+             keep secrets out of the repo — use a secret manager and commit a `.env.example` \
+             template instead"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 // ── SEC-NO-HARDCODED-SECRETS-1 ────────────────────────────────────────────────
@@ -564,6 +616,49 @@ mod tests {
         let subset = vec![gov1_rule()];
         let d = evaluate_call(&subset, &write_call("crates/core/src/lib.rs"));
         assert!(matches!(d, Decision::Allow));
+    }
+
+    // ── SEC-NO-SECRET-FILES-1 ────────────────────────────────────────────────
+
+    #[test]
+    fn secret_files_denies_env_keys_and_keystores() {
+        let subset = vec![sec_no_secret_files_1_rule()];
+        for p in [
+            ".env",
+            ".env.production",
+            ".env.local",
+            "config/.env",
+            "certs/server.pem",
+            "deploy/tls.key",
+            "secrets/app.p12",
+            "keystore.jks",
+            ".ssh/id_rsa",
+            "id_ed25519",
+            ".npmrc",
+        ] {
+            assert!(
+                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                "expected DENY for {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_files_allows_templates_and_normal_code() {
+        let subset = vec![sec_no_secret_files_1_rule()];
+        for p in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            "crates/api/src/config.rs",
+            "src/keys.rs", // a source file named keys — not a key file
+            "docs/env.md",
+        ] {
+            assert!(
+                matches!(evaluate_call(&subset, &write_call(p)), Decision::Allow),
+                "expected ALLOW for {p}"
+            );
+        }
     }
 
     #[test]

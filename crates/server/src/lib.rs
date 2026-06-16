@@ -1605,11 +1605,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        // The four substantive rules, GOV-1 filtered out.
-        assert_eq!(arr.len(), 4);
+        // The five substantive rules, GOV-1 (the synthetic test rule) filtered out.
+        assert_eq!(arr.len(), 5);
         let ids: Vec<&str> = arr.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"SEC-NO-HARDCODED-SECRETS-1"));
         assert!(ids.contains(&"SEC-NO-PATH-ESCAPE-1"));
+        assert!(ids.contains(&"SEC-NO-SECRET-FILES-1"));
         assert!(!ids.contains(&"GOV-1"));
     }
 
