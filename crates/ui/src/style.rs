@@ -978,6 +978,15 @@ html, body {
 .alt-repos-label { font-size: 11px; color: var(--ink-faint); }
 .repo-chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-faint); cursor: pointer; }
 .repo-chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+.proj-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0 20px; }
+.proj-label { font-size: 12px; color: var(--ink-soft); }
+.proj-none { font-size: 12px; color: var(--ink-faint); font-style: italic; }
+.proj-chip { font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); cursor: pointer; }
+.proj-chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+.rules-sections { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 20px; }
+.rule-count { display: flex; flex-direction: column; min-width: 150px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.rule-count-n { font-size: 22px; font-weight: 700; color: var(--ink); }
+.rule-count-l { font-size: 12px; color: var(--ink-soft); }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }

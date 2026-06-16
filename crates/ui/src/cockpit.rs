@@ -56,6 +56,233 @@ async fn fetch_rules() -> Option<Vec<CockpitRule>> {
         .ok()
 }
 
+// ── Projects ───────────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct RuleSelectionView {
+    rule_id: String,
+    #[serde(default)]
+    chosen_option: Option<String>,
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct CustomRuleView {
+    name: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    domain: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct RulesetView {
+    #[serde(default)]
+    selections: Vec<RuleSelectionView>,
+    #[serde(default)]
+    cross_repo: Vec<RuleSelectionView>,
+    #[serde(default)]
+    process: Vec<RuleSelectionView>,
+    #[serde(default)]
+    custom: Vec<CustomRuleView>,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ProjectView {
+    id: String,
+    name: String,
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    ruleset: RulesetView,
+}
+
+async fn fetch_projects() -> Option<Vec<ProjectView>> {
+    reqwest::get(format!("{}/api/projects", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<ProjectView>>()
+        .await
+        .ok()
+}
+
+async fn fetch_active_project() -> Option<ProjectView> {
+    reqwest::get(format!("{}/api/projects/active", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Option<ProjectView>>()
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn create_project(name: &str, repos: Vec<String>) -> Option<ProjectView> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/projects", crate::BFF_URL))
+        .json(&serde_json::json!({ "name": name, "repos": repos }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    serde_json::from_value(v.get("project")?.clone()).ok()
+}
+
+async fn set_active_project(id: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/active", crate::BFF_URL))
+        .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Import a ruleset JSON (upsert base rules; the server preserves custom).
+async fn import_ruleset(project_id: &str, json: String) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/ruleset", crate::BFF_URL, project_id))
+        .header("content-type", "application/json")
+        .body(json)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// The project Rules-management screen: the active project's ruleset (repo-local,
+/// cross-repo, process, custom) + export/import. The full per-rule editor + re-emit
+/// is phased (see the ADR); this is the project-scoped management surface and the
+/// home for the non-repo rules.
+#[component]
+fn RulesView() -> Element {
+    let mut refresh = use_signal(|| 0u32);
+    let active = use_resource(move || {
+        let _ = refresh();
+        async move { fetch_active_project().await }
+    });
+    let projects = use_resource(move || {
+        let _ = refresh();
+        async move { fetch_projects().await }
+    });
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut new_name = use_signal(String::new);
+    let mut import_text = use_signal(String::new);
+
+    let proj = active.read().clone().flatten();
+    let proj_list = projects.read().clone().flatten().unwrap_or_default();
+
+    rsx! {
+        div { class: "page page-wide",
+            p { class: "eyebrow", "Project" }
+            h1 { class: "h1", "Rules" }
+            p { class: "lede", "Manage the active project's ruleset: repo-local rules, the cross-repo (API contract) rules, the process (commit/PR) rules, and your custom rules. The cross-repo and process rules live at the project level (no repo owns them); the engine's gates read them here. Editing produces one emit that upserts the repo files and the project config — custom rules are preserved." }
+
+            div { class: "proj-bar",
+                span { class: "proj-label", "Project:" }
+                if proj_list.is_empty() {
+                    span { class: "proj-none", "none yet" }
+                }
+                for p in proj_list.iter() {
+                    {
+                        let id = p.id.clone();
+                        let is_active = proj.as_ref().map(|a| a.id == p.id).unwrap_or(false);
+                        let cls = if is_active { "proj-chip on" } else { "proj-chip" };
+                        rsx! {
+                            button {
+                                class: "{cls}",
+                                onclick: move |_| {
+                                    let id = id.clone();
+                                    spawn(async move { if set_active_project(&id).await { refresh += 1; } });
+                                },
+                                "{p.name}"
+                            }
+                        }
+                    }
+                }
+                input {
+                    class: "addressee-input",
+                    placeholder: "new project name",
+                    value: "{new_name}",
+                    oninput: move |e| new_name.set(e.value()),
+                }
+                button {
+                    class: "btn-restart",
+                    onclick: move |_| {
+                        let n = new_name();
+                        if n.trim().is_empty() { return; }
+                        spawn(async move { if create_project(&n, Vec::new()).await.is_some() { refresh += 1; } });
+                        new_name.set(String::new());
+                    },
+                    "New project"
+                }
+            }
+
+            match &proj {
+                None => rsx! {
+                    p { class: "section-hint", "Create a project, then onboard repos into it (the Onboard tab) to populate its ruleset." }
+                },
+                Some(p) => {
+                    let export = serde_json::to_string_pretty(&serde_json::json!({
+                        "selections": p.ruleset.selections.iter().map(|s| serde_json::json!({"rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos})).collect::<Vec<_>>(),
+                        "cross_repo": p.ruleset.cross_repo.iter().map(|s| serde_json::json!({"rule_id": s.rule_id, "repos": s.repos})).collect::<Vec<_>>(),
+                        "process": p.ruleset.process.iter().map(|s| serde_json::json!({"rule_id": s.rule_id, "repos": s.repos})).collect::<Vec<_>>(),
+                        "custom": p.ruleset.custom.iter().map(|c| serde_json::json!({"name": c.name, "body": c.body, "domain": c.domain})).collect::<Vec<_>>(),
+                    })).unwrap_or_default();
+                    let pid = p.id.clone();
+                    rsx! {
+                        div { class: "rules-sections",
+                            RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
+                            RuleCount { label: "Cross-repo rules (API contracts)", n: p.ruleset.cross_repo.len() }
+                            RuleCount { label: "Process rules (commit/PR)", n: p.ruleset.process.len() }
+                            RuleCount { label: "Custom rules", n: p.ruleset.custom.len() }
+                        }
+                        p { class: "section-label", "Export ruleset (source of truth)" }
+                        textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
+                        p { class: "section-label", "Import ruleset (upsert base; preserves custom)" }
+                        textarea {
+                            class: "routine-prompt-input",
+                            rows: "6",
+                            placeholder: "paste a ruleset JSON…",
+                            value: "{import_text}",
+                            oninput: move |e| import_text.set(e.value()),
+                        }
+                        button {
+                            class: "btn-run",
+                            onclick: move |_| {
+                                let (id, json) = (pid.clone(), import_text());
+                                if json.trim().is_empty() { return; }
+                                spawn(async move {
+                                    if import_ruleset(&id, json).await {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Ruleset imported (custom rules preserved).");
+                                        refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Import failed — check the JSON shape.");
+                                    }
+                                });
+                                import_text.set(String::new());
+                            },
+                            "Import ruleset"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RuleCount(label: String, n: usize) -> Element {
+    rsx! {
+        div { class: "rule-count",
+            span { class: "rule-count-n", "{n}" }
+            span { class: "rule-count-l", "{label}" }
+        }
+    }
+}
+
 /// The active work-tracker connection as the BFF reports it (`GET /api/provider`).
 #[derive(serde::Deserialize, Clone, PartialEq)]
 struct ProviderView {
@@ -286,6 +513,10 @@ enum CockpitView {
     /// existing repo; greenfield: scaffold a new one). The ENTRY POINT for a
     /// repo new to Camerata — distinct from a story's Investigation phase.
     Onboard,
+    /// Manage the active project's ruleset (repo-local / cross-repo / process /
+    /// custom) AFTER onboarding — the ongoing control surface over the same
+    /// project ruleset the brownfield flow first populates.
+    Rules,
     /// The scheduled-routine dashboard.
     Routines,
 }
@@ -313,6 +544,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 class: cls(CockpitView::Onboard),
                 onclick: move |_| view.set(CockpitView::Onboard),
                 "Onboard a repo"
+            }
+            button {
+                class: cls(CockpitView::Rules),
+                onclick: move |_| view.set(CockpitView::Rules),
+                "Rules"
             }
             button {
                 class: cls(CockpitView::Routines),
@@ -368,6 +604,16 @@ pub fn CockpitApp() -> Element {
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     OnboardView { connection: conn }
+                }
+            }
+        };
+    }
+    if view() == CockpitView::Rules {
+        return rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    RulesView {}
                 }
             }
         };

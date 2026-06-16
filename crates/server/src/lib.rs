@@ -19,6 +19,7 @@ pub mod connections;
 pub mod decompose;
 pub mod notify;
 pub mod onboard;
+pub mod project;
 pub mod live_fleet;
 pub mod provider;
 pub mod routine;
@@ -56,6 +57,7 @@ pub struct AppState {
     decompositions: DecompositionStore,
     routines: RoutineStore,
     notifications: crate::notify::NotificationStore,
+    projects: crate::project::ProjectStore,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
             notifications: crate::notify::NotificationStore::new(),
+            projects: crate::project::ProjectStore::new(),
         }
     }
 
@@ -119,6 +122,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/clarifications/:cid/answer", post(answer_clarification))
         .route("/api/clarifications", get(list_open_clarifications))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/active", get(active_project).post(set_active_project))
+        .route(
+            "/api/projects/:id/ruleset",
+            get(export_project_ruleset).post(import_project_ruleset),
+        )
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -289,6 +298,85 @@ async fn provider_info(State(state): State<AppState>) -> Json<serde_json::Value>
         "provider": state.provider.label,
         "live": state.provider.live,
     }))
+}
+
+// ── Projects ────────────────────────────────────────────────────────────────
+
+async fn list_projects(State(state): State<AppState>) -> Json<Vec<crate::project::Project>> {
+    Json(state.projects.list())
+}
+
+#[derive(serde::Deserialize)]
+struct CreateProjectReq {
+    name: String,
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(req): Json<CreateProjectReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.create(&req.name, req.repos) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "could not create project" })),
+    }
+}
+
+async fn active_project(State(state): State<AppState>) -> Json<Option<crate::project::Project>> {
+    Json(state.projects.active())
+}
+
+#[derive(serde::Deserialize)]
+struct SetActiveReq {
+    id: String,
+}
+
+async fn set_active_project(
+    State(state): State<AppState>,
+    Json(req): Json<SetActiveReq>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": state.projects.set_active(&req.id) }))
+}
+
+/// Export the project's ruleset as JSON (the portable source of truth).
+async fn export_project_ruleset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.projects.get(&id) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "ruleset": p.ruleset })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Import a ruleset: upsert the BASE rules (selections / cross-repo / process)
+/// while PRESERVING the project's existing custom rules.
+async fn import_project_ruleset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(incoming): Json<crate::project::ProjectRuleset>,
+) -> Json<serde_json::Value> {
+    let updated = state.projects.update(&id, |p| {
+        p.upsert_base_rules(
+            incoming.selections.clone(),
+            incoming.cross_repo.clone(),
+            incoming.process.clone(),
+        );
+        // Merge imported custom rules in by name (imported wins), never dropping
+        // existing ones that aren't in the import.
+        for c in &incoming.custom {
+            if let Some(existing) = p.ruleset.custom.iter_mut().find(|x| x.name == c.name) {
+                *existing = c.clone();
+            } else {
+                p.ruleset.custom.push(c.clone());
+            }
+        }
+    });
+    match updated {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
 }
 
 /// Connection health for the optional integrations (GitHub, Claude). Probes

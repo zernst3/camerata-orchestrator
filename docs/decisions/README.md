@@ -6,6 +6,19 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_project_container_and_rules_management.md** — the PROJECT is the
+  foundational data container (the Azure-resource-group of Camerata): repos + the
+  full ruleset (per-repo base selections, cross-repo rules, process rules, custom
+  rules) + settings, switchable. Answers "where do non-repo rules persist": the
+  cross-repo (API contract) + process (commit-format) rules span repos / are
+  account-level, so they CAN'T live in a repo `.camerata/` file — they live at the
+  PROJECT level (the project store; the integration + VCS-action gates read them
+  there), while repo-local rules are also emitted into each repo. The ruleset is one
+  source of truth; an edit is an UPSERT that never clobbers custom rules and produces
+  one emit upserting repo files + project config. Adopt camerata-ai's rule features
+  (export/import JSON, custom rules, drift) in TWO surfaces: brownfield + a project
+  Rules-management screen. Foundation built (Project container + store + ruleset
+  export/import + project selector + Rules view); full editor/re-emit phased.
 - **2026-06-15_routine_authoring_intent_not_prompt.md** — the routine form was
   treating the user's text as the literal agent prompt; backwards. The user writes
   INTENT (what they want); the lead-engineer AI authors the OPERATIONAL prompt
