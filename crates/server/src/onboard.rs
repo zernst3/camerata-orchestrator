@@ -910,6 +910,14 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
 /// PARAMETERIZED by the selected rules' directives (so it checks the code against what the
 /// project actually adopted) and produces ADVISORY findings plus its investigative pass.
 /// `selected` is `(rule_id, directive)` for each adopted rule.
+/// Whether a rule describes what CODE should look like (audit it against source) vs how
+/// the FLEET/TEAM operates (governance/process — arm it, but don't code-audit). The
+/// orchestration (`ORCH-`), meta-principle (`SPIRIT-`), and process (`PROC-`) families
+/// are governance/process; everything else (ARCH-/RUST-/SQL-/UI-/SEC-/…) is code.
+fn is_code_auditable_rule(id: &str) -> bool {
+    !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
+}
+
 pub async fn audit_repos(
     specs: &[String],
     selected: &[(String, String)],
@@ -934,9 +942,18 @@ pub async fn audit_repos(
     // deterministic code (`audit_files`) and must NEVER go to the LLM — fuzzy
     // keyword-matching a deterministic rule is the flood. Only the SEMANTIC rules
     // (no arm: layering, idempotency, authz, …) are handed to the model.
+    //
+    // SECOND, drop GOVERNANCE / PROCESS / ORCHESTRATION rules from the CODE audit.
+    // ORCH-* / SPIRIT-* / PROC-* describe how the fleet and team OPERATE (track AI
+    // spend, split author/reviewer agents, cite convention ids in commits, document
+    // decisions). They are correct to ARM into a repo's governance, but auditing
+    // application SOURCE against them is a category error ("this app doesn't track its
+    // AI token budget"). The arm path still installs them; only the AI code-audit
+    // prompt is filtered.
     let semantic: Vec<(String, String)> = selected
         .iter()
         .filter(|(id, _)| camerata_gateway::lookup_arm(id).is_none())
+        .filter(|(id, _)| is_code_auditable_rule(id))
         .cloned()
         .collect();
 

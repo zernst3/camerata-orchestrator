@@ -1501,6 +1501,12 @@ html, body {
   font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
   letter-spacing: .02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+/* Estimated token-usage badge in the Agent-activity detail. */
+.agent-tokens {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
+  font-weight: 700; color: var(--accent-ink); background: var(--accent-wash);
+  border-radius: 999px; padding: 1px 8px; margin-left: 6px; letter-spacing: .02em;
+}
 .rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
 .rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

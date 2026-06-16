@@ -111,11 +111,25 @@ pub fn AgentActivity(run_id: String) -> Element {
                         {
                             let idx = selected().min(agents().len().saturating_sub(1));
                             let a = agents()[idx].clone();
+                            // Estimated token usage (~chars/4). Honest best-effort: real
+                            // API/CLI usage isn't surfaced through the LLM layer yet, so
+                            // this is an approximation that grows live as output streams.
+                            let in_tok = a.prompt.chars().count() / 4;
+                            let out_tok = a.output.chars().count() / 4;
                             rsx! {
                                 div { class: "agent-detail",
-                                    p { class: "agent-detail-label", "Generated prompt" }
+                                    p { class: "agent-detail-label",
+                                        "Generated prompt "
+                                        span { class: "agent-tokens", "~{in_tok} tok in" }
+                                    }
                                     pre { class: "agent-prompt", "{a.prompt}" }
-                                    p { class: "agent-detail-label", "Output" }
+                                    p { class: "agent-detail-label",
+                                        "Output "
+                                        span { class: "agent-tokens",
+                                            "~{out_tok} tok out"
+                                            if a.status == "running" { " · streaming" }
+                                        }
+                                    }
                                     // While the agent is thinking with nothing emitted yet,
                                     // run the Bombe — the "it's actually working" affordance.
                                     if a.output.is_empty() {
