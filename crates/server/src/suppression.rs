@@ -137,6 +137,26 @@ pub fn fingerprint(rule_id: &str, snippet: &str) -> String {
     format!("{:016x}", fnv1a(&format!("{rule_id}|{norm}")))
 }
 
+/// Build a baseline entry for a finding (accepted pre-existing debt). The caller
+/// supplies who/when/reason so this stays time-free and pure.
+pub fn baseline_entry(
+    f: &FindingRef,
+    accepted_by: &str,
+    accepted_at: &str,
+    reason: &str,
+) -> BaselineEntry {
+    BaselineEntry {
+        rule_id: f.rule_id.clone(),
+        path: f.path.clone(),
+        fingerprint: fingerprint(&f.rule_id, &f.snippet),
+        reason: reason.to_string(),
+        accepted_by: accepted_by.to_string(),
+        accepted_at: accepted_at.to_string(),
+        kind: "baseline".to_string(),
+        ticket: None,
+    }
+}
+
 // ── inline waiver parsing ───────────────────────────────────────────────────
 
 /// True if `t` looks like a ticket id, e.g. `JIRA-123`, `AB#42`, `GH-7`.

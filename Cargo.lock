@@ -721,6 +721,7 @@ dependencies = [
  "camerata-intake",
  "camerata-rules",
  "camerata-worktracker",
+ "chrono",
  "dirs",
  "dotenvy",
  "flate2",

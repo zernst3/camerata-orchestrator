@@ -605,6 +605,60 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
 struct ArmReq {
     /// Fully-resolved rules (each with its chosen directive + which repos it goes to).
     rules: Vec<crate::arm::ArmRule>,
+    /// The current findings to snapshot as the baseline (accepted pre-existing debt),
+    /// so the team is unblocked at onboarding and the gate enforces only on new code.
+    #[serde(default)]
+    findings: Vec<ArmFinding>,
+}
+
+/// A finding the UI sends to arm, to be snapshotted into the per-repo baseline.
+#[derive(serde::Deserialize)]
+struct ArmFinding {
+    #[serde(default)]
+    repo: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    rule_id: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    status: String,
+}
+
+/// Build the per-repo `.camerata/baseline.json` contents from the armed findings:
+/// snapshot the currently-enforced (active) violations as accepted pre-existing debt,
+/// fingerprinted so the ratchet works. Returns `repo -> baseline JSON`.
+fn baselines_from_findings(
+    findings: &[ArmFinding],
+    accepted_by: &str,
+) -> std::collections::HashMap<String, String> {
+    use crate::suppression::{baseline_entry, Baseline, FindingRef};
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut by_repo: std::collections::HashMap<String, Baseline> = std::collections::HashMap::new();
+    for f in findings {
+        // Only snapshot real, currently-enforced violations — not the require-reason
+        // meta-finding, not already-suppressed ones.
+        if f.status != "active" || f.rule_id == crate::suppression::REASONLESS_RULE_ID {
+            continue;
+        }
+        let fr = FindingRef {
+            rule_id: f.rule_id.clone(),
+            path: f.path.clone(),
+            line: 0,
+            snippet: f.snippet.clone(),
+        };
+        let entry = baseline_entry(&fr, accepted_by, &now, "pre-existing at onboarding");
+        by_repo.entry(f.repo.clone()).or_default().entries.push(entry);
+    }
+    by_repo
+        .into_iter()
+        .filter_map(|(repo, b)| {
+            serde_json::to_string_pretty(&b)
+                .ok()
+                .map(|json| (repo, json))
+        })
+        .collect()
 }
 
 /// Arm: install the approved ruleset into each repo via a governance PR (AGENTS.md
@@ -641,7 +695,11 @@ async fn onboard_arm(
     repos.dedup();
     let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
 
-    let results = emit_to_repos(&repos, &repo_local, &custom, &token).await;
+    // Snapshot the current violations as the baseline (accepted pre-existing debt), so
+    // the team is unblocked at onboarding and the gate enforces only on new code.
+    let baselines = baselines_from_findings(&req.findings, "architect");
+
+    let results = emit_to_repos(&repos, &repo_local, &custom, &baselines, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
@@ -784,6 +842,7 @@ async fn emit_to_repos(
     repos: &[String],
     rules: &[crate::arm::ArmRule],
     custom: &[crate::project::CustomRule],
+    baselines: &std::collections::HashMap<String, String>,
     token: &str,
 ) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
@@ -801,7 +860,12 @@ async fn emit_to_repos(
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
         }
-        let files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        let mut files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        // Include this repo's baseline (accepted pre-existing debt) in the same PR, so
+        // the gate it installs enforces only on new code from day one.
+        if let Some(baseline_json) = baselines.get(repo) {
+            files.push((".camerata/baseline.json".to_string(), baseline_json.clone()));
+        }
         match crate::arm::arm_repo(owner, name, token, &files).await {
             Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
             Err(e) => {
@@ -897,7 +961,10 @@ async fn emit_project(
     if rules.is_empty() && project.ruleset.custom.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }));
     }
-    let results = emit_to_repos(&project.repos, &rules, &project.ruleset.custom, &token).await;
+    // Re-emit carries no new baseline (it's a ruleset refresh, not onboarding).
+    let no_baselines = std::collections::HashMap::new();
+    let results =
+        emit_to_repos(&project.repos, &rules, &project.ruleset.custom, &no_baselines, &token).await;
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 

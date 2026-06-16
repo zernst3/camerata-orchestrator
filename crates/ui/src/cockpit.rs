@@ -1413,10 +1413,10 @@ struct ArmResultView {
 }
 
 /// Arm: install the selected rules into their repos via governance PRs.
-async fn arm_rules(rules: &[ArmRuleReq]) -> Option<Vec<ArmResultView>> {
+async fn arm_rules(rules: &[ArmRuleReq], findings: &[FindingView]) -> Option<Vec<ArmResultView>> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/arm", crate::BFF_URL))
-        .json(&serde_json::json!({ "rules": rules }))
+        .json(&serde_json::json!({ "rules": rules, "findings": findings }))
         .send()
         .await
         .ok()?
@@ -1771,7 +1771,7 @@ fn AlternativesPicker(rules: Vec<ProposedRuleView>, all_repos: Vec<String>) -> E
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 #[component]
-fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
+fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
@@ -1781,6 +1781,8 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
         rows.iter().map(|(r, p)| (*r, p.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
     let mut arming = use_signal(|| false);
+    // The findings to snapshot as the baseline on arm; cloned per arm click.
+    let arm_findings = findings;
 
     rsx! {
         Table { handle, sort_enabled: true, selection_enabled: true }
@@ -1825,8 +1827,9 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
                         return;
                     }
                     arming.set(true);
+                    let findings = arm_findings.clone();
                     spawn(async move {
-                        match arm_rules(&arm_reqs).await {
+                        match arm_rules(&arm_reqs, &findings).await {
                             Some(results) => {
                                 for r in results {
                                     if r.ok {
@@ -2111,7 +2114,7 @@ fn ScanResults(report: ScanReportView) -> Element {
 
             p { class: "scan-section-h", "Proposed starter ruleset" }
             p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
-            ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone() }
+            ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone(), findings: report.findings.clone() }
 
             AlternativesPicker { rules: report.proposed_rules.clone(), all_repos: report.repos.clone() }
         }
