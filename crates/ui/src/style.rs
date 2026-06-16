@@ -1476,6 +1476,31 @@ html, body {
   animation: camerata-spin .7s linear infinite;
 }
 .spinner-sm { width: 10px; height: 10px; margin-right: 5px; border-width: 1.5px; }
+
+/* BombeSpinner — a 4x2 bank of rotor drums (homage to the Bletchley Park Bombe).
+   Each drum's rotor mark rotates; row speed + column phase are set inline. */
+.bombe { display: inline-flex; flex-direction: column; gap: 3px; vertical-align: middle; }
+.bombe-row { display: flex; gap: 3px; }
+.bombe-drum {
+  position: relative; width: 13px; height: 13px; border-radius: 50%;
+  border: 1.5px solid var(--ink-faint);
+  background: radial-gradient(circle at 50% 40%, var(--surface), var(--accent-wash));
+  box-shadow: inset 0 0 2px rgba(0,0,0,.15);
+}
+.bombe-mark {
+  position: absolute; top: 1px; left: 50%; width: 2px; height: 4.5px; margin-left: -1px;
+  border-radius: 1px; background: var(--accent);
+  transform-origin: 50% 5.5px;            /* pivot on the drum center */
+  animation-name: camerata-spin;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+/* Bombe + label rows used where the AI is thinking. */
+.audit-thinking, .agent-thinking { display: flex; align-items: center; gap: 11px; margin: 10px 0; }
+.audit-thinking-label, .agent-thinking-label {
+  font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
+  letter-spacing: .02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
 .rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

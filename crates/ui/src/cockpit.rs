@@ -2905,6 +2905,14 @@ fn ScanResults(report: ScanReportView) -> Element {
             div { class: "audit-cta",
                 p { class: "scan-section-h", "Step 2 — audit the code against your selected rules" }
                 p { class: "scan-section-sub", "Tick the rules above, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
+                // While the audit runs, the Bombe turns — a visible "the AI is thinking"
+                // cue so a multi-second audit doesn't look hung.
+                if auditing() {
+                    div { class: "audit-thinking",
+                        crate::bombe::BombeSpinner { title: "Camerata is auditing\u{2026}".to_string() }
+                        span { class: "audit-thinking-label", "Camerata is auditing your code\u{2026}" }
+                    }
+                }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung).
                 crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }

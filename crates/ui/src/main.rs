@@ -14,6 +14,7 @@
 
 mod agent_activity;
 mod app_state;
+mod bombe;
 mod build_run;
 mod chat;
 mod cockpit;

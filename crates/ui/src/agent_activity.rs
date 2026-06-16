@@ -116,8 +116,17 @@ pub fn AgentActivity(run_id: String) -> Element {
                                     p { class: "agent-detail-label", "Generated prompt" }
                                     pre { class: "agent-prompt", "{a.prompt}" }
                                     p { class: "agent-detail-label", "Output" }
-                                    pre { class: "agent-output",
-                                        if a.output.is_empty() { "…" } else { "{a.output}" }
+                                    // While the agent is thinking with nothing emitted yet,
+                                    // run the Bombe — the "it's actually working" affordance.
+                                    if a.output.is_empty() {
+                                        div { class: "agent-thinking",
+                                            crate::bombe::BombeSpinner { title: "Camerata is thinking\u{2026}".to_string() }
+                                            span { class: "agent-thinking-label",
+                                                if a.status == "running" { "thinking\u{2026}" } else { "waiting\u{2026}" }
+                                            }
+                                        }
+                                    } else {
+                                        pre { class: "agent-output", "{a.output}" }
                                     }
                                 }
                             }
