@@ -89,6 +89,10 @@ pub struct ProposedRule {
     /// Scope: `repo-local` (applies within each repo), `cross-repo` (spans the
     /// repo set, e.g. API contracts), or `process` (VCS-workflow, per account).
     pub scope: String,
+    /// The corpus domain this rule belongs to (`sql`, `api-layer`, `ui`, `security`,
+    /// `architecture`, `*` universal, …). Drives group-by-domain in the rules table.
+    #[serde(default)]
+    pub domain: String,
     /// Which gate enforces it: `content` (Layer 1/2), `integration` (cross-agent
     /// tier), or `vcs-action` (commit/PR metadata).
     pub enforcement_point: String,
@@ -226,6 +230,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             default_option: None,
             scope: "repo-local".to_string(),
             enforcement_point: "content".to_string(),
+            domain: "security".to_string(),
             repos: repos.to_vec(),
             placement: "CI gate + gate config installed in every repo".to_string(),
             finding_count,
@@ -249,6 +254,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             scope: "cross-repo".to_string(),
             enforcement_point: "integration".to_string(),
             repos: repos.to_vec(),
+            domain: "integration".to_string(),
             placement: "Integration gate, pre-PR, run across the assembled repo set".to_string(),
             finding_count: 0,
             recommended: true,
@@ -264,6 +270,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         options: Vec::new(),
         default_option: None,
         scope: "process".to_string(),
+        domain: "process".to_string(),
         enforcement_point: "vcs-action".to_string(),
         repos: repos.to_vec(),
         placement: "VCS-action gate at commit/PR (per account, all repos)".to_string(),
@@ -496,6 +503,7 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 options,
                 default_option: r.default_option.clone(),
                 scope: "repo-local".to_string(),
+                domain: r.domain.clone(),
                 enforcement_point: "content".to_string(),
                 repos: suggested,
                 placement: "CI gate + gate config in each repo this rule's domain applies to".to_string(),

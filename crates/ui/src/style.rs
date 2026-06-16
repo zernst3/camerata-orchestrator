@@ -932,7 +932,10 @@ html, body {
 .stage-not-reached-now { font-weight: 700; font-style: normal; }
 
 /* Onboard view. */
-.onboard { max-width: 760px; margin: 0 auto; padding: 28px 24px; }
+/* Wide enough for the grouped rules + findings tables to breathe; prose blocks below
+   cap their own line length for readability. */
+.onboard { max-width: 1180px; margin: 0 auto; padding: 28px 24px; }
+.onboard-sub, .scan-section-sub, .scan-domains-note { max-width: 90ch; }
 .onboard-head { margin-bottom: 18px; }
 .onboard-title { font-size: 19px; font-weight: 700; color: var(--ink); }
 .onboard-sub { font-size: 13px; color: var(--ink-soft); margin-top: 5px; line-height: 1.5; }
@@ -1432,6 +1435,26 @@ html, body {
 .scan-domains-note { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin: 0 0 12px; }
 .scan-domains-note b { color: var(--ink); }
 .audit-cta { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-wash); }
+
+/* ---- rule detail modal (click a row) -------------------------------------- */
+.rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: var(--surface); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
+.rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.rule-modal-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 700; color: var(--accent-ink); }
+.rule-modal-close { border: none; background: transparent; font-size: 16px; color: var(--ink-soft); cursor: pointer; padding: 2px 6px; }
+.rule-modal-close:hover { color: var(--ink); }
+.rule-modal-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 8px 0 12px; line-height: 1.35; }
+.rule-modal-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.rule-modal-tag { font-size: 11px; font-weight: 600; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
+.rule-modal-placement { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 16px; line-height: 1.5; }
+.rule-modal-note { font-size: 13px; color: var(--ink-soft); font-style: italic; }
+.rule-modal-label { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
+.rule-modal-opts { display: flex; flex-direction: column; gap: 8px; }
+.rule-opt { text-align: left; border: 1px solid var(--line); background: var(--paper); border-radius: 10px; padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: all .15s var(--ease); }
+.rule-opt:hover { border-color: var(--accent); }
+.rule-opt.on { border-color: var(--accent); background: var(--accent-wash); box-shadow: 0 0 0 1px var(--accent); }
+.rule-opt-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.rule-opt-directive { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .pg-create-row .addressee-input { flex: 1; min-width: 180px; }

@@ -190,6 +190,7 @@ pub fn parse_ai_findings(repo: &str, raw: &str) -> (Vec<Finding>, Vec<ProposedRu
                 options: Vec::new(),
                 default_option: None,
                 scope: "repo-local".to_string(),
+                domain: "architecture".to_string(),
                 // Inherently semantic -> enforced at the cross-agent integration tier
                 // (an AI-assisted pre-PR check), not the line-level content gate.
                 enforcement_point: "integration".to_string(),

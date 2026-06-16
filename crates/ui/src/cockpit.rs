@@ -1811,6 +1811,8 @@ struct ProposedRuleView {
     #[serde(default)]
     scope: String,
     #[serde(default)]
+    domain: String,
+    #[serde(default)]
     repos: Vec<String>,
     #[serde(default)]
     placement: String,
@@ -2010,12 +2012,24 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .with("cross-repo", BadgeVariant::new("Cross-repo", "purple"))
         .with("process", BadgeVariant::new("Process", "gray"));
     vec![
+        // The group-by column (the table groups on this). A rule's corpus domain —
+        // sql / api-layer / ui / security / architecture / process / integration.
+        ColumnDef::new(ColumnId("domain"), "Domain", |r: &ProposedRuleView| {
+            CellValue::Text(if r.domain.is_empty() {
+                "general".to_string()
+            } else {
+                r.domain.clone()
+            })
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(150.0),
         ColumnDef::new(ColumnId("id"), "Rule", |r: &ProposedRuleView| {
             CellValue::Text(r.id.clone())
         })
         .sortable()
         .filter(FilterKind::Text)
-        .initial_width(230.0),
+        .initial_width(280.0),
         ColumnDef::new(ColumnId("scope"), "Scope", |r: &ProposedRuleView| {
             CellValue::Text(r.scope.clone())
         })
@@ -2323,13 +2337,29 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
         rows.iter().map(|(r, p)| (*r, p.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
+    // Group the proposed rules BY DOMAIN (a real Chorale feature) so a long ruleset is
+    // navigable: sql / ui / security / architecture / … each under its own header.
+    use_hook(move || handle.set_grouping(vec![ColumnId("domain")]));
     let mut arming = use_signal(|| false);
     // The findings to snapshot as the baseline on arm; cloned per arm click.
     let arm_findings = findings;
     let csv_rules = rules.clone();
+    // Click a row to open its full context + alternative picker in a modal (mirrors the
+    // camerata-ai rule modal) instead of a wall of pickers below the table.
+    let mut detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
+    let id_map_click = id_map.clone();
 
     rsx! {
-        Table { handle, sort_enabled: true, selection_enabled: true }
+        Table {
+            handle,
+            sort_enabled: true,
+            selection_enabled: true,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(r) = id_map_click.get(&rid) {
+                    detail_rule.set(Some(r.clone()));
+                }
+            }),
+        }
         div { class: "findings-toolbar",
             button {
                 class: "btn-edit-sm",
@@ -2397,6 +2427,51 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>, findings: Vec<FindingView>) 
                     });
                 },
                 if arming() { "Arming…" } else { "Arm selected rules \u{2192} governance PR" }
+            }
+        }
+
+        // ── Row-click detail modal: full rule context + alternative picker ──────
+        if let Some(r) = detail_rule() {
+            div { class: "rule-modal-overlay", onclick: move |_| detail_rule.set(None),
+                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                    div { class: "rule-modal-head",
+                        span { class: "rule-modal-id", "{r.id}" }
+                        button { class: "rule-modal-close", onclick: move |_| detail_rule.set(None), "\u{2715}" }
+                    }
+                    p { class: "rule-modal-title", "{r.title}" }
+                    div { class: "rule-modal-meta",
+                        span { class: "rule-modal-tag", "domain · {r.domain}" }
+                        span { class: "rule-modal-tag", "scope · {r.scope}" }
+                        span { class: "rule-modal-tag", "kind · {r.kind}" }
+                    }
+                    p { class: "rule-modal-placement", "Enforced via: {r.placement}" }
+                    if r.options.is_empty() {
+                        p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
+                    } else {
+                        p { class: "rule-modal-label", "Choose the alternative to adopt" }
+                        div { class: "rule-modal-opts",
+                            for o in r.options.iter() {
+                                {
+                                    let rid = r.id.clone();
+                                    let oid = o.id.clone();
+                                    let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                                    let picked = cur.as_deref() == Some(o.id.as_str());
+                                    let cls = if picked { "rule-opt on" } else { "rule-opt" };
+                                    let mut chosen = chosen;
+                                    rsx! {
+                                        button {
+                                            key: "{o.id}",
+                                            class: "{cls}",
+                                            onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
+                                            span { class: "rule-opt-label", "{o.label}" }
+                                            span { class: "rule-opt-directive", "{o.directive}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
