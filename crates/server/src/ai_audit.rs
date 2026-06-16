@@ -306,6 +306,7 @@ pub async fn audit_repo(
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -330,6 +331,21 @@ pub async fn audit_repo(
     let prompt = format!(
         "Repository: {repo}\n\n{rules_block}Audit this code for genuine architectural/security violations.\n\n{digest}"
     );
+    // Feedback: register this agent's GENERATED prompt so the scan UI can show, live,
+    // that the AI is actually working (the "see the AI's output" panel).
+    let session = format!("audit-{repo}");
+    if let Some((store, key)) = feedback {
+        store.register(
+            key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!("AI audit — {repo}"),
+                prompt: prompt.clone(),
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+    }
     let resp = llm
         .complete(
             LlmRequest::new(prompt)
@@ -337,10 +353,25 @@ pub async fn audit_repo(
                 .with_max_tokens(4096),
         )
         .await?;
+    if let Some((store, key)) = feedback {
+        store.append_output(key, &session, &resp.text);
+        store.set_status(key, &session, "running");
+    }
     let (findings, proposed) = parse_ai_findings(repo, &resp.text);
     // Adversarial-verify pass: a fresh skeptic refutes over-flags + recalibrates severity
     // before these advisory findings reach the architect's queue.
     let verified = verify_findings(llm, repo, findings).await;
+    if let Some((store, key)) = feedback {
+        store.append_output(
+            key,
+            &session,
+            &format!(
+                "\n[verify pass complete — {} advisory finding(s) after refute]",
+                verified.len()
+            ),
+        );
+        store.set_status(key, &session, "done");
+    }
     Ok((verified, proposed))
 }
 

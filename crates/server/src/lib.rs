@@ -632,9 +632,18 @@ struct AuditReq {
     rules: Vec<AuditRuleReq>,
 }
 
+/// The transcript key the scan/audit AI activity registers under (the Agent-activity
+/// drawer polls `/api/runs/scan-audit/agents`).
+const SCAN_AUDIT_KEY: &str = "scan-audit";
+
 /// Phase 2 — audit the repos AGAINST the selected rules (the deterministic security floor
-/// + the AI audit parameterized by the chosen rules). Returns the findings report.
-async fn onboard_audit(Json(req): Json<AuditReq>) -> Json<crate::onboard::ScanReport> {
+/// plus the AI audit parameterized by the chosen rules). Returns the findings report. The
+/// AI activity (prompts and output) registers into the transcript store so the UI can
+/// show, live, that the model is actually working.
+async fn onboard_audit(
+    State(state): State<AppState>,
+    Json(req): Json<AuditReq>,
+) -> Json<crate::onboard::ScanReport> {
     let repos: Vec<String> = req
         .repos
         .into_iter()
@@ -658,7 +667,17 @@ async fn onboard_audit(Json(req): Json<AuditReq>) -> Json<crate::onboard::ScanRe
         .filter(|r| !r.id.trim().is_empty())
         .map(|r| (r.id, r.directive))
         .collect();
-    Json(crate::onboard::audit_repos(&repos, &selected, &token).await)
+    // Fresh transcript for this audit run so the live feedback panel starts clean.
+    state.transcripts.clear(SCAN_AUDIT_KEY);
+    Json(
+        crate::onboard::audit_repos(
+            &repos,
+            &selected,
+            &token,
+            Some((&state.transcripts, SCAN_AUDIT_KEY)),
+        )
+        .await,
+    )
 }
 
 #[derive(serde::Deserialize)]

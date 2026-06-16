@@ -52,6 +52,13 @@ impl TranscriptStore {
             .unwrap_or_default()
     }
 
+    /// Drop all transcripts for a run id (so a fresh run/scan starts clean).
+    pub fn clear(&self, run_id: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            g.remove(run_id);
+        }
+    }
+
     /// Register an agent for a run (its generated prompt + initial status). Replaces an
     /// existing agent with the same session id.
     pub fn register(&self, run_id: &str, agent: AgentTranscript) {

@@ -2852,6 +2852,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                     },
                     if auditing() { "Auditing…" } else { "Audit code against these rules" }
                 }
+                // Live feedback: open this to watch the AI's actual prompt + output for
+                // the audit (so you can trust it's really working, not hung).
+                crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }
             }
 
             // ── Findings (after the audit runs) ────────────────────────────────
