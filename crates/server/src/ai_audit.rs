@@ -308,17 +308,15 @@ pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> V
             f.severity, f.path, f.line, f.snippet, f.detail
         ));
     }
-    match llm
-        .complete(
-            LlmRequest::new(prompt)
-                .with_system(verify_system_prompt())
-                // Aggregated findings across all chunks can be many; one verdict each.
-                .with_max_tokens(4096),
-        )
-        .await
-    {
-        Ok(resp) => apply_verdicts(&resp.text, findings),
-        Err(_) => findings,
+    let req = LlmRequest::new(prompt)
+        .with_system(verify_system_prompt())
+        // Aggregated findings across all chunks can be many; one verdict each.
+        .with_max_tokens(4096);
+    // Non-streaming, so use the coarse total backstop; on timeout or error the findings
+    // pass through unchanged (calibration is best-effort, never load-bearing).
+    match tokio::time::timeout(total_backstop(), llm.complete(req)).await {
+        Ok(Ok(resp)) => apply_verdicts(&resp.text, findings),
+        _ => findings,
     }
 }
 
@@ -362,6 +360,20 @@ fn chunk_files(files: &[(String, String)], budget: usize) -> Vec<&[(String, Stri
     chunks
 }
 
+/// Coarse total-time backstop for NON-streaming calls only (the calibration pass and the
+/// no-feedback path), which have no per-token progress signal to watch. Streaming calls do
+/// NOT use this — they self-bound on an idle/stall timeout inside the transport, which
+/// scales with repo size (a big scan keeps streaming and never trips it; only a true hang
+/// does). Set high so it never kills legitimate work. `CAMERATA_LLM_MAX_SECS` (default 600).
+fn total_backstop() -> std::time::Duration {
+    let secs = std::env::var("CAMERATA_LLM_MAX_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(600);
+    std::time::Duration::from_secs(secs)
+}
+
 /// The `needs_files` paths a pass asked for (file bodies it needs co-resident to judge a
 /// cross-file rule). Drives the bounded resolution round. Robust to missing/garbled output.
 fn parse_needs_files(raw: &str) -> Vec<String> {
@@ -402,10 +414,17 @@ async fn audit_pass(
         req = req.with_model(m.to_string());
     }
     let resp = if let Some((store, key)) = feedback {
+        // Streaming: the idle/stall timeout lives inside the transport, so this scales with
+        // repo size and only a genuine hang (no output for the idle window) aborts. No
+        // total-time cap here — a big scan should be allowed to stream as long as it needs.
         let mut on_delta = |t: &str| store.append_output_raw(key, session, t);
         llm.complete_streaming(req, &mut on_delta).await?
     } else {
-        llm.complete(req).await?
+        // Non-streaming has no progress signal; bound it with the coarse total backstop.
+        let cap = total_backstop();
+        tokio::time::timeout(cap, llm.complete(req))
+            .await
+            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))??
     };
     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
     let needs = parse_needs_files(&resp.text);
@@ -636,8 +655,13 @@ pub async fn audit_repo(
 
     // Calibration pass over ALL aggregated findings: recalibrate severity + flag
     // low-confidence findings. It does NOT drop anything — recall-first discovery hands
-    // every finding to the architect.
-    let verified = verify_findings(llm, repo, all_findings).await;
+    // every finding to the architect. Skipped entirely when there's nothing to calibrate
+    // (no findings → no point spending a round-trip).
+    let verified = if all_findings.is_empty() {
+        all_findings
+    } else {
+        verify_findings(llm, repo, all_findings).await
+    };
     if let Some((store, key)) = feedback {
         store.append_output(
             key,

@@ -249,7 +249,10 @@ impl Llm {
     /// reason over the prompt and answer.
     async fn complete_cli(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
         let mut cmd = tokio::process::Command::new("claude");
-        cmd.arg("-p")
+        // kill_on_drop: if the caller's future is dropped (e.g. a timeout fires), the
+        // spawned `claude` subprocess is killed rather than orphaned and left running.
+        cmd.kill_on_drop(true)
+            .arg("-p")
             .arg(&req.prompt)
             .arg("--model")
             .arg(model)
@@ -292,7 +295,10 @@ impl Llm {
     ) -> anyhow::Result<LlmResponse> {
         use tokio::io::AsyncBufReadExt;
         let mut cmd = tokio::process::Command::new("claude");
-        cmd.arg("-p")
+        // kill_on_drop: a dropped future (timeout) kills the subprocess instead of
+        // leaving a stalled `claude` running in the background.
+        cmd.kill_on_drop(true)
+            .arg("-p")
             .arg(&req.prompt)
             .arg("--model")
             .arg(model)
@@ -315,38 +321,83 @@ impl Llm {
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("claude CLI produced no stdout pipe"))?;
+        // CRITICAL: drain stderr CONCURRENTLY. `--verbose` makes `claude` write a lot to
+        // stderr; if we only read stdout, stderr's OS pipe buffer (~64KB) fills, the
+        // subprocess BLOCKS on its next stderr write, stops producing stdout, and this
+        // read loop hangs forever (observed: an 8-minute hang after a few tokens). A
+        // spawned reader keeps stderr flowing so stdout never stalls.
+        let stderr_task = child.stderr.take().map(|stderr| {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut s = String::new();
+                let _ = tokio::io::BufReader::new(stderr)
+                    .read_to_string(&mut s)
+                    .await;
+                s
+            })
+        });
         let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+        // IDLE/STALL timeout, not a total-time cap: the wall-clock allowed BETWEEN output
+        // lines. A legitimate large scan keeps streaming and resets this every line, so it
+        // scales with repo size; only a genuine hang (no output at all for the window)
+        // trips it. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
+        let idle = std::time::Duration::from_secs(
+            std::env::var("CAMERATA_LLM_IDLE_SECS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(120),
+        );
 
         let mut full = String::new();
         let mut cost = None;
-        while let Ok(Some(line)) = lines.next_line().await {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            match v["type"].as_str() {
-                Some("stream_event") => {
-                    let ev = &v["event"];
-                    if ev["type"] == "content_block_delta" && ev["delta"]["type"] == "text_delta" {
-                        if let Some(t) = ev["delta"]["text"].as_str() {
-                            full.push_str(t);
-                            on_delta(t);
+        loop {
+            match tokio::time::timeout(idle, lines.next_line()).await {
+                // No output for the whole idle window -> a true stall. kill_on_drop reaps
+                // the subprocess when this future is dropped on the error path.
+                Err(_) => anyhow::bail!(
+                    "claude CLI streamed nothing for {}s — treating as a hang (set CAMERATA_LLM_IDLE_SECS to tune)",
+                    idle.as_secs()
+                ),
+                Ok(Ok(None)) => break, // EOF — the process finished
+                Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
+                Ok(Ok(Some(line))) => {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    match v["type"].as_str() {
+                        Some("stream_event") => {
+                            let ev = &v["event"];
+                            if ev["type"] == "content_block_delta"
+                                && ev["delta"]["type"] == "text_delta"
+                            {
+                                if let Some(t) = ev["delta"]["text"].as_str() {
+                                    full.push_str(t);
+                                    on_delta(t);
+                                }
+                            }
                         }
+                        Some("result") => {
+                            if let Some(r) = v["result"].as_str() {
+                                if !r.is_empty() {
+                                    full = r.to_string();
+                                }
+                            }
+                            cost = v["total_cost_usd"].as_f64();
+                        }
+                        _ => {}
                     }
                 }
-                Some("result") => {
-                    if let Some(r) = v["result"].as_str() {
-                        if !r.is_empty() {
-                            full = r.to_string();
-                        }
-                    }
-                    cost = v["total_cost_usd"].as_f64();
-                }
-                _ => {}
             }
         }
         let status = child.wait().await?;
+        let stderr_text = match stderr_task {
+            Some(t) => t.await.unwrap_or_default(),
+            None => String::new(),
+        };
         if !status.success() {
-            anyhow::bail!("claude CLI (stream) exited {status}");
+            anyhow::bail!("claude CLI (stream) exited {status}: {}", stderr_text.trim());
         }
         Ok(LlmResponse {
             text: full,
