@@ -911,11 +911,190 @@ enum CockpitView {
     Workspace,
 }
 
+/// The top-level screen of the enterprise app: the projects home, or inside a project.
+/// A project CONTAINS everything (repos, ruleset, baseline, workspace), so nothing in
+/// the cockpit is reachable until you open one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CockpitScreen {
+    /// The projects home: pick one to open, create a new one, or import.
+    Projects,
+    /// Inside the active project (the cockpit tabs).
+    InProject,
+}
+
+/// The shell for the enterprise edition: shows the projects home first; the cockpit only
+/// renders once a project is open. The screen is shared via context so the cockpit's nav
+/// can navigate back to the projects list.
+#[component]
+pub fn CockpitShell() -> Element {
+    let screen = use_signal(|| CockpitScreen::Projects);
+    use_context_provider(|| screen);
+    match screen() {
+        CockpitScreen::Projects => rsx! { ProjectGate {} },
+        CockpitScreen::InProject => rsx! { CockpitApp {} },
+    }
+}
+
+/// Export a project as a JSON file (native save dialog). Returns true on success.
+async fn export_project_json(id: &str) -> bool {
+    let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::BFF_URL, id)).await
+    else {
+        return false;
+    };
+    let Ok(text) = resp.text().await else {
+        return false;
+    };
+    match rfd::AsyncFileDialog::new()
+        .set_file_name("camerata-project.json")
+        .save_file()
+        .await
+    {
+        Some(file) => file.write(text.as_bytes()).await.is_ok(),
+        None => false,
+    }
+}
+
+/// Import a project from a JSON file (native open dialog → POST import). The server gives
+/// it a fresh id and makes it active. Returns true on success.
+async fn import_project_json() -> bool {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .add_filter("JSON", &["json"])
+        .pick_file()
+        .await
+    else {
+        return false;
+    };
+    let Ok(text) = String::from_utf8(file.read().await) else {
+        return false;
+    };
+    let Ok(resp) = reqwest::Client::new()
+        .post(format!("{}/api/projects/import", crate::BFF_URL))
+        .header("content-type", "application/json")
+        .body(text)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// The projects home: the first thing you see. Open a stored project, create one, or
+/// import one. Nothing else in the app is reachable until a project is open.
+#[component]
+fn ProjectGate() -> Element {
+    let mut screen = use_context::<Signal<CockpitScreen>>();
+    let mut refresh = use_signal(|| 0u32);
+    let projects = use_resource(move || {
+        let _ = refresh();
+        async move { fetch_projects().await }
+    });
+    let mut new_name = use_signal(String::new);
+    let mut new_repos = use_signal(String::new);
+    let list = projects.read().clone().flatten().unwrap_or_default();
+
+    rsx! {
+        div { class: "project-gate",
+            div { class: "pg-inner",
+                p { class: "eyebrow", "Camerata" }
+                h1 { class: "h1", "Your projects" }
+                p { class: "lede", "A project is the container for everything — its repos, ruleset, baseline, and workspace. Open one to begin, or create a new one." }
+
+                if list.is_empty() {
+                    p { class: "pg-empty", "No projects yet. Create one below to begin." }
+                } else {
+                    div { class: "pg-list",
+                        for p in list.iter() {
+                            {
+                                let id_export = p.id.clone();
+                                let id_open = p.id.clone();
+                                rsx! {
+                                    div { class: "pg-card", key: "{p.id}",
+                                        div { class: "pg-card-main",
+                                            span { class: "pg-card-name", "{p.name}" }
+                                            span { class: "pg-card-meta", "{p.repos.len()} repo(s) · {p.ruleset.selections.len()} repo-rules" }
+                                        }
+                                        div { class: "pg-card-actions",
+                                            button {
+                                                class: "btn-edit-sm",
+                                                onclick: move |_| {
+                                                    let id = id_export.clone();
+                                                    spawn(async move { let _ = export_project_json(&id).await; });
+                                                },
+                                                "Export"
+                                            }
+                                            button {
+                                                class: "btn-run",
+                                                onclick: move |_| {
+                                                    let id = id_open.clone();
+                                                    spawn(async move {
+                                                        if set_active_project(&id).await {
+                                                            screen.set(CockpitScreen::InProject);
+                                                        }
+                                                    });
+                                                },
+                                                "Open"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "pg-create",
+                    p { class: "section-label", "Create a project" }
+                    div { class: "pg-create-row",
+                        input { class: "addressee-input", placeholder: "project name", value: "{new_name}", oninput: move |e| new_name.set(e.value()) }
+                        input { class: "addressee-input", placeholder: "repos (owner/repo, comma/space separated) — optional", value: "{new_repos}", oninput: move |e| new_repos.set(e.value()) }
+                        button {
+                            class: "btn-run",
+                            onclick: move |_| {
+                                let name = new_name();
+                                if name.trim().is_empty() { return; }
+                                let repos: Vec<String> = new_repos()
+                                    .split([',', ' ', '\n'])
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect();
+                                spawn(async move {
+                                    if create_project(&name, repos).await.is_some() {
+                                        screen.set(CockpitScreen::InProject);
+                                    }
+                                });
+                            },
+                            "Create & open"
+                        }
+                    }
+                    button {
+                        class: "btn-edit-sm pg-import",
+                        onclick: move |_| {
+                            spawn(async move {
+                                if import_project_json().await {
+                                    refresh += 1;
+                                    screen.set(CockpitScreen::InProject);
+                                }
+                            });
+                        },
+                        "Import project (JSON)…"
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The cockpit's internal nav: switch between the control surface (stories) and the
 /// routine dashboard. Both are architect tools, so both live in the Enterprise app.
 #[component]
 fn CockpitNav(view: Signal<CockpitView>) -> Element {
     let mut view = view;
+    let mut screen = use_context::<Signal<CockpitScreen>>();
     let cls = |v: CockpitView| {
         if view() == v {
             "cockpit-nav-tab on"
@@ -925,6 +1104,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
     };
     rsx! {
         div { class: "cockpit-nav",
+            button {
+                class: "cockpit-nav-tab back",
+                onclick: move |_| screen.set(CockpitScreen::Projects),
+                "← Projects"
+            }
             button {
                 class: cls(CockpitView::Stories),
                 onclick: move |_| view.set(CockpitView::Stories),

@@ -208,6 +208,28 @@ impl ProjectStore {
         Some(project)
     }
 
+    /// Import a project from an external JSON export: give it a FRESH id (so it never
+    /// collides with an existing one), make it active. Name / repos / ruleset come from
+    /// the imported document.
+    pub fn import(&self, name: &str, repos: Vec<String>, ruleset: ProjectRuleset) -> Option<Project> {
+        let project = {
+            let mut s = self.inner.lock().ok()?;
+            s.counter += 1;
+            let id = format!("proj-{}", s.counter);
+            let project = Project {
+                id: id.clone(),
+                name: name.to_string(),
+                repos,
+                ruleset,
+            };
+            s.projects.push(project.clone());
+            s.active = Some(id);
+            project
+        };
+        self.save();
+        Some(project)
+    }
+
     /// Set the active project.
     pub fn set_active(&self, id: &str) -> bool {
         let ok = {

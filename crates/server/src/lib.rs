@@ -147,7 +147,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/clarifications/:cid/answer", post(answer_clarification))
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/import", post(import_project))
         .route("/api/projects/active", get(active_project).post(set_active_project))
+        .route("/api/projects/:id/export", get(export_project))
         .route(
             "/api/projects/:id/ruleset",
             get(export_project_ruleset).post(import_project_ruleset),
@@ -396,6 +398,41 @@ async fn create_project(
 
 async fn active_project(State(state): State<AppState>) -> Json<Option<crate::project::Project>> {
     Json(state.projects.active())
+}
+
+/// Export a project as a portable JSON document (the full project: name, repos, ruleset)
+/// — for backup or moving a project between machines/installs.
+async fn export_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::project::Project>, AppError> {
+    state
+        .projects
+        .get(&id)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))
+}
+
+/// A project import document (a prior export). `id` in the JSON is ignored — the import
+/// gets a fresh id so it never collides.
+#[derive(serde::Deserialize)]
+struct ImportProjectReq {
+    name: String,
+    #[serde(default)]
+    repos: Vec<String>,
+    #[serde(default)]
+    ruleset: crate::project::ProjectRuleset,
+}
+
+/// Import a project from an exported JSON, make it active, and return it.
+async fn import_project(
+    State(state): State<AppState>,
+    Json(req): Json<ImportProjectReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.import(&req.name, req.repos, req.ruleset) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "could not import project" })),
+    }
 }
 
 #[derive(serde::Deserialize)]

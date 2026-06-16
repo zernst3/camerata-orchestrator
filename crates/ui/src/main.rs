@@ -161,7 +161,7 @@ fn App() -> Element {
             EditionSwitcher { edition }
             match edition() {
                 Edition::AppBuilder => rsx! { ConsumerApp {} },
-                Edition::Cockpit => rsx! { cockpit::CockpitApp {} },
+                Edition::Cockpit => rsx! { cockpit::CockpitShell {} },
             }
         }
         // The toast stack is a SEPARATE top-layer overlay — a sibling of app-root,

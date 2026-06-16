@@ -1411,6 +1411,23 @@ html, body {
 .ignore-reason { flex: 1; min-width: 160px; }
 .ignore-ticket { width: 130px; flex: none; }
 
+/* ---- projects home (the gate) --------------------------------------------- */
+.project-gate { flex: 1; width: 100%; overflow-y: auto; display: flex; justify-content: center; background: var(--paper); }
+.pg-inner { width: 100%; max-width: 720px; padding: 56px 28px 80px; }
+.pg-empty { font-size: 14px; color: var(--ink-soft); margin: 18px 0; }
+.pg-list { display: flex; flex-direction: column; gap: 10px; margin: 24px 0; }
+.pg-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-card); }
+.pg-card-main { display: flex; flex-direction: column; gap: 4px; }
+.pg-card-name { font-size: 16px; font-weight: 700; color: var(--ink); }
+.pg-card-meta { font-size: 12.5px; color: var(--ink-soft); }
+.pg-card-actions { display: flex; gap: 8px; align-items: center; }
+.pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
+.pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.pg-create-row .addressee-input { flex: 1; min-width: 180px; }
+.pg-import { margin-top: 6px; }
+.cockpit-nav-tab.back { color: var(--accent-ink); font-weight: 600; }
+.cockpit-nav-tab.back:hover { background: var(--accent-wash); }
+
 /* ---- local workspace surface ---------------------------------------------- */
 .ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .ws-folder-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
