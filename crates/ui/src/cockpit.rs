@@ -983,8 +983,9 @@ fn FindingsTable(
 /// The chosen map (rule id -> option id) is shared via context so the findings
 /// table's rule-id hover can show the chosen alternative.
 #[component]
-fn AlternativesPicker(rules: Vec<ProposedRuleView>) -> Element {
+fn AlternativesPicker(rules: Vec<ProposedRuleView>, all_repos: Vec<String>) -> Element {
     let mut chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
     let opt_rules: Vec<ProposedRuleView> =
         rules.into_iter().filter(|r| !r.options.is_empty()).collect();
     if opt_rules.is_empty() {
@@ -1048,6 +1049,36 @@ fn AlternativesPicker(rules: Vec<ProposedRuleView>) -> Element {
                                 }
                             }
                         }
+                        // Per-rule repo placement: the domain-matched suggestion is
+                        // pre-selected; toggle any repo to override (force a domain
+                        // rule into a repo it wouldn't be suggested for, or remove one).
+                        div { class: "alt-repos",
+                            span { class: "alt-repos-label", "installs into:" }
+                            for repo in all_repos.iter() {
+                                {
+                                    let mut placement = placement;
+                                    let rid2 = r.id.clone();
+                                    let repo2 = repo.clone();
+                                    let on = placement.read().get(&r.id).map(|v| v.contains(repo)).unwrap_or(false);
+                                    let chip_cls = if on { "repo-chip on" } else { "repo-chip" };
+                                    rsx! {
+                                        button {
+                                            class: "{chip_cls}",
+                                            onclick: move |_| {
+                                                let mut p = placement.write();
+                                                let entry = p.entry(rid2.clone()).or_default();
+                                                if let Some(pos) = entry.iter().position(|x| x == &repo2) {
+                                                    entry.remove(pos);
+                                                } else {
+                                                    entry.push(repo2.clone());
+                                                }
+                                            },
+                                            "{repo}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1061,6 +1092,7 @@ fn AlternativesPicker(rules: Vec<ProposedRuleView>) -> Element {
 fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
     let rows: Vec<(RowId, ProposedRuleView)> =
         rules.iter().map(|r| (RowId::new(), r.clone())).collect();
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
@@ -1092,12 +1124,16 @@ fn ProposedRulesTable(rules: Vec<ProposedRuleView>) -> Element {
                                 _ => { unresolved.push(r.id.clone()); continue; }
                             }
                         };
+                        // Use the architect's placement override if set, else the
+                        // domain-matched suggestion. A rule routed to zero repos is skipped.
+                        let repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| r.repos.clone());
+                        if repos.is_empty() { continue; }
                         arm_reqs.push(ArmRuleReq {
                             id: r.id.clone(),
                             title: r.title.clone(),
                             directive,
                             enforcement: r.enforcement.clone(),
-                            repos: r.repos.clone(),
+                            repos,
                         });
                     }
                     if !unresolved.is_empty() {
@@ -1306,6 +1342,17 @@ fn ScanResults(report: ScanReportView) -> Element {
     });
     use_context_provider(|| chosen);
 
+    // Per-rule repo placement (rule id -> repos it installs into), seeded with the
+    // domain-matched suggestion. The architect can override it; arm uses this map.
+    let placement = use_signal(|| {
+        let mut m = std::collections::HashMap::<String, Vec<String>>::new();
+        for r in &report.proposed_rules {
+            m.insert(r.id.clone(), r.repos.clone());
+        }
+        m
+    });
+    use_context_provider(|| placement);
+
     // rule id -> what it enforces (the chosen/default alternative's directive, else
     // the rule title), for the findings-table rule-id hover.
     let descriptions: std::collections::HashMap<String, String> = report
@@ -1370,7 +1417,7 @@ fn ScanResults(report: ScanReportView) -> Element {
             p { class: "scan-section-sub", "Select the rules to arm (each shows its scope, placement, and how many existing violations it catches). You own the final set; arming generates the governance PR." }
             ProposedRulesTable { key: "r-{table_key}", rules: report.proposed_rules.clone() }
 
-            AlternativesPicker { rules: report.proposed_rules.clone() }
+            AlternativesPicker { rules: report.proposed_rules.clone(), all_repos: report.repos.clone() }
         }
     }
 }

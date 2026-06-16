@@ -974,6 +974,10 @@ html, body {
 .alt-rule-title { font-size: 12px; color: var(--ink-soft); }
 .alt-must { display: inline-block; margin-top: 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #8a4f1d; }
 .alt-select { min-width: 280px; max-width: 420px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 12px; background: var(--surface); }
+.alt-repos { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; width: 100%; }
+.alt-repos-label { font-size: 11px; color: var(--ink-faint); }
+.repo-chip { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-faint); cursor: pointer; }
+.repo-chip.on { border-color: var(--accent); background: var(--accent); color: #fff; }
 .topbar-line3 { display: flex; align-items: center; gap: 7px; margin-top: 5px; font-size: 12px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .topbar-axis-label { color: var(--ink-faint); }
 .topbar-axis-val { color: var(--ink); }

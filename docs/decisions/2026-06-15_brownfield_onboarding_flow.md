@@ -120,6 +120,17 @@ So the proposed-rules table carries `scope`, `applies-to repos`, and `gate
 placement` columns, and `arm` installs each rule's gate at its decided location.
 The findings table carries a `repo` column so violations group/filter by repo.
 
+**Per-rule repo binding (minimum domains per repo).** A rule installs into ONLY the
+repos whose detected domain it applies to — an API-layer rule goes to the backend
+repos, not the React app. This is the suggestion; it keeps each repo's `AGENTS.md` /
+`CONVENTIONS.md` free of rules from domains it doesn't have, so a consuming agent in
+the API repo never reads UI rules that add ambiguity. Universal/spirit rules
+(secrets, raw-SQL, etc.) are not domain-specific and bind to all repos. The binding
+is the architect's to OVERRIDE: per-rule repo chips let them force a rule into (or
+out of) any repo. This mirrors camerata-ai's `scaffold_routed`, which routes each
+rule's domain to one-or-many repos via a domain→repos override map. `arm` emits each
+rule only into its bound repos.
+
 ## Honest current state
 
 This is a design capture, not built. What exists today: the gate (deny-before-execute

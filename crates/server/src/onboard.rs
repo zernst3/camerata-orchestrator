@@ -199,34 +199,22 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
 pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule> {
     let mut out = Vec::new();
 
-    // 1. Content rules: repo-local, mechanical, the gate lives in each repo.
+    // 1. Content rules: universal (secrets/SQL/URL apply to ANY repo regardless of
+    //    stack), so they bind to ALL scanned repos — they don't add domain
+    //    ambiguity. Single-variant, mechanical, the gate lives in each repo.
     for &id in AUDIT_RULES {
         let finding_count = findings.iter().filter(|f| f.rule_id == id).count();
-        let mut bound: Vec<String> = findings
-            .iter()
-            .filter(|f| f.rule_id == id)
-            .map(|f| f.repo.clone())
-            .collect();
-        bound.sort();
-        bound.dedup();
-        let repos_for_rule = if bound.is_empty() {
-            repos.to_vec()
-        } else {
-            bound
-        };
         out.push(ProposedRule {
             id: id.to_string(),
             title: title_for(id),
             kind: "mechanical".to_string(),
             enforcement: "mechanical".to_string(),
-            // Content/security rules are single-variant: one deterministic check,
-            // no alternatives to choose among.
             options: Vec::new(),
             default_option: None,
             scope: "repo-local".to_string(),
             enforcement_point: "content".to_string(),
-            repos: repos_for_rule,
-            placement: "CI gate + gate config installed in each repo".to_string(),
+            repos: repos.to_vec(),
+            placement: "CI gate + gate config installed in every repo".to_string(),
             finding_count,
             recommended: true,
         });
@@ -396,51 +384,78 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     findings
 }
 
-/// Map detected stacks to corpus domains, so we propose the rules that apply to
-/// what each repo actually uses.
-fn domains_for_stacks(stacks: &[RepoStack]) -> Vec<String> {
+/// The corpus domains ONE repo's stack maps to. Used to bind each rule to only the
+/// repos whose domain it applies to (minimum domains per repo).
+fn domains_for_stack(s: &RepoStack) -> Vec<String> {
     let mut domains = std::collections::BTreeSet::new();
-    for s in stacks {
-        for lang in &s.languages {
-            match lang.as_str() {
-                "JavaScript" | "TypeScript" => {
-                    domains.insert("javascript");
-                    domains.insert("fullstack");
-                    domains.insert("api-layer");
-                }
-                "Rust" => {
-                    domains.insert("rust");
-                    domains.insert("api-layer");
-                }
-                // Other backend languages map to the API-layer architecture rules.
-                _ => {
-                    domains.insert("api-layer");
-                }
+    for lang in &s.languages {
+        match lang.as_str() {
+            "JavaScript" | "TypeScript" => {
+                domains.insert("javascript");
+                domains.insert("fullstack");
+                domains.insert("api-layer");
+            }
+            "Rust" => {
+                domains.insert("rust");
+                domains.insert("api-layer");
+            }
+            // Other backend languages map to the API-layer architecture rules.
+            _ => {
+                domains.insert("api-layer");
             }
         }
-        if !s.frameworks.is_empty() {
-            domains.insert("fullstack");
-        }
+    }
+    if !s.frameworks.is_empty() {
+        domains.insert("fullstack");
     }
     domains.into_iter().map(String::from).collect()
 }
 
 /// Propose corpus rules (the architectural ones that carry ALTERNATIVES) for the
-/// detected `domains`, each with its options + default so the architect chooses
-/// which alternative to codify. finding_count is 0: scanning these needs the
-/// per-language AST checker (future); the selection is real now.
-pub async fn propose_corpus_rules(domains: &[String], repos: &[String]) -> Vec<ProposedRule> {
+/// detected stacks, each bound to ONLY the repos whose domain it applies to (a
+/// universal `*` rule binds to all). The architect can override the binding. Each
+/// carries its options + default so the architect chooses which alternative to
+/// codify. finding_count is 0: scanning these needs the per-language AST checker
+/// (future); the selection is real now.
+///
+/// `repo_domains` is each repo paired with the corpus domains its stack maps to.
+pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec<ProposedRule> {
     let path = std::path::Path::new(camerata_rules::DEFAULT_CORPUS_PATH);
     if !path.exists() {
         return Vec::new();
     }
     let (set, _errs) = camerata_rules::load_corpus_lenient(path).await;
-    let domain_refs: Vec<&str> = domains.iter().map(String::as_str).collect();
+    // The union of all repos' domains selects the candidate rules from the corpus.
+    let mut all_domains = std::collections::BTreeSet::new();
+    for (_, ds) in repo_domains {
+        for d in ds {
+            all_domains.insert(d.clone());
+        }
+    }
+    let domain_refs: Vec<&str> = all_domains.iter().map(String::as_str).collect();
     camerata_rules::select_for_domains(&set, &domain_refs)
         .into_iter()
         // Only the rules that actually have alternatives to choose among.
         .filter(|r| !r.options.is_empty())
-        .map(|r| {
+        .filter_map(|r| {
+            // Bind to ONLY the repos whose domains include this rule's domain.
+            // Universal (`*`) rules bind to every repo. A domain rule matching no
+            // repo is dropped (it doesn't apply here).
+            let suggested: Vec<String> = if r.domain == "*" {
+                repo_domains.iter().map(|(repo, _)| repo.clone()).collect()
+            } else {
+                repo_domains
+                    .iter()
+                    .filter(|(_, ds)| ds.iter().any(|d| d == &r.domain))
+                    .map(|(repo, _)| repo.clone())
+                    .collect()
+            };
+            if suggested.is_empty() {
+                return None;
+            }
+            Some((r, suggested))
+        })
+        .map(|(r, suggested)| {
             let options = r
                 .options
                 .iter()
@@ -469,8 +484,8 @@ pub async fn propose_corpus_rules(domains: &[String], repos: &[String]) -> Vec<P
                 default_option: r.default_option.clone(),
                 scope: "repo-local".to_string(),
                 enforcement_point: "content".to_string(),
-                repos: repos.to_vec(),
-                placement: "CI gate + gate config installed in each repo".to_string(),
+                repos: suggested,
+                placement: "CI gate + gate config in each repo this rule's domain applies to".to_string(),
                 finding_count: 0,
                 // Recommend the ones with a default; the no-default ones still
                 // appear (the architect MUST choose an alternative for them).
@@ -696,11 +711,14 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         }
     }
 
-    // Propose the architectural corpus rules (with alternatives) for the detected
-    // stacks, alongside the content/cross-repo/process rules.
-    let domains = domains_for_stacks(&stacks);
+    // Per-repo domains, so each corpus rule binds to only the repos its domain
+    // applies to (minimum domains per repo).
+    let repo_domains: Vec<(String, Vec<String>)> = stacks
+        .iter()
+        .map(|s| (s.repo.clone(), domains_for_stack(s)))
+        .collect();
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
-    let corpus = propose_corpus_rules(&domains, &report.repos).await;
+    let corpus = propose_corpus_rules(&repo_domains).await;
     report.proposed_rules.extend(corpus);
 
     if !notes.is_empty() {
@@ -790,8 +808,8 @@ mod tests {
         assert_eq!(secrets.finding_count, findings.len());
         assert_eq!(secrets.scope, "repo-local");
         assert_eq!(secrets.enforcement_point, "content");
-        assert_eq!(secrets.repos, vec!["me/api".to_string()], "bound to the repo with the violation");
-        assert!(secrets.placement.contains("each repo"));
+        assert_eq!(secrets.repos, vec!["me/api".to_string()], "universal -> all scanned repos");
+        assert!(secrets.placement.contains("every repo"));
         assert!(single.iter().any(|r| r.scope == "process"));
         assert!(
             !single.iter().any(|r| r.scope == "cross-repo"),
