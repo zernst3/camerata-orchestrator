@@ -123,6 +123,39 @@ while preserving control.
 Until then, the **model picker already gives a speed lever today** (pick Haiku for a fast pass), and
 the auto-select can simply choose Mode 1 vs Mode 2 once Mode 2 exists.
 
+## Pricing / tiering principles (the dials must add to a complete floor, not gate it)
+
+Customer-controlled cost/speed/thoroughness is the right product shape — enterprises like
+holding the dial, and it answers the cost worry (the buyer chooses their spend). Three rules keep
+it a feature and not a trap:
+
+1. **Three orthogonal dials, not one "max everything" slider.** They're independent and each buys
+   a different thing — expose and explain them separately:
+   - **Mode** (sequential / parallel / async) → **speed & scale**. Does NOT change *what* is found.
+   - **Model tier** (Haiku … Opus) → **detection quality** (fewer semantic misses, sharper findings).
+   - **Rule selection** → **coverage** (which conventions are checked).
+   The real value is letting a user *mix* — top-tier quality on a small fast scan, or a cheap model
+   on a huge async job. "Max on all three" is one valid point, not the only useful one.
+
+2. **The deterministic floor is free, instant, and runs in EVERY config.** `audit_files` (local
+   regex/AST, no LLM, no model, no mode) runs unconditionally on every scan — it does not depend on
+   the selected rules, the model, or the mode. The dials apply ONLY to the **semantic/LLM pass**:
+   that is what gets faster (parallel), better (top model), or scale-graceful (async). When the
+   parallel-execution work lands, **parallel must be the DEFAULT efficient floor of the semantic
+   pass, not a paywalled escape from a slow sequential baseline.** Sequential (Mode 1) is a
+   debug/simplicity fallback, not the thing users pay to get out of.
+
+3. **The critical checks can never be a paid tier.** Hardcoded secrets, injection, secret-in-URL
+   — the highest-severity, deterministic-cheap defects — are table stakes on every tier, free,
+   always-on. (Verified: they run in `audit_files` independent of `selected`/model/mode, and now
+   rank Critical.) A governance tool that misses a hardcoded secret unless you upgrade is broken at
+   any price. The premium dials buy the *expensive* things: deep semantic/architectural review (top
+   model) and walk-away multi-repo scale (async mode).
+
+The resulting pitch is also the stronger one: *"every scan catches the critical stuff fast and
+cheap; pay more for deeper architectural review and walk-away multi-repo runs"* — not *"pay up or
+we might miss your secrets."*
+
 ## Related
 
 - `ARCH-PARALLEL-INDEPENDENT-1` — the rule that mandates the parallel execution axis.
