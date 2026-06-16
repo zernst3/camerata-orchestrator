@@ -1429,6 +1429,8 @@ html, body {
 .pg-btn-danger:hover { border-color: #c0392b; color: #c0392b; }
 .pg-btn-danger.confirm { background: #c0392b; border-color: #c0392b; color: #fff; }
 .onboard-browse { margin: 8px 0 0; }
+.scan-domains-note { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin: 0 0 12px; }
+.scan-domains-note b { color: var(--ink); }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .pg-create-row .addressee-input { flex: 1; min-width: 180px; }

@@ -1929,22 +1929,25 @@ fn finding_columns() -> Vec<ColumnDef<FindingView>> {
         .sortable()
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
-        // Provenance: AI architectural audit (genuine, semantic) vs the deterministic
-        // mechanical scan (secrets/SQL/path-escape). AI findings carry an `AI-` rule id.
-        ColumnDef::new(ColumnId("source"), "Source", |f: &FindingView| {
+        // AUTHORITY, not just provenance: a deterministic rule hit is ENFORCED
+        // (high-confidence, gateable, auto-fix-eligible); an AI finding is ADVISORY
+        // (investigative, review-only, never auto-blocks or auto-fixes without a human).
+        // This is the enforcement-vs-convention split rendered as a column. AI findings
+        // carry an `AI-` rule id.
+        ColumnDef::new(ColumnId("authority"), "Authority", |f: &FindingView| {
             CellValue::Text(if f.rule_id.starts_with("AI-") {
-                "ai".to_string()
+                "advisory".to_string()
             } else {
-                "lint".to_string()
+                "enforced".to_string()
             })
         })
         .sortable()
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                .with("ai", BadgeVariant::new("AI · architectural", "purple"))
-                .with("lint", BadgeVariant::new("Mechanical", "gray")),
+                .with("enforced", BadgeVariant::new("Rule · enforced", "blue"))
+                .with("advisory", BadgeVariant::new("AI · advisory", "purple")),
         ))
-        .initial_width(160.0),
+        .initial_width(170.0),
         ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
             CellValue::Text(f.rule_id.clone())
         })
@@ -2717,7 +2720,11 @@ fn ScanResults(report: ScanReportView) -> Element {
             }
 
             p { class: "scan-section-h", "Findings already in these repos" }
-            p { class: "scan-section-sub", "What the gate would deny on a new write — already present. Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/type; filter by type or location." }
+            p { class: "scan-section-sub", "Select rows to Ignore, Resolve, or Accept as tech debt (opens a ticket). Sort by repo/severity/authority; filter by type or location." }
+            p { class: "scan-domains-note",
+                b { "Two domains, two authorities. " }
+                "“Rule · enforced” findings are deterministic rule violations — high-confidence, gateable, eligible for auto-fix. “AI · advisory” findings are the investigative layer — the agent thinks something's worth a look. They are review-only: they never auto-block work or auto-fix without you confirming. Enforcement is mechanical; advice needs the architect."
+            }
             FindingsTable { key: "f-{table_key}", findings: report.findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
 
             FixAuditedPanel { findings: report.findings.clone(), repos: report.repos.clone() }

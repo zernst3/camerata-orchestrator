@@ -28,19 +28,31 @@ use crate::onboard::{Finding, ProposedRule};
 /// the context on a large repo (the digest truncates with a note).
 const MAX_DIGEST_CHARS: usize = 60_000;
 
+/// Number each line `NNNN| line`, so the model cites ACCURATE line numbers. Without
+/// this the digest had no line markers and the model estimated by counting (and drifted —
+/// 3 of 4 findings on the testbed cited the wrong line).
+fn number_lines(content: &str) -> String {
+    let mut s = String::new();
+    for (i, line) in content.lines().enumerate() {
+        s.push_str(&format!("{:>4}| {}\n", i + 1, line));
+    }
+    s
+}
+
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
-/// Each file is delimited so the model can cite paths/lines.
+/// Each file is delimited and LINE-NUMBERED so the model can cite exact paths + lines.
 pub fn build_digest(files: &[(String, String)]) -> String {
     let mut out = String::new();
     let mut truncated = false;
     for (path, content) in files {
         let header = format!("// ===== FILE: {path} =====\n");
-        if out.len() + header.len() + content.len() > MAX_DIGEST_CHARS {
+        let numbered = number_lines(content);
+        if out.len() + header.len() + numbered.len() > MAX_DIGEST_CHARS {
             // Add a partial slice of this file if there's room, then stop.
             let remaining = MAX_DIGEST_CHARS.saturating_sub(out.len() + header.len());
             if remaining > 200 {
                 out.push_str(&header);
-                let slice: String = content.chars().take(remaining).collect();
+                let slice: String = numbered.chars().take(remaining).collect();
                 out.push_str(&slice);
                 out.push('\n');
             }
@@ -48,7 +60,7 @@ pub fn build_digest(files: &[(String, String)]) -> String {
             break;
         }
         out.push_str(&header);
-        out.push_str(content);
+        out.push_str(&numbered);
         out.push('\n');
     }
     if truncated {
@@ -73,6 +85,9 @@ Find GENUINE architectural and security violations — the kind that require und
 - secrets/config read in ways that leak, broad error swallowing that hides failures
 
 DO NOT report: hardcoded secrets, raw SQL string concatenation, or path-escape writes — a separate deterministic scanner already covers those precisely. Do not report pure style/formatting nits.
+
+Each line in the digest is prefixed with its line number as `NNNN| `. Cite that exact
+number in `line` — do not estimate.
 
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
