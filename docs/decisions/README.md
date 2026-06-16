@@ -6,6 +6,14 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-16_enforcement_tiers_gate_vs_ci.md** — two enforcement tiers, mapped by what
+  the check needs: the write-time deny-before-execute GATE is the SECURITY tier (decidable
+  from one write's path/content, near-zero false positives — secrets, path/secret-file
+  guards, SQL-concat, secret-URLs), and CI/integration is the CONSISTENCY/ARCHITECTURE
+  tier (mechanical corpus rules whose conformance needs build context — lint, query-plan,
+  migration audit, AST). None of the 16 mechanical corpus rules fit the gate (their own
+  conformance says "in CI"). New gate rule SEC-NO-SECRET-FILES-1; arm emits
+  `.camerata/ci-checks.json` + a governance workflow for mechanical rules.
 - **2026-06-16_rule_corpus_is_the_moat.md** — "detect frameworks → suggest rules" is only
   as good as the rule library; generic/wrong rules = a noisy audit = negative value, so
   the per-language/framework corpus is the moat and is eval'd as a SEPARATE axis from the

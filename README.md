@@ -57,13 +57,16 @@ Spawning parallel agents is commodity. The differentiators, in order of weight:
    denies bad agent actions before they execute, and an out-of-process structural
    check bounces violations back for revision. Binary pass/fail, not "the model
    thinks this looks right." The architecture is the differentiator, not the rule
-   count: today the gate enforces five rules (a path-segment guard against `..`
-   traversal and writes into `.git`/`.ssh`, a forbidden-path guard, and three regex
-   content heuristics for secrets / raw-SQL-concat / secrets-in-URLs; no AST analysis
-   yet), and the broader corpus is catalogued and selected but not yet given executable
-   enforcement arms. The point this repo proves is the *seam* (deny-before-execute,
-   provider-neutral, fail-closed); deepening the rule set behind it is incremental, not
-   architectural.
+   count. The gate is the high-strictness SECURITY tier — write-time checks that deny
+   before a byte hits disk: a `..`/`.git`/`.ssh` path guard, a secret-FILE guard
+   (`.env`/`.pem`/`.key`/`id_rsa`/…, templates exempt), and content heuristics for
+   secrets / raw-SQL-concat / secrets-in-URLs (no AST yet). Consistency/architectural
+   rules are enforced one tier out, at CI/integration: arming a mechanical corpus rule
+   emits `.camerata/ci-checks.json` + a governance workflow, because those checks
+   (lint, query-plan, migration audit, AST) need build context the write-time gate
+   doesn't have. The point this repo proves is the *seam* (deny-before-execute,
+   provider-neutral, fail-closed) and the right enforcement tier per rule; deepening the
+   set behind it is incremental, not architectural.
 3. **A standing maintenance/ops agent.** A published app is alive: upgrades, security
    patches, key rotation, all run through the same governed loop, with calm
    plain-language recommendations. The owner gets the maintenance a real team would
