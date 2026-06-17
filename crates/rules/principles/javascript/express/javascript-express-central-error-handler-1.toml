@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1"
+title = "Errors flow to one central error-handling middleware; async handlers forward via next"
+tag = "stack"
+domain = "javascript:express"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Errors flow to one central error-handling middleware; async handlers forward via next?"
+default = "errors-flow-to-one-central-error-handling-middle"
+why = "Express has one built-in mechanism for handling errors: the error-handling middleware, a function with the four-argument (err, req, res, next) signature, registered last. Routes signal a failure by throwing (in sync code) or calling next(err) (in async code), and Express routes it there. The hazard specific to Express is async: a Promise rejection inside an async route handler is NOT caught by Express automatically, so an un-wrapped async handler that rejects leaves the request hanging until it times out, with no response and no error logged. Each route inventing its own try/catch that formats and sends an error response produces inconsistent status codes and bodies across the API, scatters the logging, and still misses the async-rejection case unless every handler remembers the wrapper. Centralizing means one place decides the error response shape, the status mapping, and the logging, and one async wrapper (or express-async-errors, or Express 5's native async forwarding) guarantees rejections reach it. Ad-hoc per-route error handling trades that single consistent contract for N partial reimplementations, and the gaps surface as a route that returns a 200 with an error body, or one that hangs forever on a rejected promise."
+
+[[option]]
+id = "errors-flow-to-one-central-error-handling-middle"
+label = "Errors flow to one central error-handling middleware; async handlers forward via next"
+directive = "The app registers a single error-handling middleware with the (err, req, res, next) signature, last in the middleware chain, which owns the error response shape, status-code mapping, and error logging. Route handlers signal failure by throwing (sync) or forwarding to next(err) (async), never by formatting and sending error responses ad hoc. Async handlers are wrapped so their rejections reach the central handler (an asyncHandler wrapper, the express-async-errors package, or Express 5's native async error forwarding); a bare async route whose rejection can escape is forbidden."
+why = "The adopted default. Express routes thrown and next(err) errors to the four-argument error middleware, but does not auto-catch async rejections; one central handler plus a consistent async wrapper gives uniform error responses and guarantees rejections are not lost to a hung request."
+
+[[option]]
+id = "each-route-handles-its-own-errors-with-local-try"
+label = "each route handles its own errors with local try/catch …"
+directive = "each route handles its own errors with local try/catch blocks that format and send their own error responses, rather than forwarding to a single central error-handling middleware via throw or next(err)"
+why = "A defensible alternative the project considered and did not adopt as the default."

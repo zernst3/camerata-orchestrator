@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-REDUX-TOOLKIT-DEFAULT-1"
+title = "State is built with Redux Toolkit, not hand-rolled action types and switch reducers"
+tag = "stack"
+domain = "javascript:redux"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: State is built with Redux Toolkit, not hand-rolled action types and switch reducers?"
+default = "state-is-built-with-redux-toolkit-not-hand-rolle"
+why = "Redux Toolkit is the official, maintainers-recommended way to write Redux; the legacy style (hand-written action-type string constants, action creators, and large switch-statement reducers wired together with a manually composed store) is what Toolkit was created to replace. The hand-rolled style is not just more verbose, it is more error-prone in specific ways Toolkit closes: action-type strings are stringly-typed and a typo silently produces a no-op action rather than an error; reducers must be written with manual immutable-update spreads that get deep and easy to get subtly wrong; and the store has to be assembled with middleware and devtools wiring by hand, which is commonly misconfigured. createSlice generates the action types, action creators, and reducer together from one declaration, wraps Immer so updates are safe, and configureStore sets up sane middleware (including the immutability and serializability checks) and devtools by default. Choosing the hand-rolled style for new code reintroduces all of that boilerplate and its failure modes for no capability gain, since Toolkit is a superset of what the core library offers."
+
+[[option]]
+id = "state-is-built-with-redux-toolkit-not-hand-rolle"
+label = "State is built with Redux Toolkit, not hand-rolled action types and switch reducers"
+directive = "New Redux state is written with Redux Toolkit: createSlice for reducers and their action creators, configureStore for the store, and createAsyncThunk (or RTK Query) for async flows. Hand-written action-type string constants, separate action-creator functions, switch-statement reducers, and manual store/middleware assembly are not used for new code."
+why = "The adopted default. Redux Toolkit is the official recommended way to write Redux; the legacy hand-rolled style reintroduces stringly-typed action constants, manual immutable-update spreads, and hand-wired store middleware, each with failure modes Toolkit closes."
+
+[[option]]
+id = "state-is-built-with-hand-written-action-type-con"
+label = "state is built with hand-written action-type constants and …"
+directive = "state is built with hand-written action-type constants, separate action creators, and switch-statement reducers wired into a manually configured store, rather than using Redux Toolkit's createSlice and configureStore"
+why = "A defensible alternative the project considered and did not adopt as the default."

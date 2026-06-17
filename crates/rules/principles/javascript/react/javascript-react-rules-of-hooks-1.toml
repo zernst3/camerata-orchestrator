@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-REACT-RULES-OF-HOOKS-1"
+title = "Hooks are called only at the top level of components or other hooks"
+tag = "stack"
+domain = "javascript:react"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the react-hooks/rules-of-hooks rule from eslint-plugin-react-hooks, which fails the lint step on a hook called conditionally, in a loop, after an early return, or from a plain (non-component, non-hook) function. Conformance holds when the rule is at error severity and a misplaced hook call fails the build; it fails when the plugin is not configured or the rule only warns."
+
+[decision]
+question = "What position does the project take on: Hooks are called only at the top level of components or other hooks?"
+default = "hooks-are-called-only-at-the-top-level-of-compon"
+why = "React identifies hook state by call order, not by name: on every render it walks the hooks in the exact sequence they are called and matches each to the slot it allocated on the previous render. A hook placed inside a condition, a loop, or after an early return changes that call order between renders, so React silently associates a useState or useEffect with the wrong slot, and state from one hook leaks into another or an effect's cleanup runs against stale data. The failure does not throw at the offending line; it manifests as corrupted, drifting component state that is extremely hard to trace back to the conditional hook. Calling hooks conditionally because the logic 'only needs the state sometimes' breaks the one invariant React's hook implementation depends on; the correct shape is to call the hook unconditionally at the top level and put the condition inside the hook or around the value it returns. Hooks are also only valid inside React function components and custom hooks (names starting with use), never plain functions or class methods, because only those execution contexts have a React render frame to attach state to."
+
+[[option]]
+id = "hooks-are-called-only-at-the-top-level-of-compon"
+label = "Hooks are called only at the top level of components or other hooks"
+directive = "Every hook (useState, useEffect, useMemo, useContext, custom hooks, and the rest) is called at the top level of a function component or a custom hook, unconditionally and in the same order on every render. Hooks are never called inside conditionals, loops, nested functions, or after an early return. Conditional logic goes inside the hook or around the value it returns, not around the hook call itself."
+why = "The adopted default. React identifies hook state by call order, so a hook inside a condition, loop, or early return changes that order between renders and silently associates state with the wrong slot, corrupting component state in ways that are hard to trace."
+
+[[option]]
+id = "hooks-may-be-called-conditionally-or-inside-loop"
+label = "hooks may be called conditionally or inside loops …"
+directive = "hooks may be called conditionally or inside loops and branches when the component only needs the state in some cases, rather than always calling every hook unconditionally at the top level in a fixed order"
+why = "A defensible alternative the project considered and did not adopt as the default."

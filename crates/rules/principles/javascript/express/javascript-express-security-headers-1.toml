@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1"
+title = "A security-headers middleware is mounted app-wide"
+tag = "stack"
+domain = "javascript:express"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: A security-headers middleware is mounted app-wide?"
+default = "a-security-headers-middleware-is-mounted-app-wid"
+why = "Express sends no protective HTTP response headers by default, and it advertises itself via a default X-Powered-By: Express header. Without a security-headers layer, every response ships missing the headers browsers use to harden the page: no Content-Security-Policy, no Strict-Transport-Security, no X-Content-Type-Options: nosniff, no clickjacking protection. These are defense-in-depth headers whose absence is invisible in normal operation and only matters under attack, which is exactly why they get forgotten. Mounting a security-headers middleware (helmet is the de-facto standard, applied once at the top of the chain) sets a sensible baseline of these headers on every response and removes the framework-fingerprinting header, in one line, covering routes added later automatically. Setting headers by hand on individual responses, or skipping them because nothing has gone wrong yet, leaves the coverage partial and the newest route most likely uncovered; an app-wide middleware is the one place the baseline can be guaranteed for every response. Application-specific policies (a strict CSP, CORS rules) are then tuned on top of that baseline rather than assembled from nothing."
+
+[[option]]
+id = "a-security-headers-middleware-is-mounted-app-wid"
+label = "A security-headers middleware is mounted app-wide"
+directive = "A security-headers middleware (helmet, or an equivalent) is mounted once near the top of the middleware chain so every response carries a baseline of protective headers (Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options, frame protection) and the X-Powered-By fingerprint is removed. Application-specific policies such as a tightened CSP or CORS rules are configured on top of that baseline. Relying on Express's header defaults, or setting protective headers ad hoc per response, is not sufficient."
+why = "The adopted default. Express sends no protective headers by default and advertises X-Powered-By; an app-wide middleware sets the security-header baseline on every response, including routes added later, in one place rather than per-response and partially."
+
+[[option]]
+id = "protective-response-headers-are-set-ad-hoc-or-le"
+label = "protective response headers are set ad hoc, or left …"
+directive = "protective response headers are set ad hoc on individual responses, or left at Express's defaults, rather than mounting an app-wide security-headers middleware that covers every response by default"
+why = "A defensible alternative the project considered and did not adopt as the default."

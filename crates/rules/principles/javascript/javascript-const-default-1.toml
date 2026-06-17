@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-CONST-DEFAULT-1"
+title = "const is the default binding; let only when the binding is reassigned"
+tag = "stack"
+domain = "javascript"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the ESLint prefer-const rule, which fails the lint step on any let that is never reassigned after initialization. Conformance holds when prefer-const is configured at error severity and a never-reassigned let fails the build; it fails when the rule is absent or only warns."
+
+[decision]
+question = "What position does the project take on: const is the default binding; let only when the binding is reassigned?"
+default = "const-is-the-default-binding-let-only-when-the-b"
+why = "A const binding tells the reader, in one keyword at the declaration site, that this name will never be reassigned, so they can reason about the rest of the scope without scanning for a later mutation. let makes no such promise and forces the reader to keep watching. Defaulting to const and reaching for let only at an actual reassignment makes the exceptions visible: a let in the code is a signal that something is mutated, which is exactly where attention should go. Defaulting to let everywhere for uniformity erases that signal, so every binding now looks mutable whether it is or not, and the reader loses the cheap local guarantee const provides at no cost. (const constrains the binding, not the referenced object; a const-bound array or object can still have its contents mutated, which is a separate concern from rebinding.)"
+
+[[option]]
+id = "const-is-the-default-binding-let-only-when-the-b"
+label = "const is the default binding; let only when the binding is reassigned"
+directive = "Declarations default to const. let is used only for a binding that is genuinely reassigned after initialization. A let that is never reassigned is rewritten as const."
+why = "The adopted default. A const binding tells the reader at the declaration site that the name will never be reassigned, so they can reason about the scope without scanning for a later mutation."
+
+[[option]]
+id = "let-is-used-as-the-default-binding-keyword-for-u"
+label = "let is used as the default binding keyword for …"
+directive = "let is used as the default binding keyword for uniformity, with const reserved for a narrower set of cases, rather than defaulting to const and using let only where reassignment actually occurs"
+why = "A defensible alternative the project considered and did not adopt as the default."

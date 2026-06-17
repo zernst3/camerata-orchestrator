@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"
+title = "any is forbidden; unknown is the typed escape hatch at boundaries"
+tag = "stack"
+domain = "javascript:typescript"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the @typescript-eslint/no-explicit-any rule, which fails the lint step on an explicit any annotation. Conformance holds when the rule is at error severity and an any in the codebase fails the build; it fails when the rule is absent or only warns. A narrow, commented eslint-disable on a single line is the sanctioned escape valve where any is genuinely unavoidable."
+
+[decision]
+question = "What position does the project take on: any is forbidden; unknown is the typed escape hatch at boundaries?"
+default = "any-is-forbidden-unknown-is-the-typed-escape-hat"
+why = "any is not a type, it is an instruction to the compiler to stop checking: a value typed any propagates through every assignment, call, and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. unknown serves the same 'I do not know the shape yet' purpose without the contagion: it accepts any value but permits no operation until the code narrows it (a type guard, a schema parse, an assertion), which forces the validation to happen exactly where untrusted data enters. Reaching for any to make an error go away works at that line and moves the failure somewhere with no type information, where it resurfaces as a runtime TypeError far from the cast; unknown keeps the obligation visible and local to the boundary where the shape is actually unknown."
+
+[[option]]
+id = "any-is-forbidden-unknown-is-the-typed-escape-hat"
+label = "any is forbidden; unknown is the typed escape hatch at boundaries"
+directive = "Explicit any annotations are forbidden. At boundaries where a value's type is genuinely not known at compile time (parsed JSON, third-party payloads, dynamic input), the value is typed unknown and narrowed via a type guard or validated via a schema parser before use. Where any is truly unavoidable, it is isolated behind a single commented lint-disable rather than spread through the surrounding types."
+why = "The adopted default. any disables type checking transitively along every assignment, call, and property access it touches, so one any near a boundary can silently void the guarantees of a large region of typed code; unknown serves the same purpose without the contagion."
+
+[[option]]
+id = "any-is-permitted-as-an-escape-hatch-wherever-a-t"
+label = "any is permitted as an escape hatch wherever a …"
+directive = "any is permitted as an escape hatch wherever a type is inconvenient to express, accepting that values so typed disable checking transitively, rather than requiring unknown plus explicit narrowing at boundaries"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-STRICT-EQUALITY-1"
+title = "Comparisons use strict equality (=== / !==), never the coercing == / !="
+tag = "stack"
+domain = "javascript"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the ESLint eqeqeq rule (set to 'always', or 'smart' if intentional == null checks are sanctioned), which fails the lint step on any abstract-equality operator. Conformance holds when eqeqeq is configured at error severity and a == or != in the codebase fails the build; it fails when the rule is absent or downgraded to a warning that does not block."
+
+[decision]
+question = "What position does the project take on: Comparisons use strict equality (=== / !==), never the coercing == / !=?"
+default = "comparisons-use-strict-equality-never-the-coerci"
+why = "Abstract equality (==) runs the Abstract Equality Comparison algorithm, which coerces operands across types before comparing, producing results that are non-obvious and non-transitive (the classic 0 == '', '' == false, 0 == false chain, or [] == ![] resolving to true). Reviewers cannot tell at a glance whether a given == was a deliberate coercion or a typo for ===, so every loose comparison costs reading time and hides bugs. Strict equality compares type-and-value with no coercion, which is what the author almost always means. Allowing == across the codebase relying on coercion works for the cases the author tested but silently misfires the first time an operand's runtime type differs from the assumed one (a number arrives as a string from a form or query param), and the build still passes; the defect surfaces as a wrong branch taken in production rather than a lint error at commit time."
+
+[[option]]
+id = "comparisons-use-strict-equality-never-the-coerci"
+label = "Comparisons use strict equality (=== / !==), never the coercing == / !="
+directive = "All equality comparisons use === and !==. The abstract-equality operators == and != are forbidden. The one sanctioned exception, if the project opts into it, is the == null / != null idiom to test for null-or-undefined in a single check; if that exception is not adopted, an explicit value === null || value === undefined is required instead."
+why = "The adopted default. Abstract equality (==) coerces operands across types before comparing, producing results that are non-obvious and non-transitive, and reviewers cannot tell whether a given == was deliberate or a typo for ===."
+
+[[option]]
+id = "loose-equality-is-used-relying-on-javascripts-ty"
+label = "loose equality (== / !=) is used, relying on …"
+directive = "loose equality (== / !=) is used throughout, relying on JavaScript's type coercion rules to compare values across types, rather than requiring strict === / !== comparisons"
+why = "A defensible alternative the project considered and did not adopt as the default."

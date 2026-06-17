@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1"
+title = "Route handlers stay thin; business logic and data access live in a service layer"
+tag = "stack"
+domain = "javascript:express"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Route handlers stay thin; business logic and data access live in a service layer?"
+default = "route-handlers-stay-thin-business-logic-and-data"
+why = "A route handler's job is HTTP-shaped: read the validated request, call into the application, and translate the result (or error) into a status code and response body. When business rules and direct database access move into the handler itself, three things follow. The logic becomes reachable only through an HTTP request, so it cannot be unit-tested or reused by a job, a CLI, or another route without spinning up the web layer. The same rule, copied into a second handler that needs it, drifts out of sync between the two copies. And the handler now mixes transport concerns with domain concerns, so a change to either touches code that does both. Keeping handlers thin and putting the logic and data access behind a service (or repository) layer makes the domain logic independently testable, reusable across entry points, and changeable without touching routing. This is the same separation-of-layers principle that governs the Rust side of the stack: the boundary layer talks protocol, the inner layer owns the rules and the data. Putting a database query straight into a route because it is a 'small' endpoint is how the boundary erodes; small endpoints accrete, and the query that lived in the handler is the one that later cannot be reused or tested without a request."
+
+[[option]]
+id = "route-handlers-stay-thin-business-logic-and-data"
+label = "Route handlers stay thin; business logic and data access live in a service layer"
+directive = "Route handlers are limited to HTTP concerns: invoke input validation, call a service/use-case function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler delegates to, not inline in the route. A direct database query or business-rule computation written inside a route handler is forbidden; it moves behind the service layer the handler calls."
+why = "The adopted default. Logic and data access inline in a handler can only be reached through an HTTP request, so it cannot be unit-tested or reused by a job or another route, and it mixes transport concerns with domain concerns in one place."
+
+[[option]]
+id = "route-handlers-contain-business-logic-and-direct"
+label = "route handlers contain business logic and direct database …"
+directive = "route handlers contain business logic and direct database access inline, handling validation, rules, and data access together in the route, rather than delegating to a separate service or repository layer"
+why = "A defensible alternative the project considered and did not adopt as the default."

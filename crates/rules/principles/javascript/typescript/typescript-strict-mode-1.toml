@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-TYPESCRIPT-STRICT-MODE-1"
+title = "The compiler runs in strict mode"
+tag = "stack"
+domain = "javascript:typescript"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by tsconfig.json with \"strict\": true (which enables strictNullChecks, noImplicitAny, strictFunctionTypes, and the rest of the strict family) and a tsc --noEmit type-check wired into the build/CI. Conformance holds when strict is on and the type-check is a required gate that fails the build on a type error; it fails when strict is off, individual strict flags are disabled, or tsc is not run in CI."
+
+[decision]
+question = "What position does the project take on: The compiler runs in strict mode?"
+default = "the-compiler-runs-in-strict-mode"
+why = "The single most consequential of the strict flags is strictNullChecks: with it off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs (the canonical 'cannot read property of undefined') that are most common and most expensive at runtime, and the compiler reports nothing. noImplicitAny closes the other large hole, where an un-annotated parameter becomes any and disables checking for everything downstream of it. Running with strict off, or cherry-picking the flags, buys a smaller initial diff at the cost of a type system that claims to verify code it does not actually verify; the gaps are invisible until a null flows into a field at runtime, and retrofitting strict onto a large untyped-by-default codebase later is far more expensive than starting strict and never accumulating the debt."
+
+[[option]]
+id = "the-compiler-runs-in-strict-mode"
+label = "The compiler runs in strict mode"
+directive = "tsconfig sets \"strict\": true at the root, enabling the full strict family (strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, and the rest). A tsc type-check (tsc --noEmit or equivalent) is a required build/CI gate. Disabling individual strict flags to silence errors is forbidden; the error is fixed at its source instead."
+why = "The adopted default. With strictNullChecks off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs that are most common and most expensive at runtime."
+
+[[option]]
+id = "the-compiler-runs-with-strict-mode-off-or-with-i"
+label = "the compiler runs with strict mode off, or with …"
+directive = "the compiler runs with strict mode off, or with individual strict flags such as strictNullChecks or noImplicitAny disabled, rather than enabling the full strict family and keeping it on"
+why = "A defensible alternative the project considered and did not adopt as the default."

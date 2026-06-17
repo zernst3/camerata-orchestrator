@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-REDUX-NO-STATE-MUTATION-1"
+title = "Reducers never mutate existing state; they produce a new state value"
+tag = "stack"
+domain = "javascript:redux"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Reducers never mutate existing state; they produce a new state value?"
+default = "reducers-never-mutate-existing-state-they-produc"
+why = "Redux's entire model rests on state being treated as immutable: the store holds one state object, and change is expressed by replacing it with a new object, never editing the old one in place. Two things break the moment a reducer mutates the previous state directly. First, React-Redux decides whether a connected component needs to re-render by comparing the previous and next state references with a shallow (===) check; an in-place mutation keeps the same reference, so the comparison says 'unchanged' and the UI silently fails to update even though the data did change. Second, time-travel debugging, undo/redo, and the devtools all assume past states are preserved, and a mutation corrupts that history. The correct shape is to return a new object/array with the changed parts replaced (via spreads, or via Redux Toolkit's createSlice, which wraps Immer so apparently-mutating code produces an immutable update under the hood). Editing state directly because it is fewer keystrokes produces a store that updates internally but a UI that does not move, which reads as a baffling 'my state changed but nothing rendered' bug rather than an error."
+
+[[option]]
+id = "reducers-never-mutate-existing-state-they-produc"
+label = "Reducers never mutate existing state; they produce a new state value"
+directive = "Reducers treat the incoming state as read-only and return a new state value with the changed parts replaced, never assigning to a property of the existing state, pushing to an existing array, or otherwise editing it in place. Spreads (or Immer, as used internally by Redux Toolkit's createSlice) produce the new value. The 'mutating' syntax inside createSlice is permitted precisely because Immer turns it into an immutable update; raw mutation of state outside that wrapper is forbidden."
+why = "The adopted default. React-Redux uses a shallow reference check to decide on re-renders, so an in-place mutation keeps the same reference, reports 'unchanged', and silently fails to update the UI; it also corrupts time-travel debugging and undo history."
+
+[[option]]
+id = "reducers-mutate-the-existing-state-object-in-pla"
+label = "reducers mutate the existing state object in place …"
+directive = "reducers mutate the existing state object in place and return it, relying on the mutated reference to carry the change, rather than returning a new state value with the changed parts replaced"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,25 @@
+id = "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"
+title = "Effect and memo dependency arrays list every reactive value the body reads"
+tag = "stack"
+domain = "javascript:react"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the react-hooks/exhaustive-deps rule from eslint-plugin-react-hooks, which fails the lint step when a useEffect / useCallback / useMemo dependency array omits a reactive value the body references. Conformance holds when the rule is at error severity and a missing dependency fails the build; it fails when the plugin is absent, the rule only warns, or dependencies are suppressed wholesale with a blanket lint-disable."
+
+[decision]
+question = "What position does the project take on: Effect and memo dependency arrays list every reactive value the body reads?"
+default = "effect-and-memo-dependency-arrays-list-every-rea"
+why = "The dependency array is React's declaration of what the effect (or memoized value) depends on, and React re-runs the effect only when one of those values changes. If the body reads a prop, state value, or derived value that is not in the array, the effect closes over the value from the render where it last ran and never sees later updates: the effect operates on stale data indefinitely. This produces the hardest class of React bug, where the UI shows one value but an effect acts on an older one, with no error and no obvious cause. Omitting dependencies to stop an effect from re-running 'too often' treats the symptom by lying about the dependency, which trades a visible re-render for an invisible staleness bug; the correct fixes keep the array honest (move the value out of the effect, wrap a function in useCallback, use a functional state updater, or split the effect) so re-runs are controlled without hiding a real dependency. A blanket eslint-disable on the deps line is the same lie written down."
+
+[[option]]
+id = "effect-and-memo-dependency-arrays-list-every-rea"
+label = "Effect and memo dependency arrays list every reactive value the body reads"
+directive = "Every useEffect, useCallback, and useMemo declares in its dependency array every reactive value (props, state, context, and values derived from them) that its body reads. When an effect re-runs too often, the fix keeps the array complete (functional state updaters, useCallback-wrapped functions, moving values out of the effect, or splitting it), never trimming a real dependency or blanket-disabling the exhaustive-deps lint."
+why = "The adopted default. The dependency array declares what the effect depends on; omitting a value the body reads makes the effect close over a stale copy and operate on outdated data indefinitely, with no error and no obvious cause."
+
+[[option]]
+id = "dependency-arrays-are-trimmed-to-control-when-ef"
+label = "dependency arrays are trimmed to control when effects …"
+directive = "dependency arrays are trimmed to control when effects re-run, omitting values the body reads (or suppressing the exhaustive-deps lint) when listing them would cause unwanted re-execution, rather than keeping every read reactive value in the array"
+why = "A defensible alternative the project considered and did not adopt as the default."
