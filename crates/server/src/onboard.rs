@@ -138,6 +138,11 @@ pub struct ScanReport {
     pub stacks: Vec<RepoStack>,
     /// Number of files scanned across all repos.
     pub files_scanned: usize,
+    /// Total characters of scannable code across all repos (after noise pruning). Drives the
+    /// pre-audit cost estimate: the digest the model sees is built from this, so it's the
+    /// honest token base before chunk/batch multipliers.
+    #[serde(default)]
+    pub code_chars: usize,
     /// Every violation found, across all repos (each tagged with its repo).
     pub findings: Vec<Finding>,
     /// The proposed starter ruleset (aggregated over all repos).
@@ -155,6 +160,7 @@ impl ScanReport {
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
+            code_chars: 0,
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
@@ -612,6 +618,7 @@ pub fn build_report(
         repos,
         stacks,
         files_scanned,
+        code_chars: 0,
         findings,
         proposed_rules,
         gated: false,
@@ -946,6 +953,7 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
 pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
+    let mut code_chars = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
 
@@ -961,6 +969,7 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         match fetch_repo_files(owner, repo, token).await {
             Ok((files, truncated)) => {
                 files_total += files.len();
+                code_chars += files.iter().map(|(_, c)| c.len()).sum::<usize>();
                 stacks.push(detect_stack(spec, &files));
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -978,6 +987,7 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         .map(|s| (s.repo.clone(), domains_for_stack(s)))
         .collect();
     let mut report = build_report(repos_ok, stacks, files_total, Vec::new());
+    report.code_chars = code_chars;
     report.proposed_rules = propose_corpus_rules(&repo_domains).await;
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));

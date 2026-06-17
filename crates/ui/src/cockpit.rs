@@ -1895,6 +1895,8 @@ struct ScanReportView {
     #[serde(default)]
     stacks: Vec<StackView>,
     files_scanned: usize,
+    #[serde(default)]
+    code_chars: usize,
     findings: Vec<FindingView>,
     proposed_rules: Vec<ProposedRuleView>,
     gated: bool,
@@ -1941,6 +1943,11 @@ async fn audit_against(
 struct AuditModelOption {
     label: String,
     id: String,
+    /// USD per million tokens (input / output). Drives the pre-audit cost estimate.
+    #[serde(default)]
+    price_in: f64,
+    #[serde(default)]
+    price_out: f64,
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -1957,6 +1964,52 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
         .json::<AuditModelsResp>()
         .await
         .ok()
+}
+
+/// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
+/// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends:
+/// the digest is re-sent per rule-batch, so parallel/job (batches of 15) cost more tokens
+/// than sequential (one batch). Approximate by design — ~4 chars/token, a fixed per-pass
+/// overhead for the repo map + rules + system prompt, and a fudge for the resolution +
+/// calibration passes. Sized to size a scan, not to bill it.
+fn estimate_audit_cost(
+    code_chars: usize,
+    selected: usize,
+    mode: &str,
+    price_in: f64,
+    price_out: f64,
+) -> (u64, f64, usize) {
+    const CHUNK_DIGEST_CHARS: usize = 350_000;
+    const RULE_BATCH_SIZE: usize = 15;
+    const CHARS_PER_TOKEN: f64 = 4.0;
+    const OVERHEAD_CHARS_PER_PASS: usize = 8_000;
+    const OUT_TOKENS_PER_PASS: f64 = 1_500.0;
+    const FUDGE: f64 = 1.15;
+
+    let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
+    let batches = if mode == "sequential" {
+        1
+    } else {
+        selected.div_ceil(RULE_BATCH_SIZE).max(1)
+    };
+    let passes = chunks * batches;
+    let in_chars = code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes;
+    let in_tokens = in_chars as f64 / CHARS_PER_TOKEN;
+    let out_tokens = OUT_TOKENS_PER_PASS * passes as f64;
+    let total_tokens = ((in_tokens + out_tokens) * FUDGE) as u64;
+    let dollars = (in_tokens * price_in + out_tokens * price_out) / 1_000_000.0 * FUDGE;
+    (total_tokens, dollars, passes)
+}
+
+/// Compact human token count: 2.0M / 350k / 900.
+fn human_tokens(t: u64) -> String {
+    if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1_000_000.0)
+    } else if t >= 1_000 {
+        format!("{:.0}k", t as f64 / 1_000.0)
+    } else {
+        t.to_string()
+    }
 }
 
 /// A polled async-audit job (`GET /api/onboard/audit/job/:id`).
@@ -2651,6 +2704,13 @@ fn ProposedRulesTable(
             handle.set_selection(*rid, true);
         }
     });
+    // Publish the live selected-rule count to ScanResults (Step 2) so its cost estimate
+    // tracks what the user has ticked. Reactive: re-runs whenever the selection changes.
+    // ProposedRulesTable only mounts inside ScanResults, which provides this signal.
+    let mut selected_count = use_context::<Signal<usize>>();
+    use_effect(move || {
+        selected_count.set(handle.selected_ids().len());
+    });
     let mut arming = use_signal(|| false);
     let mut domain_panel_open = use_signal(|| false);
     let arm_findings = findings;
@@ -3151,6 +3211,10 @@ fn ScanResults(report: ScanReportView) -> Element {
             poll_job(jid, audit, auditing, job_progress, active_audit_job).await;
         }
     });
+    // Selected-rule count, set by ProposedRulesTable and read here for the cost estimate
+    // (the estimate also depends on the model + mode pickers, which live in this component).
+    let selected_count = use_signal(|| 0usize);
+    use_context_provider(|| selected_count);
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -3392,6 +3456,35 @@ fn ScanResults(report: ScanReportView) -> Element {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
                     span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
+                }
+                // Pre-audit cost estimate: the user sees the price of THIS configuration
+                // (model + mode + ticked rules) before spending anything. It moves with the
+                // pickers above — Sonnet vs Opus, parallel vs sequential, more/fewer rules.
+                if report.code_chars > 0 {
+                    {
+                        let price = models.as_ref().and_then(|m| {
+                            m.models.iter().find(|o| o.id == audit_model()).map(|o| (o.price_in, o.price_out))
+                        });
+                        let (pin, pout) = price.unwrap_or((3.0, 15.0));
+                        let sel = selected_count();
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), pin, pout);
+                        let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
+                        let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
+                        rsx! {
+                            div { class: "audit-cost",
+                                div { class: "audit-cost-main",
+                                    span { class: "audit-cost-label", "Estimated cost" }
+                                    span { class: "audit-cost-val", "{dollar_str}" }
+                                    span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
+                                }
+                                p { class: "audit-cost-note",
+                                    "Approximate, one-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files). "
+                                    "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
+                                    "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
+                                }
+                            }
+                        }
+                    }
                 }
                 // Live progress for an async job: a determinate bar (it grows as repos are
                 // discovered) + a findings-so-far count, so a walk-away scan shows life.

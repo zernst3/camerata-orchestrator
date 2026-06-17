@@ -1209,6 +1209,13 @@ html, body {
 .finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
 /* Action row for the "leave onboarding?" confirm dialog: Cancel + Leave anyway. */
 .onboard-leave-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+/* Pre-audit cost estimate card: the price of the configured scan, before running it. */
+.audit-cost { margin: 12px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.audit-cost-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.audit-cost-label { font-size: 12px; font-weight: 600; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .04em; }
+.audit-cost-val { font-size: 22px; font-weight: 800; color: var(--ink); }
+.audit-cost-meta { font-size: 12px; color: var(--ink-faint); }
+.audit-cost-note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-faint); }
 .live-run { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 14px 16px; }
 .live-run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .live-run-title { font-size: 15px; font-weight: 700; color: var(--ink); }

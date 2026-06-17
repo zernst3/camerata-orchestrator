@@ -22,19 +22,24 @@
 use serde::Serialize;
 
 /// One model the UI offers, tagged with its vendor so the selector can group/extend.
+/// `price_in` / `price_out` are USD per MILLION tokens (input / output), used by the UI's
+/// pre-audit cost estimate. Approximate list pricing — enough to size a scan, not billing.
 pub struct ModelInfo {
     pub vendor: &'static str,
     pub label: &'static str,
     pub id: &'static str,
+    pub price_in: f64,
+    pub price_out: f64,
 }
 
 /// The models the UI offers. Anthropic today; add a vendor's models here when its arm
-/// is wired in [`Llm::complete`]. Latest/most capable first.
+/// is wired in [`Llm::complete`]. Latest/most capable first. Prices are $/Mtok and track
+/// the well-known tiering (Sonnet ~5× cheaper than Opus, Haiku ~15×).
 pub const MODELS: &[ModelInfo] = &[
-    ModelInfo { vendor: "anthropic", label: "Opus 4.8", id: "claude-opus-4-8" },
-    ModelInfo { vendor: "anthropic", label: "Sonnet 4.6", id: "claude-sonnet-4-6" },
-    ModelInfo { vendor: "anthropic", label: "Haiku 4.5", id: "claude-haiku-4-5-20251001" },
-    ModelInfo { vendor: "anthropic", label: "Fable 5", id: "claude-fable-5" },
+    ModelInfo { vendor: "anthropic", label: "Opus 4.8", id: "claude-opus-4-8", price_in: 15.0, price_out: 75.0 },
+    ModelInfo { vendor: "anthropic", label: "Sonnet 4.6", id: "claude-sonnet-4-6", price_in: 3.0, price_out: 15.0 },
+    ModelInfo { vendor: "anthropic", label: "Haiku 4.5", id: "claude-haiku-4-5-20251001", price_in: 1.0, price_out: 5.0 },
+    ModelInfo { vendor: "anthropic", label: "Fable 5", id: "claude-fable-5", price_in: 15.0, price_out: 75.0 },
 ];
 
 /// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
