@@ -1200,6 +1200,10 @@ html, body {
    secondary buttons beside it (the margin is for standalone primary buttons). */
 .findings-toolbar { align-items: center; }
 .findings-toolbar .btn-run { margin-bottom: 0; }
+/* The "Open" primary in a project card sits in a center-aligned action row beside the
+   Export/Delete secondaries. Drop the standalone bottom margin and match their padding
+   so all three buttons share the same baseline/height. */
+.pg-card-actions .btn-run { margin-bottom: 0; padding: 8px 16px; }
 .live-run { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 14px 16px; }
 .live-run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .live-run-title { font-size: 15px; font-weight: 700; color: var(--ink); }

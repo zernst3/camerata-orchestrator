@@ -2087,7 +2087,7 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
     }
 }
 
-fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<FindingView>> {
+fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
     let sev = BadgeVariantMap::new()
         // chorale badges support red/yellow/gray/green; critical reuses red (most
         // alarming available) and is distinguished by its "Critical" label + top sort.
@@ -2144,7 +2144,9 @@ fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<Find
             CellValue::Text(f.rule_id.clone())
         })
         .sortable()
-        .filter(FilterKind::MultiSelect { options: types })
+        // String lookup, not multi-select: rule ids are many and the architect typically
+        // wants "show me everything matching ARCH-" or a specific id, not a checkbox list.
+        .filter(FilterKind::Text)
         .initial_width(250.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
@@ -2176,7 +2178,7 @@ fn finding_columns(repos: Vec<String>, types: Vec<String>) -> Vec<ColumnDef<Find
     ]
 }
 
-fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
+fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
     let kind = BadgeVariantMap::new()
         .with("mechanical", BadgeVariant::new("Mechanical", "green"))
         .with("review", BadgeVariant::new("Review", "yellow"));
@@ -2195,7 +2197,9 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
             })
         })
         .sortable()
-        .filter(FilterKind::Text)
+        // Multi-select: a rule has exactly one domain, so exact-match MultiSelect lets the
+        // architect tick the domains they care about (sql + api-layer, say) and see only those.
+        .filter(FilterKind::MultiSelect { options: domains })
         .initial_width(150.0),
         // Suggested = the rule's domain matched the scanned stack; the rest are the full
         // library, available to arm but not recommended for this stack.
@@ -2225,13 +2229,16 @@ fn rule_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Badge(scope))
         .initial_width(130.0),
+        // Show EVERY repo this rule applies to (comma-joined), not a "N repos" collapse —
+        // the Text filter matches by substring, so typing one repo surfaces every row that
+        // references it regardless of which OTHER repos share the cell ("contains", not the
+        // exact-combo match a MultiSelect would impose). That's the per-repo "show anywhere
+        // this repo is referenced" behavior the multi-repo case needs.
         ColumnDef::new(ColumnId("repos"), "Applies to", |r: &ProposedRuleView| {
             CellValue::Text(if r.repos.is_empty() {
                 "—".to_string()
-            } else if r.repos.len() <= 2 {
-                r.repos.join(", ")
             } else {
-                format!("{} repos", r.repos.len())
+                r.repos.join(", ")
             })
         })
         .filter(FilterKind::Text)
@@ -2275,13 +2282,11 @@ fn FindingsTable(
         };
         (enforced, sev)
     });
-    // Distinct values for the multi-select filters (repo + finding type).
+    // Distinct repos for the repo multi-select filter. (Finding type is a Text/contains
+    // filter now, so it needs no precomputed option list.)
     let mut filter_repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
     filter_repos.sort();
     filter_repos.dedup();
-    let mut filter_types: Vec<String> = findings.iter().map(|f| f.rule_id.clone()).collect();
-    filter_types.sort();
-    filter_types.dedup();
     // Mint row ids ONCE per mount (see ProposedRulesTable): `RowId::new()` in the render
     // body would re-id every render and desync the Table from id_map/selection. This
     // component remounts on each new audit (it's gated behind `audited.is_some()` and the
@@ -2299,10 +2304,7 @@ fn FindingsTable(
     // the complete, untruncated explanation that the row cell clips.
     let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
     let handle = use_table(move || {
-        TableState::new(
-            rows.clone(),
-            finding_columns(filter_repos.clone(), filter_types.clone()),
-        )
+        TableState::new(rows.clone(), finding_columns(filter_repos.clone()))
     });
     // Group findings BY FINDING TYPE so same-kind violations sit together (a flat 200-row
     // dump is paralysis); severity / authority / repo / type filter via multi-select.
@@ -2469,6 +2471,9 @@ fn FindingsTable(
             filter_enabled: true,
             selection_enabled: true,
             resize_enabled: true,
+            // Pin the column header to the top of the table's scroll viewport so it
+            // stays visible while scrolling a long findings list.
+            sticky_header: true,
             cell_renderers: renderers,
             row_cell_renderers: row_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
@@ -2516,7 +2521,11 @@ fn ProposedRulesTable(
         let d = if p.domain.is_empty() { "general".to_string() } else { p.domain.clone() };
         domain_rows.entry(d).or_default().push(*rid);
     }
-    let handle = use_table(move || TableState::new(rows.clone(), rule_columns()));
+    // Distinct domains (sorted, "general" for blank — matches the cell value) for the
+    // Domain column's multi-select filter options.
+    let domain_options: Vec<String> = domain_rows.keys().cloned().collect();
+    let handle =
+        use_table(move || TableState::new(rows.clone(), rule_columns(domain_options.clone())));
     // The row-detail modal is hosted by ScanResults (OUTSIDE this table's subtree)
     // via a shared signal: a row click writes the rule here, ScanResults renders the
     // modal. Hosting the full-screen overlay outside the Table avoids a Dioxus-desktop
@@ -2530,6 +2539,10 @@ fn ProposedRulesTable(
     // and PRE-SELECT the suggested rules. Once, on mount.
     use_hook(move || {
         handle.set_grouping(vec![ColumnId("domain")]);
+        // Start every domain group COLLAPSED: the rule list is long and the architect
+        // scans domain-by-domain, expanding only the ones they're triaging. Must run
+        // AFTER set_grouping so the group keys exist to collapse.
+        handle.collapse_all_groups();
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(5000);
         for rid in &suggested_ids {
