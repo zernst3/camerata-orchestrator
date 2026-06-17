@@ -1619,14 +1619,21 @@ async fn save_csv(default_name: &str, content: String) -> bool {
 
 /// Build CSV for the audit findings table.
 fn findings_csv(findings: &[FindingView]) -> String {
-    let mut out = String::from("repo,severity,status,rule_id,path,line,snippet,detail\n");
+    // Flat + lossless: one row per finding, every column. NOT grouped/merged — a machine
+    // consumer (script, pivot, SIEM, compliance pipeline) groups/filters itself and needs
+    // full fidelity. `also_matches` carries the other rule ids the location-merge folded in,
+    // so no rule is dropped from the export (space-separated; the grouping the UI shows is
+    // recoverable from rule_id + also_matches + path + line).
+    let mut out =
+        String::from("repo,severity,status,rule_id,also_matches,path,line,snippet,detail\n");
     for f in findings {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{}\n",
             csv_field(&f.repo),
             csv_field(&f.severity),
             csv_field(&f.status),
             csv_field(&f.rule_id),
+            csv_field(&f.also_matches.join(" ")),
             csv_field(&f.path),
             f.line,
             csv_field(&f.snippet),
@@ -2312,12 +2319,21 @@ fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
                 .with("waived", BadgeVariant::new("Waived", "yellow")),
         ))
         .initial_width(150.0),
-        ColumnDef::new(ColumnId("loc"), "Location", |f: &FindingView| {
-            CellValue::Text(format!("{}:{}", f.path, f.line))
+        // Second grouping level: the FILE (path only). The findings table groups by
+        // rule → file, so a rule violated 4× across one file collapses under a
+        // "handlers.rs (4)" sub-header instead of 4 loose rows. Path-only (not path:line)
+        // so all sites in a file share one group; the line lives in the Line column.
+        ColumnDef::new(ColumnId("file"), "File", |f: &FindingView| {
+            CellValue::Text(f.path.clone())
         })
         .sortable()
         .filter(FilterKind::Text)
-        .initial_width(280.0),
+        .initial_width(260.0),
+        ColumnDef::new(ColumnId("loc"), "Line", |f: &FindingView| {
+            CellValue::Text(f.line.to_string())
+        })
+        .sortable()
+        .initial_width(80.0),
         ColumnDef::new(ColumnId("snippet"), "Snippet", |f: &FindingView| {
             CellValue::Text(f.snippet.clone())
         })
@@ -2453,10 +2469,13 @@ fn FindingsTable(
     let handle = use_table(move || {
         TableState::new(rows.clone(), finding_columns(filter_repos.clone()))
     });
-    // Group findings BY FINDING TYPE so same-kind violations sit together (a flat 200-row
-    // dump is paralysis); severity / authority / repo / type filter via multi-select.
+    // Two-level grouping: by RULE, then by FILE within each rule. chorale groups by an
+    // ordered key list (it recurses through the Vec, one depth per key), so a rule violated
+    // 4× across one file renders as "RULE (4)" → "handlers.rs (4)" → the 4 individual lines.
+    // Counts come free on every header. This is a PRESENTATION view of the flat finding
+    // list; the CSV export stays flat + lossless (one row per finding), unchanged.
     use_hook(move || {
-        handle.set_grouping(vec![ColumnId("type")]);
+        handle.set_grouping(vec![ColumnId("type"), ColumnId("file")]);
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(5000);
     });
