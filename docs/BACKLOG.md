@@ -3,6 +3,48 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Re-onboard guard + "add repo to project" + project-config sharing (2026-06-17)
+
+**Gated to the disposition-testing phase** (apply / ignore / accept-as-tech-debt is the next
+thing Zach tests). Do NOT build ahead of that phase.
+
+**Re-onboard guard.** Once a repo is onboarded, that fact should be detectable so a second
+onboarding warns "this repo is already onboarded" (non-blocking — they can proceed, they just
+shouldn't duplicate work unknowingly). The onboarded fact must be read from the REPO at origin,
+not from project state: onboarding is "armed" as committed artifacts (CONVENTIONS.md / AGENTS.md,
+the CI gate workflow, the gate rule-subset config). The guard = check origin for those armed
+artifacts (cheap: a contents API HEAD on the gate workflow / `.camerata/` config). This keeps the
+flag authoritative across users + machines, because the enforced config already lives in origin.
+
+**"Add repo to project" as the alternative.** If they don't want to re-onboard, offer adding the
+already-onboarded repo to the current project's set (a workspace op, no re-scan) so they reuse the
+existing armed config instead of regenerating it.
+
+**Project-config sharing — recommendation: user-sharable export, NOT config-in-every-repo.**
+Two deliberate tiers (this is the decision Zach was erring toward, and it's the right one):
+
+1. **Enforced/armed config → lives in each repo, in origin** (CONVENTIONS/AGENTS, CI gate, gate
+   rule-subset, baseline). Already gets there via Arm. Each repo owns exactly its own slice → no
+   fan-out conflicts, survives in origin, anyone who clones gets it. This is the source of truth
+   for *enforcement*.
+2. **Project workspace config → user-sharable artifact** (the existing export/import JSON), never
+   committed to repos. This is the cross-repo orchestration + pre-arm working state (repo set,
+   in-flight rule selections/alternatives/dispositions, audit history). It's a "project file" like
+   a `.code-workspace` / Postman collection.
+
+Reject "project config lives in each repo it touches": a project spans N repos but has ONE config,
+so replicating it to all N drifts + conflicts (Zach's instinct, correct); picking one "primary"
+repo is arbitrary + breaks if that repo leaves; and access-control mismatches (a teammate with
+repo A but not B can't reconstruct the project from A). The thing that genuinely belongs in repos
+already gets there via Arm; project config is inherently a workspace concern.
+
+Evolution path when multi-user becomes real: a **shared project store** (orchestrator SQLite →
+hosted project service, or the Work-Tracker bridge in `WORKTRACKER_INTEGRATION.md`), NOT
+config-in-repos. Optional refinement: the project keeps a *manifest* (repo list + a hash/pointer
+to each repo's armed config) so it can DETECT drift between project intent and what each repo
+actually enforces — without owning/duplicating the enforced config. Promote to a `docs/decisions/`
+ADR once Zach confirms the two-tier split.
+
 ## Scan execution modes — parallel, then job/streaming (designed 2026-06-16)
 
 Decision + plain-English design in `docs/decisions/2026-06-16_scan_execution_modes.md`.
