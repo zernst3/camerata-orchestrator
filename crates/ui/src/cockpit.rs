@@ -2088,9 +2088,11 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
 }
 
 fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
+    // Fallback badge map only. The severity column is actually drawn by a custom cell
+    // renderer in FindingsTable (which overrides RenderKind::Badge) so High can be ORANGE,
+    // distinct from Critical's red — chorale's built-in palette has no orange and would
+    // collapse both to red. This map is the safety net if that renderer is ever absent.
     let sev = BadgeVariantMap::new()
-        // chorale badges support red/yellow/gray/green; critical reuses red (most
-        // alarming available) and is distinguished by its "Critical" label + top sort.
         .with("critical", BadgeVariant::new("Critical", "red"))
         .with("high", BadgeVariant::new("High", "red"))
         .with("medium", BadgeVariant::new("Medium", "yellow"))
@@ -2338,6 +2340,54 @@ fn FindingsTable(
                 };
                 let tip = desc.get(&rid).cloned().unwrap_or_else(|| rid.clone());
                 rsx! { span { title: "{tip}", "{rid}" } }
+            }) as CellRenderer,
+        );
+        // Severity badge with a per-level palette. chorale's badge map only has
+        // green/yellow/red/gray, so Critical AND High both landed on red and looked
+        // identical (the whole reason for the red row-stripe). A custom renderer (which
+        // overrides the column's RenderKind::Badge) gives High its own ORANGE, keeping
+        // Critical the strongest red. Orange routes through a --chorale-badge-orange-*
+        // var with an orange fallback, so it works today and auto-adopts a future
+        // chorale orange (rust-chorale#33).
+        m.insert(
+            ColumnId("severity"),
+            std::sync::Arc::new(move |val: &CellValue| {
+                let sev = match val {
+                    CellValue::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let (label, bg, fg): (&str, &str, &str) = match sev.as_str() {
+                    "critical" => (
+                        "Critical",
+                        "var(--chorale-badge-red-bg, #fee2e2)",
+                        "var(--chorale-badge-red-text, #991b1b)",
+                    ),
+                    "high" => (
+                        "High",
+                        "var(--chorale-badge-orange-bg, #ffedd5)",
+                        "var(--chorale-badge-orange-text, #9a3412)",
+                    ),
+                    "medium" => (
+                        "Medium",
+                        "var(--chorale-badge-yellow-bg, #fef3c7)",
+                        "var(--chorale-badge-yellow-text, #92400e)",
+                    ),
+                    "low" => (
+                        "Low",
+                        "var(--chorale-badge-gray-bg, #f3f4f6)",
+                        "var(--chorale-badge-gray-text, #374151)",
+                    ),
+                    other => (
+                        other,
+                        "var(--chorale-badge-default-bg, #e5e7eb)",
+                        "var(--chorale-badge-default-text, #1f2937)",
+                    ),
+                };
+                let style = format!(
+                    "display:inline-block;padding:0.125rem 0.5rem;border-radius:9999px;\
+                     background:{bg};color:{fg};font-size:0.75rem;font-weight:500;"
+                );
+                rsx! { span { style: "{style}", "{label}" } }
             }) as CellRenderer,
         );
         CellRenderers::new(m)
