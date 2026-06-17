@@ -702,6 +702,63 @@ fn has_code_ext(path: &str) -> bool {
     }
 }
 
+/// Directory names that are build output, dependency trees, caches, or tool state — pure
+/// noise for an architecture audit, and the bulk of a repo's bytes/tokens. A real consumer
+/// found 14 of 25 MB of one monorepo was `.turbo/cache` manifests + lockfiles; scanning
+/// that is paying to audit generated artifacts. Matched on ANY path segment, so
+/// `apps/web/node_modules/...` and `node_modules/...` both prune. Extend per-project via
+/// the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated extra dir names).
+const NOISE_DIRS: &[&str] = &[
+    "node_modules", "bower_components", "jspm_packages", ".yarn", ".pnpm-store",
+    ".git", ".svn", ".hg",
+    "target", "dist", "build", "out", "obj", "bin",
+    ".next", ".nuxt", ".svelte-kit", ".angular", ".expo", ".docusaurus", "storybook-static",
+    ".turbo", ".cache", ".parcel-cache", ".serverless",
+    "coverage", ".nyc_output",
+    "vendor", "Pods", "DerivedData", ".dart_tool",
+    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
+    ".gradle", ".terraform", ".terragrunt-cache",
+    ".idea", ".vscode",
+];
+
+/// Generated / lock / vendored FILE basenames that carry no architectural signal but are
+/// large (lockfiles are often the single biggest text files in a repo).
+const NOISE_FILES: &[&str] = &[
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "packages.lock.json", "Cargo.lock", "composer.lock", "Gemfile.lock",
+    "poetry.lock", "Pipfile.lock", "go.sum",
+];
+
+/// Generated-file suffixes: minified bundles and source maps.
+const NOISE_SUFFIXES: &[&str] = &[".min.js", ".min.css", ".bundle.js", ".map"];
+
+/// True when a path should be pruned BEFORE scanning: it lives under a build/dep/cache
+/// directory, or is a lockfile / minified bundle / source map. `extra_dirs` holds any
+/// project-specific dir names from `CAMERATA_SCAN_EXCLUDE_DIRS`.
+fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
+    let mut segments = path.split('/');
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if NOISE_FILES.contains(&basename) {
+        return true;
+    }
+    if NOISE_SUFFIXES.iter().any(|s| basename.ends_with(s)) {
+        return true;
+    }
+    segments.any(|seg| {
+        NOISE_DIRS.contains(&seg) || extra_dirs.iter().any(|d| d == seg)
+    })
+}
+
+/// Parse the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated) into extra dir names.
+fn extra_exclude_dirs() -> Vec<String> {
+    std::env::var("CAMERATA_SCAN_EXCLUDE_DIRS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// Fetch the WHOLE repo's auditable files in ONE request: download the repo
 /// tarball (gzipped tar) and gunzip + untar it in memory, keeping the text/code
 /// files under the size cap. No per-file API calls, so a large repo is scanned
@@ -744,6 +801,7 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
     let mut archive = tar::Archive::new(gz);
     let mut files = Vec::new();
     let mut truncated = false;
+    let extra_dirs = extra_exclude_dirs();
 
     for entry in archive.entries()? {
         let mut e = entry?;
@@ -755,7 +813,9 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
         let Some((_, path)) = raw.split_once('/') else {
             continue;
         };
-        if path.is_empty() || !has_code_ext(path) {
+        // Prune build/dep/cache dirs + lockfiles/minified BEFORE the ext check, so a repo's
+        // node_modules / .turbo / package-lock never enters the scan (or the token bill).
+        if path.is_empty() || is_noise_path(path, &extra_dirs) || !has_code_ext(path) {
             continue;
         }
         if e.header().size().unwrap_or(0) as usize > MAX_FILE_BYTES {
@@ -1091,6 +1151,30 @@ mod tests {
         assert!(!has_code_ext("logo.png"));
         assert!(!has_code_ext("Dockerfile"));
         assert!(!has_code_ext("README"));
+    }
+
+    #[test]
+    fn noise_paths_are_pruned() {
+        let none: &[String] = &[];
+        // Build / dep / cache dirs at any depth.
+        assert!(is_noise_path("node_modules/react/index.js", none));
+        assert!(is_noise_path("apps/web/node_modules/x/y.ts", none));
+        assert!(is_noise_path(".turbo/cache/abc-manifest.json", none));
+        assert!(is_noise_path("target/debug/build/x.rs", none));
+        assert!(is_noise_path("apps/ui/.next/server/page.js", none));
+        // Lockfiles + minified + maps.
+        assert!(is_noise_path("package-lock.json", none));
+        assert!(is_noise_path("apps/api/Cargo.lock", none));
+        assert!(is_noise_path("public/app.min.js", none));
+        assert!(is_noise_path("dist/bundle.js.map", none));
+        // Real source survives.
+        assert!(!is_noise_path("crates/api/src/handlers.rs", none));
+        assert!(!is_noise_path("apps/ui/src/page.tsx", none));
+        assert!(!is_noise_path("migrations/001_init.sql", none));
+        // Project-specific extra exclusions.
+        let extra = vec!["generated".to_string()];
+        assert!(is_noise_path("src/generated/schema.ts", &extra));
+        assert!(!is_noise_path("src/generated/schema.ts", none));
     }
 
     #[test]
