@@ -437,49 +437,47 @@ fn arm_sec_no_hardcoded_secrets_1(_path: &str, content: &str) -> Result<(), Stri
 ///
 /// # Heuristic and its limits
 ///
-/// This pattern fires when **both** conditions hold on the same line or in
-/// close proximity in the file:
-///   1. A SQL keyword (SELECT, INSERT, UPDATE, DELETE — case-insensitive; WHERE is
-///      deliberately excluded as too common in prose) appears inside a string
-///      literal (detected by flanking quote context).
-///   2. That same context contains either a format-interpolation placeholder
-///      (`{}` — Rust/Python f-strings) OR a string-concatenation operator
-///      (`" +` — a closing quote followed by a `+`).
+/// Fires only when **all three** co-occur within a bounded window (across lines):
+///   1. A DML keyword (SELECT/INSERT/UPDATE/DELETE), **word-bounded** so substrings like
+///      `Selection`/`selected` and labels like "Select page" do not match.
+///   2. A confirming SQL clause (FROM/INTO/SET/VALUES/JOIN/WHERE) — the statement-shape gate
+///      that distinguishes real SQL from ordinary text that happens to contain a keyword.
+///   3. A format interpolation (`{}`/`{named}`) or string-concat (`" +`) — i.e. the query is
+///      being BUILT by concatenation, which is the actual risk.
 ///
-/// Known limits / false-positive / false-negative sources:
-/// - A SQL keyword in a comment followed by a `{}` elsewhere on the line
-///   will fire (over-broad).
-/// - Parameterised queries that use `$1`/`?` placeholders instead of `{}`
-///   or `" +` are NOT caught — this rule is complement to, not a replacement
-///   for, a parameterised-query lint.
-/// - Multi-line string constructions where the keyword and the `{}` span
-///   different lines may be missed (line-by-line scanning would be needed
-///   for full coverage).
-/// - Intentional SQL in test fixtures or migration files may trigger false
-///   positives; those files can be excluded via the rule-subset config.
+/// Requiring (2) is the precision fix: before it, the bare keyword + a nearby `{}` was enough,
+/// so `"Selection: {n} row(s)"` and other rsx text critical-flagged frontend code.
+///
+/// Known limits / false-negative sources:
+/// - Parameterised queries using `$1`/`?` placeholders instead of `{}`/`" +` are NOT caught —
+///   this rule complements, not replaces, a parameterised-query lint.
+/// - A query whose keyword and clause/interpolation span more than the window may be missed.
+/// - Intentional raw SQL in test fixtures / migrations triggers it; exclude those via the
+///   rule-subset config.
 static SEC_SQL_CONCAT_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn sec_sql_concat_regex() -> &'static Regex {
     SEC_SQL_CONCAT_REGEX.get_or_init(|| {
-        // Match a SQL keyword followed (within ~200 chars, ACROSS lines via the `s`
-        // dotall flag) by a format interpolation or string concat. `{\w*}` catches both
-        // empty `{}` and NAMED args like `{user_id}` (a multi-line `format!("SELECT …
-        // WHERE x = '{user_id}'", …)` is the exact shape this missed before).
+        // Require actual SQL-STATEMENT SHAPE, not a bare keyword. Three parts must co-occur
+        // within a bounded window (across lines via the `s` dotall flag):
+        //   1. a DML keyword, WORD-BOUNDED — `\b…\b` so `Selection`, `selected`, a button
+        //      labelled "Select page", etc. no longer match the keyword at all;
+        //   2. a CONFIRMING clause (FROM / INTO / SET / VALUES / JOIN / WHERE) — this is the
+        //      "is it really SQL" gate. A UI string like "Selection: {n} row(s)" has a
+        //      keyword-ish prefix but no clause, so it's rejected;
+        //   3. an interpolation `{}`/`{named}` or string-concat `" +` — the rule is about
+        //      BUILDING the query via concat/interpolation, not a static query string.
+        // This is the precision fix for the deterministic floor: it was matching the
+        // substring "Select" in ordinary rsx text and critical-flagging frontend code.
         Regex::new(
             r#"(?isx)
-            # The SQL keyword must OPEN inside a string literal (a `"` just before it) —
-            # this is what raw-SQL-concat looks like (`format!("SELECT … {x}")`,
-            # `"INSERT …" + x`). Requiring the quote kills the precision flood: a Dioxus
-            # `select {}`, a SQL keyword in a comment, or an identifier named `select`
-            # all lack the opening quote and no longer match. (WHERE dropped — too common
-            # in prose.)
-            "\s*
-            (?:SELECT|INSERT|UPDATE|DELETE)
-            # within ~200 chars (bounded; across lines via the `s` flag):
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b   # 1. DML keyword, word-bounded
+            .{0,200}?
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b   # 2. confirming SQL clause
             .{0,200}?
             (?:
-                \{\w*\}         # {} or {named} format interpolation
-              | "\s*\+          # closing quote followed by + (string concat)
+                \{\w*\}         # 3a. {} or {named} format interpolation
+              | "\s*\+          # 3b. closing quote followed by + (string concat)
             )
             "#,
         )
@@ -693,8 +691,28 @@ mod tests {
         assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "rsx! { select {} }").is_empty());
         // A SQL keyword as an identifier/method (no quote) must NOT match.
         assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "let selected = items.select(|x| x);").is_empty());
-        // The real plant (keyword opens inside a string) STILL matches.
+        // The real plant (full statement shape + interpolation) STILL matches.
         assert!(!content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "format!(\"SELECT x WHERE id = {id}\")").is_empty());
+
+        // Regression: bare "Select"/"Selection" in rsx text must NOT match (the dogfooding
+        // false positives on rust-chorale, a frontend lib with zero SQL).
+        for s in [
+            r#"rsx! { "Selection: {count} row(s)" }"#,   // "Selection" + interpolation, no SQL clause
+            r#"button { "Select page" }"#,               // a button label
+            r#"h1 { "Selection example" }"#,             // a heading
+            r#"let selected = view.get(); rsx!{ "{selected} chosen" }"#, // keyword-ish + interp, no clause
+        ] {
+            assert!(
+                content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", s).is_empty(),
+                "UI text must not match the SQL-concat floor: {s}"
+            );
+        }
+        // A genuine concat-built UPDATE still matches (DML + SET + interpolation).
+        assert!(!content_match_lines(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "format!(\"UPDATE users SET name = '{name}' WHERE id = {id}\")"
+        )
+        .is_empty());
     }
 
     #[test]
