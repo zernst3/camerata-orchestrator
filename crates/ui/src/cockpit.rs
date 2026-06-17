@@ -1919,6 +1919,8 @@ struct ScanReportView {
     stacks: Vec<StackView>,
     files_scanned: usize,
     #[serde(default)]
+    files_excluded: usize,
+    #[serde(default)]
     code_chars: usize,
     #[serde(default)]
     actual_usage: Option<ActualUsageView>,
@@ -3430,6 +3432,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                 span { class: "scan-stat",
                     span { class: "scan-stat-n", "{report.files_scanned}" }
                     " files scanned"
+                }
+                if report.files_excluded > 0 {
+                    span { class: "scan-stat",
+                        span { class: "scan-stat-n", "{report.files_excluded}" }
+                        " excluded as noise"
+                    }
                 }
             }
 

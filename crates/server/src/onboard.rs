@@ -138,6 +138,10 @@ pub struct ScanReport {
     pub stacks: Vec<RepoStack>,
     /// Number of files scanned across all repos.
     pub files_scanned: usize,
+    /// Scannable files (code extension) PRUNED as build/dep/cache/generated noise before the
+    /// scan. Surfaced so the filter's effect is visible ("N scanned, M excluded as noise").
+    #[serde(default)]
+    pub files_excluded: usize,
     /// Total characters of scannable code across all repos (after noise pruning). Drives the
     /// pre-audit cost estimate: the digest the model sees is built from this, so it's the
     /// honest token base before chunk/batch multipliers.
@@ -164,6 +168,7 @@ impl ScanReport {
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
+            files_excluded: 0,
             code_chars: 0,
             findings: Vec::new(),
             proposed_rules: Vec::new(),
@@ -623,6 +628,7 @@ pub fn build_report(
         repos,
         stacks,
         files_scanned,
+        files_excluded: 0,
         code_chars: 0,
         findings,
         proposed_rules,
@@ -732,6 +738,8 @@ const NOISE_DIRS: &[&str] = &[
     ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
     ".gradle", ".terraform", ".terragrunt-cache",
     ".idea", ".vscode",
+    // Generated-code + test-artifact dirs (codegen output, snapshot fixtures).
+    "generated", "__generated__", "__snapshots__", "node_modules.bin",
 ];
 
 /// Generated / lock / vendored FILE basenames that carry no architectural signal but are
@@ -739,11 +747,19 @@ const NOISE_DIRS: &[&str] = &[
 const NOISE_FILES: &[&str] = &[
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
     "packages.lock.json", "Cargo.lock", "composer.lock", "Gemfile.lock",
-    "poetry.lock", "Pipfile.lock", "go.sum",
+    "poetry.lock", "Pipfile.lock", "go.sum", "bun.lock", "deno.lock", "flake.lock",
 ];
 
-/// Generated-file suffixes: minified bundles and source maps.
-const NOISE_SUFFIXES: &[&str] = &[".min.js", ".min.css", ".bundle.js", ".map"];
+/// Generated-file suffixes: minified bundles, source maps, and codegen output. The codegen
+/// patterns (`.gen.ts`, `.pb.go`, protobuf/relay/graphql/openapi output, etc.) are machine-
+/// written from a schema — auditing them is paying to review code no human owns.
+const NOISE_SUFFIXES: &[&str] = &[
+    ".min.js", ".min.css", ".bundle.js", ".map",
+    ".gen.ts", ".gen.tsx", ".gen.js", ".gen.go", ".gen.dart",
+    ".generated.ts", ".generated.tsx", ".generated.js", ".generated.go", ".generated.cs",
+    ".pb.go", ".pb.ts", ".pb.cc", ".pb.h", "_pb2.py", "_pb2.pyi",
+    ".g.dart", ".freezed.dart",
+];
 
 /// True when a path should be pruned BEFORE scanning: it lives under a build/dep/cache
 /// directory, or is a lockfile / minified bundle / source map. `extra_dirs` holds any
@@ -781,7 +797,7 @@ pub async fn fetch_repo_files(
     owner: &str,
     repo: &str,
     token: &str,
-) -> anyhow::Result<(Vec<(String, String)>, bool)> {
+) -> anyhow::Result<ExtractedRepo> {
     // The shared transport is text-only; the tarball is binary, so use reqwest
     // directly. GitHub redirects the tarball to a pre-signed codeload URL, so the
     // Authorization header being dropped on the cross-host redirect is fine.
@@ -807,13 +823,24 @@ pub async fn fetch_repo_files(
         .map_err(|e| anyhow::anyhow!("tarball extraction task failed: {e}"))?
 }
 
+/// What `extract_code_files` pulled from a tarball: the auditable files, whether the file
+/// cap was hit, and how many would-be-scannable files were pruned as noise (so the scan can
+/// SHOW the filter doing its job — "1,583 scanned, 2,800 excluded as build/generated noise").
+pub struct ExtractedRepo {
+    pub files: Vec<(String, String)>,
+    pub truncated: bool,
+    pub excluded_noise: usize,
+}
+
 /// Gunzip + untar a repo tarball, returning its auditable text/code files (path
-/// relative to the repo root) plus whether the file cap was hit. Pure over bytes.
-fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>, bool)> {
+/// relative to the repo root), whether the file cap was hit, and the noise-pruned count.
+/// Pure over bytes.
+fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<ExtractedRepo> {
     let gz = GzDecoder::new(gz_bytes);
     let mut archive = tar::Archive::new(gz);
     let mut files = Vec::new();
     let mut truncated = false;
+    let mut excluded_noise = 0usize;
     let extra_dirs = extra_exclude_dirs();
 
     for entry in archive.entries()? {
@@ -826,9 +853,19 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
         let Some((_, path)) = raw.split_once('/') else {
             continue;
         };
-        // Prune build/dep/cache dirs + lockfiles/minified BEFORE the ext check, so a repo's
-        // node_modules / .turbo / package-lock never enters the scan (or the token bill).
-        if path.is_empty() || is_noise_path(path, &extra_dirs) || !has_code_ext(path) {
+        if path.is_empty() {
+            continue;
+        }
+        // Prune build/dep/cache/generated dirs + lockfiles/minified/codegen BEFORE the ext
+        // check, so a repo's node_modules / .turbo / *.gen.ts / package-lock never enters the
+        // scan (or the token bill). Count the ones that WOULD have been scanned (code ext) so
+        // the report can show how much the filter saved.
+        let noise = is_noise_path(path, &extra_dirs);
+        let code = has_code_ext(path);
+        if noise && code {
+            excluded_noise += 1;
+        }
+        if noise || !code {
             continue;
         }
         if e.header().size().unwrap_or(0) as usize > MAX_FILE_BYTES {
@@ -848,7 +885,11 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<(Vec<(String, String)>,
             break;
         }
     }
-    Ok((files, truncated))
+    Ok(ExtractedRepo {
+        files,
+        truncated,
+        excluded_noise,
+    })
 }
 
 /// Scan a SET of repos end to end: download and audit each whole repo, then
@@ -872,9 +913,10 @@ pub async fn suppression_registry(
         let Some((owner, repo)) = spec.split_once('/') else {
             continue;
         };
-        let Ok((files, _)) = fetch_repo_files(owner, repo, token).await else {
+        let Ok(extracted) = fetch_repo_files(owner, repo, token).await else {
             continue;
         };
+        let files = extracted.files;
         let mut inline = Vec::new();
         for (path, content) in &files {
             inline.extend(parse_inline_waivers(path, content));
@@ -959,6 +1001,7 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
 pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
+    let mut files_excluded = 0usize;
     let mut code_chars = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
@@ -973,8 +1016,10 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
             continue;
         };
         match fetch_repo_files(owner, repo, token).await {
-            Ok((files, truncated)) => {
+            Ok(extracted) => {
+                let ExtractedRepo { files, truncated, excluded_noise } = extracted;
                 files_total += files.len();
+                files_excluded += excluded_noise;
                 code_chars += files.iter().map(|(_, c)| c.len()).sum::<usize>();
                 stacks.push(detect_stack(spec, &files));
                 repos_ok.push(spec.to_string());
@@ -994,6 +1039,7 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
         .collect();
     let mut report = build_report(repos_ok, stacks, files_total, Vec::new());
     report.code_chars = code_chars;
+    report.files_excluded = files_excluded;
     report.proposed_rules = propose_corpus_rules(&repo_domains).await;
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
@@ -1072,7 +1118,7 @@ pub async fn audit_repos(
             continue;
         };
         match fetch_repo_files(owner, repo, token).await {
-            Ok((files, truncated)) => {
+            Ok(ExtractedRepo { files, truncated, excluded_noise: _ }) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
                 // Deterministic security floor (always-on): ENFORCED findings. Push them to
@@ -1143,8 +1189,9 @@ mod tests {
         gz.write_all(&tar_buf).unwrap();
         let gz_bytes = gz.finish().unwrap();
 
-        let (files, truncated) = extract_code_files(&gz_bytes).unwrap();
-        assert!(!truncated);
+        let extracted = extract_code_files(&gz_bytes).unwrap();
+        let files = extracted.files;
+        assert!(!extracted.truncated);
         assert_eq!(files.len(), 1, "only the .rs file is auditable: {files:?}");
         assert_eq!(files[0].0, "src/main.rs", "top dir stripped");
         assert_eq!(files[0].1, "fn main() {}\n");
@@ -1189,14 +1236,20 @@ mod tests {
         assert!(is_noise_path("apps/api/Cargo.lock", none));
         assert!(is_noise_path("public/app.min.js", none));
         assert!(is_noise_path("dist/bundle.js.map", none));
+        // Generated / codegen output.
+        assert!(is_noise_path("src/api/client.gen.ts", none));
+        assert!(is_noise_path("proto/service.pb.go", none));
+        assert!(is_noise_path("src/__generated__/schema.ts", none));
+        assert!(is_noise_path("components/__snapshots__/Btn.test.tsx", none));
+        assert!(is_noise_path("models/user.freezed.dart", none));
         // Real source survives.
         assert!(!is_noise_path("crates/api/src/handlers.rs", none));
         assert!(!is_noise_path("apps/ui/src/page.tsx", none));
         assert!(!is_noise_path("migrations/001_init.sql", none));
-        // Project-specific extra exclusions.
-        let extra = vec!["generated".to_string()];
-        assert!(is_noise_path("src/generated/schema.ts", &extra));
-        assert!(!is_noise_path("src/generated/schema.ts", none));
+        // Project-specific extra exclusions (a dir not in the default set).
+        let extra = vec!["fixtures".to_string()];
+        assert!(is_noise_path("test/fixtures/big.ts", &extra));
+        assert!(!is_noise_path("test/fixtures/big.ts", none));
     }
 
     #[test]
