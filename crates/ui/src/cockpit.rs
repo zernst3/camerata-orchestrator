@@ -1135,6 +1135,13 @@ fn ProjectGate() -> Element {
 fn CockpitNav(view: Signal<CockpitView>) -> Element {
     let mut view = view;
     let mut screen = use_context::<Signal<CockpitScreen>>();
+    // Onboarding work is client-side and unsaved: leaving the project unmounts it and it's
+    // gone (a fresh return is a clean slate). So if there's a scan in progress/on screen or
+    // an in-flight audit job, warn before navigating away rather than silently dropping it.
+    let onboard_scan = use_context::<Signal<Option<ScanReportView>>>();
+    let active_audit_job = use_context::<Signal<Option<String>>>();
+    let mut confirm_leave = use_signal(|| false);
+    let has_unsaved = move || onboard_scan.read().is_some() || active_audit_job.read().is_some();
     let cls = |v: CockpitView| {
         if view() == v {
             "cockpit-nav-tab on"
@@ -1143,10 +1150,39 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
         }
     };
     rsx! {
+        if confirm_leave() {
+            div { class: "rule-modal-overlay", onclick: move |_| confirm_leave.set(false),
+                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                    div { class: "rule-modal-head",
+                        span { class: "rule-modal-id", "Leave this project?" }
+                        button { class: "rule-modal-close", onclick: move |_| confirm_leave.set(false), "\u{2715}" }
+                    }
+                    p { class: "rule-modal-detail",
+                        "You'll lose your onboarding work. The scan results, selected repos, and \
+                         any in-progress audit are not saved — leaving now discards them, and \
+                         returning starts from a clean slate."
+                    }
+                    div { class: "onboard-leave-actions",
+                        button { class: "btn-edit-sm", onclick: move |_| confirm_leave.set(false), "Cancel" }
+                        button {
+                            class: "pg-btn-danger",
+                            onclick: move |_| { confirm_leave.set(false); screen.set(CockpitScreen::Projects); },
+                            "Leave anyway"
+                        }
+                    }
+                }
+            }
+        }
         div { class: "cockpit-nav",
             button {
                 class: "cockpit-nav-tab back",
-                onclick: move |_| screen.set(CockpitScreen::Projects),
+                onclick: move |_| {
+                    if has_unsaved() {
+                        confirm_leave.set(true);
+                    } else {
+                        screen.set(CockpitScreen::Projects);
+                    }
+                },
                 "← Projects"
             }
             button {
@@ -3381,8 +3417,16 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
                 // Live feedback: open this to watch the AI's actual prompt + output for
-                // the audit (so you can trust it's really working, not hung).
-                crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }
+                // the audit (so you can trust it's really working, not hung). Shown ONLY for
+                // a current-session audit (running or done THIS mount). The transcript lives
+                // server-side, so without this gate a remount (e.g. switching cockpit tabs
+                // and back) re-renders the PREVIOUS run's transcript while the findings —
+                // which are client state — are gone: a confusing half-restored state. Gating
+                // it on the same lifecycle as the findings keeps the two consistent (both
+                // present during/after an audit, both absent on a fresh remount).
+                if auditing() || audited.is_some() {
+                    crate::agent_activity::AgentActivity { run_id: "scan-audit".to_string() }
+                }
             }
 
             // ── Findings (after the audit runs) ────────────────────────────────
