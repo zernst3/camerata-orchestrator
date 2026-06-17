@@ -125,6 +125,7 @@ mod tests {
             snippet: "x".into(),
             detail: "d".into(),
             status: "active".into(),
+            also_matches: Vec::new(),
         }
     }
 

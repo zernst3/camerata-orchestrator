@@ -46,6 +46,12 @@ pub struct Finding {
     /// pre-existing debt / policy). Report shows all; enforcement is on `active` only.
     #[serde(default = "default_status")]
     pub status: String,
+    /// Other rule ids this SAME code location also violates, demoted here when several
+    /// findings at one `(path, line)` were merged into this single row (the primary in
+    /// `rule_id`). Empty for an un-merged finding. Lets one row honestly read "violates
+    /// layering + DI + entities-chain" instead of emitting five near-duplicate rows.
+    #[serde(default)]
+    pub also_matches: Vec<String>,
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
@@ -202,6 +208,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 snippet,
                 detail: title_for(rule_id),
                 status: default_status(),
+                also_matches: Vec::new(),
             });
         }
     }
@@ -856,6 +863,7 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
                      suppression is itself a violation."
                 .to_string(),
             status: "active".to_string(),
+            also_matches: Vec::new(),
         });
     }
 }
@@ -1229,6 +1237,7 @@ mod tests {
             snippet: snip.into(),
             detail: "d".into(),
             status: "active".into(),
+            also_matches: Vec::new(),
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1255,6 +1264,7 @@ mod tests {
                 snippet: "x".into(),
                 detail: "d".into(),
                 status: "active".into(),
+                also_matches: Vec::new(),
             },
             Finding {
                 repo: "me/web".into(),
@@ -1265,6 +1275,7 @@ mod tests {
                 snippet: "y".into(),
                 detail: "d".into(),
                 status: "active".into(),
+                also_matches: Vec::new(),
             },
         ];
         let body = tech_debt_issue_body(&findings);

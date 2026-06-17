@@ -95,7 +95,7 @@ RECALL OVER PRECISION. This is a discovery audit and a human architect reviews e
 
 CRITICAL — do NOT invent rule names that duplicate adopted rules. Before you set `rule`, check whether the violation is already covered by one of the adopted `[RULE-ID]`s above. If it is, you MUST use that exact adopted RULE-ID — even if you would have phrased the issue differently. A controller reaching into the database directly is `ARCH-STRICT-LAYERING-1`, not "controller-direct-db" or "handler-bypasses-repo"; a handler panicking on a DB error is `ARCH-STRUCTURED-ERRORS-1`, not "panic-on-db-error". Inventing a new name for a violation an adopted rule already covers is the single worst failure mode of this audit — it produces triplicate findings that all mean the same thing.
 
-You may ALSO flag genuine issues NOT covered by ANY adopted rule. ONLY for those — issues where no adopted RULE-ID applies at all — set `rule` to a short kebab name (e.g. "auth-on-write-paths"). Reserve kebab names strictly for genuinely-novel issues; if any adopted rule fits, use the adopted id instead.
+Flagging novel issues (issues no adopted rule covers) is GATED by this pass's instruction line. ONLY when that line says to "ALSO flag any other genuine issues" may you report something outside the adopted rules — and then set `rule` to a short kebab name (e.g. "auth-on-write-paths"), reserved strictly for genuinely-novel issues (if any adopted rule fits, use the adopted id instead). When the instruction line says to check ONLY the listed rules, report nothing outside them.
 
 DO NOT report: hardcoded secrets, secrets embedded in URLs, raw SQL string concatenation, or path-escape writes — a separate deterministic scanner already covers those precisely. Do not report pure style/formatting nits.
 
@@ -142,6 +142,34 @@ fn extract_json_object(s: &str) -> Option<&str> {
     }
 }
 
+/// Map a model-invented rule name (already uppercased + hyphenated) onto the canonical
+/// adopted corpus rule it actually means, for the few families the model keeps re-inventing:
+/// panics → structured-errors, direct-DB / own-pool / bypasses-repo → strict-layering,
+/// secret-in-URL → no-secrets-in-URL. Returns the canonical id ONLY when that rule is
+/// actually adopted by this project, so a project without the rule never gets a phantom id
+/// (and the location merge still collapses the duplicates regardless). Patterns are kept
+/// narrow to avoid mislabeling a genuinely-novel issue.
+fn canonical_adopted_rule(
+    norm: &str,
+    adopted: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let has = |s: &str| norm.contains(s);
+    let candidate = if has("SECRET") && has("URL") {
+        "ARCH-NO-SECRETS-IN-URL-1"
+    } else if has("PANIC") {
+        "ARCH-STRUCTURED-ERRORS-1"
+    } else if (has("DIRECT") && (has("DB") || has("DATABASE")))
+        || (has("BYPASS") && has("REPO"))
+        || (has("OWN") && has("POOL"))
+        || (has("CREATES") && has("POOL"))
+    {
+        "ARCH-STRICT-LAYERING-1"
+    } else {
+        return None;
+    };
+    adopted.contains(candidate).then(|| candidate.to_string())
+}
+
 /// Parse a model audit response into Findings + ProposedRules in the scan's shapes.
 /// Robust: malformed output yields empty vecs rather than erroring the whole scan.
 pub fn parse_ai_findings(
@@ -161,11 +189,15 @@ pub fn parse_ai_findings(
         for f in arr {
             let rule = f["rule"].as_str().unwrap_or("architecture").trim();
             let norm = rule.to_ascii_uppercase().replace(' ', "-");
-            // If the model cited an ADOPTED rule id, key the finding to that id directly
-            // so the violation shows up under the rule the architect selected; otherwise
-            // it's an AI-discovered issue beyond the ruleset (AI- provenance prefix).
+            // If the model cited an ADOPTED rule id, key the finding to that id directly so
+            // the violation shows up under the rule the architect selected. Else try to
+            // canonicalize a well-known invented name onto the adopted rule it actually
+            // means (AI-HANDLER-PANICS → ARCH-STRUCTURED-ERRORS-1). Else it's a genuinely
+            // AI-discovered issue beyond the ruleset (AI- provenance prefix).
             let rule_id = if adopted.contains(&norm) {
                 norm
+            } else if let Some(canon) = canonical_adopted_rule(&norm, adopted) {
+                canon
             } else {
                 format!("AI-{norm}")
             };
@@ -188,6 +220,7 @@ pub fn parse_ai_findings(
                 snippet: title,
                 detail,
                 status: "active".to_string(),
+                also_matches: Vec::new(),
             });
         }
     }
@@ -579,6 +612,19 @@ async fn run_passes(
             let batch = batches[bi];
             async move {
                 let rb = build_rules_block(batch);
+                // ADVISORY RUNS ONCE PER CHUNK, not once per rule-batch. The "flag novel
+                // issues beyond the adopted rules" task only depends on the code (the whole
+                // chunk is visible every pass), not on which rule-batch this is — so asking
+                // for it in all N batches just re-derives the SAME novel issue under N
+                // independently-invented names (one `.expect()` → AI-HANDLER-PANICS +
+                // AI-HANDLER-UNHANDLED-PANIC + AI-HANDLER-PANICS-ON-ERROR). Gate it to the
+                // first batch of each chunk; later batches check ONLY their adopted rules.
+                let advisory = bi == 0;
+                let task_line = if advisory {
+                    format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
+                } else {
+                    format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
+                };
                 // PROMPT ORDER IS CACHE-AWARE: the STABLE content (the per-chunk repo map +
                 // digest) leads, so it forms a reusable cached prefix across this chunk's
                 // rule-batches (and the system prompt before it). The VARYING content (the
@@ -586,9 +632,8 @@ async fn run_passes(
                 // opening line is deliberately free of the batch number for the same reason.
                 // Bonus: rules landing last = most recent context = strongest rule-following.
                 let prompt = format!(
-                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n── Check the code above against the ADOPTED rules below (batch {}/{n_b}); also flag any other genuine issues. Use the REPO MAP for cross-file context. ──\n\n{rb}",
+                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n{task_line}\n\n{rb}",
                     ci + 1,
-                    bi + 1
                 );
                 let session = format!("{session_prefix}-c{ci}-b{bi}");
                 if let Some((store, key)) = feedback {
@@ -642,19 +687,10 @@ async fn run_passes(
     (findings, proposed, requested, ok, last_err)
 }
 
-/// Normalize a finding's title (stored in `snippet`) for same-issue comparison:
-/// lowercase, keep only alphanumerics. "Controller accesses DB directly" and
-/// "controller, accesses db directly!" collapse to the same key.
-fn normalize_issue(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 /// Severity rank for keeping the most-severe representative when merging duplicates.
 fn severity_rank(s: &str) -> u8 {
     match s {
+        "critical" => 4,
         "high" => 3,
         "medium" => 2,
         "low" => 1,
@@ -662,41 +698,78 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
-/// Merge findings that describe the SAME issue at the SAME site under different rule names.
-/// Key = (path, line, normalized-title). Within a group, keep the adopted rule id over an
-/// invented `AI-` one (adopted ids never carry the `AI-` provenance prefix) and the highest
-/// severity. Order is preserved by first appearance. This is the aggregation-side defense
-/// against the duplication explosion; the prompt's "use the adopted id" rule is the primary.
-fn merge_same_site_findings(findings: Vec<Finding>) -> Vec<Finding> {
-    let mut order: Vec<(String, usize, String)> = Vec::new();
-    let mut by_key: std::collections::HashMap<(String, usize, String), Finding> =
-        std::collections::HashMap::new();
-    for f in findings {
-        let key = (f.path.clone(), f.line, normalize_issue(&f.snippet));
-        match by_key.get_mut(&key) {
-            None => {
-                order.push(key.clone());
-                by_key.insert(key, f);
-            }
-            Some(existing) => {
-                // Prefer an adopted rule id (no AI- prefix) over an invented one.
-                if existing.rule_id.starts_with("AI-") && !f.rule_id.starts_with("AI-") {
-                    existing.rule_id = f.rule_id.clone();
-                    // Carry the adopted finding's detail too — it's the canonical phrasing.
-                    if !f.detail.is_empty() {
-                        existing.detail = f.detail.clone();
-                    }
-                }
-                // Keep the most-severe label across the duplicates.
-                if severity_rank(&f.severity) > severity_rank(&existing.severity) {
-                    existing.severity = f.severity.clone();
-                }
-            }
+/// Collapse one `(path, line)` group of findings into a SINGLE finding. The model routinely
+/// reports one smell under several rule names — an invented `AI-` name PLUS the adopted
+/// corpus rule it maps to PLUS sibling invented names — each with a different title, so a
+/// `.expect()` panic at handlers.rs:41 arrives as five rows. This keeps ONE primary
+/// (preferring an adopted corpus rule id over an invented `AI-` one, then the most severe,
+/// then earliest), demotes every OTHER distinct rule id to `also_matches`, and keeps the
+/// max severity — so the row honestly reads "violates layering + DI + entities-chain" rather
+/// than emitting five near-duplicates.
+fn merge_location_group(group: Vec<Finding>) -> Finding {
+    // Index of the primary: adopted (non-AI-) beats invented; then higher severity; then
+    // earliest appearance (so the order is deterministic, not HashMap-dependent).
+    let primary_idx = group
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, f)| {
+            let adopted = u8::from(!f.rule_id.starts_with("AI-"));
+            (adopted, severity_rank(&f.severity), group.len() - i)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let max_sev = group
+        .iter()
+        .max_by_key(|f| severity_rank(&f.severity))
+        .map(|f| f.severity.clone())
+        .unwrap_or_else(|| "low".to_string());
+
+    let mut group = group;
+    let mut primary = group.remove(primary_idx);
+    // Every OTHER distinct rule id, in first-seen order, minus the primary's own.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(primary.rule_id.clone());
+    let mut also = Vec::new();
+    for f in &group {
+        if seen.insert(f.rule_id.clone()) {
+            also.push(f.rule_id.clone());
         }
+    }
+    primary.severity = max_sev;
+    primary.also_matches = also;
+    primary
+}
+
+/// Merge findings that sit at the SAME code location into one row, keyed on `(path, line)`
+/// — NOT on the title (the model writes a different title for each invented rule name, so a
+/// title key never collapses them). This is the deterministic reduce that turns the audit's
+/// duplication explosion (e.g. one panic reported under five rule ids) into one honest row
+/// per location via [`merge_location_group`]. Line 0 (file-level / uncited) findings are
+/// NOT location-merged — unrelated file-level issues legitimately share line 0 — so each is
+/// passed through untouched (the exact `(path, line, rule_id)` dedup upstream already
+/// removed byte-identical line-0 repeats).
+fn merge_by_location(findings: Vec<Finding>) -> Vec<Finding> {
+    // `disambiguator` is 0 for real lines (so all hits at one line group together) and a
+    // unique counter for line 0 (so each line-0 finding stays its own group).
+    let mut order: Vec<(String, usize, usize)> = Vec::new();
+    let mut groups: std::collections::HashMap<(String, usize, usize), Vec<Finding>> =
+        std::collections::HashMap::new();
+    let mut solo: usize = 0;
+    for f in findings {
+        let key = if f.line == 0 {
+            solo += 1;
+            (f.path.clone(), 0, solo)
+        } else {
+            (f.path.clone(), f.line, 0)
+        };
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(f);
     }
     order
         .into_iter()
-        .filter_map(|k| by_key.remove(&k))
+        .filter_map(|k| groups.remove(&k).map(merge_location_group))
         .collect()
 }
 
@@ -812,18 +885,19 @@ pub async fn audit_repo(
         all_proposed.extend(rp);
     }
 
-    // Cross-chunk dedup + cross-name MERGE: the shared repo map means the same issue can
-    // surface in more than one pass, and the model can label the SAME violation under
-    // different rule names (an invented `AI-CONTROLLER-DIRECT-DB` plus the adopted
-    // `ARCH-STRICT-LAYERING-1`). Step 1 collapses byte-identical (path, line, rule_id).
-    // Step 2 merges findings that describe the same issue at the same site — keyed on
-    // (path, line, normalized-title) — into ONE, keeping the adopted rule id over an
-    // invented AI- one and the highest severity. This is the aggregation half of the
-    // duplication fix; the prompt's "use the adopted id" rule is the other half.
+    // Cross-chunk dedup + cross-name LOCATION MERGE: the shared repo map means the same
+    // issue can surface in more than one pass, and the model labels the SAME violation under
+    // several rule names at one line (an invented `AI-CONTROLLER-DIRECT-DB` + the adopted
+    // `ARCH-STRICT-LAYERING-1` + sibling AI- names), each with a different title. Step 1
+    // drops byte-identical (path, line, rule_id) repeats. Step 2 is the real reduce:
+    // `merge_by_location` collapses every finding at one (path, line) into ONE row, keeping
+    // an adopted corpus rule as the primary and demoting the rest to `also_matches`. Keying
+    // on LOCATION (not title) is what makes this work — titles vary per invented name. This
+    // is N-in / M-out (M < N), a true dedup, not the calibration pass's N-in/N-out scoring.
     {
         let mut seen = std::collections::HashSet::new();
         all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
-        all_findings = merge_same_site_findings(all_findings);
+        all_findings = merge_by_location(all_findings);
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
@@ -887,33 +961,73 @@ mod tests {
             snippet: title.to_string(),
             detail: format!("detail for {rule_id}"),
             status: "active".to_string(),
+            also_matches: Vec::new(),
         }
     }
 
     #[test]
-    fn merge_collapses_same_site_dupes_preferring_adopted_rule() {
-        // Same site + same issue, but the model invented two AI- names plus the adopted id.
+    fn merge_collapses_same_location_into_one_preferring_adopted_rule() {
+        // One smell at h.rs:12 reported under two invented names PLUS the adopted id —
+        // each with a DIFFERENT title (the exact case a title-keyed merge missed).
         let findings = vec![
             site_finding("AI-CONTROLLER-DIRECT-DB", "h.rs", 12, "medium", "Controller accesses DB directly"),
-            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 12, "high", "controller, accesses db directly!"),
-            site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", "Controller accesses DB directly"),
+            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 12, "high", "Layering violation in handler"),
+            site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", "Handler bypasses repository"),
         ];
-        let merged = merge_same_site_findings(findings);
-        assert_eq!(merged.len(), 1, "three labels of one issue collapse to one");
-        // Adopted id wins over the invented AI- ones, highest severity is kept.
+        let merged = merge_by_location(findings);
+        assert_eq!(merged.len(), 1, "three labels at one location collapse to one row");
+        // Adopted id wins as primary; highest severity kept; others demoted to also_matches.
         assert_eq!(merged[0].rule_id, "ARCH-STRICT-LAYERING-1");
         assert_eq!(merged[0].severity, "high");
+        assert!(merged[0].also_matches.contains(&"AI-CONTROLLER-DIRECT-DB".to_string()));
+        assert!(merged[0].also_matches.contains(&"AI-HANDLER-BYPASSES-REPO".to_string()));
+        assert!(!merged[0].also_matches.contains(&"ARCH-STRICT-LAYERING-1".to_string()));
     }
 
     #[test]
-    fn merge_keeps_distinct_issues_at_same_site() {
-        // Two genuinely different issues on the same line stay separate.
+    fn merge_folds_overlapping_corpus_rules_at_one_location() {
+        // "Handler opens its own pool" legitimately trips layering + DI + entities-chain.
+        // That's one finding that names all three, not three rows.
         let findings = vec![
-            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 5, "high", "controller hits DB"),
-            site_finding("AI-MISSING-AUTH", "h.rs", 5, "high", "write path lacks auth check"),
+            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 41, "high", "own pool"),
+            site_finding("ARCH-SERVICE-DI-1", "h.rs", 41, "medium", "own pool"),
+            site_finding("RUST-ENTITIES-13", "h.rs", 41, "low", "own pool"),
         ];
-        let merged = merge_same_site_findings(findings);
-        assert_eq!(merged.len(), 2);
+        let merged = merge_by_location(findings);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].also_matches.len(), 2, "two non-primary rules demoted");
+    }
+
+    #[test]
+    fn merge_does_not_collapse_distinct_line_zero_findings() {
+        // Line 0 (file-level / uncited) must NOT location-merge — unrelated file-level
+        // issues legitimately share line 0.
+        let findings = vec![
+            site_finding("AI-NO-MAPPERS-CRATE", "lib.rs", 0, "low", "no mappers crate"),
+            site_finding("AI-NO-TESTS", "lib.rs", 0, "low", "no tests"),
+        ];
+        let merged = merge_by_location(findings);
+        assert_eq!(merged.len(), 2, "distinct line-0 findings stay separate");
+    }
+
+    #[test]
+    fn canonicalize_maps_invented_names_only_when_adopted() {
+        let adopted: std::collections::HashSet<String> =
+            ["ARCH-STRUCTURED-ERRORS-1".to_string(), "ARCH-STRICT-LAYERING-1".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            canonical_adopted_rule("HANDLER-PANICS-ON-DB-ERROR", &adopted).as_deref(),
+            Some("ARCH-STRUCTURED-ERRORS-1")
+        );
+        assert_eq!(
+            canonical_adopted_rule("HANDLER-CREATES-OWN-POOL", &adopted).as_deref(),
+            Some("ARCH-STRICT-LAYERING-1")
+        );
+        // Secret-in-URL canonical isn't adopted here -> no phantom id.
+        assert_eq!(canonical_adopted_rule("SECRET-IN-URL", &adopted), None);
+        // A genuinely-novel name maps to nothing.
+        assert_eq!(canonical_adopted_rule("MISSING-RATE-LIMIT", &adopted), None);
     }
 
     #[test]
@@ -1037,6 +1151,7 @@ mod tests {
             snippet: "x".into(),
             detail: "d".into(),
             status: "active".into(),
+            also_matches: Vec::new(),
         }
     }
 

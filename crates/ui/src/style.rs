@@ -1204,6 +1204,9 @@ html, body {
    Export/Delete secondaries. Drop the standalone bottom margin and match their padding
    so all three buttons share the same baseline/height. */
 .pg-card-actions .btn-run { margin-bottom: 0; padding: 8px 16px; }
+/* "+N" chip on a findings "type" cell: N other rule ids the server merged into this row
+   (also_matches). Muted so it reads as a secondary annotation, not a second rule. */
+.finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
 .live-run { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 14px 16px; }
 .live-run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .live-run-title { font-size: 15px; font-weight: 700; color: var(--ink); }

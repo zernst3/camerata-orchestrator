@@ -1633,6 +1633,11 @@ struct FindingView {
     /// `active` (enforced), `suppressed-inline`, or `suppressed-baseline`.
     #[serde(default = "default_finding_status")]
     status: String,
+    /// Other rule ids this same location also violates (the server merged them into this
+    /// row). Empty for an un-merged finding. Surfaced as a "+N" on the rule and listed in
+    /// the detail modal.
+    #[serde(default)]
+    also_matches: Vec<String>,
 }
 
 fn default_finding_status() -> String {
@@ -2325,23 +2330,9 @@ fn FindingsTable(
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
-    // Hover the rule id in the "type" column to read what it enforces (and, once a
-    // rule's alternative is chosen, the chosen alternative) — no memorizing.
     let renderers = {
-        let desc = descriptions.clone();
         let mut m: std::collections::HashMap<ColumnId, CellRenderer> =
             std::collections::HashMap::new();
-        m.insert(
-            ColumnId("type"),
-            std::sync::Arc::new(move |val: &CellValue| {
-                let rid = match val {
-                    CellValue::Text(s) => s.clone(),
-                    _ => String::new(),
-                };
-                let tip = desc.get(&rid).cloned().unwrap_or_else(|| rid.clone());
-                rsx! { span { title: "{tip}", "{rid}" } }
-            }) as CellRenderer,
-        );
         // Severity badge with a per-level palette. chorale's badge map only has
         // green/yellow/red/gray, so Critical AND High both landed on red and looked
         // identical (the whole reason for the red row-stripe). A custom renderer (which
@@ -2414,6 +2405,31 @@ fn FindingsTable(
                         span { class: "crit-row-stripe" }
                     }
                     "{repo}"
+                }
+            }) as RowCellRenderer<FindingView>,
+        );
+        // "Finding type": the primary rule id, with a hover tooltip of what it enforces, and
+        // a "+N" chip when the server merged N other rules at this same location into the row
+        // (the also_matches set). Row-aware so it can read both the description map and the
+        // also_matches off the FindingView. Tooltip lists the demoted rule ids too.
+        let desc = descriptions.clone();
+        m.insert(
+            ColumnId("type"),
+            std::sync::Arc::new(move |f: &FindingView, val: &CellValue| {
+                let rid = match val {
+                    CellValue::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let mut tip = desc.get(&rid).cloned().unwrap_or_else(|| rid.clone());
+                if !f.also_matches.is_empty() {
+                    tip = format!("{tip}\n\nAlso violates here: {}", f.also_matches.join(", "));
+                }
+                let extra = f.also_matches.len();
+                rsx! {
+                    span { title: "{tip}", "{rid}" }
+                    if extra > 0 {
+                        span { class: "finding-also-count", title: "{tip}", " +{extra}" }
+                    }
                 }
             }) as RowCellRenderer<FindingView>,
         );
@@ -3195,6 +3211,14 @@ fn ScanResults(report: ScanReportView) -> Element {
                             p { class: "rule-modal-title", "{f.snippet}" }
                             p { class: "rule-modal-label", "Explanation" }
                             p { class: "rule-modal-detail", "{f.detail}" }
+                            if !f.also_matches.is_empty() {
+                                p { class: "rule-modal-label", "Also violates at this location" }
+                                div { class: "rule-modal-meta",
+                                    for rid in f.also_matches.iter() {
+                                        span { class: "rule-modal-tag", "{rid}" }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
