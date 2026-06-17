@@ -409,6 +409,14 @@ fn detect_frameworks(path: &str, content: &str, out: &mut std::collections::BTre
             }
         }
     }
+    // Path/extension signals that aren't keyed on a manifest basename:
+    // any Terraform file → IaC; any file under .github/workflows/ → CI/CD.
+    if file.ends_with(".tf") || file.ends_with(".tf.json") {
+        add("Terraform");
+    }
+    if path.contains(".github/workflows/") {
+        add("GitHub Actions");
+    }
 }
 
 /// Detect a repo's stack from its files: languages from extensions, frameworks
@@ -518,6 +526,14 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             }
             "Axum" | "Actix" | "FastAPI" | "Flask" | "Django" | "Rails" | "ASP.NET" => {
                 domains.insert("api-layer");
+            }
+            // Infrastructure-as-code and CI: detected from .tf files and
+            // .github/workflows/ respectively, mapped to their corpus domains.
+            "Terraform" => {
+                domains.insert("iac");
+            }
+            "GitHub Actions" => {
+                domains.insert("ci-cd");
             }
             _ => {}
         }
@@ -1400,6 +1416,24 @@ mod tests {
         assert!(stack.frameworks.contains(&"Express".to_string()));
         assert!(stack.frameworks.contains(&".NET".to_string()));
         assert!(stack.frameworks.contains(&"ASP.NET".to_string()));
+    }
+
+    #[test]
+    fn detect_stack_finds_terraform_and_github_actions() {
+        let files = vec![
+            ("infra/main.tf".to_string(), "resource \"aws_s3_bucket\" \"b\" {}".to_string()),
+            (
+                ".github/workflows/ci.yml".to_string(),
+                "name: CI\non: [push]\njobs: {}".to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/infra", &files);
+        assert!(stack.frameworks.contains(&"Terraform".to_string()));
+        assert!(stack.frameworks.contains(&"GitHub Actions".to_string()));
+        // ...and those map to the iac / ci-cd corpus domains.
+        let domains = domains_for_stack(&stack);
+        assert!(domains.contains(&"iac".to_string()), "{domains:?}");
+        assert!(domains.contains(&"ci-cd".to_string()), "{domains:?}");
     }
 
     #[test]
