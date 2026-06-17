@@ -343,8 +343,9 @@ For EACH finding, do two things:
   for the human, not a deletion.
 
 Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N]", "duplicate
-of [N]", or any pointer to another index. Deduplication already happened upstream; your
-`reason` is one line about THIS finding's severity/confidence only.
+of [N]", "as index N", "index N", "row N", or ANY pointer to another finding by index/row.
+Deduplication already happened upstream; your `reason` is one line about THIS finding's
+severity/confidence only, with no reference to any other finding.
 
 Return ONLY JSON, no prose:
 {"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","reason":"one line"}]}
@@ -360,47 +361,80 @@ fn strip_dedup_pointers(reason: &str) -> String {
     // Char-indexed (UTF-8 safe). ASCII-lowercase per char keeps a 1:1 index alignment.
     let chars: Vec<char> = reason.chars().collect();
     let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let patterns: [&[char]; 4] = [
-        &['s', 'a', 'm', 'e', ' ', 'a', 's'],
-        &['d', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', ' ', 'o', 'f'],
-        &['d', 'u', 'p', ' ', 'o', 'f'],
-        &['d', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', 's'],
+    let starts = |at: usize, pat: &str| -> bool {
+        let pc: Vec<char> = pat.chars().collect();
+        at + pc.len() <= lower.len() && lower[at..at + pc.len()] == pc[..]
+    };
+    // After a phrase, consume optional separators + a pointer token ([..] | #N | N).
+    // Returns Some(end) when a number token was consumed, else None.
+    let skip_number = |from: usize| -> Option<usize> {
+        let mut j = from;
+        while j < chars.len() && matches!(chars[j], ' ' | '#' | ':') {
+            j += 1;
+        }
+        if j < chars.len() && chars[j] == '[' {
+            let mut k = j + 1;
+            while k < chars.len() && chars[k] != ']' {
+                k += 1;
+            }
+            return (k < chars.len() && k > j + 1).then_some(k + 1);
+        }
+        if j < chars.len() && chars[j].is_ascii_digit() {
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            return Some(j);
+        }
+        None
+    };
+    // (phrase, requires_a_following_number). The `index`/`row` family REQUIRES a number so
+    // legitimate prose ("add an index on (a, b)") is untouched while pointers ("as index 6",
+    // "index 9", "row 3") are stripped. The same-as/duplicate family is always a pointer.
+    let patterns: &[(&str, bool)] = &[
+        ("same as", false),
+        ("duplicate of", false),
+        ("duplicates", false),
+        ("dup of", false),
+        ("as index", true),
+        ("see index", true),
+        ("cf index", true),
+        ("index", true),
+        ("row", true),
     ];
     let mut keep = String::with_capacity(reason.len());
     let mut i = 0;
     while i < chars.len() {
-        let matched = patterns
-            .iter()
-            .find(|p| i + p.len() <= lower.len() && &lower[i..i + p.len()] == **p);
-        if let Some(p) = matched {
-            // Skip the phrase plus an optional following "[..]" / "#.." / digits token.
-            let mut j = i + p.len();
-            while j < chars.len() && (chars[j] == ' ' || chars[j] == '#') {
-                j += 1;
-            }
-            if j < chars.len() && chars[j] == '[' {
-                while j < chars.len() && chars[j] != ']' {
-                    j += 1;
-                }
-                if j < chars.len() {
-                    j += 1; // consume ']'
-                }
-            } else {
-                while j < chars.len() && chars[j].is_ascii_digit() {
-                    j += 1;
+        let mut next = None;
+        for (pat, needs_num) in patterns {
+            if starts(i, pat) {
+                let after = i + pat.chars().count();
+                if *needs_num {
+                    if let Some(end) = skip_number(after) {
+                        next = Some(end);
+                        break;
+                    }
+                    // phrase present but no number -> not a pointer; try other patterns
+                } else {
+                    next = Some(skip_number(after).unwrap_or(after));
+                    break;
                 }
             }
-            i = j;
-        } else {
-            keep.push(chars[i]);
-            i += 1;
+        }
+        match next {
+            Some(end) => i = end,
+            None => {
+                keep.push(chars[i]);
+                i += 1;
+            }
         }
     }
     // Tidy: collapse double spaces and strip leftover leading/trailing separators.
     let tidied = keep.replace("  ", " ");
     tidied
         .trim()
-        .trim_matches(|c: char| c == ';' || c == ',' || c == '.' || c == '-' || c.is_whitespace())
+        .trim_matches(|c: char| {
+            matches!(c, ';' | ',' | '.' | '-' | ':') || c.is_whitespace()
+        })
         .to_string()
 }
 
@@ -1138,6 +1172,22 @@ mod tests {
         assert_eq!(
             strip_dedup_pointers("over-flagged for a mini app, duplicate of 7"),
             "over-flagged for a mini app"
+        );
+        // The newer "index N" / "as index N" / "row N" pointer phrasing.
+        assert_eq!(
+            strip_dedup_pointers("directly observable failure as index 0"),
+            "directly observable failure"
+        );
+        assert_eq!(strip_dedup_pointers("index 6"), "");
+        assert_eq!(
+            strip_dedup_pointers("maintainability concern; see index 9"),
+            "maintainability concern"
+        );
+        assert_eq!(strip_dedup_pointers("same root cause, row 3"), "same root cause");
+        // Legit prose that merely contains the word "index" (no pointer number) survives.
+        assert_eq!(
+            strip_dedup_pointers("add a composite index on (user_id, created_at)"),
+            "add a composite index on (user_id, created_at)"
         );
         // A clean reason is untouched.
         assert_eq!(
