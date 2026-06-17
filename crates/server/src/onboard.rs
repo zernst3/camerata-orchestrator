@@ -490,6 +490,17 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
     if domains.contains("api-layer") {
         domains.insert("permissions");
     }
+    // A child domain ALWAYS implies its parent: recommending `javascript:next` without
+    // `javascript` is incoherent (the framework rules sit on top of the language baseline)
+    // and reads as a bug in the UI (child ticked, parent not). Add the primary component of
+    // every namespaced domain. The split borrows from the 'static keys, so it stays `&str`.
+    let parents: Vec<&str> = domains
+        .iter()
+        .filter_map(|d| d.split_once(':').map(|(p, _)| p))
+        .collect();
+    for p in parents {
+        domains.insert(p);
+    }
     domains.into_iter().map(String::from).collect()
 }
 
@@ -1055,6 +1066,22 @@ mod tests {
         assert_eq!(files.len(), 1, "only the .rs file is auditable: {files:?}");
         assert_eq!(files[0].0, "src/main.rs", "top dir stripped");
         assert_eq!(files[0].1, "fn main() {}\n");
+    }
+
+    #[test]
+    fn domains_for_stack_includes_parent_of_child_domain() {
+        // Next.js => javascript:next, and the parent `javascript` must come along.
+        let s = RepoStack {
+            repo: "me/web".into(),
+            languages: vec!["JavaScript".into()],
+            frameworks: vec!["Next.js".into()],
+        };
+        let domains = domains_for_stack(&s);
+        assert!(domains.contains(&"javascript:next".to_string()));
+        assert!(
+            domains.contains(&"javascript".to_string()),
+            "child domain must pull in its parent: {domains:?}"
+        );
     }
 
     #[test]
