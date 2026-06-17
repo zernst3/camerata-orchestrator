@@ -2029,8 +2029,10 @@ fn estimate_audit_cost(
     // under-counted on output (the half that bites, since output bills ~5×).
     const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
     const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + general conservatism (calibration is now priced explicitly below).
-    const FUDGE: f64 = 1.1;
+    // Resolution round + general conservatism. Biased HIGH on purpose: both logged real
+    // runs (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate, and an audit that
+    // costs more than quoted is the bad surprise. Better to over-quote than under-quote.
+    const FUDGE: f64 = 1.4;
 
     let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let batches = if mode == "sequential" {
@@ -2047,10 +2049,12 @@ fn estimate_audit_cost(
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
     // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
-    // re-reads roughly the scan's output (the findings) and emits short verdicts, so its
-    // cost rides with findings volume — and can be a different model than the scan. ──
+    // re-reads roughly the scan's output (the findings) and, crucially, RE-EMITS each
+    // finding with a corrected/verified body — not a short verdict. So its output rides
+    // with the full findings volume, ~1× the scan's output, not a fraction of it. The
+    // earlier 0.3× factor was the main structural reason real runs came in over estimate. ──
     let cal_in = scan_out;
-    let cal_out = scan_out * 0.3;
+    let cal_out = scan_out;
 
     let dollars = ((scan_in * audit_in + scan_out * audit_out)
         + (cal_in * calib_in + cal_out * calib_out))
