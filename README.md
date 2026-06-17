@@ -7,8 +7,9 @@
 **The proven core, in one sentence:** Camerata is a deterministic, deny-before-execute
 MCP gate written in Rust; a real `claude -p` agent, locked to a single gated tool, is
 blocked from a forbidden write before it touches disk, in microseconds, in-process and
-fail-closed. That is the claim this repo backs end to end, and it is reproducible by
-running `cargo run -p camerata -- live-demo`.
+fail-closed. That is the claim this repo backs end to end, and it is reproducible by running
+`cargo run -p camerata -- live-demo`. The full governed experience — and the visual one — is
+the **Enterprise Cockpit**: `cargo run -p camerata-ui`.
 
 Everything else here is built around that core to show where the architecture leads: a
 governed multi-agent engineering engine exposed through two interaction surfaces. What
@@ -173,12 +174,12 @@ These run end to end on the in-process providers and stubs, no network or creden
 needed, and narrate what they exercise:
 
 ```
+cargo run -p camerata-ui                    # ► START HERE — the Enterprise Cockpit (Dioxus desktop), the full visual surface
 cargo run -p camerata -- live-demo          # the gate denies a real claude -p agent's forbidden write
 cargo run -p camerata -- po-demo            # a PO form -> lead engineer -> governed fleet -> cargo build/test
 cargo run -p camerata -- worktracker-demo   # architect surface: ingest a story, the owner answers from their board, status written back
-cargo run -p camerata -- maintenance-demo   # app-builder surface: the standing ops agent (security recommendation, approval gate, rotation)
-cargo run -p camerata -- deploy-demo        # app-builder surface: the draft->publish gate, a local deploy, and the Azure az-CLI plan
-cargo run -p camerata-ui                    # the Dioxus app-builder surface (desktop)
+cargo run -p camerata -- maintenance-demo   # the standing ops agent (security recommendation, approval gate, rotation)
+cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local deploy, and the Azure az-CLI plan
 ```
 
 ## Read in this order
