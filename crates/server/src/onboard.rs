@@ -450,7 +450,17 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
     let mut domains = std::collections::BTreeSet::new();
     for lang in &s.languages {
         match lang.as_str() {
-            "JavaScript" | "TypeScript" => {
+            // The corpus has a `javascript` family (javascript, javascript:typescript,
+            // :react, :redux, :express, :next). Map the language to its own domain so those
+            // baseline rules are suggested; the child-domain → parent expansion below adds
+            // plain `javascript` whenever a `javascript:*` framework domain is present.
+            "JavaScript" => {
+                domains.insert("javascript");
+                domains.insert("fullstack");
+                domains.insert("api-layer");
+            }
+            "TypeScript" => {
+                domains.insert("javascript:typescript");
                 domains.insert("fullstack");
                 domains.insert("api-layer");
             }
@@ -489,12 +499,24 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("fullstack");
                 domains.insert("ui");
             }
-            "React" | "Vue" | "Svelte" | "Angular" => {
+            "React" => {
+                domains.insert("javascript:react");
                 domains.insert("ui");
                 domains.insert("fullstack");
             }
-            "Axum" | "Actix" | "Express" | "FastAPI" | "Flask" | "Django" | "Rails"
-            | "ASP.NET" => {
+            "Redux" => {
+                domains.insert("javascript:redux");
+                domains.insert("fullstack");
+            }
+            "Vue" | "Svelte" | "Angular" => {
+                domains.insert("ui");
+                domains.insert("fullstack");
+            }
+            "Express" => {
+                domains.insert("javascript:express");
+                domains.insert("api-layer");
+            }
+            "Axum" | "Actix" | "FastAPI" | "Flask" | "Django" | "Rails" | "ASP.NET" => {
                 domains.insert("api-layer");
             }
             _ => {}
@@ -1211,6 +1233,30 @@ mod tests {
             domains.contains(&"javascript".to_string()),
             "child domain must pull in its parent: {domains:?}"
         );
+    }
+
+    #[test]
+    fn domains_for_stack_maps_ts_react_express_to_javascript_family() {
+        // A TypeScript + React + Express repo (e.g. agora-mono) should auto-suggest the
+        // javascript:typescript / :react / :express domains, and `javascript` via the
+        // child→parent expansion — not just generic fullstack/api-layer/ui.
+        let s = RepoStack {
+            repo: "acme/app".into(),
+            languages: vec!["TypeScript".into()],
+            frameworks: vec!["React".into(), "Express".into()],
+        };
+        let domains = domains_for_stack(&s);
+        for want in [
+            "javascript",
+            "javascript:typescript",
+            "javascript:react",
+            "javascript:express",
+        ] {
+            assert!(
+                domains.contains(&want.to_string()),
+                "expected {want} in {domains:?}"
+            );
+        }
     }
 
     #[test]
