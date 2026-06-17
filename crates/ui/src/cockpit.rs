@@ -2478,8 +2478,12 @@ fn FindingsTable(
     // list; the CSV export stays flat + lossless (one row per finding), unchanged.
     use_hook(move || {
         handle.set_grouping(vec![ColumnId("type"), ColumnId("file")]);
+        // Load all groups first, then collapse all by default — the architect drills in
+        // rule → file → lines. (collapse_all only collapses groups in the loaded view, so it
+        // must run after the page size is raised.)
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(5000);
+        handle.collapse_all_groups();
     });
     let mut busy = use_signal(|| false);
     // A durable ignore requires a reason (the require-reason invariant); optional ticket.
@@ -2766,12 +2770,12 @@ fn ProposedRulesTable(
     // and PRE-SELECT the suggested rules. Once, on mount.
     use_hook(move || {
         handle.set_grouping(vec![ColumnId("domain")]);
-        // Start every domain group COLLAPSED: the rule list is long and the architect
-        // scans domain-by-domain, expanding only the ones they're triaging. Must run
-        // AFTER set_grouping so the group keys exist to collapse.
-        handle.collapse_all_groups();
+        // Load EVERY group first, THEN collapse — collapse_all_groups only collapses the
+        // groups currently in the view, so collapsing before the page size is raised left
+        // every group past the first page expanded. Order: group → load all → collapse all.
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(5000);
+        handle.collapse_all_groups();
         for rid in &suggested_ids {
             handle.set_selection(*rid, true);
         }
