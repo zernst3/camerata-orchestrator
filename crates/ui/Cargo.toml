@@ -36,29 +36,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 chorale-core = "0.2.2"
 chorale-dioxus = "0.2.2"
 
-# The real engine. The consumer app is no longer purely mocked: app_state bridges
-# the screens to the typed IntakeForm / Project / RefinementSession (intake) and
-# the versioned ArtifactStore (persistence).
-camerata-intake = { path = "../intake" }
-camerata-persistence = { path = "../persistence" }
-# The governed build runner: lets the Build screen run a REAL governed fleet
-# (gateway + claude -p agents) in-process, the same path the CLI po-demo uses.
-camerata-fleet = { path = "../fleet" }
 # The BFF the desktop shell embeds and the cockpit talks to over HTTP.
 camerata-server = { path = "../server" }
 # The cockpit deserializes the canonical Story spine (status etc.) from the BFF.
 camerata-worktracker = { path = "../worktracker" }
-# The BYO-infra publish step: the Live screen deploys through this seam.
-camerata-deploy = { path = "../deploy" }
-# The standing ops agent: scans the live app for dependency and security news.
-camerata-maintenance = { path = "../maintenance" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
-# Locate the per-user data directory so the SQLite version history persists across
-# launches (platform-correct: ~/Library/Application Support on macOS, etc.).
-dirs = "6"
 # Native OS folder picker for choosing the local workspace root (the visible folder
 # where project repos are cloned). Async API integrates with the desktop event loop.
 rfd = "0.15"

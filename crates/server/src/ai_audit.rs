@@ -604,7 +604,6 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
 /// by the primary chunk loop and the resolution round so neither duplicates the call logic.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn audit_pass(
     llm: &Llm,
     audit_model: Option<&str>,

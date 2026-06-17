@@ -740,18 +740,12 @@ name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "camerata-deploy",
- "camerata-fleet",
- "camerata-intake",
- "camerata-maintenance",
- "camerata-persistence",
  "camerata-server",
  "camerata-worktracker",
  "chorale-core",
  "chorale-dioxus",
  "chrono",
  "dioxus",
- "dirs",
  "dotenvy",
  "reqwest",
  "rfd 0.15.4",
