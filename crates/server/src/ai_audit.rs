@@ -342,9 +342,65 @@ For EACH finding, do two things:
   real without seeing more code), set confidence "low"; otherwise "high". This is advice
   for the human, not a deletion.
 
+Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N]", "duplicate
+of [N]", or any pointer to another index. Deduplication already happened upstream; your
+`reason` is one line about THIS finding's severity/confidence only.
+
 Return ONLY JSON, no prose:
 {"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
+        .to_string()
+}
+
+/// Remove cross-finding dedup pointers like "same as [6]" / "duplicate of [10]" (and a
+/// trailing bare "[12]") from a calibration reason, case-insensitively, then tidy leftover
+/// separators. These indices are batch-local and unreliable; the merge relationship is
+/// already structural (rule_id + path + line + also_matches), so the prose is pure noise.
+fn strip_dedup_pointers(reason: &str) -> String {
+    // Char-indexed (UTF-8 safe). ASCII-lowercase per char keeps a 1:1 index alignment.
+    let chars: Vec<char> = reason.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let patterns: [&[char]; 4] = [
+        &['s', 'a', 'm', 'e', ' ', 'a', 's'],
+        &['d', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', ' ', 'o', 'f'],
+        &['d', 'u', 'p', ' ', 'o', 'f'],
+        &['d', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', 's'],
+    ];
+    let mut keep = String::with_capacity(reason.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let matched = patterns
+            .iter()
+            .find(|p| i + p.len() <= lower.len() && &lower[i..i + p.len()] == **p);
+        if let Some(p) = matched {
+            // Skip the phrase plus an optional following "[..]" / "#.." / digits token.
+            let mut j = i + p.len();
+            while j < chars.len() && (chars[j] == ' ' || chars[j] == '#') {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '[' {
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j < chars.len() {
+                    j += 1; // consume ']'
+                }
+            } else {
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+            }
+            i = j;
+        } else {
+            keep.push(chars[i]);
+            i += 1;
+        }
+    }
+    // Tidy: collapse double spaces and strip leftover leading/trailing separators.
+    let tidied = keep.replace("  ", " ");
+    tidied
+        .trim()
+        .trim_matches(|c: char| c == ';' || c == ',' || c == '.' || c == '-' || c.is_whitespace())
         .to_string()
 }
 
@@ -373,7 +429,12 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                 .to_string();
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
-            let reason = verdict["reason"].as_str().unwrap_or("").trim();
+            // Strip any cross-finding dedup pointers ("same as [6]", "duplicate of [10]") the
+            // model still volunteers: the indices are batch-local and wrong, the relationship
+            // is already encoded structurally (rule_id + path + line + also_matches), and a
+            // wrong English pointer in a data cell is worse than none — it ships in the CSV.
+            let reason = strip_dedup_pointers(verdict["reason"].as_str().unwrap_or("").trim());
+            let reason = reason.trim();
             if low_conf || !reason.is_empty() {
                 let tag = if low_conf { "needs review" } else { "calibrated" };
                 f.detail = if reason.is_empty() {
@@ -1064,6 +1125,25 @@ mod tests {
             status: "active".to_string(),
             also_matches: Vec::new(),
         }
+    }
+
+    #[test]
+    fn strip_dedup_pointers_removes_cross_references() {
+        assert_eq!(strip_dedup_pointers("Same as [6]"), "");
+        assert_eq!(strip_dedup_pointers("duplicate of [10]"), "");
+        assert_eq!(
+            strip_dedup_pointers("Real panic risk; same as [3]"),
+            "Real panic risk"
+        );
+        assert_eq!(
+            strip_dedup_pointers("over-flagged for a mini app, duplicate of 7"),
+            "over-flagged for a mini app"
+        );
+        // A clean reason is untouched.
+        assert_eq!(
+            strip_dedup_pointers("maintainability, not correctness"),
+            "maintainability, not correctness"
+        );
     }
 
     #[test]
