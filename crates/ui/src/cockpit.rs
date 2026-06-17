@@ -3228,7 +3228,21 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         }
                     }
                 } else {
-                    ScanResults { report }
+                    {
+                        // Key by the SCAN's identity (repo set + proposed-rule count) so a
+                        // RE-SCAN remounts ScanResults/ProposedRulesTable with fresh rows and a
+                        // fresh "recommended -> selected" pass. Without this, the once-per-mount
+                        // suggested-selection (and minted row ids) carried over from the first
+                        // scan, so adding/removing repos never updated which rules were ticked.
+                        // Stable across re-renders of the SAME scan (ticking a rule doesn't
+                        // change onboard_scan), so it never wipes the user's selection mid-edit.
+                        let scan_key = format!(
+                            "{}|{}",
+                            report.repos.join(","),
+                            report.proposed_rules.len()
+                        );
+                        rsx! { ScanResults { key: "{scan_key}", report } }
+                    }
                 }
             }
 
