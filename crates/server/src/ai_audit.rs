@@ -164,6 +164,8 @@ WATCH FOR INDIRECTION before flagging something MISSING. When a loop renders ite
 
 Cross-file context: you have the REPO MAP (every file + its public symbols) but only SOME file bodies in this pass. If judging a rule needs the actual BODY of a file that is in the map but NOT included below (e.g. you must read a repository's implementation, or a type defined elsewhere, to decide), do NOT guess and do NOT stay silent — list EVERY file path involved in that deferred judgment (the file under suspicion AND the files it depends on) in `needs_files`. A follow-up pass will include those bodies together so you can decide then.
 
+For `code`, copy the offending source text VERBATIM from the digest — the exact characters of the line you're flagging, not a paraphrase. A deterministic post-step locates the true line by finding this text in the file, so an exact copy gives an exact line; a paraphrase makes the line approximate. Keep it to the single most relevant line (or short span). Still set `line` to your best estimate as a fallback.
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "findings": [
@@ -173,6 +175,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "severity": "high|medium|low",
       "rule": "EXACT adopted RULE-ID, or a short-kebab-name for an unlisted issue",
       "title": "one-line statement of the specific violation here",
+      "code": "the EXACT offending source line, copied verbatim from the digest",
       "detail": "why it's a problem and what the fix direction is"
     }
   ],
@@ -268,17 +271,28 @@ pub fn parse_ai_findings(
                 _ => "medium",
             };
             let title = f["title"].as_str().unwrap_or("").trim().to_string();
+            let code = f["code"].as_str().unwrap_or("").trim().to_string();
             let detail = f["detail"].as_str().unwrap_or("").trim().to_string();
-            if title.is_empty() && detail.is_empty() {
+            if title.is_empty() && detail.is_empty() && code.is_empty() {
                 continue;
             }
+            // `snippet` holds the VERBATIM offending line when the model gave one (matches the
+            // deterministic floor, and lets the line-resolution post-step grep for it). Fall
+            // back to the title when there's no code. The title is preserved by leading the
+            // detail so the human still sees the one-line statement.
+            let snippet = if code.is_empty() { title.clone() } else { code };
+            let detail = match (title.is_empty(), detail.is_empty()) {
+                (false, false) => format!("{title} — {detail}"),
+                (false, true) => title.clone(),
+                _ => detail,
+            };
             findings.push(Finding {
                 repo: repo.to_string(),
                 path: f["path"].as_str().unwrap_or("(repo)").to_string(),
                 line: f["line"].as_u64().unwrap_or(0) as usize,
                 rule_id,
                 severity: severity.to_string(),
-                snippet: title,
+                snippet,
                 detail,
                 status: "active".to_string(),
                 also_matches: Vec::new(),
@@ -918,6 +932,38 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
     primary
 }
 
+/// Resolve each finding's line DETERMINISTICALLY from its verbatim snippet. LLMs can't count
+/// newlines, so model line numbers drift (the dogfooding run cited header cells for the
+/// data-row loops); the snippet the model COPIED is reliable. For each finding we locate the
+/// snippet in its file and take the matching line, disambiguating duplicate matches by
+/// proximity to the model's estimate. Snippet not found (paraphrase, or a description rather
+/// than code) → the model's line is kept as the fallback. The model says WHAT; code says WHERE.
+fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
+    let by_path: std::collections::HashMap<&str, &str> =
+        files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    for f in findings.iter_mut() {
+        let needle = f.snippet.trim();
+        // Too short to locate reliably (single token / punctuation) — keep the model's line.
+        if needle.len() < 4 {
+            continue;
+        }
+        let Some(content) = by_path.get(f.path.as_str()) else {
+            continue;
+        };
+        let matches: Vec<usize> = content
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .map(|(i, _)| i + 1) // 1-based
+            .collect();
+        // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
+        // more than once resolves to the intended site. No match → leave the model's line.
+        if let Some(best) = matches.iter().copied().min_by_key(|&ln| ln.abs_diff(f.line)) {
+            f.line = best;
+        }
+    }
+}
+
 /// Merge findings that sit at the SAME code location into one row, keyed on `(path, line)`
 /// — NOT on the title (the model writes a different title for each invented rule name, so a
 /// title key never collapses them). This is the deterministic reduce that turns the audit's
@@ -1077,6 +1123,11 @@ pub async fn audit_repo(
         all_findings.extend(rf);
         all_proposed.extend(rp);
     }
+
+    // Resolve each finding's line DETERMINISTICALLY from its verbatim snippet before dedup,
+    // so the model's unreliable line counting can't (a) mislocate a finding or (b) defeat the
+    // location merge. The model says WHAT (the snippet); plain code finds WHERE.
+    resolve_finding_lines(&mut all_findings, files);
 
     // Cross-chunk dedup + cross-name LOCATION MERGE: the shared repo map means the same
     // issue can surface in more than one pass, and the model labels the SAME violation under
@@ -1371,6 +1422,41 @@ mod tests {
         assert_eq!(rules[0].enforcement_point, "integration");
         // The rule's finding_count picks up its matching finding.
         assert_eq!(rules[0].finding_count, 1);
+    }
+
+    #[test]
+    fn parse_uses_verbatim_code_as_snippet_and_keeps_title_in_detail() {
+        let raw = r#"{"findings":[{"path":"a.rs","line":5,"severity":"high","rule":"x",
+          "title":"raw SQL built by format!","code":"let q = format!(\"SELECT ...\");",
+          "detail":"use a query builder"}],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (f, _) = parse_ai_findings("r/r", raw, &none);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].snippet, "let q = format!(\"SELECT ...\");", "snippet is the verbatim code");
+        assert!(f[0].detail.starts_with("raw SQL built by format!"), "title leads the detail");
+        assert!(f[0].detail.contains("use a query builder"));
+    }
+
+    #[test]
+    fn resolve_finding_lines_corrects_from_verbatim_snippet() {
+        let content = "fn a() {}\nlet x = 1;\nthe offending CALL here\nlet y = 2;\n";
+        let files = vec![("src/lib.rs".to_string(), content.to_string())];
+        // Model guessed line 1, snippet is on line 3.
+        let mut findings = vec![site_finding("AI-X", "src/lib.rs", 1, "high", "the offending CALL here")];
+        resolve_finding_lines(&mut findings, &files);
+        assert_eq!(findings[0].line, 3, "line resolved from the verbatim snippet");
+
+        // Duplicate snippet → nearest occurrence to the model's estimate wins.
+        let dup = "data_tr(a)\nx\ndata_tr(a)\n";
+        let files2 = vec![("d.rs".to_string(), dup.to_string())];
+        let mut f2 = vec![site_finding("AI-Y", "d.rs", 3, "high", "data_tr(a)")];
+        resolve_finding_lines(&mut f2, &files2);
+        assert_eq!(f2[0].line, 3, "duplicate resolves to the nearest match");
+
+        // Paraphrase not present → keep the model's line.
+        let mut f3 = vec![site_finding("AI-Z", "src/lib.rs", 2, "high", "paraphrase not in the file")];
+        resolve_finding_lines(&mut f3, &files);
+        assert_eq!(f3[0].line, 2, "no match keeps the model's line");
     }
 
     fn finding(rule: &str, sev: &str) -> Finding {
