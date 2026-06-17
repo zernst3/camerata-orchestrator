@@ -26,7 +26,9 @@ use chorale_core::{
     BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
     PaginationMode, RenderKind, RowId, TableState,
 };
-use chorale_dioxus::{use_table, CellRenderer, CellRenderers, Table};
+use chorale_dioxus::{
+    use_table, CellRenderer, CellRenderers, RowCellRenderer, RowCellRenderers, Table,
+};
 
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
 /// filtered out server-side). The cockpit just renders what the BFF returns.
@@ -2339,7 +2341,45 @@ fn FindingsTable(
         CellRenderers::new(m)
     };
 
+    // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
+    // bold red full-height stripe on the left of their row, so they're unmistakable beyond
+    // the badge text. A row-aware renderer on the first column ("repo") draws an
+    // absolutely-positioned bar (the chorale <td> is position:relative) for critical rows,
+    // leaving every other cell — including the Severity badge — untouched.
+    let row_renderers = {
+        let mut m: std::collections::HashMap<ColumnId, RowCellRenderer<FindingView>> =
+            std::collections::HashMap::new();
+        m.insert(
+            ColumnId("repo"),
+            std::sync::Arc::new(move |f: &FindingView, val: &CellValue| {
+                let repo = match val {
+                    CellValue::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                let is_security = f.severity == "critical";
+                rsx! {
+                    if is_security {
+                        span { class: "crit-row-stripe" }
+                    }
+                    "{repo}"
+                }
+            }) as RowCellRenderer<FindingView>,
+        );
+        RowCellRenderers::new(m)
+    };
+
     rsx! {
+        // Key: what the red stripe means. Security (deterministic, Critical) vs the rest.
+        div { class: "findings-key",
+            span { class: "findings-key-item",
+                span { class: "findings-key-swatch crit" }
+                "Security findings (deterministic, stop-the-line)"
+            }
+            span { class: "findings-key-item",
+                span { class: "findings-key-swatch arch" }
+                "Architectural findings (everything else)"
+            }
+        }
         div { class: "findings-toolbar",
             input {
                 class: "addressee-input ignore-reason",
@@ -2430,6 +2470,7 @@ fn FindingsTable(
             selection_enabled: true,
             resize_enabled: true,
             cell_renderers: renderers,
+            row_cell_renderers: row_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(f) = id_map_click.get(&rid) {
                     detail_finding.set(Some(f.clone()));

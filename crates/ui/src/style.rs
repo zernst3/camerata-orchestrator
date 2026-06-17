@@ -978,6 +978,24 @@ html, body {
 .scan-stack-repo { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-stack-tech { color: var(--ink-soft); }
 .findings-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+
+/* Critical (security) row marker: a full-height red bar on the left edge of the row's
+   first cell. The chorale <td> is position:relative + overflow:hidden, so this anchors
+   to the cell's left edge and spans its height. */
+.crit-row-stripe {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: #d4332b; pointer-events: none;
+}
+
+/* Key above the findings table: what the stripe means. */
+.findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }
+.findings-key-item {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--ink-soft);
+}
+.findings-key-swatch { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+.findings-key-swatch.crit { background: #d4332b; }
+.findings-key-swatch.arch { background: var(--surface); border: 1px solid var(--line); }
 .alts { margin-top: 22px; }
 .alts-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .alt-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--line); }
