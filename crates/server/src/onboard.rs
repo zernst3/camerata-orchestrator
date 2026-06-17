@@ -151,6 +151,10 @@ pub struct ScanReport {
     pub gated: bool,
     /// A human message (e.g. the connect-GitHub gate, a per-repo error, or a cap).
     pub message: Option<String>,
+    /// REAL token usage + cost for the Phase-2 audit (every pass + calibration), when the
+    /// backend reported it. Drives the actual-vs-estimated readout. None on a Phase-1 scan.
+    #[serde(default)]
+    pub actual_usage: Option<crate::ai_audit::ActualUsage>,
 }
 
 impl ScanReport {
@@ -164,6 +168,7 @@ impl ScanReport {
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
+            actual_usage: None,
             message: Some(
                 "Connect GitHub (set CAMERATA_GITHUB_TOKEN) so Camerata can read the repo(s)."
                     .to_string(),
@@ -623,6 +628,7 @@ pub fn build_report(
         proposed_rules,
         gated: false,
         message: None,
+        actual_usage: None,
     }
 }
 
@@ -1015,6 +1021,7 @@ pub async fn audit_repos(
     selected: &[(String, String)],
     token: &str,
     model: Option<&str>,
+    calibration_model: Option<&str>,
     mode: crate::ai_audit::ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
@@ -1025,6 +1032,9 @@ pub async fn audit_repos(
     let mut repos_ok = Vec::new();
     let mut notes = Vec::new();
     let llm = crate::llm::Llm::from_env();
+    // Aggregates REAL usage across every repo's audit (passes + calibration) for the
+    // actual-vs-estimated readout.
+    let meter = crate::ai_audit::UsageMeter::default();
 
     // A re-run must start from a clean transcript: drop the prior audit's per-agent
     // prompts/output so the Agent-activity drawer shows THIS run, not the last one.
@@ -1073,7 +1083,8 @@ pub async fn audit_repos(
                 }
                 // AI audit parameterized by the SEMANTIC rules only: ADVISORY findings.
                 match crate::ai_audit::audit_repo(
-                    &llm, spec, &files, &semantic, model, mode, feedback, job,
+                    &llm, spec, &files, &semantic, model, calibration_model, mode, feedback, job,
+                    Some(&meter),
                 )
                 .await
                 {
@@ -1094,6 +1105,7 @@ pub async fn audit_repos(
     }
 
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.actual_usage = Some(meter.snapshot());
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }

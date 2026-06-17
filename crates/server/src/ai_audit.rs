@@ -20,8 +20,67 @@
 //! so the onboarding UI renders both tiers in one table. AI findings carry an `AI-`
 //! rule-id prefix so the UI can mark their provenance.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::llm::{Llm, LlmRequest};
 use crate::onboard::{Finding, ProposedRule};
+
+/// Aggregated REAL usage across every LLM call in one audit — all chunk×rule passes, the
+/// resolution round, and the calibration pass. Lets the UI show ACTUAL vs the pre-scan
+/// estimate. Thread-safe (passes run concurrently); cost is held in micro-dollars to stay
+/// integer-atomic.
+#[derive(Default)]
+pub struct UsageMeter {
+    input_tokens: AtomicU64,
+    output_tokens: AtomicU64,
+    cost_micro_usd: AtomicU64,
+    calls: AtomicU64,
+    cost_calls: AtomicU64,
+}
+
+impl UsageMeter {
+    /// Fold one completion's reported usage in. Missing fields are simply not counted.
+    pub fn record(&self, r: &crate::llm::LlmResponse) {
+        if let Some(i) = r.input_tokens {
+            self.input_tokens.fetch_add(i, Ordering::Relaxed);
+        }
+        if let Some(o) = r.output_tokens {
+            self.output_tokens.fetch_add(o, Ordering::Relaxed);
+        }
+        if let Some(c) = r.cost_usd {
+            self.cost_micro_usd
+                .fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
+            self.cost_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        self.calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> ActualUsage {
+        let calls = self.calls.load(Ordering::Relaxed);
+        let cost_calls = self.cost_calls.load(Ordering::Relaxed);
+        ActualUsage {
+            input_tokens: self.input_tokens.load(Ordering::Relaxed),
+            output_tokens: self.output_tokens.load(Ordering::Relaxed),
+            cost_usd: self.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+            calls,
+            // Every call that ran reported a cost — so the dollar figure is complete, not a
+            // partial sum that would understate (some calls' usage may be unreported).
+            cost_complete: calls > 0 && cost_calls == calls,
+        }
+    }
+}
+
+/// A snapshot of real audit usage, serialized onto the scan report for the UI's
+/// actual-vs-estimated readout.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct ActualUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub calls: u64,
+    /// True when every call contributed a cost (the dollar total isn't a partial sum).
+    pub cost_complete: bool,
+}
 
 /// Per-call safety cap on a single digest's size (chars). A digest is built PER CHUNK
 /// (see `chunk_files`), so this only bounds one chunk's line-numbered text; it sits above
@@ -332,7 +391,13 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
-pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> Vec<Finding> {
+pub async fn verify_findings(
+    llm: &Llm,
+    repo: &str,
+    findings: Vec<Finding>,
+    calibration_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
     }
@@ -343,14 +408,25 @@ pub async fn verify_findings(llm: &Llm, repo: &str, findings: Vec<Finding>) -> V
             f.severity, f.path, f.line, f.snippet, f.detail
         ));
     }
-    let req = LlmRequest::new(prompt)
+    let mut req = LlmRequest::new(prompt)
         .with_system(verify_system_prompt())
         // Aggregated findings across all chunks can be many; one verdict each.
         .with_max_tokens(4096);
+    // Calibration runs on its OWN selected model (the UI exposes it). Previously it silently
+    // used the backend default, so a "Haiku" scan was really Haiku-scan + default-calibrate;
+    // now the model the user picked for calibration is the one that runs.
+    if let Some(m) = calibration_model {
+        req = req.with_model(m.to_string());
+    }
     // Non-streaming, so use the coarse total backstop; on timeout or error the findings
     // pass through unchanged (calibration is best-effort, never load-bearing).
     match tokio::time::timeout(total_backstop(), llm.complete(req)).await {
-        Ok(Ok(resp)) => apply_verdicts(&resp.text, findings),
+        Ok(Ok(resp)) => {
+            if let Some(m) = meter {
+                m.record(&resp);
+            }
+            apply_verdicts(&resp.text, findings)
+        }
         _ => findings,
     }
 }
@@ -433,6 +509,7 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
 /// by the primary chunk loop and the resolution round so neither duplicates the call logic.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn audit_pass(
     llm: &Llm,
     audit_model: Option<&str>,
@@ -441,6 +518,7 @@ async fn audit_pass(
     adopted: &std::collections::HashSet<String>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     session: &str,
+    meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> {
     let mut req = LlmRequest::new(prompt)
         .with_system(audit_system_prompt())
@@ -461,6 +539,9 @@ async fn audit_pass(
             .await
             .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))??
     };
+    if let Some(m) = meter {
+        m.record(&resp);
+    }
     let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
     let needs = parse_needs_files(&resp.text);
     Ok((f, p, needs))
@@ -587,6 +668,7 @@ async fn run_passes(
     concurrency: usize,
     label: &str,
     session_prefix: &str,
+    meter: Option<&UsageMeter>,
 ) -> (
     Vec<Finding>,
     Vec<ProposedRule>,
@@ -648,7 +730,7 @@ async fn run_passes(
                         },
                     );
                 }
-                let r = audit_pass(llm, audit_model, prompt, repo, adopted, feedback, &session).await;
+                let r = audit_pass(llm, audit_model, prompt, repo, adopted, feedback, &session, meter).await;
                 if let Some((store, key)) = feedback {
                     store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
                 }
@@ -789,9 +871,11 @@ pub async fn audit_repo(
     files: &[(String, String)],
     selected: &[(String, String)],
     model: Option<&str>,
+    calibration_model: Option<&str>,
     mode: ScanMode,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
+    meter: Option<&UsageMeter>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -808,6 +892,17 @@ pub async fn audit_repo(
             .ok()
             .filter(|s| !s.trim().is_empty())
     });
+    // Calibration model: the user's calibration pick wins; else CAMERATA_CALIBRATION_MODEL;
+    // else fall back to the SCAN model so the audit is end-to-end on one model by default
+    // (no silent default-model calibration). The UI exposes this as its own picker.
+    let calib_model = calibration_model
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("CAMERATA_CALIBRATION_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .or_else(|| audit_model.clone());
 
     // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
     // rule-batches × file-chunks run concurrently (the default efficient floor).
@@ -836,6 +931,7 @@ pub async fn audit_repo(
         concurrency,
         "pass",
         &format!("audit-{repo}"),
+        meter,
     )
     .await;
 
@@ -879,6 +975,7 @@ pub async fn audit_repo(
             concurrency,
             "resolution",
             &format!("audit-{repo}-res"),
+            meter,
         )
         .await;
         all_findings.extend(rf);
@@ -921,14 +1018,18 @@ pub async fn audit_repo(
                 key,
                 crate::transcript::AgentTranscript {
                     session_id: session.clone(),
-                    role: format!("calibrating {} findings — {repo}", all_findings.len()),
+                    role: format!(
+                        "calibrating {} findings on {} — {repo}",
+                        all_findings.len(),
+                        calib_model.as_deref().unwrap_or("default")
+                    ),
                     prompt: String::new(),
                     output: String::new(),
                     status: "running".to_string(),
                 },
             );
         }
-        let out = verify_findings(llm, repo, all_findings).await;
+        let out = verify_findings(llm, repo, all_findings, calib_model.as_deref(), meter).await;
         if let Some((store, key)) = feedback {
             store.set_status(key, &session, "done");
         }

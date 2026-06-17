@@ -174,8 +174,36 @@ pub struct LlmResponse {
     pub model: String,
     /// `cli` | `api` — which backend served it (surfaced honestly in the UI).
     pub backend: String,
-    /// Cost in USD when the backend reports it (CLI does; API would need accounting).
+    /// Cost in USD when known: the CLI reports it directly; the API path computes it from
+    /// token usage × the model's list price (see [`MODELS`]).
     pub cost_usd: Option<f64>,
+    /// Real billed input tokens (folds in cache read/creation), when the backend reports
+    /// usage. Drives the post-scan ACTUAL-vs-estimated readout.
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    /// Real billed output tokens, when reported.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+}
+
+/// Pull (input, output) token counts from a Claude `usage` object (CLI JSON or API
+/// response). Input folds in cache read + cache creation so it reflects all input-side
+/// billing; absent fields are treated as zero only when `input_tokens` itself is present.
+fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>) {
+    let base = usage["input_tokens"].as_u64();
+    let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    let cache_create = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    let input = base.map(|i| i + cache_read + cache_create);
+    let output = usage["output_tokens"].as_u64();
+    (input, output)
+}
+
+/// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
+fn price_for(model_id: &str) -> Option<(f64, f64)> {
+    MODELS
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| (m.price_in, m.price_out))
 }
 
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
@@ -331,11 +359,14 @@ impl Llm {
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
+        let (input_tokens, output_tokens) = usage_tokens(&v["usage"]);
         Ok(LlmResponse {
             text: v["result"].as_str().unwrap_or_default().to_string(),
             model: model.to_string(),
             backend: "cli".to_string(),
             cost_usd: v["total_cost_usd"].as_f64(),
+            input_tokens,
+            output_tokens,
         })
     }
 
@@ -419,6 +450,8 @@ impl Llm {
 
         let mut full = String::new();
         let mut cost = None;
+        let mut usage_in = None;
+        let mut usage_out = None;
         let mut deadline = tokio::time::Instant::now() + idle;
         loop {
             let now = tokio::time::Instant::now();
@@ -479,6 +512,9 @@ impl Llm {
                                 }
                             }
                             cost = v["total_cost_usd"].as_f64();
+                            let (i, o) = usage_tokens(&v["usage"]);
+                            usage_in = i.or(usage_in);
+                            usage_out = o.or(usage_out);
                         }
                         _ => {}
                     }
@@ -506,6 +542,8 @@ impl Llm {
             model: model.to_string(),
             backend: "cli".to_string(),
             cost_usd: cost,
+            input_tokens: usage_in,
+            output_tokens: usage_out,
         })
     }
 
@@ -550,11 +588,23 @@ impl Llm {
                     .join("")
             })
             .unwrap_or_default();
+        let (input_tokens, output_tokens) = usage_tokens(&v["usage"]);
+        // The API doesn't bill back a dollar figure, so compute it from usage × list price.
+        let cost_usd = price_for(model).and_then(|(pin, pout)| {
+            match (input_tokens, output_tokens) {
+                (Some(i), Some(o)) => {
+                    Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0)
+                }
+                _ => None,
+            }
+        });
         Ok(LlmResponse {
             text: out,
             model: model.to_string(),
             backend: "api".to_string(),
-            cost_usd: None,
+            cost_usd,
+            input_tokens,
+            output_tokens,
         })
     }
 }

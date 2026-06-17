@@ -1888,6 +1888,22 @@ struct StackView {
     frameworks: Vec<String>,
 }
 
+/// Real audit usage from the server (the actual half of actual-vs-estimated).
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct ActualUsageView {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cost_usd: f64,
+    #[serde(default)]
+    calls: u64,
+    /// False when some calls didn't report a cost (the dollar figure is a partial sum).
+    #[serde(default)]
+    cost_complete: bool,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ScanReportView {
     #[serde(default)]
@@ -1897,6 +1913,8 @@ struct ScanReportView {
     files_scanned: usize,
     #[serde(default)]
     code_chars: usize,
+    #[serde(default)]
+    actual_usage: Option<ActualUsageView>,
     findings: Vec<FindingView>,
     proposed_rules: Vec<ProposedRuleView>,
     gated: bool,
@@ -1921,6 +1939,7 @@ async fn audit_against(
     repos: &[String],
     rules: &[(String, String)],
     model: &str,
+    calibration_model: &str,
     mode: &str,
 ) -> Option<ScanReportView> {
     let rule_json: Vec<_> = rules
@@ -1929,7 +1948,7 @@ async fn audit_against(
         .collect();
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "mode": mode }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode }))
         .send()
         .await
         .ok()?
@@ -1980,12 +1999,15 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
 /// the calibration pass. The guarded risk is the OUTPUT undercount on findings-dense scans —
 /// so output is modeled both per-pass AND proportional to the code scanned, not a flat
 /// constant. Approximate by design (~4 chars/token); sized to size a scan, not to bill it.
+#[allow(clippy::too_many_arguments)]
 fn estimate_audit_cost(
     code_chars: usize,
     selected: usize,
     mode: &str,
-    price_in: f64,
-    price_out: f64,
+    audit_in: f64,
+    audit_out: f64,
+    calib_in: f64,
+    calib_out: f64,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -1998,8 +2020,8 @@ fn estimate_audit_cost(
     // under-counted on output (the half that bites, since output bills ~5×).
     const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
     const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + calibration pass over all findings, and general conservatism.
-    const FUDGE: f64 = 1.2;
+    // Resolution round + general conservatism (calibration is now priced explicitly below).
+    const FUDGE: f64 = 1.1;
 
     let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let batches = if mode == "sequential" {
@@ -2009,12 +2031,23 @@ fn estimate_audit_cost(
     };
     let passes = chunks * batches;
     let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
-    let in_chars = code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes;
-    let in_tokens = in_chars as f64 / CHARS_PER_TOKEN;
-    let out_tokens =
+
+    // ── Scan passes, priced at the AUDIT model ──
+    let scan_in = (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN;
+    let scan_out =
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
-    let total_tokens = ((in_tokens + out_tokens) * FUDGE) as u64;
-    let dollars = (in_tokens * price_in + out_tokens * price_out) / 1_000_000.0 * FUDGE;
+
+    // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
+    // re-reads roughly the scan's output (the findings) and emits short verdicts, so its
+    // cost rides with findings volume — and can be a different model than the scan. ──
+    let cal_in = scan_out;
+    let cal_out = scan_out * 0.3;
+
+    let dollars = ((scan_in * audit_in + scan_out * audit_out)
+        + (cal_in * calib_in + cal_out * calib_out))
+        / 1_000_000.0
+        * FUDGE;
+    let total_tokens = ((scan_in + scan_out + cal_in + cal_out) * FUDGE) as u64;
     (total_tokens, dollars, passes)
 }
 
@@ -2051,6 +2084,7 @@ async fn audit_job_start(
     repos: &[String],
     rules: &[(String, String)],
     model: &str,
+    calibration_model: &str,
     exec_mode: &str,
 ) -> Option<String> {
     let rule_json: Vec<_> = rules
@@ -2059,7 +2093,7 @@ async fn audit_job_start(
         .collect();
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "mode": exec_mode }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode }))
         .send()
         .await
         .ok()?
@@ -3212,6 +3246,14 @@ fn ScanResults(report: ScanReportView) -> Element {
             }
         }
     }
+    // Calibration model — its OWN picker (severity recalibration + confidence tagging). A
+    // customer can run a cheap scan with a stronger verify, or keep it end-to-end. Defaults
+    // to the scan model so "the model you picked" is genuinely used across the board unless
+    // the user deliberately splits the tiers.
+    let mut calibration_model = use_signal(String::new);
+    if calibration_model().is_empty() && !audit_model().is_empty() {
+        calibration_model.set(audit_model());
+    }
     // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
     // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
     // AUTO-SELECTED by the scan's scale; the user can override.
@@ -3403,6 +3445,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                         on_audit: move |rules: Vec<(String, String)>| {
                             let repos = repos_audit.clone();
                             let model = audit_model();
+                            let calib = calibration_model();
                             let mode = audit_mode();
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
@@ -3416,7 +3459,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, "parallel").await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel").await else {
                                         auditing.set(false);
                                         return;
                                     };
@@ -3426,7 +3469,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &mode).await);
+                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode).await);
                                     auditing.set(false);
                                 });
                             }
@@ -3455,6 +3498,22 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                         span { class: "audit-model-hint", "Faster models finish sooner; stronger models catch more." }
                     }
+                    // Calibration model — its OWN tier. The scan finds; calibration
+                    // recalibrates severity + tags confidence. Defaults to the scan model
+                    // (end-to-end); split it to run a cheap scan with a stronger verify.
+                    div { class: "audit-model-row",
+                        label { class: "audit-model-label", "Calibration model" }
+                        select {
+                            class: "audit-model-select",
+                            disabled: auditing(),
+                            value: "{calibration_model}",
+                            onchange: move |e| calibration_model.set(e.value()),
+                            for opt in m.models.iter() {
+                                option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                            }
+                        }
+                        span { class: "audit-model-hint", "Recalibrates severity + flags low-confidence findings. Default = the scan model; pick a stronger one for cheap-scan-plus-smart-verify." }
+                    }
                 }
                 // Execution mode — speed/scale knob, separate from the model (quality) and
                 // the rule selection (coverage). Parallel is the recommended default.
@@ -3474,31 +3533,60 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                     span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
                 }
-                // Pre-audit cost estimate: the user sees the price of THIS configuration
-                // (model + mode + ticked rules) before spending anything. It moves with the
-                // pickers above — Sonnet vs Opus, parallel vs sequential, more/fewer rules.
+                // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
+                // model + mode + ticked rules), and — once the audit has run — the ACTUAL
+                // billed usage beside it, so the estimate is verifiable, not a black box.
                 if report.code_chars > 0 {
                     {
-                        let price = models.as_ref().and_then(|m| {
-                            m.models.iter().find(|o| o.id == audit_model()).map(|o| (o.price_in, o.price_out))
-                        });
-                        let (pin, pout) = price.unwrap_or((3.0, 15.0));
+                        let price = |id: &str, fallback: (f64, f64)| {
+                            models.as_ref()
+                                .and_then(|m| m.models.iter().find(|o| o.id == id).map(|o| (o.price_in, o.price_out)))
+                                .unwrap_or(fallback)
+                        };
+                        let (a_in, a_out) = price(&audit_model(), (3.0, 15.0));
+                        let (c_in, c_out) = price(&calibration_model(), (a_in, a_out));
                         let sel = selected_count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), pin, pout);
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
+                        // ACTUAL, once the audit finished and the backend reported usage.
+                        let actual = audited.as_ref().and_then(|a| a.actual_usage.clone()).filter(|u| u.calls > 0);
                         rsx! {
                             div { class: "audit-cost",
-                                div { class: "audit-cost-main",
-                                    span { class: "audit-cost-label", "Estimated cost" }
-                                    span { class: "audit-cost-val", "{dollar_str}" }
-                                    span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
-                                }
-                                p { class: "audit-cost-note",
-                                    "Approximate, biased high (input + output priced separately; output bills ~5× and dominates findings-heavy scans). "
-                                    "One-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files); prompt-caching can make the actual bill lower. "
-                                    "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
-                                    "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
+                                if let Some(u) = actual {
+                                    {
+                                        let act_toks = u.input_tokens + u.output_tokens;
+                                        let act_dollar = if !u.cost_complete { "n/a".to_string() }
+                                            else if u.cost_usd < 0.01 { "<$0.01".to_string() }
+                                            else { format!("${:.2}", u.cost_usd) };
+                                        rsx! {
+                                            div { class: "audit-cost-main",
+                                                span { class: "audit-cost-label", "Actual cost" }
+                                                span { class: "audit-cost-val", "{act_dollar}" }
+                                                span { class: "audit-cost-meta", "{human_tokens(act_toks)} tokens · {u.calls} calls · est. was {dollar_str}" }
+                                            }
+                                            p { class: "audit-cost-note",
+                                                if u.cost_complete {
+                                                    "Real billed usage for this run ({human_tokens(u.input_tokens)} in / {human_tokens(u.output_tokens)} out). "
+                                                } else {
+                                                    "Real token usage shown; a $ figure needs every call to report cost (some didn't, so it's omitted to avoid understating). "
+                                                }
+                                                "The deterministic security floor ran free. Next time you audit PR diffs — pennies."
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    div { class: "audit-cost-main",
+                                        span { class: "audit-cost-label", "Estimated cost" }
+                                        span { class: "audit-cost-val", "{dollar_str}" }
+                                        span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
+                                    }
+                                    p { class: "audit-cost-note",
+                                        "Approximate, biased high (input + output priced separately; output bills ~5× and dominates findings-heavy scans). "
+                                        "One-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files); prompt-caching can make the actual bill lower. "
+                                        "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
+                                        "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
+                                    }
                                 }
                             }
                         }
