@@ -75,11 +75,36 @@ impl Vendor {
 /// per call or via `CAMERATA_LLM_MODEL`.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
-/// Tools forbidden on the CLI path so it stays a PURE text completion (no MCP servers via
-/// `--strict-mcp-config`, no sub-agents, no filesystem). The audit reasons over the digest
-/// in the prompt; it must not wander.
-const NO_TOOLS: &str = "Task Bash Read Edit Write MultiEdit Glob Grep WebFetch WebSearch \
-                        NotebookEdit TodoWrite BashOutput KillShell";
+/// Force the `claude -p` CLI into a PURE, non-agentic, single-shot completion. The
+/// orchestrator's model calls reason over the prompt and return text (JSON for the audit);
+/// they must never behave like an interactive coding agent. A real run derailed once — it
+/// reached for the `init` skill, entered plan mode, hunted for file tools, and tried to
+/// write a CLAUDE.md instead of returning findings. The old guard (`--disallowedTools` with
+/// a NAME blocklist) couldn't stop that: skills, plan-mode, and any unnamed tool slipped
+/// through, and `--append-system-prompt` left the full Claude Code agent identity active.
+///
+/// This locks it down (verified flags, claude 2.1.x):
+/// - `--tools ""` — disables ALL built-in tools (an allowlist of nothing, so future/unnamed
+///   tools are covered too), not a fragile blocklist.
+/// - `--disable-slash-commands` — turns off skills entirely (kills the `init` reflex).
+/// - `--permission-mode dontAsk` — never prompts, never enters plan mode.
+/// - `--system-prompt` (REPLACE, not append) — strips the Claude Code agent scaffolding so
+///   it's a plain auditor, not a coding agent. Only set when the caller supplies one.
+/// - `--strict-mcp-config` (no `--mcp-config`) — loads zero MCP servers.
+///
+/// Deliberately NOT `--bare`: that flag forces ANTHROPIC_API_KEY-only auth and never reads
+/// OAuth/keychain, which would break the subscription-based CLI the local app relies on.
+fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
+    cmd.arg("--strict-mcp-config")
+        .arg("--tools")
+        .arg("")
+        .arg("--disable-slash-commands")
+        .arg("--permission-mode")
+        .arg("dontAsk");
+    if let Some(system) = &req.system {
+        cmd.arg("--system-prompt").arg(system);
+    }
+}
 
 // ── In-flight subprocess registry (shutdown hook) ──────────────────────────────
 // `kill_on_drop(true)` reaps subprocesses when their future is dropped (graceful runtime
@@ -340,13 +365,8 @@ impl Llm {
             .arg("--model")
             .arg(model)
             .arg("--output-format")
-            .arg("json")
-            .arg("--strict-mcp-config")
-            .arg("--disallowedTools")
-            .arg(NO_TOOLS);
-        if let Some(system) = &req.system {
-            cmd.arg("--append-system-prompt").arg(system);
-        }
+            .arg("json");
+        harden_completion(&mut cmd, req);
         let out = cmd.output().await.map_err(|e| {
             anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
         })?;
@@ -399,14 +419,9 @@ impl Llm {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--include-partial-messages")
-            .arg("--strict-mcp-config")
-            .arg("--disallowedTools")
-            .arg(NO_TOOLS)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        if let Some(system) = &req.system {
-            cmd.arg("--append-system-prompt").arg(system);
-        }
+        harden_completion(&mut cmd, req);
         let mut child = cmd.spawn().map_err(|e| {
             anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
         })?;
