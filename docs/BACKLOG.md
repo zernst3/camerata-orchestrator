@@ -3,6 +3,26 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Cost estimate: model the calibration pass + bias HIGH (2026-06-17, PARKED)
+
+**Park until before a customer sees it** — immaterial at single-dollar scans, but the bias
+direction is wrong (it reads LOW, and a surprise-bigger-bill is the trust-killer). Two logged
+actuals, both UNDER-estimated:
+- budget-mini (dense fixture): est ~$0.25 → actual $0.56 (~2.24× under)
+- rust-chorale (real, sparser): est ~$1.79 → actual $3.13 (~1.75× under)
+
+The gap narrowed on the larger/less-dense repo, so the agent's density theory holds — BUT a
+~1.75× under-read remains even on a real repo, which means a STRUCTURAL under-count on top of
+density. Diagnosed cause: the **calibration pass** isn't modeled as its own line — its input is
+all findings + context and its output re-emits them, at the calibration model's rate. On a $600
+Rivet scan a 1.75× under-read is a ~$450 surprise.
+
+Fix when picked up: estimate the calibration pass explicitly (input ≈ findings + context,
+output ≈ findings re-emitted, priced at the calibration model) and add a conservative bias so
+the estimate lands ABOVE actual. Keep logging actuals (the actual-vs-estimated readout is the
+training data); fit the findings-density prior + calibration line once there are ~5–10 points
+across small/large × sparse/dense × model-combo. Cheap, later, not now.
+
 ## Re-onboard guard + "add repo to project" + project-config sharing (2026-06-17)
 
 **Gated to the disposition-testing phase** (apply / ignore / accept-as-tech-debt is the next
