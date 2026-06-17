@@ -1969,9 +1969,17 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
 /// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
 /// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends:
 /// the digest is re-sent per rule-batch, so parallel/job (batches of 15) cost more tokens
-/// than sequential (one batch). Approximate by design — ~4 chars/token, a fixed per-pass
-/// overhead for the repo map + rules + system prompt, and a fudge for the resolution +
-/// calibration passes. Sized to size a scan, not to bill it.
+/// than sequential (one batch). Input and output are priced SEPARATELY (output bills ~5×
+/// input and dominates findings-heavy scans, so a flat blended rate would misprice exactly
+/// the scans that matter).
+///
+/// Deliberately biased CONSERVATIVE (slightly high): an estimate that turns into a smaller
+/// bill is a pleasant surprise; one that turns into a bigger bill is broken trust. Two
+/// things push the real bill the other way and are NOT modeled, both safe: prompt-caching
+/// of the repeated rules/repo-map prefix (cache reads bill ~0.1× input), and dedup shrinking
+/// the calibration pass. The guarded risk is the OUTPUT undercount on findings-dense scans —
+/// so output is modeled both per-pass AND proportional to the code scanned, not a flat
+/// constant. Approximate by design (~4 chars/token); sized to size a scan, not to bill it.
 fn estimate_audit_cost(
     code_chars: usize,
     selected: usize,
@@ -1982,9 +1990,16 @@ fn estimate_audit_cost(
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
-    const OVERHEAD_CHARS_PER_PASS: usize = 8_000;
-    const OUT_TOKENS_PER_PASS: f64 = 1_500.0;
-    const FUDGE: f64 = 1.15;
+    // Per-pass scaffolding re-sent every pass: the rules block (verbose directives) + the
+    // repo map + the system prompt. Conservative.
+    const OVERHEAD_CHARS_PER_PASS: usize = 10_000;
+    // Output is findings: each is a paragraph of detail. A baseline per pass PLUS a term
+    // that scales with the code each pass scans, so a findings-dense or large scan isn't
+    // under-counted on output (the half that bites, since output bills ~5×).
+    const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
+    const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
+    // Resolution round + calibration pass over all findings, and general conservatism.
+    const FUDGE: f64 = 1.2;
 
     let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let batches = if mode == "sequential" {
@@ -1993,9 +2008,11 @@ fn estimate_audit_cost(
         selected.div_ceil(RULE_BATCH_SIZE).max(1)
     };
     let passes = chunks * batches;
+    let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
     let in_chars = code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes;
     let in_tokens = in_chars as f64 / CHARS_PER_TOKEN;
-    let out_tokens = OUT_TOKENS_PER_PASS * passes as f64;
+    let out_tokens =
+        OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
     let total_tokens = ((in_tokens + out_tokens) * FUDGE) as u64;
     let dollars = (in_tokens * price_in + out_tokens * price_out) / 1_000_000.0 * FUDGE;
     (total_tokens, dollars, passes)
@@ -3478,7 +3495,8 @@ fn ScanResults(report: ScanReportView) -> Element {
                                     span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
                                 }
                                 p { class: "audit-cost-note",
-                                    "Approximate, one-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files). "
+                                    "Approximate, biased high (input + output priced separately; output bills ~5× and dominates findings-heavy scans). "
+                                    "One-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files); prompt-caching can make the actual bill lower. "
                                     "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
                                     "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
                                 }
