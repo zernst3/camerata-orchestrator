@@ -1117,6 +1117,78 @@ html, body {
 .spine-badge.done,    .topbar-status.done    { background: #e2f1e7; color: #2f8f5b; }
 .spine-badge.block,   .topbar-status.block   { background: #f7e1dc; color: #b0432e; }
 
+/* UoW dev-status badge — compact pill shown alongside the tracker status badge in the spine.
+   New=gray, In progress=accent (terracotta), Done=green. Visually distinct from spine-badge
+   (lighter weight, italicized label) so the two statuses read as orthogonal layers. */
+.uow-dev-badge {
+  font-size: 9px; font-weight: 700; font-style: italic; letter-spacing: .04em;
+  padding: 2px 6px; border-radius: 5px; text-transform: uppercase;
+  border: 1px solid transparent; flex-shrink: 0;
+}
+.uow-dev-badge.neutral { background: #ece9e3; color: #6c6862; border-color: #dedad3; }
+.uow-dev-badge.accent  { background: var(--accent-wash); color: var(--accent-ink); border-color: #e5c9bd; }
+.uow-dev-badge.green   { background: #e2f1e7; color: #2f8f5b; border-color: #c5e3ce; }
+
+/* UoW panel — appears in the center stage below the run + agent-activity blocks. */
+.uow-panel {
+  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; background: var(--surface);
+}
+.uow-panel-h {
+  font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 12px;
+}
+.uow-status-row, .uow-branch-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+}
+.uow-field-label {
+  font-size: 11.5px; font-weight: 600; color: var(--ink-soft); min-width: 76px;
+}
+/* Segmented control for the 3-state dev-status selector. */
+.uow-seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden;
+  background: var(--paper);
+}
+.uow-seg-btn {
+  font-size: 11.5px; font-weight: 600; padding: 4px 11px;
+  border: none; border-right: 1px solid var(--line); background: transparent;
+  color: var(--ink-soft); cursor: pointer; transition: background .12s var(--ease), color .12s var(--ease);
+}
+.uow-seg-btn:last-child { border-right: none; }
+.uow-seg-btn:hover { background: var(--line-soft); color: var(--ink); }
+.uow-seg-btn.active { background: var(--accent); color: #fff; font-weight: 700; }
+
+.uow-branch-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; color: var(--ink); background: var(--accent-wash);
+  padding: 2px 8px; border-radius: 5px; border: 1px solid #e5c9bd;
+}
+.uow-branch-none { font-size: 12px; color: var(--ink-faint); font-style: italic; }
+
+/* AI history list */
+.uow-history { margin-top: 6px; }
+.uow-history-h {
+  font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 6px;
+}
+.uow-history-empty { font-size: 12px; color: var(--ink-faint); font-style: italic; margin: 0; }
+.uow-history-list { display: flex; flex-direction: column; gap: 4px; }
+.uow-history-row {
+  display: grid; grid-template-columns: auto 80px 1fr; gap: 8px; align-items: baseline;
+  font-size: 11.5px; padding: 5px 8px; border-radius: 6px;
+  background: var(--paper); border: 1px solid var(--line-soft);
+}
+.uow-hist-ts {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; color: var(--ink-faint); white-space: nowrap;
+}
+.uow-hist-kind {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--accent-wash);
+  padding: 1px 5px; border-radius: 4px; white-space: nowrap; text-align: center;
+}
+.uow-hist-text { color: var(--ink); line-height: 1.4; }
+
 /* NEEDS YOU queue */
 .needs-list { display: flex; flex-direction: column; gap: 6px; }
 .needs-item {

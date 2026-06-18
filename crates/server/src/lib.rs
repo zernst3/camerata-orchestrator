@@ -16,6 +16,7 @@
 pub mod ai_audit;
 pub mod arm;
 pub mod draft;
+pub mod uow;
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
@@ -74,6 +75,7 @@ pub struct AppState {
     transcripts: crate::transcript::TranscriptStore,
     jobs: crate::jobs::JobStore,
     draft: crate::draft::DraftStore,
+    uow: crate::uow::UowStore,
 }
 
 impl AppState {
@@ -93,6 +95,7 @@ impl AppState {
             transcripts: crate::transcript::TranscriptStore::new(),
             jobs: crate::jobs::JobStore::new(),
             draft: crate::draft::DraftStore::new(),
+            uow: crate::uow::UowStore::new(),
         }
     }
 
@@ -123,6 +126,7 @@ impl AppState {
             state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
+            state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
         }
         state
     }
@@ -222,6 +226,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/git/push", post(git_push))
         .route("/api/projects/:id/git/pull", post(git_pull))
         .route("/api/projects/:id/git/cherry-pick", post(git_cherry_pick))
+        // ── Unit of Work (issue #39) ─────────────────────────────────────────
+        .route("/api/uow", get(uow_list))
+        .route("/api/uow/:story_id", get(uow_get))
+        .route("/api/uow/:story_id/status", post(uow_set_status))
+        .route("/api/uow/:story_id/branch", post(uow_set_branch))
+        .route("/api/uow/:story_id/history", post(uow_append_history))
         .with_state(state)
 }
 
@@ -2258,6 +2268,71 @@ async fn git_cherry_pick(
         Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
+}
+
+// ── Unit of Work handlers (issue #39) ────────────────────────────────────────
+
+/// All known UoWs across every story.
+async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfWork>> {
+    Json(state.uow.list())
+}
+
+/// The UoW for a story. Creates a default one if the story has no UoW yet.
+async fn uow_get(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(state.uow.get_or_create(&story_id))
+}
+
+#[derive(serde::Deserialize)]
+struct UowStatusReq {
+    /// Accepted values: `"new"`, `"in_progress"`, `"done"`.
+    status: String,
+}
+
+/// Set the dev status for a story's UoW.
+async fn uow_set_status(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowStatusReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    let status = crate::uow::DevStatus::from_wire(&req.status)
+        .ok_or_else(|| AppError(anyhow::anyhow!("unknown status {:?}; expected new, in_progress, done", req.status)))?;
+    state.uow.set_status(&story_id, status);
+    Ok(Json(state.uow.get_or_create(&story_id)))
+}
+
+#[derive(serde::Deserialize)]
+struct UowBranchReq {
+    /// The branch name, or `null` to clear it.
+    branch: Option<String>,
+}
+
+/// Set (or clear) the branch for a story's UoW.
+async fn uow_set_branch(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowBranchReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    state.uow.set_branch(&story_id, req.branch);
+    Json(state.uow.get_or_create(&story_id))
+}
+
+#[derive(serde::Deserialize)]
+struct UowHistoryReq {
+    kind: String,
+    text: String,
+}
+
+/// Append an entry to the AI development history for a story's UoW.
+async fn uow_append_history(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowHistoryReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    state.uow.append_history(&story_id, &req.kind, &req.text);
+    Json(state.uow.get_or_create(&story_id))
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

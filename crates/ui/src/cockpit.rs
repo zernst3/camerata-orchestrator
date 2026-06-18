@@ -1780,6 +1780,103 @@ async fn fetch_children(story_id: &str) -> Option<Vec<CanonicalStory>> {
         .ok()
 }
 
+// ── Unit of Work (issue #39) ──────────────────────────────────────────────────
+
+/// The dev status of a Unit of Work. Shown alongside the story's tracker status.
+/// New = gray, In progress = accent, Done = green.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+enum DevStatus {
+    #[default]
+    New,
+    InProgress,
+    Done,
+}
+
+impl DevStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::New => "New",
+            Self::InProgress => "In progress",
+            Self::Done => "Done",
+        }
+    }
+
+    /// CSS modifier for the `uow-dev-badge` class.
+    fn badge_cls(self) -> &'static str {
+        match self {
+            Self::New => "neutral",
+            Self::InProgress => "accent",
+            Self::Done => "green",
+        }
+    }
+
+    /// Wire string for `POST /api/uow/:id/status`.
+    fn wire_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::InProgress => "in_progress",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// A single entry in the AI development history.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct HistoryEntryView {
+    ts: String,
+    kind: String,
+    text: String,
+}
+
+/// The Unit of Work as returned by `GET /api/uow/:story_id`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct UowView {
+    story_id: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    dev_status: DevStatus,
+    #[serde(default)]
+    history: Vec<HistoryEntryView>,
+    #[serde(default)]
+    updated: String,
+}
+
+/// Fetch all UoWs from the BFF and return them indexed by `story_id`.
+async fn fetch_uow_map() -> std::collections::HashMap<String, UowView> {
+    let Ok(resp) = reqwest::get(format!("{}/api/uow", crate::BFF_URL)).await else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(list) = resp.json::<Vec<UowView>>().await else {
+        return std::collections::HashMap::new();
+    };
+    list.into_iter().map(|u| (u.story_id.clone(), u)).collect()
+}
+
+/// Fetch the UoW for a single story (get-or-create semantics).
+async fn fetch_uow(story_id: &str) -> Option<UowView> {
+    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, story_id))
+        .await
+        .ok()?
+        .json::<UowView>()
+        .await
+        .ok()
+}
+
+/// POST a new dev-status for a story's UoW.
+async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<UowView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/status", crate::BFF_URL, story_id))
+        .json(&serde_json::json!({ "status": status.wire_str() }))
+        .send()
+        .await
+        .ok()?
+        .json::<UowView>()
+        .await
+        .ok()
+}
+
 /// Map a canonical status to a short label + a badge CSS modifier.
 fn status_badge(status: FeatureStatus) -> (&'static str, &'static str) {
     match status {
@@ -2275,6 +2372,15 @@ pub fn CockpitApp() -> Element {
     // The active connection (native vs GitHub), shown honestly in the topbar.
     let provider_res = use_resource(fetch_provider);
 
+    // UoW refresh tick: bumped whenever the architect changes a UoW dev-status so the
+    // spine row badges update immediately. The UoW map is fetched once on mount and
+    // re-fetched whenever this tick bumps.
+    let uow_refresh = use_signal(|| 0u32);
+    let uow_res = use_resource(move || {
+        let _dep = uow_refresh();
+        async move { fetch_uow_map().await }
+    });
+
     let mut selected = use_signal(|| 0usize);
     let mut selected_rule = use_signal(|| 0usize);
     // Which stage tab the user is previewing. `None` follows the selected story's
@@ -2387,17 +2493,33 @@ pub fn CockpitApp() -> Element {
                         aside { class: "cockpit-rail",
                             p { class: "cockpit-rail-label", "STORY SPINE" }
                             div { class: "spine-list",
-                                for (i , s) in story_list.iter().enumerate() {
-                                    {
-                                        let (badge, badge_cls) = status_badge(s.status);
-                                        let sel = i == selected();
-                                        let cls = if sel { "spine-item sel" } else { "spine-item" };
-                                        rsx! {
-                                            button {
-                                                class: "{cls}",
-                                                onclick: move |_| selected.set(i),
-                                                span { class: "spine-title", "{s.title}" }
-                                                span { class: "spine-badge {badge_cls}", "{badge}" }
+                                {
+                                    // Snapshot the UoW map once for the entire spine render.
+                                    let uow_map = uow_res.read().clone().unwrap_or_default();
+                                    rsx! {
+                                        for (i , s) in story_list.iter().enumerate() {
+                                            {
+                                                let (badge, badge_cls) = status_badge(s.status);
+                                                let sel = i == selected();
+                                                let cls = if sel { "spine-item sel" } else { "spine-item" };
+                                                // UoW dev-status for this story (default New if no UoW yet).
+                                                let dev_status = uow_map
+                                                    .get(&s.id)
+                                                    .map(|u| u.dev_status)
+                                                    .unwrap_or_default();
+                                                let dev_label = dev_status.label();
+                                                let dev_cls = dev_status.badge_cls();
+                                                rsx! {
+                                                    button {
+                                                        class: "{cls}",
+                                                        onclick: move |_| selected.set(i),
+                                                        span { class: "spine-title", "{s.title}" }
+                                                        // Story tracker status (existing).
+                                                        span { class: "spine-badge {badge_cls}", "{badge}" }
+                                                        // UoW dev status (new — shown alongside, visually distinct).
+                                                        span { class: "uow-dev-badge {dev_cls}", "{dev_label}" }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -2500,6 +2622,16 @@ pub fn CockpitApp() -> Element {
                                         _ => String::new(),
                                     };
                                     rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+                                }
+
+                                // ── UoW panel: dev status + branch + AI history ──────
+                                // Shows the dev-side projection of the selected story.
+                                // Branch and history are designed to be auto-populated by
+                                // the governed run (Pillar 2); for now they are readable
+                                // here and settable via the API endpoints.
+                                UowPanel {
+                                    story_id: current.id.clone(),
+                                    uow_refresh,
                                 }
 
                                 // A live run for THIS story (when the user is on its actual
@@ -5718,6 +5850,108 @@ fn LiveRunPanel(run: RunView) -> Element {
                 }
                 if run.events.is_empty() {
                     p { class: "live-events-empty", "Spinning up the fleet…" }
+                }
+            }
+        }
+    }
+}
+
+/// The Unit of Work dev panel for a selected story.
+///
+/// Shows the dev-side projection alongside the story's tracker status:
+/// - Dev status control (3-state segmented control: New / In progress / Done).
+/// - Branch ref (if set, read-only here — auto-populated by the governed run).
+/// - AI development history (HistoryEntry rows: ts · kind · text), read-only.
+///
+/// Fetch is keyed by `story_id` so switching stories reloads the UoW. A shared
+/// `uow_refresh` tick lets the spine badges update after a status change.
+///
+/// NOTE: branch + history are designed to be auto-populated by the governed run
+/// (Pillar 2). They are settable via the API endpoints; the UI shows them here.
+#[component]
+fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let sid = story_id.clone();
+    let uow_data = use_resource(move || {
+        let sid = sid.clone();
+        async move { fetch_uow(&sid).await }
+    });
+
+    let uow = uow_data.read().clone().flatten();
+    let dev_status = uow.as_ref().map(|u| u.dev_status).unwrap_or_default();
+    let branch = uow.as_ref().and_then(|u| u.branch.clone());
+    let history = uow.as_ref().map(|u| u.history.clone()).unwrap_or_default();
+
+    // The three status options for the segmented control.
+    const STATUS_OPTS: &[DevStatus] = &[DevStatus::New, DevStatus::InProgress, DevStatus::Done];
+
+    rsx! {
+        div { class: "uow-panel",
+            p { class: "uow-panel-h", "UNIT OF WORK" }
+
+            // ── Dev status: 3-state segmented control ──────────────────────────
+            div { class: "uow-status-row",
+                span { class: "uow-field-label", "Dev status" }
+                div { class: "uow-seg",
+                    for opt in STATUS_OPTS.iter().copied() {
+                        {
+                            let sid = story_id.clone();
+                            let active = opt == dev_status;
+                            let cls = if active { "uow-seg-btn active" } else { "uow-seg-btn" };
+                            rsx! {
+                                button {
+                                    class: "{cls}",
+                                    onclick: move |_| {
+                                        let sid = sid.clone();
+                                        let mut uow_refresh = uow_refresh;
+                                        let toasts = toasts;
+                                        spawn(async move {
+                                            if post_uow_status(&sid, opt).await.is_some() {
+                                                // Bump both: the panel re-fetches its own UoW,
+                                                // and the spine badges refresh via the map.
+                                                uow_refresh += 1;
+                                            } else {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    "Could not update dev status.".to_string(),
+                                                );
+                                            }
+                                        });
+                                    },
+                                    "{opt.label()}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Branch ref (read-only; auto-populated by the governed run) ─────
+            div { class: "uow-branch-row",
+                span { class: "uow-field-label", "Branch" }
+                if let Some(ref b) = branch {
+                    span { class: "uow-branch-val", "{b}" }
+                } else {
+                    span { class: "uow-branch-none", "not set" }
+                }
+            }
+
+            // ── AI development history ─────────────────────────────────────────
+            div { class: "uow-history",
+                p { class: "uow-history-h", "AI history" }
+                if history.is_empty() {
+                    p { class: "uow-history-empty", "No history yet — the governed run will append entries here." }
+                } else {
+                    div { class: "uow-history-list",
+                        for entry in history.iter() {
+                            div { class: "uow-history-row",
+                                span { class: "uow-hist-ts", "{entry.ts}" }
+                                span { class: "uow-hist-kind", "{entry.kind}" }
+                                span { class: "uow-hist-text", "{entry.text}" }
+                            }
+                        }
+                    }
                 }
             }
         }
