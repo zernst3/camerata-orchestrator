@@ -214,6 +214,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
+        // ── Local git controls (issue #37) ───────────────────────────────────
+        .route("/api/projects/:id/git/branches", get(git_branches))
+        .route("/api/projects/:id/git/log", get(git_log))
+        .route("/api/projects/:id/git/checkout", post(git_checkout))
+        .route("/api/projects/:id/git/commit", post(git_commit))
+        .route("/api/projects/:id/git/push", post(git_push))
+        .route("/api/projects/:id/git/pull", post(git_pull))
+        .route("/api/projects/:id/git/cherry-pick", post(git_cherry_pick))
         .with_state(state)
 }
 
@@ -2051,6 +2059,205 @@ async fn ship_repo(
     let url = crate::workspace::ship(&req.repo, &req.branch, &req.title, &req.body, &root, &token)
         .await?;
     Ok(Json(serde_json::json!({ "pr_url": url })))
+}
+
+// ── Local git controls (issue #37) ───────────────────────────────────────────
+
+/// Query parameters shared by git read endpoints.
+#[derive(serde::Deserialize)]
+struct GitRepoQuery {
+    repo: String,
+}
+
+/// Query parameters for the commit log.
+#[derive(serde::Deserialize)]
+struct GitLogQuery {
+    repo: String,
+    #[serde(default = "default_log_limit")]
+    limit: usize,
+}
+
+fn default_log_limit() -> usize {
+    50
+}
+
+/// Resolve a repo's local dir from project settings, or return an error response.
+fn resolve_git_dir(state: &AppState, repo: &str) -> Result<std::path::PathBuf, Json<serde_json::Value>> {
+    let override_path = state.settings.repo_path(repo);
+    let workspace_root = state.settings.workspace_root();
+    crate::workspace::resolve_repo_dir(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        repo,
+    )
+    .ok_or_else(|| {
+        Json(serde_json::json!({
+            "ok": false,
+            "message": "repo not resolved locally — set its path in the Rules view"
+        }))
+    })
+}
+
+/// List local branches + the current HEAD branch for a repo.
+async fn git_branches(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<GitRepoQuery>,
+) -> Json<serde_json::Value> {
+    let dir = match resolve_git_dir(&state, &q.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::list_branches(&dir).await {
+        Ok(bl) => Json(serde_json::json!({ "ok": true, "current": bl.current, "branches": bl.branches })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+/// Recent commit log for a repo.
+async fn git_log(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<GitLogQuery>,
+) -> Json<serde_json::Value> {
+    let dir = match resolve_git_dir(&state, &q.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::git_log(&dir, q.limit).await {
+        Ok(commits) => Json(serde_json::json!({ "ok": true, "commits": commits })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitCheckoutReq {
+    repo: String,
+    branch: String,
+    #[serde(default)]
+    create: bool,
+}
+
+/// Switch to (or create) a local branch.
+async fn git_checkout(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitCheckoutReq>,
+) -> Json<serde_json::Value> {
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let result = if req.create {
+        crate::workspace::create_branch_at(&dir, &req.branch).await
+    } else {
+        crate::workspace::switch_branch(&dir, &req.branch).await
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "branch": req.branch })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitCommitReq {
+    repo: String,
+    message: String,
+}
+
+/// Stage all changes and commit them.
+async fn git_commit(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitCommitReq>,
+) -> Json<serde_json::Value> {
+    if req.message.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "commit message is required" }));
+    }
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::commit_all(&dir, &req.message).await {
+        Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitPushReq {
+    repo: String,
+    branch: String,
+}
+
+/// Push the branch to origin (user-triggered; token required).
+async fn git_push(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitPushReq>,
+) -> Json<serde_json::Value> {
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to push" }));
+    }
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::push_branch(&dir, &req.repo, &req.branch, &token).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitPullReq {
+    repo: String,
+    branch: String,
+}
+
+/// Fast-forward pull from origin.
+async fn git_pull(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitPullReq>,
+) -> Json<serde_json::Value> {
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to pull" }));
+    }
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::pull_branch(&dir, &req.repo, &req.branch, &token).await {
+        Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitCherryPickReq {
+    repo: String,
+    sha: String,
+}
+
+/// Cherry-pick a commit onto the current HEAD branch. On conflict, returns the error
+/// message so the UI can display it (the repo stays in conflict state for the user to
+/// resolve).
+async fn git_cherry_pick(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitCherryPickReq>,
+) -> Json<serde_json::Value> {
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::cherry_pick(&dir, &req.sha).await {
+        Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

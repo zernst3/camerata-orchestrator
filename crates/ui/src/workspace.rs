@@ -4,7 +4,9 @@
 //! picks a visible workspace folder once; the active project's repos clone under it at
 //! `<workspace>/<owner>/<repo>`. From here you clone/update the repos, see each working
 //! copy's branch + dirty state, start a working branch, and ship (push + open a PR).
-//! Repo CONTENTS live on disk; only the project pointers persist server-side.
+//!
+//! Issue #37 adds a full git panel per repo: branch list (switch/create), commit log,
+//! commit-all, push, pull, and cherry-pick (both via drag-and-drop and per-commit button).
 
 use dioxus::prelude::*;
 
@@ -34,6 +36,27 @@ struct RepoCheckout {
     dirty: bool,
     detail: String,
 }
+
+/// One commit from the git log panel.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct CommitRow {
+    sha: String,
+    short: String,
+    subject: String,
+    author: String,
+    date: String,
+}
+
+/// Branch list response from `/api/projects/:id/git/branches`.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct BranchListView {
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    branches: Vec<String>,
+}
+
+// ── BFF fetch helpers ─────────────────────────────────────────────────────────
 
 async fn fetch_settings() -> Option<SettingsView> {
     reqwest::get(format!("{}/api/settings", crate::BFF_URL))
@@ -112,6 +135,148 @@ async fn ship(project_id: &str, repo: &str, branch: &str, title: &str) -> Option
         .ok()?;
     v.get("pr_url").and_then(|u| u.as_str()).map(String::from)
 }
+
+// ── Git panel API calls (issue #37) ──────────────────────────────────────────
+
+/// Minimal percent-encode for `owner/repo` paths in query strings (encodes `/` as `%2F`).
+fn urlencoding_simple(s: &str) -> String {
+    s.replace('/', "%2F").replace(' ', "%20")
+}
+
+async fn api_git_branches(project_id: &str, repo: &str) -> Option<BranchListView> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/git/branches?repo={}",
+        crate::BFF_URL,
+        project_id,
+        urlencoding_simple(repo),
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if v.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        serde_json::from_value(v).ok()
+    } else {
+        None
+    }
+}
+
+async fn api_git_log(project_id: &str, repo: &str, limit: usize) -> Vec<CommitRow> {
+    let v: serde_json::Value = match reqwest::get(format!(
+        "{}/api/projects/{}/git/log?repo={}&limit={}",
+        crate::BFF_URL,
+        project_id,
+        urlencoding_simple(repo),
+        limit,
+    ))
+    .await
+    .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return Vec::new(),
+    };
+    v.get("commits")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default()
+}
+
+async fn api_git_checkout(project_id: &str, repo: &str, branch: &str, create: bool) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/git/checkout", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "repo": repo, "branch": branch, "create": create }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    (ok, msg)
+}
+
+async fn api_git_commit(project_id: &str, repo: &str, message: &str) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/git/commit", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "repo": repo, "message": message }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let out = v
+        .get("output")
+        .or_else(|| v.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    (ok, out)
+}
+
+async fn api_git_push(project_id: &str, repo: &str, branch: &str) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/git/push", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "repo": repo, "branch": branch }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    (ok, msg)
+}
+
+async fn api_git_pull(project_id: &str, repo: &str, branch: &str) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/git/pull", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "repo": repo, "branch": branch }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let out = v
+        .get("output")
+        .or_else(|| v.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    (ok, out)
+}
+
+async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/git/cherry-pick", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "repo": repo, "sha": sha }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let out = v
+        .get("output")
+        .or_else(|| v.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    (ok, out)
+}
+
+// ── Top-level view ────────────────────────────────────────────────────────────
 
 #[component]
 pub fn WorkspaceView() -> Element {
@@ -259,6 +424,8 @@ pub fn WorkspaceView() -> Element {
     }
 }
 
+// ── RepoCard ──────────────────────────────────────────────────────────────────
+
 #[component]
 fn RepoCard(repo: String, project_id: String, status: Option<RepoCheckout>) -> Element {
     let mut branch = use_signal(|| "camerata/work".to_string());
@@ -358,8 +525,356 @@ fn RepoCard(repo: String, project_id: String, status: Option<RepoCheckout>) -> E
                 if !msg().is_empty() {
                     p { class: "ws-repo-msg", "{msg}" }
                 }
+
+                // ── Git panel (issue #37) ─────────────────────────────────
+                GitPanel {
+                    repo: repo.clone(),
+                    project_id: project_id.clone(),
+                }
             } else {
-                p { class: "ws-hint", "Not cloned. Use “Clone / update all repos” above to create the local working copy." }
+                p { class: "ws-hint", "Not cloned. Use \"Clone / update all repos\" above to create the local working copy." }
+            }
+        }
+    }
+}
+
+// ── GitPanel ──────────────────────────────────────────────────────────────────
+
+/// The full local git control panel for one repo. Embedded inside RepoCard when cloned.
+/// Provides branch list, commit log, commit-all, push, pull, and cherry-pick.
+#[component]
+fn GitPanel(repo: String, project_id: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // ── refresh counter (bumped after any mutating git op) ────────────────
+    let mut git_refresh = use_signal(|| 0u32);
+
+    // Branch panel state
+    let mut new_branch_input = use_signal(String::new);
+    let mut branch_working = use_signal(|| false);
+
+    // Commit panel state
+    let mut commit_msg = use_signal(String::new);
+    let mut commit_working = use_signal(|| false);
+
+    // Push / pull state
+    let mut net_working = use_signal(|| false);
+
+    // Drag-and-drop: stash the SHA of the row being dragged
+    let mut dragged_sha = use_signal(String::new);
+
+    // ── data fetches ─────────────────────────────────────────────────────────
+    let pid_b = project_id.clone();
+    let rp_b = repo.clone();
+    let branches_res = use_resource(move || {
+        let _dep = git_refresh();
+        let pid = pid_b.clone();
+        let rp = rp_b.clone();
+        async move { api_git_branches(&pid, &rp).await }
+    });
+
+    let pid_l = project_id.clone();
+    let rp_l = repo.clone();
+    let log_res = use_resource(move || {
+        let _dep = git_refresh();
+        let pid = pid_l.clone();
+        let rp = rp_l.clone();
+        async move { api_git_log(&pid, &rp, 30).await }
+    });
+
+    let branch_list = branches_res
+        .read()
+        .clone()
+        .flatten()
+        .unwrap_or_default();
+    let commits: Vec<CommitRow> = log_res
+        .read()
+        .as_ref()
+        .map(|v| v.clone())
+        .unwrap_or_default();
+    let current_branch = branch_list.current.clone();
+
+    rsx! {
+        div { class: "git-panel",
+            // ── Branch list ───────────────────────────────────────────────
+            div { class: "git-section",
+                p { class: "git-section-label", "Branches" }
+
+                // Existing branches: click to switch; each is also a drop target for cherry-pick
+                div { class: "git-branch-list",
+                    for br in branch_list.branches.iter() {
+                        {
+                            let br_name = br.clone();
+                            let is_current = *br == current_branch;
+                            let pid_sw = project_id.clone();
+                            let rp_sw = repo.clone();
+                            rsx! {
+                                div {
+                                    key: "{br_name}",
+                                    class: if is_current { "git-branch current" } else { "git-branch" },
+                                    // Drop target: cherry-pick the dragged commit onto the current branch
+                                    ondragover: move |evt| { evt.prevent_default(); },
+                                    ondrop: {
+                                        let pid = pid_sw.clone();
+                                        let rp = rp_sw.clone();
+                                        move |evt| {
+                                            evt.prevent_default();
+                                            let sha = dragged_sha();
+                                            if sha.is_empty() { return; }
+                                            let pid = pid.clone();
+                                            let rp = rp.clone();
+                                            spawn(async move {
+                                                let (ok, out) = api_git_cherry_pick(&pid, &rp, &sha).await;
+                                                if ok {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Cherry-picked {sha} onto current branch."));
+                                                    git_refresh += 1;
+                                                } else {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Cherry-pick failed: {out}"));
+                                                }
+                                            });
+                                        }
+                                    },
+                                    // Click to switch branches
+                                    onclick: {
+                                        let pid = pid_sw.clone();
+                                        let rp = rp_sw.clone();
+                                        let br2 = br_name.clone();
+                                        move |_| {
+                                            if is_current { return; }
+                                            let pid = pid.clone();
+                                            let rp = rp.clone();
+                                            let br2 = br2.clone();
+                                            branch_working.set(true);
+                                            spawn(async move {
+                                                let (ok, err_msg) = api_git_checkout(&pid, &rp, &br2, false).await;
+                                                branch_working.set(false);
+                                                if ok {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Switched to {br2}"));
+                                                    git_refresh += 1;
+                                                } else {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Switch failed: {err_msg}"));
+                                                }
+                                            });
+                                        }
+                                    },
+                                    span { class: "git-branch-name", "{br_name}" }
+                                    if is_current {
+                                        span { class: "git-branch-current-mark", "HEAD" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if branch_list.branches.is_empty() {
+                        p { class: "ws-hint", "No local branches (clone / update first)." }
+                    }
+                }
+
+                // New branch input + create button
+                div { class: "git-new-branch-row",
+                    input {
+                        class: "addressee-input git-new-branch-input",
+                        placeholder: "new-branch-name",
+                        value: "{new_branch_input}",
+                        oninput: move |e| new_branch_input.set(e.value()),
+                    }
+                    button {
+                        class: "btn-edit-sm",
+                        disabled: branch_working() || new_branch_input().trim().is_empty(),
+                        onclick: {
+                            let pid = project_id.clone();
+                            let rp = repo.clone();
+                            move |_| {
+                                let br = new_branch_input().trim().to_string();
+                                if br.is_empty() { return; }
+                                let pid = pid.clone();
+                                let rp = rp.clone();
+                                branch_working.set(true);
+                                spawn(async move {
+                                    let (ok, err_msg) = api_git_checkout(&pid, &rp, &br, true).await;
+                                    branch_working.set(false);
+                                    if ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Created and switched to {br}"));
+                                        new_branch_input.set(String::new());
+                                        git_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Create branch failed: {err_msg}"));
+                                    }
+                                });
+                            }
+                        },
+                        if branch_working() { "Working…" } else { "New branch" }
+                    }
+                }
+            }
+
+            // ── Commit-all ────────────────────────────────────────────────
+            div { class: "git-section",
+                p { class: "git-section-label", "Commit" }
+                div { class: "git-commit-row",
+                    input {
+                        class: "addressee-input git-commit-input",
+                        placeholder: "Commit message",
+                        value: "{commit_msg}",
+                        oninput: move |e| commit_msg.set(e.value()),
+                    }
+                    button {
+                        class: "btn-edit-sm",
+                        disabled: commit_working() || commit_msg().trim().is_empty(),
+                        onclick: {
+                            let pid = project_id.clone();
+                            let rp = repo.clone();
+                            move |_| {
+                                let msg_txt = commit_msg().trim().to_string();
+                                if msg_txt.is_empty() { return; }
+                                let pid = pid.clone();
+                                let rp = rp.clone();
+                                commit_working.set(true);
+                                spawn(async move {
+                                    let (ok, out) = api_git_commit(&pid, &rp, &msg_txt).await;
+                                    commit_working.set(false);
+                                    if ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Committed: {out}"));
+                                        commit_msg.set(String::new());
+                                        git_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Commit failed: {out}"));
+                                    }
+                                });
+                            }
+                        },
+                        if commit_working() { "Committing…" } else { "Commit all" }
+                    }
+                }
+            }
+
+            // ── Push / Pull ───────────────────────────────────────────────
+            div { class: "git-section git-net-row",
+                p { class: "git-section-label", "Sync — {current_branch}" }
+                div { class: "git-net-btns",
+                    button {
+                        class: "btn-edit-sm",
+                        disabled: net_working() || current_branch.is_empty(),
+                        onclick: {
+                            let pid = project_id.clone();
+                            let rp = repo.clone();
+                            let br = current_branch.clone();
+                            move |_| {
+                                let pid = pid.clone();
+                                let rp = rp.clone();
+                                let br = br.clone();
+                                net_working.set(true);
+                                spawn(async move {
+                                    let (ok, out) = api_git_pull(&pid, &rp, &br).await;
+                                    net_working.set(false);
+                                    if ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Pulled {br}: {out}"));
+                                        git_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Pull failed: {out}"));
+                                    }
+                                });
+                            }
+                        },
+                        if net_working() { "Working…" } else { "Pull" }
+                    }
+                    button {
+                        class: "btn-run btn-run-sm",
+                        disabled: net_working() || current_branch.is_empty(),
+                        onclick: {
+                            let pid = project_id.clone();
+                            let rp = repo.clone();
+                            let br = current_branch.clone();
+                            move |_| {
+                                let pid = pid.clone();
+                                let rp = rp.clone();
+                                let br = br.clone();
+                                net_working.set(true);
+                                spawn(async move {
+                                    let (ok, out) = api_git_push(&pid, &rp, &br).await;
+                                    net_working.set(false);
+                                    if ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Pushed {br} to origin."));
+                                        git_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Push failed: {out}"));
+                                    }
+                                });
+                            }
+                        },
+                        if net_working() { "Working…" } else { "Push" }
+                    }
+                }
+            }
+
+            // ── Commit log ────────────────────────────────────────────────
+            div { class: "git-section",
+                p { class: "git-section-label",
+                    "Recent commits"
+                    span { class: "git-log-hint", " — drag a row onto a branch to cherry-pick it, or use the button" }
+                }
+                div { class: "git-log",
+                    for commit in commits.iter() {
+                        {
+                            let sha = commit.sha.clone();
+                            let short = commit.short.clone();
+                            let subject = commit.subject.clone();
+                            let author = commit.author.clone();
+                            let date = commit.date.clone();
+                            let pid_cp = project_id.clone();
+                            let rp_cp = repo.clone();
+                            let sha_drag = sha.clone();
+                            let sha_btn = sha.clone();
+                            rsx! {
+                                div {
+                                    key: "{sha}",
+                                    class: "git-commit-row-log",
+                                    // Draggable: stash SHA on drag start so drop targets can read it
+                                    draggable: "true",
+                                    ondragstart: {
+                                        let sha_d = sha_drag.clone();
+                                        move |_| { dragged_sha.set(sha_d.clone()); }
+                                    },
+                                    div { class: "git-commit-meta",
+                                        span { class: "git-commit-short", "{short}" }
+                                        span { class: "git-commit-date", "{date}" }
+                                        span { class: "git-commit-author", "{author}" }
+                                    }
+                                    div { class: "git-commit-subject", "{subject}" }
+                                    // Per-commit cherry-pick button: fallback when drag is
+                                    // unavailable, and a convenience shortcut regardless
+                                    button {
+                                        class: "btn-edit-sm git-cherry-btn",
+                                        title: "Cherry-pick {short} onto current branch",
+                                        onclick: {
+                                            let pid = pid_cp.clone();
+                                            let rp = rp_cp.clone();
+                                            let sha = sha_btn.clone();
+                                            move |_| {
+                                                let pid = pid.clone();
+                                                let rp = rp.clone();
+                                                let sha = sha.clone();
+                                                spawn(async move {
+                                                    let (ok, out) = api_git_cherry_pick(&pid, &rp, &sha).await;
+                                                    if ok {
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Cherry-picked {sha}."));
+                                                        git_refresh += 1;
+                                                    } else {
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Cherry-pick conflict: {out}"));
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Cherry-pick"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if commits.is_empty() {
+                        p { class: "ws-hint", "No commits yet." }
+                    }
+                }
             }
         }
     }

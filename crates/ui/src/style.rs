@@ -1800,6 +1800,34 @@ html, body {
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
 
+/* ---- Git panel (issue #37) ------------------------------------------------ */
+/* Compact panels that sit beneath the branch+ship row inside each .ws-repo.    */
+.git-panel { margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 14px; display: flex; flex-direction: column; gap: 14px; }
+.git-section { display: flex; flex-direction: column; gap: 8px; }
+.git-section-label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
+.git-log-hint { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--ink-faint); }
+.git-branch-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-branch { display: inline-flex; align-items: center; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); cursor: pointer; transition: border-color .2s var(--ease), background .2s var(--ease); }
+.git-branch:hover { border-color: var(--accent); color: var(--accent-ink); }
+.git-branch.current { background: var(--accent-wash); border-color: #efd9d0; cursor: default; font-weight: 700; }
+.git-branch.current:hover { border-color: #efd9d0; color: var(--ink); }
+.git-branch-name { color: inherit; }
+.git-branch-current-mark { font-size: 10px; letter-spacing: .04em; font-weight: 700; color: var(--accent-ink); background: #fff; border: 1px solid #efd9d0; border-radius: 999px; padding: 1px 5px; }
+.git-new-branch-row { display: flex; align-items: center; gap: 8px; }
+.git-new-branch-input { flex: 1; font-size: 13px; padding: 6px 10px; }
+.git-commit-row { display: flex; align-items: center; gap: 8px; }
+.git-commit-input { flex: 1; font-size: 13px; padding: 6px 10px; }
+.git-net-btns { display: flex; gap: 8px; align-items: center; }
+.git-log { display: flex; flex-direction: column; gap: 4px; max-height: 280px; overflow-y: auto; }
+.git-commit-row-log { display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 2px; padding: 7px 10px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface); cursor: grab; transition: border-color .15s var(--ease); }
+.git-commit-row-log:hover { border-color: var(--line); }
+.git-commit-meta { grid-column: 1; grid-row: 1; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.git-commit-short { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 700; color: var(--accent-ink); }
+.git-commit-date { font-size: 11px; color: var(--ink-faint); }
+.git-commit-author { font-size: 11px; color: var(--ink-soft); }
+.git-commit-subject { grid-column: 1; grid-row: 2; font-size: 12.5px; color: var(--ink); line-height: 1.4; }
+.git-cherry-btn { grid-column: 2; grid-row: 1 / 3; align-self: center; font-size: 11px; padding: 4px 8px; white-space: nowrap; }
+
 /* ---- Rules view: project rules table (T1) + corpus table (T2) ------------- */
 
 /* Toolbar below Table 1 (remove-from-repo action + hint). */

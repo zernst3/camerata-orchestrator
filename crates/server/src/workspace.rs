@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 /// The state of one repo's local working copy, as the cockpit renders it.
@@ -332,6 +332,190 @@ pub async fn apply_local_and_push(
     Ok(dir.to_string_lossy().into_owned())
 }
 
+// ── Local git controls (issue #37) ───────────────────────────────────────────
+
+/// A single commit in the log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Commit {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// Branch list for a local checkout: the current HEAD branch plus all local branches.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BranchList {
+    pub current: String,
+    pub branches: Vec<String>,
+}
+
+/// Return the current branch and all local branch names in the working copy at `dir`.
+pub async fn list_branches(dir: &Path) -> anyhow::Result<BranchList> {
+    let current_out = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    let current = if current_out.status.success() {
+        String::from_utf8_lossy(&current_out.stdout).trim().to_string()
+    } else {
+        anyhow::bail!("git rev-parse: {}", stderr_of(&current_out));
+    };
+
+    let branch_out = git(
+        Some(dir),
+        &["branch", "--format=%(refname:short)"],
+    )
+    .await?;
+    if !branch_out.status.success() {
+        anyhow::bail!("git branch: {}", stderr_of(&branch_out));
+    }
+    let branches = String::from_utf8_lossy(&branch_out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(BranchList { current, branches })
+}
+
+/// Return the `limit` most-recent commits in the working copy at `dir`.
+pub async fn git_log(dir: &Path, limit: usize) -> anyhow::Result<Vec<Commit>> {
+    let limit_str = limit.to_string();
+    let format_arg = "--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ad";
+    let out = git(
+        Some(dir),
+        &["log", "-n", &limit_str, format_arg, "--date=short"],
+    )
+    .await?;
+
+    // git won't error on an empty repo history — just yields no output.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut commits = Vec::new();
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(5, '\x1f').collect();
+        if parts.len() == 5 {
+            commits.push(Commit {
+                sha: parts[0].to_string(),
+                short: parts[1].to_string(),
+                subject: parts[2].to_string(),
+                author: parts[3].to_string(),
+                date: parts[4].to_string(),
+            });
+        }
+    }
+    Ok(commits)
+}
+
+/// Parse `git log` `--pretty=format:%H\x1f%h\x1f%s\x1f%an\x1f%ad` raw output into commits.
+/// Exported so unit tests can drive the parser without a real git process.
+pub fn parse_git_log(raw: &str) -> Vec<Commit> {
+    raw.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(5, '\x1f').collect();
+            if parts.len() == 5 {
+                Some(Commit {
+                    sha: parts[0].to_string(),
+                    short: parts[1].to_string(),
+                    subject: parts[2].to_string(),
+                    author: parts[3].to_string(),
+                    date: parts[4].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Parse `git branch --format=%(refname:short)` raw output into branch names.
+/// Exported so unit tests can drive the parser without a real git process.
+pub fn parse_branch_list(current: &str, raw: &str) -> BranchList {
+    let branches = raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    BranchList {
+        current: current.trim().to_string(),
+        branches,
+    }
+}
+
+/// Stage all changes with `git add -A` then commit with `message`. Returns the
+/// commit output (or a "nothing to commit" notice if the tree was already clean).
+pub async fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
+    let add = git(Some(dir), &["add", "-A"]).await?;
+    if !add.status.success() {
+        anyhow::bail!("git add: {}", stderr_of(&add));
+    }
+    let commit = git(Some(dir), &["commit", "-m", message]).await?;
+    if commit.status.success() {
+        let out = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        return Ok(out);
+    }
+    let err = stderr_of(&commit);
+    let stdout = String::from_utf8_lossy(&commit.stdout);
+    if err.contains("nothing to commit") || stdout.contains("nothing to commit") {
+        return Ok("nothing to commit — working tree clean".to_string());
+    }
+    anyhow::bail!("git commit: {err}");
+}
+
+/// Push `branch` to origin using an authenticated transient URL (token never lands
+/// in `.git/config`). This is the user-triggered push from the UI; the server never
+/// calls this on its own.
+pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    let out = git(Some(dir), &["push", &authed_url(repo, token), branch]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git push {branch}: {}", stderr_of(&out));
+}
+
+/// Fast-forward `branch` from origin using an authenticated transient URL.
+pub async fn pull_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<String> {
+    let out = git(Some(dir), &["pull", "--ff-only", &authed_url(repo, token), branch]).await?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    anyhow::bail!("git pull {branch}: {}", stderr_of(&out));
+}
+
+/// Switch to an existing local branch (no creation). Use `create_branch_at` to create + switch.
+pub async fn switch_branch(dir: &Path, branch: &str) -> anyhow::Result<()> {
+    let out = git(Some(dir), &["checkout", branch]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git checkout {branch}: {}", stderr_of(&out));
+}
+
+/// Create a new branch at `dir` and switch to it. If the branch already exists, just
+/// switch to it. This variant takes the resolved `dir` directly (unlike `create_branch`
+/// which accepts root + repo identifiers).
+pub async fn create_branch_at(dir: &Path, branch: &str) -> anyhow::Result<()> {
+    let created = git(Some(dir), &["checkout", "-b", branch]).await?;
+    if created.status.success() {
+        return Ok(());
+    }
+    // Branch already exists — switch to it.
+    let switched = git(Some(dir), &["checkout", branch]).await?;
+    if switched.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git checkout {branch}: {}", stderr_of(&switched))
+}
+
+/// Cherry-pick `sha` onto the current HEAD branch. On conflict, returns the stderr so
+/// the UI can show it; the repo is left in conflict state (the user resolves or aborts).
+pub async fn cherry_pick(dir: &Path, sha: &str) -> anyhow::Result<String> {
+    let out = git(Some(dir), &["cherry-pick", sha]).await?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    // Don't silently swallow the conflict — return it so the UI shows it.
+    let detail = stderr_of(&out);
+    anyhow::bail!("cherry-pick {sha}: {detail}");
+}
+
 /// Open a governance PR from an already-pushed branch (the explicit, separate step after
 /// `apply_local_and_push`). Returns the PR URL; tolerant of a pre-existing open PR.
 pub async fn open_branch_pr(
@@ -464,6 +648,65 @@ mod tests {
 
     // Full git round-trip against a local "remote" — exercises clone, branch, status,
     // and the token-scrubbed origin, with no network.
+    // ── Tests for the new git-controls parsers (issue #37) ──────────────────
+
+    #[test]
+    fn parse_git_log_parses_valid_lines() {
+        let raw = "abc123\x1fabc\x1ffix: the bug\x1fAlice\x1f2024-01-15\n\
+                   def456\x1fdef\x1ffeat: new thing\x1fBob\x1f2024-01-14";
+        let commits = parse_git_log(raw);
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].sha, "abc123");
+        assert_eq!(commits[0].short, "abc");
+        assert_eq!(commits[0].subject, "fix: the bug");
+        assert_eq!(commits[0].author, "Alice");
+        assert_eq!(commits[0].date, "2024-01-15");
+        assert_eq!(commits[1].sha, "def456");
+        assert_eq!(commits[1].subject, "feat: new thing");
+    }
+
+    #[test]
+    fn parse_git_log_tolerates_empty_input() {
+        let commits = parse_git_log("");
+        assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn parse_git_log_skips_malformed_lines() {
+        // A line with only 3 fields should be skipped; the valid one after it parses.
+        let raw = "bad\x1fline\x1fonly-three\n\
+                   abc\x1fABC\x1fgood: commit\x1fAuthor\x1f2024-02-01";
+        let commits = parse_git_log(raw);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].short, "ABC");
+    }
+
+    #[test]
+    fn parse_git_log_subject_may_contain_record_separator_via_splitn5() {
+        // splitn(5, ..) ensures only the first 4 fields split; the subject can contain spaces.
+        let raw = "sha1\x1fsh1\x1fsubject with spaces here\x1fAuthor Name\x1f2024-03-10";
+        let commits = parse_git_log(raw);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "subject with spaces here");
+        assert_eq!(commits[0].author, "Author Name");
+    }
+
+    #[test]
+    fn parse_branch_list_builds_branch_list() {
+        let raw = "main\nfeature/foo\ncamerata/work\n";
+        let bl = parse_branch_list("feature/foo", raw);
+        assert_eq!(bl.current, "feature/foo");
+        assert_eq!(bl.branches, vec!["main", "feature/foo", "camerata/work"]);
+    }
+
+    #[test]
+    fn parse_branch_list_trims_whitespace() {
+        let raw = "  main  \n  other  ";
+        let bl = parse_branch_list("  main  ", raw);
+        assert_eq!(bl.current, "main");
+        assert!(bl.branches.iter().all(|b| b == b.trim()));
+    }
+
     #[tokio::test]
     async fn clone_branch_and_status_round_trip() {
         let base = std::env::temp_dir().join(format!("camerata-ws-rt-{}", std::process::id()));
