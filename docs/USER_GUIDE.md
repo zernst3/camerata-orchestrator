@@ -52,14 +52,14 @@ A **project** holds its repos, ruleset, and onboarded state. From the **Projects
 
 ## 2. The cockpit views
 
-Inside a project the nav shows: **Onboard repos · Development Surface · Rules · Routines ·
-Development Workspace**.
+Inside a project the nav shows: **Onboard repos · Governed Development · Rules · Routines ·
+Repository Workspace**.
 - **Onboard repos** — bring a repo under governance (§3).
-- **Development Surface** — the story control surface: adopt stories, run governed development with
+- **Governed Development** — the story control surface: adopt stories, run governed development with
   the human↔AI clarify loop, review + sign off (§6).
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
 - **Routines** — schedule governed runs.
-- **Development Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
+- **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
 
 ---
 
@@ -131,7 +131,7 @@ missing, or not a git checkout whose origin matches `owner/repo`.
 
 ---
 
-## 6. Steer a story through its lifecycle (Development Surface)
+## 6. Steer a story through its lifecycle (Governed Development)
 
 Select a story in the spine. The center stage has clickable stage tabs:
 1. **Intake** — adopted into the spine.
@@ -176,5 +176,5 @@ The floating chat bubble has two modes:
 
 **Connect GitHub + Claude → create/open a project → onboard each repo (scan → pick per-repo rules →
 Apply local branch+push → optionally audit + triage + wire CI) → manage the ruleset in the Rules view →
-adopt stories and run governed work on the Development Surface → review → sign off.** Export/import a
+adopt stories and run governed work in Governed Development → review → sign off.** Export/import a
 project to move it between machines; resolve local repo paths on the receiving side.

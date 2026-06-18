@@ -2241,7 +2241,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             button {
                 class: cls(CockpitView::Stories),
                 onclick: move |_| view.set(CockpitView::Stories),
-                "Development Surface"
+                "Governed Development"
             }
             button {
                 class: cls(CockpitView::Rules),
@@ -2256,7 +2256,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             button {
                 class: cls(CockpitView::Workspace),
                 onclick: move |_| view.set(CockpitView::Workspace),
-                "Development Workspace"
+                "Repository Workspace"
             }
         }
     }

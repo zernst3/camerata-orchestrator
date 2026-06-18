@@ -147,7 +147,7 @@ pub fn WorkspaceView() -> Element {
     rsx! {
         div { class: "page page-wide",
             p { class: "eyebrow", "Local" }
-            h1 { class: "h1", "Workspace" }
+            h1 { class: "h1", "Repository Workspace" }
             p { class: "lede",
                 "Your repos are cloned into a folder you can open and run. The governed fleet edits these local working copies on a branch; you run and test them here; then you ship a branch (push + open a PR). Nothing pushes on its own."
             }
