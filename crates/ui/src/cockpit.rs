@@ -2354,6 +2354,28 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
     }
 }
 
+/// Split a finding's detail into (body, needs-review reason). The calibration pass appends
+/// `[needs review: <reason>]` (or a bare `[needs review]`) to flag findings whose
+/// APPLICABILITY is questionable — distinct from the trivial sense in which every finding
+/// "needs review". Returns `Some(reason)` (reason may be empty) when the flag is present, so
+/// the table can surface WHY this one is flagged (e.g. "premature for a mini/internal app").
+fn split_needs_review(detail: &str) -> (String, Option<String>) {
+    if let Some(start) = detail.rfind("[needs review") {
+        if let Some(end_rel) = detail[start..].find(']') {
+            let inside = &detail[start + 1..start + end_rel];
+            let reason = inside
+                .strip_prefix("needs review")
+                .unwrap_or("")
+                .trim_start_matches([':', ' '])
+                .trim()
+                .to_string();
+            let body = detail[..start].trim_end().to_string();
+            return (body, Some(reason));
+        }
+    }
+    (detail.to_string(), None)
+}
+
 fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // Fallback badge map only. The severity column is actually drawn by a custom cell
     // renderer in FindingsTable (which overrides RenderKind::Badge) so High can be ORANGE,
@@ -2417,6 +2439,21 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         // wants "show me everything matching ARCH-" or a specific id, not a checkbox list.
         .filter(FilterKind::Text)
         .initial_width(250.0),
+        // "Needs review": the calibration pass's applicability flag with its reason. Every
+        // finding technically needs review; THESE are flagged for a specific reason (usually
+        // over-engineering / YAGNI on a small codebase). Surfaced as its own column + reason
+        // so the architect can triage the hedged ones at a glance. Text-filterable so you can
+        // show only the flagged rows. Drawn by a cell renderer (orange chip + reason).
+        ColumnDef::new(ColumnId("needs_review"), "Needs review", |f: &FindingView| {
+            match split_needs_review(&f.detail).1 {
+                Some(reason) if !reason.is_empty() => CellValue::Text(reason),
+                Some(_) => CellValue::Text("needs review".to_string()),
+                None => CellValue::Text(String::new()),
+            }
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(300.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
         ColumnDef::new(ColumnId("status"), "Enforcement", |f: &FindingView| {
@@ -2740,6 +2777,25 @@ fn FindingsTable(
                     if extra > 0 {
                         span { class: "finding-also-count", title: "{tip}", " +{extra}" }
                     }
+                }
+            }) as RowCellRenderer<FindingView>,
+        );
+        // "Needs review" flag + reason: an orange chip when the calibration pass hedged this
+        // finding, followed by the specific reason. Blank when not flagged.
+        m.insert(
+            ColumnId("needs_review"),
+            std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
+                match split_needs_review(&f.detail).1 {
+                    Some(reason) => {
+                        let reason = reason.clone();
+                        rsx! {
+                            span { class: "nr-flag", "Needs review" }
+                            if !reason.is_empty() {
+                                span { class: "nr-reason", " {reason}" }
+                            }
+                        }
+                    }
+                    None => rsx! {},
                 }
             }) as RowCellRenderer<FindingView>,
         );
@@ -3877,7 +3933,22 @@ fn ScanResults(report: ScanReportView) -> Element {
                             p { class: "rule-modal-label", "Finding" }
                             p { class: "rule-modal-title", "{f.snippet}" }
                             p { class: "rule-modal-label", "Explanation" }
-                            p { class: "rule-modal-detail", "{f.detail}" }
+                            {
+                                // Bold the calibration "[needs review: …]" flag so the reason it
+                                // was hedged stands out from the explanation body.
+                                let (body, nr) = split_needs_review(&f.detail);
+                                rsx! {
+                                    p { class: "rule-modal-detail",
+                                        "{body}"
+                                        if let Some(reason) = nr {
+                                            " "
+                                            b { class: "nr-inline",
+                                                if reason.is_empty() { "[needs review]" } else { "[needs review: {reason}]" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if !f.also_matches.is_empty() {
                                 p { class: "rule-modal-label", "Also violates at this location" }
                                 div { class: "rule-modal-meta",

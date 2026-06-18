@@ -1501,6 +1501,14 @@ html, body {
 }
 .job-progress-scope-note { font-size: 11px; color: var(--ink-faint); flex-basis: 100%; }
 
+.nr-flag {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
+  text-transform: uppercase; color: #92400e; background: #fde68a; border-radius: 999px;
+  padding: 1px 8px; white-space: nowrap;
+}
+.nr-reason { font-size: 11.5px; color: var(--ink-soft); }
+.nr-inline { color: #92400e; }
+
 .arm-note { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0 0; max-width: 90ch; }
 .arm-note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
 
