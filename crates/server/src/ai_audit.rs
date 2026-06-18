@@ -324,6 +324,8 @@ pub fn parse_ai_findings(
                 enforcement: "structured".to_string(),
                 options: Vec::new(),
                 default_option: None,
+                decision_question: None,
+                decision_why: None,
                 scope: "repo-local".to_string(),
                 domain: "architecture".to_string(),
                 // Inherently semantic -> enforced at the cross-agent integration tier

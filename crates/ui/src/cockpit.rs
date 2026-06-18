@@ -1920,6 +1920,8 @@ struct RuleOptionView {
     label: String,
     #[serde(default)]
     directive: String,
+    #[serde(default)]
+    why: String,
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -1933,6 +1935,10 @@ struct ProposedRuleView {
     options: Vec<RuleOptionView>,
     #[serde(default)]
     default_option: Option<String>,
+    #[serde(default)]
+    decision_question: Option<String>,
+    #[serde(default)]
+    decision_why: Option<String>,
     #[serde(default)]
     scope: String,
     #[serde(default)]
@@ -3281,28 +3287,62 @@ fn RuleDetailModal() -> Element {
                     span { class: "rule-modal-tag", "domain · {r.domain}" }
                     span { class: "rule-modal-tag", "scope · {r.scope}" }
                     span { class: "rule-modal-tag", "kind · {r.kind}" }
+                    if !r.enforcement.is_empty() {
+                        span { class: "rule-modal-tag", "enforcement · {r.enforcement}" }
+                    }
                 }
                 p { class: "rule-modal-placement", "Enforced via: {r.placement}" }
+                // The decision this rule frames — what the architect is actually choosing between.
+                if let Some(q) = r.decision_question.as_ref().filter(|s| !s.is_empty()) {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "The decision" }
+                        p { class: "rule-modal-question", "{q}" }
+                    }
+                }
+                // The rationale for the adopted default (decision.why).
+                if let Some(w) = r.decision_why.as_ref().filter(|s| !s.is_empty()) {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "Why the default" }
+                        p { class: "rule-modal-why", "{w}" }
+                    }
+                }
                 if r.options.is_empty() {
                     p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
                 } else {
-                    p { class: "rule-modal-label", "Choose the alternative to adopt" }
-                    div { class: "rule-modal-opts",
-                        for o in r.options.iter() {
-                            {
-                                let rid = r.id.clone();
-                                let oid = o.id.clone();
-                                let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
-                                let picked = cur.as_deref() == Some(o.id.as_str());
-                                let cls = if picked { "rule-opt on" } else { "rule-opt" };
-                                let mut chosen = chosen;
-                                rsx! {
-                                    button {
-                                        key: "{o.id}",
-                                        class: "{cls}",
-                                        onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
-                                        span { class: "rule-opt-label", "{o.label}" }
-                                        span { class: "rule-opt-directive", "{o.directive}" }
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "Choose the alternative to adopt" }
+                        if r.default_option.is_none() {
+                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                        }
+                        div { class: "rule-modal-opts",
+                            for o in r.options.iter() {
+                                {
+                                    let rid = r.id.clone();
+                                    let oid = o.id.clone();
+                                    let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                                    let picked = cur.as_deref() == Some(o.id.as_str());
+                                    let is_default = r.default_option.as_deref() == Some(o.id.as_str());
+                                    let cls = if picked { "rule-opt on" } else { "rule-opt" };
+                                    let mut chosen = chosen;
+                                    rsx! {
+                                        button {
+                                            key: "{o.id}",
+                                            class: "{cls}",
+                                            onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
+                                            div { class: "rule-opt-head",
+                                                span { class: "rule-opt-label", "{o.label}" }
+                                                if is_default {
+                                                    span { class: "rule-opt-default-badge", "default" }
+                                                }
+                                                if picked {
+                                                    span { class: "rule-opt-picked-badge", "✓ adopted" }
+                                                }
+                                            }
+                                            span { class: "rule-opt-directive", "{o.directive}" }
+                                            if !o.why.is_empty() {
+                                                span { class: "rule-opt-why", "Why: {o.why}" }
+                                            }
+                                        }
                                     }
                                 }
                             }

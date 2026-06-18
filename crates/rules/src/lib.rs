@@ -103,6 +103,9 @@ struct RuleToml {
 
 #[derive(Debug, Deserialize)]
 struct DecisionToml {
+    /// The decision this rule frames (e.g. "What position does the project take on …?").
+    #[serde(default)]
+    question: Option<String>,
     #[serde(default)]
     why: Option<String>,
     /// The id of the default option, when one is adopted.
@@ -151,6 +154,11 @@ pub struct Rule {
     /// A one-paragraph summary — sourced from `qualifies`, then
     /// `decision.why`, then `title` as a final fallback.
     pub summary: String,
+    /// The decision this rule frames (`[decision].question`), when present. The architect
+    /// reads this to understand WHAT they are choosing between.
+    pub decision_question: Option<String>,
+    /// The rationale for the adopted default (`[decision].why`), when present.
+    pub decision_why: Option<String>,
     /// The alternatives the architect chooses among. May be empty (a mechanical
     /// rule with no variants).
     pub options: Vec<RuleOption>,
@@ -381,6 +389,19 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         None
     };
 
+    // The decision context the architect reads in the rule-detail view: the question being
+    // decided and the rationale for the adopted default.
+    let decision_question = raw
+        .decision
+        .as_ref()
+        .and_then(|d| d.question.clone())
+        .filter(|s| !s.is_empty());
+    let decision_why = raw
+        .decision
+        .as_ref()
+        .and_then(|d| d.why.clone())
+        .filter(|s| !s.is_empty());
+
     let options = raw
         .options
         .into_iter()
@@ -398,6 +419,8 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         enforcement: raw.enforcement,
         domain: raw.domain,
         summary,
+        decision_question,
+        decision_why,
         options,
         default_option,
     })
@@ -623,6 +646,8 @@ mod tests {
             enforcement,
             domain: domain.to_owned(),
             summary: format!("Summary of {id}"),
+            decision_question: None,
+            decision_why: None,
             options: Vec::new(),
             default_option: None,
         }

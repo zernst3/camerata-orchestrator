@@ -68,6 +68,9 @@ pub struct RuleOptionView {
     pub label: String,
     /// The concrete directive this alternative codifies.
     pub directive: String,
+    /// Why this alternative — the rationale shown in the rule-detail view.
+    #[serde(default)]
+    pub why: String,
 }
 
 /// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
@@ -92,6 +95,13 @@ pub struct ProposedRule {
     /// The default option id, or `None` when the architect MUST choose one.
     #[serde(default)]
     pub default_option: Option<String>,
+    /// The decision this rule frames (`[decision].question`) — what the architect is choosing
+    /// between. None for rules with no decision block (content/security rules).
+    #[serde(default)]
+    pub decision_question: Option<String>,
+    /// The rationale for the adopted default (`[decision].why`), when present.
+    #[serde(default)]
+    pub decision_why: Option<String>,
     /// Scope: `repo-local` (applies within each repo), `cross-repo` (spans the
     /// repo set, e.g. API contracts), or `process` (VCS-workflow, per account).
     pub scope: String,
@@ -253,6 +263,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             enforcement: "mechanical".to_string(),
             options: Vec::new(),
             default_option: None,
+            decision_question: None,
+            decision_why: None,
             scope: "repo-local".to_string(),
             enforcement_point: "content".to_string(),
             domain: "security".to_string(),
@@ -276,6 +288,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             enforcement: "structured".to_string(),
             options: Vec::new(),
             default_option: None,
+            decision_question: None,
+            decision_why: None,
             scope: "cross-repo".to_string(),
             enforcement_point: "integration".to_string(),
             repos: repos.to_vec(),
@@ -294,6 +308,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         enforcement: "mechanical".to_string(),
         options: Vec::new(),
         default_option: None,
+        decision_question: None,
+        decision_why: None,
         scope: "process".to_string(),
         domain: "process".to_string(),
         enforcement_point: "vcs-action".to_string(),
@@ -654,6 +670,7 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                     id: o.id.clone(),
                     label: o.label.clone(),
                     directive: o.directive.clone(),
+                    why: o.why.clone(),
                 })
                 .collect();
             let enforcement = match r.enforcement {
@@ -666,6 +683,20 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
             } else {
                 "review"
             };
+            // Placement is HONEST per enforcement tier, not a one-size string: only mechanical
+            // rules get a deterministic CI gate; structured/prose rules are human-reviewed at PR
+            // (structured against CONVENTIONS.md, prose as AGENTS.md guidance).
+            let placement = match r.enforcement {
+                camerata_rules::EnforcementKind::Mechanical => {
+                    "Mechanical CI gate (deterministic check) in each repo this rule's domain applies to"
+                }
+                camerata_rules::EnforcementKind::Structured => {
+                    "Reviewed at PR against CONVENTIONS.md (structured; no mechanical gate)"
+                }
+                camerata_rules::EnforcementKind::Prose => {
+                    "Guidance in AGENTS.md, reviewed at PR (prose; no mechanical gate)"
+                }
+            };
             ProposedRule {
                 id: r.id.0.clone(),
                 title: r.title.clone(),
@@ -673,11 +704,13 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 enforcement: enforcement.to_string(),
                 options,
                 default_option: r.default_option.clone(),
+                decision_question: r.decision_question.clone(),
+                decision_why: r.decision_why.clone(),
                 scope: "repo-local".to_string(),
                 domain: r.domain.clone(),
                 enforcement_point: "content".to_string(),
                 repos,
-                placement: "CI gate + gate config in each repo this rule's domain applies to".to_string(),
+                placement: placement.to_string(),
                 finding_count: 0,
                 // SUGGESTED = the rule's domain matches the scanned stack. AGENTIC rules
                 // are ALWAYS suggested by design (they govern how the AI fleet builds,

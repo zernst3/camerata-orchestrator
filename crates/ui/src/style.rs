@@ -1645,11 +1645,19 @@ html, body {
 .rule-modal-note { font-size: 13px; color: var(--ink-soft); font-style: italic; }
 .rule-modal-label { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
 .rule-modal-opts { display: flex; flex-direction: column; gap: 8px; }
+.rule-modal-section { margin: 0 0 16px; }
+.rule-modal-question { font-size: 13.5px; color: var(--ink); line-height: 1.55; margin: 0; }
+.rule-modal-why { font-size: 12.5px; color: var(--ink-soft); line-height: 1.55; margin: 0; }
+.rule-modal-mustchoose { font-size: 12px; font-weight: 600; color: #92400e; background: #fde68a; border-radius: 7px; padding: 6px 10px; margin: 0 0 10px; }
 .rule-opt { text-align: left; border: 1px solid var(--line); background: var(--paper); border-radius: 10px; padding: 12px 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: all .15s var(--ease); }
 .rule-opt:hover { border-color: var(--accent); }
 .rule-opt.on { border-color: var(--accent); background: var(--accent-wash); box-shadow: 0 0 0 1px var(--accent); }
+.rule-opt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rule-opt-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.rule-opt-default-badge { font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-soft); background: var(--accent-wash); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+.rule-opt-picked-badge { font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: #fff; background: var(--accent); border-radius: 999px; padding: 1px 8px; }
 .rule-opt-directive { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
+.rule-opt-why { font-size: 12px; color: var(--ink-faint); line-height: 1.5; font-style: italic; margin-top: 2px; }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .pg-create-row .addressee-input { flex: 1; min-width: 180px; }
