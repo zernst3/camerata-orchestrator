@@ -15,6 +15,7 @@
 
 pub mod ai_audit;
 pub mod arm;
+pub mod draft;
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
@@ -72,6 +73,7 @@ pub struct AppState {
     settings: crate::settings::SettingsStore,
     transcripts: crate::transcript::TranscriptStore,
     jobs: crate::jobs::JobStore,
+    draft: crate::draft::DraftStore,
 }
 
 impl AppState {
@@ -90,6 +92,7 @@ impl AppState {
             settings: crate::settings::SettingsStore::new(),
             transcripts: crate::transcript::TranscriptStore::new(),
             jobs: crate::jobs::JobStore::new(),
+            draft: crate::draft::DraftStore::new(),
         }
     }
 
@@ -119,6 +122,7 @@ impl AppState {
             let dir = data.join("camerata");
             state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+            state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
         }
         state
     }
@@ -175,6 +179,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/apply", post(onboard_apply))
         .route("/api/onboard/open-pr", post(onboard_open_pr))
+        .route("/api/onboard/draft", get(onboard_draft_get).post(onboard_draft_save))
+        .route("/api/onboard/draft/clear", post(onboard_draft_clear))
         .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
@@ -1028,6 +1034,26 @@ async fn onboard_apply(
         }
     }
     Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "results": results }))
+}
+
+/// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.
+async fn onboard_draft_get(State(state): State<AppState>) -> Json<Option<serde_json::Value>> {
+    Json(state.draft.load())
+}
+
+/// Save/replace the current onboarding draft (opaque blob; the UI owns its shape).
+async fn onboard_draft_save(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    state.draft.save(body);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Drop the onboarding draft (completed, or starting fresh).
+async fn onboard_draft_clear(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.draft.clear();
+    Json(serde_json::json!({ "ok": true }))
 }
 
 #[derive(serde::Deserialize)]

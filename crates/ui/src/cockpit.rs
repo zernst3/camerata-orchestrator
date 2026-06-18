@@ -32,7 +32,7 @@ use chorale_dioxus::{
 
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
 /// filtered out server-side). The cockpit just renders what the BFF returns.
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct CockpitRule {
     id: String,
     statement: String,
@@ -60,7 +60,7 @@ async fn fetch_rules() -> Option<Vec<CockpitRule>> {
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RuleSelectionView {
     rule_id: String,
     #[serde(default)]
@@ -69,7 +69,7 @@ struct RuleSelectionView {
     repos: Vec<String>,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct CustomRuleView {
     name: String,
     #[serde(default)]
@@ -78,7 +78,7 @@ struct CustomRuleView {
     domain: String,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct RulesetView {
     #[serde(default)]
     selections: Vec<RuleSelectionView>,
@@ -90,7 +90,7 @@ struct RulesetView {
     custom: Vec<CustomRuleView>,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ProjectView {
     id: String,
     name: String,
@@ -142,7 +142,7 @@ async fn set_active_project(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct AppliedOptionView {
     id: String,
     label: String,
@@ -150,7 +150,7 @@ struct AppliedOptionView {
     directive: String,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct AppliedRuleView {
     id: String,
     repo: String,
@@ -307,7 +307,7 @@ async fn import_ruleset(project_id: &str, json: String) -> bool {
 /// is phased (see the ADR); this is the project-scoped management surface and the
 /// home for the non-repo rules.
 /// One suppression in the audit registry (`GET /api/projects/:id/suppressions`).
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct SuppressionView {
     rule_id: String,
     path: String,
@@ -679,7 +679,7 @@ async fn fetch_provider() -> Option<ProviderView> {
 
 /// A run as the BFF reports it (`GET /api/runs/:id`): status plus the REAL gate
 /// verdicts produced so far.
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RunView {
     #[serde(default)]
     id: String,
@@ -692,7 +692,7 @@ struct RunView {
 }
 
 /// One real gate verdict in a run.
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RunGateEvent {
     verdict: String,
     rule: Option<String>,
@@ -732,7 +732,7 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
 }
 
 /// A clarification as the BFF reports it (`/api/stories/:id/clarifications`).
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ClarificationView {
     id: String,
     story_id: String,
@@ -1691,8 +1691,9 @@ fn default_finding_status() -> String {
 /// three tables (a single-select switches the view) until nothing is Unresolved; then the
 /// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
 /// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 enum TriageState {
+    #[default]
     Unresolved,
     Ignored,
     TechDebt,
@@ -1710,7 +1711,7 @@ impl TriageState {
 
 /// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
 /// into the dev engine as the first story). Only meaningful when state == TechDebt.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum TechDebtBucket {
     Later,
     Now,
@@ -1718,7 +1719,7 @@ enum TechDebtBucket {
 
 /// One finding's triage disposition: its table, the (required) ignore reason, and its
 /// tech-debt bucket. Absence from the dispositions map == Unresolved with defaults.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Disposition {
     state: TriageState,
     reason: String,
@@ -1914,7 +1915,7 @@ async fn fix_audited(repo: &str, findings: &[FindingView]) -> Option<(String, St
     Some((run, mode))
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RuleOptionView {
     id: String,
     label: String,
@@ -1924,7 +1925,7 @@ struct RuleOptionView {
     why: String,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ProposedRuleView {
     id: String,
     title: String,
@@ -1953,7 +1954,7 @@ struct ProposedRuleView {
     recommended: bool,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct StackView {
     repo: String,
     #[serde(default)]
@@ -1963,7 +1964,7 @@ struct StackView {
 }
 
 /// Real audit usage from the server (the actual half of actual-vs-estimated).
-#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct ActualUsageView {
     #[serde(default)]
     input_tokens: u64,
@@ -1978,7 +1979,7 @@ struct ActualUsageView {
     cost_complete: bool,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ScanReportView {
     #[serde(default)]
     repos: Vec<String>,
@@ -2008,6 +2009,56 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
         .json::<ScanReportView>()
         .await
         .ok()
+}
+
+/// The persisted in-flight onboarding state (issue #27). Saved continuously so a brownfield
+/// onboarding survives an app restart — the architect doesn't re-scan to keep testing the
+/// post-scan features. The scan + audit (the expensive artifacts) plus the per-repo rule
+/// selection, triage dispositions, and view state are all sticky.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct OnboardingDraft {
+    scan: ScanReportView,
+    #[serde(default)]
+    audit: Option<ScanReportView>,
+    #[serde(default)]
+    repo_selection: std::collections::HashMap<String, Vec<String>>,
+    #[serde(default)]
+    dispositions: std::collections::HashMap<String, Disposition>,
+    #[serde(default)]
+    viewed_repo: String,
+    #[serde(default)]
+    triage_view: TriageState,
+}
+
+/// Load the saved onboarding draft, or None when nothing is in progress.
+async fn load_onboarding_draft() -> Option<OnboardingDraft> {
+    reqwest::Client::new()
+        .get(format!("{}/api/onboard/draft", crate::BFF_URL))
+        .send()
+        .await
+        .ok()?
+        .json::<Option<OnboardingDraft>>()
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Persist the current onboarding draft (best-effort; failure is non-fatal).
+async fn save_onboarding_draft(draft: &OnboardingDraft) {
+    let _ = reqwest::Client::new()
+        .post(format!("{}/api/onboard/draft", crate::BFF_URL))
+        .json(draft)
+        .send()
+        .await;
+}
+
+/// Drop the saved draft (a fresh scan starts a new session; clearing avoids re-seeding the
+/// previous run's audit/dispositions onto it).
+async fn clear_onboarding_draft() {
+    let _ = reqwest::Client::new()
+        .post(format!("{}/api/onboard/draft/clear", crate::BFF_URL))
+        .send()
+        .await;
 }
 
 /// A rule the user selected to audit against, carrying its per-repo binding. An empty
@@ -2050,7 +2101,7 @@ async fn audit_against(
 }
 
 /// One model the audit selector offers (`GET /api/models`).
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct AuditModelOption {
     label: String,
     id: String,
@@ -2061,7 +2112,7 @@ struct AuditModelOption {
     price_out: f64,
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct AuditModelsResp {
     models: Vec<AuditModelOption>,
     #[serde(default)]
@@ -2159,7 +2210,7 @@ fn human_tokens(t: u64) -> String {
 }
 
 /// A polled async-audit job (`GET /api/onboard/audit/job/:id`).
-#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct JobStateView {
     #[serde(default)]
     status: String,
@@ -3560,6 +3611,18 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     let mut scanning = use_signal(|| false);
     let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
 
+    // RESTORE a saved onboarding draft on first mount (issue #27): if there's no live scan
+    // but a draft exists on disk, bring its scan back so the architect resumes exactly where
+    // they left off — no re-scan. ScanResults then rehydrates its own selection/dispositions/
+    // audit from the same draft.
+    use_future(move || async move {
+        if scan.peek().is_none() {
+            if let Some(draft) = load_onboarding_draft().await {
+                scan.set(Some(draft.scan));
+            }
+        }
+    });
+
     let brownfield_cls = if path() == OnboardPath::Brownfield { "onboard-path on" } else { "onboard-path" };
     let greenfield_cls = if path() == OnboardPath::Greenfield { "onboard-path on" } else { "onboard-path" };
 
@@ -3674,6 +3737,10 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         if repos.is_empty() { return; }
                         scanning.set(true);
                         spawn(async move {
+                            // A fresh scan starts a new session: clear any prior draft FIRST so
+                            // ScanResults doesn't rehydrate the previous run's audit/dispositions
+                            // onto these results. Awaited before the scan lands.
+                            clear_onboarding_draft().await;
                             scan.set(scan_repos(&repos).await);
                             scanning.set(false);
                         });
@@ -3888,6 +3955,65 @@ fn ScanResults(report: ScanReportView) -> Element {
     let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
     let mut processing = use_signal(|| false);
+
+    // ── Auto-save / restore the onboarding draft (issue #27) ──────────────────
+    // On mount, rehydrate this scan's audit / selection / dispositions / view from the saved
+    // draft (only when it's the SAME scan). The `draft_loaded` gate keeps the save effect from
+    // overwriting the draft with initial (un-rehydrated) state before the restore runs.
+    let mut audit_w = audit;
+    let mut repo_selection_w = repo_selection;
+    let mut dispositions_w = dispositions;
+    let mut draft_loaded = use_signal(|| false);
+    {
+        let report_repos = report.repos.clone();
+        use_future(move || {
+            let report_repos = report_repos.clone();
+            async move {
+                if let Some(d) = load_onboarding_draft().await {
+                    if d.scan.repos == report_repos {
+                        if d.audit.is_some() {
+                            audit_w.set(d.audit);
+                        }
+                        if !d.repo_selection.is_empty() {
+                            repo_selection_w.set(d.repo_selection);
+                        }
+                        if !d.dispositions.is_empty() {
+                            dispositions_w.set(d.dispositions);
+                        }
+                        if !d.viewed_repo.is_empty() {
+                            viewed_repo.set(d.viewed_repo);
+                        }
+                        triage_view.set(d.triage_view);
+                    }
+                }
+                draft_loaded.set(true);
+            }
+        });
+    }
+    {
+        let report = report.clone();
+        use_effect(move || {
+            // Track every persisted slice so the effect re-runs on any change.
+            let audit_v = audit.read().clone();
+            let sel = repo_selection.read().clone();
+            let disp = dispositions.read().clone();
+            let vr = viewed_repo();
+            let tv = triage_view();
+            if !draft_loaded() {
+                return;
+            }
+            let draft = OnboardingDraft {
+                scan: report.clone(),
+                audit: audit_v,
+                repo_selection: sel,
+                dispositions: disp,
+                viewed_repo: vr,
+                triage_view: tv,
+            };
+            spawn(async move { save_onboarding_draft(&draft).await });
+        });
+    }
+
     // Live per-table counts (recompute reactively as dispositions change).
     let (n_unresolved, n_ignored, n_techdebt) = {
         let d = dispositions.read();
