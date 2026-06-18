@@ -17,6 +17,12 @@ pub struct Settings {
     /// until the architect picks one (the UI prompts for it before any checkout).
     #[serde(default)]
     pub workspace_root: Option<String>,
+    /// MACHINE-LOCAL per-repo path overrides: `owner/repo` → absolute local folder, for
+    /// repos that live OUTSIDE the workspace-root convention. This is the resolution layer for
+    /// the local-first model — it is keyed by repo identity, never travels in a project export,
+    /// and is what makes an imported project's repos resolvable on THIS machine.
+    #[serde(default)]
+    pub repo_paths: std::collections::HashMap<String, String>,
 }
 
 /// Clone-shareable settings store, persisted to a JSON file so the workspace choice
@@ -86,6 +92,27 @@ impl SettingsStore {
         };
         self.save();
         updated
+    }
+
+    /// The machine-local override path for `repo` (`owner/repo`), if one was set.
+    pub fn repo_path(&self, repo: &str) -> Option<String> {
+        self.get().repo_paths.get(repo).cloned().filter(|p| !p.trim().is_empty())
+    }
+
+    /// Record (or clear, when `path` is empty) the machine-local override for `repo`.
+    pub fn set_repo_path(&self, repo: &str, path: Option<String>) {
+        {
+            let Ok(mut s) = self.inner.lock() else { return };
+            match path.filter(|p| !p.trim().is_empty()) {
+                Some(p) => {
+                    s.repo_paths.insert(repo.to_string(), p);
+                }
+                None => {
+                    s.repo_paths.remove(repo);
+                }
+            }
+        }
+        self.save();
     }
 }
 

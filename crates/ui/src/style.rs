@@ -1501,6 +1501,18 @@ html, body {
 }
 .job-progress-scope-note { font-size: 11px; color: var(--ink-faint); flex-basis: 100%; }
 
+.repo-health { margin: 4px 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.repo-health-ok { font-size: 12.5px; color: #166534; margin: 0; font-weight: 600; }
+.repo-health-warn { margin-bottom: 8px; }
+.repo-health-warn-h { font-size: 13px; font-weight: 800; color: #92400e; }
+.repo-health-row { display: flex; align-items: center; gap: 9px; padding: 5px 0; flex-wrap: wrap; }
+.repo-health-icon { font-weight: 800; font-size: 12px; width: 16px; text-align: center; }
+.repo-health-icon.ok { color: #166534; }
+.repo-health-icon.bad { color: #b45309; }
+.repo-health-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.repo-health-path { font-size: 11.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.repo-health-reason { font-size: 12px; color: var(--ink-soft); flex: 1; min-width: 200px; }
+
 .pg-onboard-badge {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   text-transform: uppercase; border-radius: 999px; padding: 1px 8px; margin-left: 8px;

@@ -399,6 +399,116 @@ fn SuppressionsPanel(project_id: String) -> Element {
     }
 }
 
+/// One repo's local-path resolution status (issue #33), from `/api/projects/:id/repo-health`.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct RepoResolutionView {
+    repo: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    resolved: bool,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn fetch_repo_health(project_id: &str) -> Option<Vec<RepoResolutionView>> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/repo-health",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    serde_json::from_value(v.get("repos")?.clone()).ok()
+}
+
+async fn set_repo_path(repo: &str, path: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/repo-path", crate::BFF_URL))
+        .json(&serde_json::json!({ "repo": repo, "path": path }))
+        .send()
+        .await
+        .is_ok()
+}
+
+/// The broken-path health check (issue #33): for each of a project's repos, shows whether it
+/// resolves to a local git checkout, with a per-repo "Resolve…" folder picker for the broken
+/// ones. Refreshes on mount and after a resolve. Shown wherever a project's repos matter
+/// (the Rules view today); the same data backs an import's "resolve paths" prompt.
+#[component]
+fn RepoHealthPanel(project_id: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut refresh = use_signal(|| 0u32);
+    let pid = project_id.clone();
+    let health = use_resource(move || {
+        let pid = pid.clone();
+        let _ = refresh();
+        async move { fetch_repo_health(&pid).await }
+    });
+    let repos = health.read().clone().flatten().unwrap_or_default();
+    if repos.is_empty() {
+        return rsx! {};
+    }
+    let broken = repos.iter().filter(|r| !r.resolved).count();
+    rsx! {
+        div { class: "repo-health",
+            if broken == 0 {
+                p { class: "repo-health-ok", "✓ All {repos.len()} repo path(s) resolve to a local checkout." }
+            } else {
+                div { class: "repo-health-warn",
+                    span { class: "repo-health-warn-h", "⚠ {broken} repo path(s) need resolving" }
+                    p { class: "section-hint", "These repos don't point at a local git checkout on this machine (common right after importing a project). Resolve each before working on it." }
+                }
+            }
+            for r in repos.iter() {
+                {
+                    let repo = r.repo.clone();
+                    let resolved = r.resolved;
+                    let reason = r.reason.clone();
+                    let path = r.path.clone().unwrap_or_default();
+                    rsx! {
+                        div { class: "repo-health-row", key: "{r.repo}",
+                            span { class: if resolved { "repo-health-icon ok" } else { "repo-health-icon bad" },
+                                if resolved { "✓" } else { "⚠" }
+                            }
+                            span { class: "repo-health-repo", "{r.repo}" }
+                            if resolved {
+                                span { class: "repo-health-path", "{path}" }
+                            } else {
+                                span { class: "repo-health-reason", "{reason}" }
+                                button {
+                                    class: "btn-edit-sm",
+                                    onclick: move |_| {
+                                        let repo = repo.clone();
+                                        spawn(async move {
+                                            if let Some(folder) = rfd::AsyncFileDialog::new()
+                                                .set_title("Choose this repo's local folder")
+                                                .pick_folder()
+                                                .await
+                                            {
+                                                let p = folder.path().to_string_lossy().to_string();
+                                                if set_repo_path(&repo, &p).await {
+                                                    refresh += 1;
+                                                } else {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Couldn't save the repo path.");
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Resolve…"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -484,7 +594,11 @@ fn RulesView() -> Element {
                     let pid_rec = p.id.clone();
                     let pid_emit = p.id.clone();
                     let pid_sup = p.id.clone();
+                    let pid_health = p.id.clone();
                     rsx! {
+                        // Broken-path health check (issue #33): up top so a path that doesn't
+                        // resolve to a local checkout is the first thing the architect sees.
+                        RepoHealthPanel { project_id: pid_health }
                         div { class: "rules-sections",
                             RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
                             RuleCount { label: "Cross-repo rules (API contracts)", n: p.ruleset.cross_repo.len() }

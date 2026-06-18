@@ -181,6 +181,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/open-pr", post(onboard_open_pr))
         .route("/api/onboard/draft", get(onboard_draft_get).post(onboard_draft_save))
         .route("/api/onboard/draft/clear", post(onboard_draft_clear))
+        .route("/api/projects/:id/repo-health", get(project_repo_health))
+        .route("/api/repo-path", post(set_repo_path))
         .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
@@ -1046,6 +1048,59 @@ async fn onboard_apply(
         }
     }
     Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "onboarded": applied, "results": results }))
+}
+
+/// Per-repo local-path resolution for a project (issue #33): for each repo, is there a local
+/// folder, is it a git checkout, and does its origin match? Drives the broken-path health
+/// banner + per-repo icons + resolve action. Continuous (the UI calls it on load + after
+/// import + after a resolve).
+async fn project_repo_health(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "unknown project", "repos": [] }));
+    };
+    let workspace_root = state.settings.workspace_root();
+    let mut out = Vec::new();
+    for repo in &project.repos {
+        let override_path = state.settings.repo_path(repo);
+        let res = crate::workspace::repo_resolution(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        )
+        .await;
+        out.push(res);
+    }
+    Json(serde_json::json!({ "ok": true, "repos": out }))
+}
+
+#[derive(serde::Deserialize)]
+struct RepoPathReq {
+    repo: String,
+    /// The chosen local folder; empty clears the override.
+    #[serde(default)]
+    path: String,
+}
+
+/// Set (or clear) a repo's machine-local path override, then re-validate it (issue #33).
+async fn set_repo_path(
+    State(state): State<AppState>,
+    Json(req): Json<RepoPathReq>,
+) -> Json<serde_json::Value> {
+    let path = if req.path.trim().is_empty() { None } else { Some(req.path.clone()) };
+    state.settings.set_repo_path(&req.repo, path);
+    // Re-resolve so the UI gets the post-set status without a second round trip.
+    let workspace_root = state.settings.workspace_root();
+    let override_path = state.settings.repo_path(&req.repo);
+    let res = crate::workspace::repo_resolution(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &req.repo,
+    )
+    .await;
+    Json(serde_json::json!({ "ok": true, "resolution": res }))
 }
 
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.

@@ -187,6 +187,73 @@ fn parse_owner_repo(url: &str) -> Option<String> {
     }
 }
 
+/// Resolve a repo's local folder (local-first, issue #33): a machine-local per-repo override
+/// path wins; otherwise fall back to the `<workspace_root>/<owner>/<repo>` convention. None
+/// when neither is available (no override and no workspace root) — that repo is unresolved.
+pub fn resolve_repo_dir(
+    override_path: Option<&str>,
+    workspace_root: Option<&str>,
+    repo: &str,
+) -> Option<PathBuf> {
+    if let Some(p) = override_path.filter(|p| !p.trim().is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    workspace_root
+        .filter(|r| !r.trim().is_empty())
+        .map(|root| repo_dir(Path::new(root), repo))
+}
+
+/// One repo's local-path resolution status for the health check (issue #33).
+#[derive(serde::Serialize)]
+pub struct RepoResolution {
+    pub repo: String,
+    /// The resolved local folder, if any was determined.
+    pub path: Option<String>,
+    /// True only when `path` is a git checkout whose `origin` matches `repo`.
+    pub resolved: bool,
+    /// Human reason when not resolved (no path / not a checkout / wrong origin).
+    pub reason: String,
+}
+
+/// Resolve + validate one repo against the local filesystem: is there a folder, is it a git
+/// checkout, and does its `origin` remote match `owner/repo`? Pure of side effects.
+pub async fn repo_resolution(
+    override_path: Option<&str>,
+    workspace_root: Option<&str>,
+    repo: &str,
+) -> RepoResolution {
+    let Some(dir) = resolve_repo_dir(override_path, workspace_root, repo) else {
+        return RepoResolution {
+            repo: repo.to_string(),
+            path: None,
+            resolved: false,
+            reason: "no local path set — choose the repo's folder (or set a workspace root)"
+                .to_string(),
+        };
+    };
+    let path_str = dir.to_string_lossy().into_owned();
+    match detect_remote_repo(&dir).await {
+        Ok(found) if found == repo => RepoResolution {
+            repo: repo.to_string(),
+            path: Some(path_str),
+            resolved: true,
+            reason: String::new(),
+        },
+        Ok(found) => RepoResolution {
+            repo: repo.to_string(),
+            path: Some(path_str),
+            resolved: false,
+            reason: format!("that folder is a different repo (origin: {found})"),
+        },
+        Err(e) => RepoResolution {
+            repo: repo.to_string(),
+            path: Some(path_str),
+            resolved: false,
+            reason: e,
+        },
+    }
+}
+
 /// Create (or switch to) a working branch in the local clone. Used when the fleet
 /// starts code work so edits land on a branch, not the default.
 pub async fn create_branch(root: &Path, repo: &str, branch: &str) -> anyhow::Result<()> {
