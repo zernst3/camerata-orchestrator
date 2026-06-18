@@ -6,7 +6,10 @@
 
 use dioxus::prelude::*;
 
-const USER_GUIDE: &str = include_str!("../docs/USER_GUIDE.md");
+// Grounds the chat bubble's Guide mode in the CANONICAL repo user guide (docs/USER_GUIDE.md),
+// not a UI-local copy — so the assistant tracks the same doc the rest of the project maintains
+// and can't drift into describing features that aren't shipped.
+const USER_GUIDE: &str = include_str!("../../../docs/USER_GUIDE.md");
 
 /// One model the selector offers (`GET /api/models`).
 #[derive(Clone, PartialEq, serde::Deserialize)]

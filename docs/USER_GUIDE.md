@@ -1,210 +1,153 @@
 # Camerata — end-to-end user guide
 
-This is the "I have a repo new to Camerata — where do I start, and how do I take it
-all the way through?" walkthrough. It covers both **brownfield** (an existing repo)
-and **greenfield** (a new repo), the two credentials you connect, and the full loop
-from onboarding a repo to shipping a governed change.
+This is the "I have a repo new to Camerata — where do I start, and how do I take it all
+the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat
+bubble's **Guide** mode) answers from. Keep it accurate to what's actually shipped — an
+assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status note (updated 2026-06-16): the app runs end to end on a **clean slate** with
-> no seeded data. The two things you connect are a **GitHub token** and **Claude**
-> (the `claude` CLI). What each step needs is called out inline, honestly: the steps
-> light up the moment the token is present. The brownfield **scan + audit engine is
-> now built and live** — the deterministic security floor (secrets / raw-SQL /
-> secret-URLs) plus an AI architectural audit, with a user-selectable model, three
-> scan modes (Parallel / Sequential / Background job), and async jobs you can walk
-> away from. See the Audit step below.
+> Status (updated 2026-06-18): the brownfield **onboarding flow is built and live** — per-repo
+> stack detection + rule selection, an optional code audit with three scan modes, a three-table
+> finding triage, and an **Apply** step that writes governance onto a local branch and pushes it
+> (no PR until you ask). Projects are **exportable/importable**, repos resolve to **local
+> folders** with a health check, and onboarding state **auto-saves**. The two things you connect
+> are a **GitHub token** and **Claude** (the `claude` CLI).
 
 ---
 
 ## 0. The two connections (the only setup)
 
-Everything else is wired. You provide:
-
-1. **GitHub** — a token, via environment variables. One token serves **every repo
-   it can reach** (Camerata never scopes itself below the token):
+1. **GitHub** — a token via environment variable. One token serves every repo it can reach:
    ```bash
-   export CAMERATA_GITHUB_TOKEN=github_pat_xxx      # Issues R/W; + read:project for boards
-   # optional default repo (a convenience, never a ceiling):
-   export CAMERATA_GITHUB_REPO=owner/repo
+   export CAMERATA_GITHUB_TOKEN=github_pat_xxx      # Contents + PR write to apply/open PRs; Issues R/W for tickets
    ```
-   See [`GITHUB_SETUP.md`](GITHUB_SETUP.md) for token scopes.
+2. **Claude** — the `claude` CLI on your PATH, logged in (subscription) or with `ANTHROPIC_API_KEY`
+   set (metered API). This is what the audit and the governed fleet run as. Set
+   `CAMERATA_LIVE_BUILD=1` to run a real `claude -p` fleet for governed dev work.
 
-2. **Claude** — the `claude` CLI on your PATH, logged in (`claude` Code
-   subscription or an API key). This is what the governed fleet runs as agents.
-   Camerata locks each agent to a single gated write tool; it never gets `Bash`,
-   `Write`, or subagents (see [`HARDENING.md`](HARDENING.md)).
-
-   **CLI vs API.** Camerata's live driver shells out to the **`claude` CLI**
-   (`claude -p`); a direct-Anthropic-API driver is a seam but not built. So you
-   configure *how the CLI authenticates*: log in for **subscription** credits, or
-   set `ANTHROPIC_API_KEY` for **metered API** billing (the CLI picks it up). Set
-   `CAMERATA_LIVE_BUILD=1` to run a real `claude -p` fleet (otherwise runs are
-   scripted/token-free, but the gate deciding is still the real one).
-
-### Notifications & polling cadence (optional env)
-
-Camerata polls the integrations (no webhooks needed). Intervals are env-configurable
-with sensible defaults:
-
-| Variable | Default | What it paces |
-|---|---|---|
-| `CAMERATA_POLL_TRACKER_SECS` | `45` | Server poll of tracker events (PO comments, status changes). |
-| `CAMERATA_POLL_DEPLOY_SECS` | `5` | Deployment-status poll (fast; reserved until a deploy source is wired). |
-| `CAMERATA_UI_NOTIFY_SECS` | `5` | How often the app drains the notification feed into toasts. |
-
-#### Audit / model env (optional)
-
-The audit model is picked in the UI per scan, but these env vars set defaults and
-tune the LLM calls:
-
-| Variable | Default | Effect |
-|---|---|---|
-| `CAMERATA_LLM_MODEL` | `claude-sonnet-4-6` | Default model for generic/research LLM calls. |
-| `CAMERATA_AUDIT_MODEL` | (the default) | Default model for the audit passes (the UI model picker overrides it per scan). |
-| `CAMERATA_LLM_IDLE_SECS` | `120` | Stall timeout for a streaming call — fails a pass if the model produces no output for this long (catches a true hang without capping a legitimately long stream). |
-| `CAMERATA_LLM_MAX_SECS` | `600` | Coarse total backstop for non-streaming calls (calibration/headless). |
-
-The app shows **toasts**: a warning when no integration is connected (optional, not
-an error), an error when a configured connection fails (401/403/5xx), and an info
-toast when one recovers — re-checked every 45s. Tracker events (a PO answering a
-comment) flow through the server poller into toasts. Note the background tracker
-poll uses the connection's **default repo** (`CAMERATA_GITHUB_REPO`); set it for the
-poller to have a repo to watch.
-
-Set the token, then launch:
+Launch:
 ```bash
 CAMERATA_GITHUB_TOKEN=github_pat_xxx cargo run -p camerata-ui
 ```
-The desktop app opens with its embedded server. The cockpit topbar shows the live
-connection (`github (token; …)` vs `native (in-process)`), so you can confirm the
-token took.
+The desktop app opens with its embedded server; the topbar shows the live connection.
+
+**Local-first:** Camerata stores only configs + pointers (JSON in your OS app-data dir —
+`projects.json`, `settings.json`, `onboarding-draft.json`); your repo code lives on your own
+machine. Each repo a project references must resolve to a local git checkout (see §5).
 
 ---
 
-## 1. Where you start: onboard the repo
+## 1. Projects (the container for everything)
 
-Open the **Enterprise cockpit** edition, then the **"Onboard a repo"** tab. This is
-the entry point for any repo new to Camerata. It is *separate* from a story's
-Investigation phase — onboarding sets up the **repo's** rules and CI gate;
-Investigation refines one **piece of work**.
+A **project** holds its repos, ruleset, and onboarded state. From the **Projects** home you can:
+- **Create** a project (just a name to start).
+- **Open** one (the cockpit's four+1 views only appear inside a project).
+- **Export** the open project — a single, **path-free** `camerata-project-<name>.json` containing
+  only that project's repos (`owner/repo`), ruleset, and which repos are onboarded. It does **not**
+  include local paths or your workspace settings.
+- **Import** a project config — it **upserts** into your local projects. If you already have a
+  project with the same name, Camerata **warns before overwriting**. Your own workspace settings are
+  never touched. After import the repos have no local paths yet — resolve them in the Rules view (§5).
 
-Pick your path:
+---
 
-Brownfield onboards a **set of inter-related repos** at once (one `owner/repo` per
-line — e.g. a .NET API, a Python worker, a React app). Camerata downloads the WHOLE
-of each repo (one tarball each, not a per-file cap) and:
+## 2. The cockpit views
 
-- runs the **universal** rules (secrets, raw SQL, secrets-in-URL) immediately → instant
-  findings, no stack knowledge needed (the 5-minute payoff);
-- **detects each repo's stack** (languages from extensions, frameworks from manifests)
-  and proposes the **stack-specific** rules that apply, for you to select;
-- classifies every proposed rule by **scope** (repo-local / cross-repo / process) and
-  **placement** (which gate lives where), so you approve where each rule and its gate go.
+Inside a project the nav shows: **Onboard repos · Development Surface · Rules · Routines ·
+Development Workspace**.
+- **Onboard repos** — bring a repo under governance (§3).
+- **Development Surface** — the story control surface: adopt stories, run governed development with
+  the human↔AI clarify loop, review + sign off (§6).
+- **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
+- **Routines** — schedule governed runs.
+- **Development Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
 
-Findings land in a table you **triage**: select rows and **Ignore**, **Resolve** (queue
-a governed fix), or **Accept as tech debt** (opens a ticket with the findings).
+---
 
-### Brownfield (an existing repo)
-The flow is **scan → propose → approve → audit → arm**:
+## 3. Onboarding a repo (the main flow)
 
-1. **Point at the repo** — `owner/repo` your token can reach.
-2. **Scan + propose a starter ruleset** — Camerata maps the stack and conventions
-   and proposes a starting RuleSet. You *review*, you don't author from scratch.
-3. **Approve / edit** — adjust and approve. You own the final set.
-4. **Audit** — scan the existing code against the approved rules and list what's
-   already wrong. This is the five-minute payoff ("here are the 12 things wrong in
-   your repo right now"). Two tiers run together: the **deterministic security floor**
-   (hardcoded secrets, raw-SQL-concat, secrets-in-URLs) always runs, free + instant,
-   and ranks its hits **Critical**; the **AI architectural audit** checks the code
-   against the rules you selected (layering, DI, exact-decimals, auth gaps, N+1, …)
-   and flags anything else worth a look (advisory). Pick the **model** (speed vs
-   thoroughness) and the **scan mode** — *Parallel* (default), *Sequential* (gentle),
-   or *Background job* (async; submit, walk away, watch progress stream) — both
-   auto-recommended by the scan's size. Click any finding row to read the violated
-   rule's full directive + explanation. Findings are tagged **Rule · enforced**
-   (deterministic, gateable) vs **AI · advisory** (review-only).
-5. **Arm** — select the rules and press **"Arm selected rules → governance PR"**.
-   Camerata opens a PR per repo installing the **adopted** ruleset in the
-   camerata-ai emit format: **prose** rules → `AGENTS.md`, **structured/mechanical**
-   rules → `CONVENTIONS.md` (each as a single citable directive — your chosen
-   alternative, not the curation surface), plus `.camerata/rules.json` (the gate
-   config). A rule with alternatives must have an alternative chosen first. Merge
-   the PR and the repo is governed going forward. (Needs Contents + PR write on the
-   token.)
+Open **Onboard repos**. The flow: **scan → pick rules → apply → (optional audit → triage → CI step)
+→ onboarded.** Onboarding state **auto-saves** continuously, so you can quit and reopen without
+re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
-### Greenfield (a new repo)
-**name → pick starter ruleset → scaffold + arm**: Camerata scaffolds the repo with
-the rules baked in from commit zero, so it's governed from the first commit.
+1. **Add repos** to the project (one `owner/repo` per line, or browse to a local folder).
+2. **Scan** — Camerata downloads each repo and detects its stack: languages from extensions,
+   frameworks from manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and
+   **CI/CD** (GitHub Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone,
+   Jenkins). It proposes a starter ruleset **per repo**.
+3. **Pick rules** — each repo has its **own** recommended-rule table; a repo single-select switches
+   which repo you're editing. Selection is **per repo**: a rule ticked for repo A is bound to A only.
+   **Project-level rules** apply to every repo. Click any rule to read its decision question, the
+   options, the default, and each option's rationale, and to choose an alternative.
+4. **Apply rules** — writes the governance files onto a `camerata/onboard-governance` branch in each
+   repo's **local clone AND pushes that branch to origin — no pull request is opened.** The files:
+   `AGENTS.md` (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for
+   mechanical rules), and `.camerata/baseline.json` (accepted pre-existing debt). Edit the working
+   copy freely, then click **Open governance PR** (a separate button) when ready. **Applying marks the
+   repo onboarded** — the audit is **not** required to finish.
+5. **Audit (optional)** — run it to surface existing violations to triage. Each repo is scanned only
+   against **its own selected rules** plus the always-on **deterministic security floor** (hardcoded
+   secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free + instant). Pick the
+   **model** and the **scan mode** (*Parallel* / *Sequential* / *Background job* — a multi-repo or
+   large scan auto-selects Background, which runs one repo at a time and streams progress). A
+   pre-run **cost estimate** (biased high) shows tokens/passes before you commit.
+6. **Triage findings** — findings live in three tables you switch between: **Unresolved · Ignored ·
+   Tech debt**. Select findings and **Ignore (with reason)** or **Save as tech debt**; they move
+   tables, and you can re-bucket between any of the three. Findings carry a **Needs-review** column
+   when the calibration pass flags them (e.g. "over-engineered for a mini app") with the specific
+   reason. In the Tech-debt table mark each item **resolve later** or **resolve now**, then
+   **Process**: "later" → a tracked ticket (with CSV), "now" → the dev engine.
+7. **Apply mechanical rules to CI** — the final step (once nothing is Unresolved): wires the selected
+   mechanical rules into each repo's existing CI as enforced lint gates (checks what's already
+   enforced, adds the rest, as a governed run). Separate from fixing/ticketing the violations.
 
-> The "Scan repo" / "Scaffold repo" button activates once GitHub is connected (it
-> runs against your repo). Until a token is present, the view explains each step and
-> the button is disabled — that is the honest gate, not a dead button.
+**Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
+from commit zero.
 
 Design rationale: [`decisions/2026-06-15_brownfield_onboarding_flow.md`](decisions/2026-06-15_brownfield_onboarding_flow.md).
 
 ---
 
-## 2. Bring in work: stories from your tracker
+## 4. The Rules view (manage the ruleset)
 
-A **story** is a unit of work. It has two independent axes (shown in the cockpit
-topbar):
+Two tables:
+- **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
+  single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
+  a rule from a repo. Edits persist to the project's ruleset.
+- **All rules** — the full corpus, viewable even when unassigned. Each row shows **which repos it's
+  applied to**, with **"Add to repo"** (add a rule to any repo it's not yet on — directly here) and a
+  jump to the project-rules table for editing.
 
-- **Source** — where it's tracked: a GitHub **Issue**, a **Projects v2** board card,
-  later ADO/Jira. Projects/boards sit *above* the repo.
-- **Build targets** — the repo(s) where its code lands. One story can span several
-  repos.
-
-Two ways to get stories into the spine:
-
-- **Adopt a GitHub issue** — pull an issue in by id (and `owner/repo`); it appears in
-  the spine as a story. The first live round-trip is the CLI canary:
-  ```bash
-  CAMERATA_GITHUB_TOKEN=… CAMERATA_GITHUB_REPO=owner/repo CAMERATA_GITHUB_ISSUE=1 \
-    cargo run -p camerata -- worktracker-live
-  ```
-- **List a Projects v2 board** (spans repos):
-  ```bash
-  CAMERATA_GITHUB_TOKEN=… CAMERATA_GITHUB_PROJECT_OWNER=you \
-    CAMERATA_GITHUB_PROJECT_NUMBER=1 cargo run -p camerata -- projects-live
-  ```
-  One board yields stories across different repos, each with its own source +
-  target. (Surfacing the board as a cockpit view is the next UI step; the engine is
-  built and proven by the CLI.)
-
-Design rationale: [`decisions/2026-06-15_credential_delegated_scope_and_build_targets.md`](decisions/2026-06-15_credential_delegated_scope_and_build_targets.md).
+The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
 
 ---
 
-## 3. Steer a story through its lifecycle (the cockpit)
+## 5. Repo paths (resolution + health)
 
-Select a story in the spine. The center stage has five **clickable** tabs — click to
-preview any stage; the highlighted one is where the story actually is:
+Each repo resolves to a **local folder** — repos can live anywhere; the path is machine-local and is
+**never exported**. The Rules view runs a continuous **health check**: any repo that doesn't point at
+a valid local git checkout (common right after importing a project) is flagged with a warning + a
+per-repo **Resolve…** button to browse to its folder. A repo is "broken" when its path is unset,
+missing, or not a git checkout whose origin matches `owner/repo`.
 
+---
+
+## 6. Steer a story through its lifecycle (Development Surface)
+
+Select a story in the spine. The center stage has clickable stage tabs:
 1. **Intake** — adopted into the spine.
-2. **Investigation** — the lead engineer raises clarifying questions via the
-   **bridge** (posts a comment on the tracker item; the requirements owner answers
-   there; the answer comes back). Review before posting.
-3. **Plan** — **decompose** the story into component child stories per your practice;
-   each child is independently governable and targets its own repo.
-4. **Status (execution & gating)** — press **"Run this story (governed)"**. The
-   governed fleet runs under the gate:
-   - **Layer 1** denies a forbidden write *before* it touches disk (at the MCP tool
-     boundary).
-   - **Layer 2** re-checks each task after (`fmt`/`clippy`/`test`).
-   - The **worktree jail** structurally confines every write to the story's worktree.
-   Real deny/allow verdicts stream into the panel. *Without `CAMERATA_LIVE_BUILD=1`
-   this runs in a token-free scripted mode — the agent is scripted but the gate
-   deciding is the real one. With the flag set (and `claude` connected), it's a real
-   `claude -p` fleet.*
-5. **QA & sign-off** — review the diff + gate results, then sign off. Provenance (PR
-   links, gate verdicts, sign-off) is written back to the tracker item.
-
-The **Inspector** (right rail) lists the gate's actual enforced rules, live from the
-engine.
+2. **Investigation** — the lead engineer raises clarifying questions via the bridge (posts a comment
+   on the tracker item; the owner answers; the answer comes back). Review before posting.
+3. **Plan** — decompose the story into child stories, each independently governable.
+4. **Status (execution & gating)** — "Run this story (governed)". The fleet runs under the gate:
+   **Layer 1** denies a forbidden write before it touches disk; **Layer 2** re-checks each task
+   (`fmt`/`clippy`/`test`); the **worktree jail** confines every write. Without `CAMERATA_LIVE_BUILD=1`
+   this runs token-free/scripted (the gate deciding is still real); with it set + `claude` connected,
+   a real `claude -p` fleet.
+5. **QA & sign-off** — review the diff + gate results, sign off; provenance is written back.
 
 ---
 
-## 4. The rules that govern it
+## 7. The rules that govern it
 
 Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
 
@@ -213,33 +156,25 @@ Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
 | **Layer 1** (MCP tool gate) | one write's file content, before it executes | no hardcoded secret reaches disk |
 | **Layer 2** (CheckRunner) | one task's diff, after | `fmt`/`clippy`/`test` |
 | **Integration gate** | the assembled tree (cross-agent) | API contract between two agents agrees |
-| **VCS-action gate** | commit/PR/branch **metadata** | the PR title + commit subject carry `AB#<id>` |
+| **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
 
-Rule scopes: **corpus-global** (shipped), **repo-local** (from onboarding),
-**cross-repo** (contracts), **process** (your workflow conventions, e.g. the
-`AB#{id}` ticket link — `ProcessRule::ado_ticket_link()`). The process gate is
-complete by construction: the agent has no `git`, so Camerata is the sole committer.
-
-Design rationale:
-[`decisions/2026-06-15_cross_agent_integration_gate.md`](decisions/2026-06-15_cross_agent_integration_gate.md),
-[`decisions/2026-06-15_process_rules_and_vcs_action_gate.md`](decisions/2026-06-15_process_rules_and_vcs_action_gate.md).
+Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo** (contracts),
+**process** (workflow conventions). The agent has no `git`, so Camerata is the sole committer.
 
 ---
 
-## 5. The whole loop, in one line
+## 8. The in-app assistant (chat bubble)
 
-**Connect GitHub + Claude → onboard the repo (brownfield audit + arm, or greenfield
-scaffold) → adopt/list stories → investigate → decompose → run governed → review →
-sign off → provenance written back.**
+The floating chat bubble has two modes:
+- **Research** — open AI chat (any question), a live smoke test that the model backend works.
+- **Guide** — answers "how do I do X in Camerata?" grounded in THIS user guide. It answers only from
+  the guide and says when something isn't covered, so it won't invent features.
 
-## What's live now vs. what's the next build
+---
 
-- **Live (clicks/works on a clean slate):** every cockpit view and tab, the onboarding
-  view (connection-gated), adopting issues, listing Projects boards (CLI), governed
-  runs (scripted or live), the four enforcement gates' deterministic cores,
-  source/target story model.
-- **Needs the connections to exercise:** anything hitting GitHub (adopt, scan,
-  Projects) needs the token; a real `claude -p` fleet needs `claude` + `CAMERATA_LIVE_BUILD=1`.
-- **Next backend builds (flagged, not faked):** the brownfield scan/audit/arm engine
-  (the view + flow exist; the repo-scanning engine is the build), the Projects board
-  as a cockpit view, and wiring the VCS-action gate into the live commit/PR path.
+## The whole loop, in one line
+
+**Connect GitHub + Claude → create/open a project → onboard each repo (scan → pick per-repo rules →
+Apply local branch+push → optionally audit + triage + wire CI) → manage the ruleset in the Rules view →
+adopt stories and run governed work on the Development Surface → review → sign off.** Export/import a
+project to move it between machines; resolve local repo paths on the receiving side.
