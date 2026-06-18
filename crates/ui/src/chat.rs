@@ -50,6 +50,59 @@ async fn fetch_models() -> Option<ModelsResp> {
         .ok()
 }
 
+/// A corpus rule, trimmed to what the Guide assistant needs to NAME and describe it.
+#[derive(Clone, serde::Deserialize)]
+struct CorpusRuleLite {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    domain: String,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    options: Vec<CorpusOptLite>,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct CorpusOptLite {
+    #[serde(default)]
+    label: String,
+}
+
+/// Fetch the whole rule corpus (`GET /api/corpus-rules`) and render it as a compact catalog
+/// the Guide assistant can cite from — so "give me an example of a repo-level rule" gets a real
+/// rule id + title, not "the guide doesn't say". One line per rule: id [domain · scope]: title,
+/// plus the alternatives it offers. Grounded in the live corpus, so it can't go stale.
+async fn fetch_rules_catalog() -> Option<String> {
+    let mut rules: Vec<CorpusRuleLite> =
+        reqwest::get(format!("{}/api/corpus-rules", crate::BFF_URL))
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+    if rules.is_empty() {
+        return None;
+    }
+    rules.sort_by(|a, b| (&a.domain, &a.id).cmp(&(&b.domain, &b.id)));
+    let mut s = String::new();
+    for r in &rules {
+        let domain = if r.domain.is_empty() { "general" } else { r.domain.as_str() };
+        let scope = if r.scope.is_empty() { "repo-local" } else { r.scope.as_str() };
+        s.push_str(&format!("- {} [{} · {}]: {}", r.id, domain, scope, r.title));
+        if !r.options.is_empty() {
+            let labels: Vec<&str> =
+                r.options.iter().map(|o| o.label.as_str()).filter(|l| !l.is_empty()).collect();
+            if !labels.is_empty() {
+                s.push_str(&format!("  (alternatives: {})", labels.join(" / ")));
+            }
+        }
+        s.push('\n');
+    }
+    Some(s)
+}
+
 /// Which mode the chat panel is in.
 #[derive(Clone, Copy, PartialEq)]
 enum ChatMode {
@@ -73,13 +126,25 @@ async fn send_chat(prompt: &str, model: &str, system: Option<&str>) -> Option<Ch
         .ok()
 }
 
-/// Build the Guide-mode system prompt at call time (avoids a large const).
-fn guide_system_prompt() -> String {
-    format!(
-        "You are Camerata's in-app assistant. Answer the user's question about HOW TO USE \
-         Camerata, using ONLY the user guide below. If the answer isn't in the guide, say so \
-         briefly. Be concise and concrete.\n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
-    )
+/// Build the Guide-mode system prompt at call time (avoids a large const). Grounded in the
+/// canonical user guide PLUS the live rules catalog, so the assistant can both explain flows and
+/// name/describe actual governance rules. Both are real, maintained sources — it must not
+/// improvise features or rules that aren't in them.
+fn guide_system_prompt(rules_catalog: &str) -> String {
+    let mut p = format!(
+        "You are Camerata's in-app assistant. Answer the user's question about Camerata using \
+         ONLY the materials below: the USER GUIDE for how-to and flows, and the RULES CATALOG for \
+         specific governance rules. When asked for examples of rules (e.g. a repo-local rule), \
+         cite REAL rule ids + titles from the catalog (scope=repo-local are repo-level; \
+         cross-repo/process are project-level; the security floor is always-on). If something \
+         isn't in these materials, say so briefly rather than guessing. Be concise and concrete.\
+         \n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
+    );
+    if !rules_catalog.trim().is_empty() {
+        p.push_str("\n\n=== CAMERATA RULES CATALOG (every governance rule, with domain · scope) ===\n");
+        p.push_str(rules_catalog);
+    }
+    p
 }
 
 #[component]
@@ -103,6 +168,14 @@ pub fn ChatBubble() -> Element {
     let mut turns = use_signal(Vec::<Turn>::new);
     let mut draft = use_signal(String::new);
     let mut sending = use_signal(|| false);
+
+    // The live rules catalog, fetched once, fed into the Guide system prompt so the assistant
+    // can cite real rule ids/titles. Empty string until it loads (the guide alone still answers).
+    let rules_res = use_resource(fetch_rules_catalog);
+    let rules_catalog = rules_res.read().clone().flatten().unwrap_or_default();
+    // One clone per send closure (onkeydown + onclick each move-capture their own).
+    let catalog_kd = rules_catalog.clone();
+    let catalog_btn = rules_catalog;
 
     rsx! {
         // Floating launcher.
@@ -194,7 +267,7 @@ pub fn ChatBubble() -> Element {
                                 let prompt = draft().trim().to_string();
                                 if prompt.is_empty() || sending() { return; }
                                 let mdl = model();
-                                let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt()) } else { None };
+                                let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt(&catalog_kd)) } else { None };
                                 turns.write().push(Turn { role: "you", text: prompt.clone() });
                                 draft.set(String::new());
                                 sending.set(true);
@@ -222,7 +295,7 @@ pub fn ChatBubble() -> Element {
                             let prompt = draft().trim().to_string();
                             if prompt.is_empty() || sending() { return; }
                             let mdl = model();
-                            let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt()) } else { None };
+                            let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt(&catalog_btn)) } else { None };
                             turns.write().push(Turn { role: "you", text: prompt.clone() });
                             draft.set(String::new());
                             sending.set(true);
