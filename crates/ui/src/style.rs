@@ -1483,6 +1483,31 @@ html, body {
 /* ---- rule detail modal (click a row) -------------------------------------- */
 /* Proposed-rules table: per-domain "select all" as a column-filter-style
    multi-select. Trigger opens a FIXED-HEIGHT, scrollable checkbox list. */
+.triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
+.triage-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 12.5px; font-weight: 600; padding: 7px 13px; border-radius: 8px; cursor: pointer;
+  transition: border-color .15s var(--ease), color .15s var(--ease), background .15s var(--ease);
+}
+.triage-tab:hover { border-color: var(--accent); color: var(--ink); }
+.triage-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.triage-tab-count {
+  font-size: 11px; font-weight: 800; min-width: 18px; text-align: center;
+  padding: 1px 6px; border-radius: 999px; background: var(--accent-wash); color: var(--ink);
+}
+.triage-tab.active .triage-tab-count { background: rgba(255,255,255,.25); color: #fff; }
+.triage-process {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 12px 0; padding: 11px 13px;
+  background: var(--accent-wash); border: 1px solid var(--line); border-radius: 9px;
+}
+.td-bucket {
+  display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+}
+.td-bucket.later { background: var(--accent-wash); color: var(--ink-soft); border: 1px solid var(--line); }
+.td-bucket.now { background: #fde68a; color: #92400e; }
+
 .repo-select {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin: 4px 0 12px; padding: 9px 12px;

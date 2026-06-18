@@ -1687,6 +1687,67 @@ fn default_finding_status() -> String {
     "active".to_string()
 }
 
+/// Where a finding sits in onboarding triage. The architect moves each finding between these
+/// three tables (a single-select switches the view) until nothing is Unresolved; then the
+/// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
+/// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriageState {
+    Unresolved,
+    Ignored,
+    TechDebt,
+}
+
+impl TriageState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unresolved => "Unresolved",
+            Self::Ignored => "Ignored",
+            Self::TechDebt => "Tech debt",
+        }
+    }
+}
+
+/// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
+/// into the dev engine as the first story). Only meaningful when state == TechDebt.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TechDebtBucket {
+    Later,
+    Now,
+}
+
+/// One finding's triage disposition: its table, the (required) ignore reason, and its
+/// tech-debt bucket. Absence from the dispositions map == Unresolved with defaults.
+#[derive(Clone, PartialEq)]
+struct Disposition {
+    state: TriageState,
+    reason: String,
+    bucket: TechDebtBucket,
+}
+
+impl Default for Disposition {
+    fn default() -> Self {
+        Self { state: TriageState::Unresolved, reason: String::new(), bucket: TechDebtBucket::Later }
+    }
+}
+
+/// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
+/// so its disposition survives table switches and re-sorts.
+fn finding_key(f: &FindingView) -> String {
+    format!("{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}", f.repo, f.rule_id, f.path, f.line, f.snippet)
+}
+
+/// The disposition state for a finding (Unresolved when absent from the map).
+fn finding_state(
+    dispositions: &std::collections::HashMap<String, Disposition>,
+    f: &FindingView,
+) -> TriageState {
+    dispositions
+        .get(&finding_key(f))
+        .map(|d| d.state)
+        .unwrap_or(TriageState::Unresolved)
+}
+
 /// Wire the mechanical (CI-tier) governance rules into a repo's CI as a governed dev run.
 /// Returns `(run_id, mode)`.
 async fn wire_ci_rules(repo: &str) -> Option<(String, String)> {
@@ -2258,7 +2319,7 @@ async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
     }
 }
 
-fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
+fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // Fallback badge map only. The severity column is actually drawn by a custom cell
     // renderer in FindingsTable (which overrides RenderKind::Badge) so High can be ORANGE,
     // distinct from Critical's red — chorale's built-in palette has no orange and would
@@ -2268,7 +2329,7 @@ fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
         .with("high", BadgeVariant::new("High", "red"))
         .with("medium", BadgeVariant::new("Medium", "yellow"))
         .with("low", BadgeVariant::new("Low", "gray"));
-    vec![
+    let mut cols = vec![
         ColumnDef::new(ColumnId("repo"), "Repo", |f: &FindingView| {
             CellValue::Text(f.repo.clone())
         })
@@ -2357,7 +2418,18 @@ fn finding_columns(repos: Vec<String>) -> Vec<ColumnDef<FindingView>> {
             CellValue::Text(f.snippet.clone())
         })
         .initial_width(380.0),
-    ]
+    ];
+    // The tech-debt bucket flag (resolve later / now). Drawn by a row renderer that reads the
+    // live disposition map; the accessor is a placeholder. Only present in the tech-debt view.
+    if show_bucket {
+        cols.push(
+            ColumnDef::new(ColumnId("bucket"), "Bucket", |_f: &FindingView| {
+                CellValue::Text(String::new())
+            })
+            .initial_width(120.0),
+        );
+    }
+    cols
 }
 
 fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
@@ -2446,9 +2518,22 @@ fn FindingsTable(
     findings: Vec<FindingView>,
     repos: Vec<String>,
     descriptions: std::collections::HashMap<String, String>,
+    // Which triage table this is (issue #26). Findings not in this state are filtered out;
+    // the component is keyed on it by the parent, so a switch remounts with that table's set.
+    #[props(default = TriageState::Unresolved)] triage_view: TriageState,
+    // The lifted finding -> disposition map. Move actions write here; the row is then dropped
+    // from this table (remove_rows) and reappears under its new table on the next switch.
+    #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    let target_repo = repos.first().cloned().unwrap_or_default();
+    // Keep only the findings in THIS table's triage state (absent from the map = Unresolved).
+    let findings: Vec<FindingView> = {
+        let d = dispositions.peek();
+        findings
+            .into_iter()
+            .filter(|f| finding_state(&d, f) == triage_view)
+            .collect()
+    };
     // Default order leads triage with what matters: enforced (new) before suppressed
     // (debt/waived), then by severity (critical → high → medium → low). A flat 200-row dump
     // is paralysis; this floats the exploitable-bug criticals to the very top so a
@@ -2485,9 +2570,13 @@ fn FindingsTable(
     // subtree — same reason as the rule modal). Shows the violated rule's full directive +
     // the complete, untruncated explanation that the row cell clips.
     let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
+    let in_techdebt = triage_view == TriageState::TechDebt;
     let handle = use_table(move || {
-        TableState::new(rows.clone(), finding_columns(filter_repos.clone()))
+        TableState::new(rows.clone(), finding_columns(filter_repos.clone(), in_techdebt))
     });
+    // Subscribe to the disposition map so the bucket flag column re-renders when the architect
+    // marks resolve-later/now (the renderer below captures this snapshot).
+    let bucket_snapshot = dispositions.read().clone();
     // Two-level grouping: by RULE, then by FILE within each rule. chorale groups by an
     // ordered key list (it recurses through the Vec, one depth per key), so a rule violated
     // 4× across one file renders as "RULE (4)" → "handlers.rs (4)" → the 4 individual lines.
@@ -2502,13 +2591,17 @@ fn FindingsTable(
         let _ = handle.set_page_size(5000);
         handle.collapse_all_groups();
     });
-    let mut busy = use_signal(|| false);
-    // A durable ignore requires a reason (the require-reason invariant); optional ticket.
+    // A durable ignore requires a reason (the require-reason invariant), captured here and
+    // stored on the disposition; it's committed to the baseline at Process.
     let mut ignore_reason = use_signal(String::new);
-    let mut ignore_ticket = use_signal(String::new);
-    // Separate clones for the ignore button (the tech-debt button moves the originals).
-    let id_map_ig = id_map.clone();
-    let repo_ig = target_repo.clone();
+    // Two id_map clones: each triage table renders two move buttons, and the two closures in
+    // an arm each move a clone. Match arms are mutually exclusive, so the same two clones
+    // serve every arm.
+    let id_map_a = id_map.clone();
+    let id_map_b = id_map.clone();
+    // Two more clones for the tech-debt bucket buttons (resolve later / now).
+    let id_map_c = id_map.clone();
+    let id_map_d = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -2615,6 +2708,22 @@ fn FindingsTable(
                 }
             }) as RowCellRenderer<FindingView>,
         );
+        // Tech-debt bucket flag: reads the live disposition snapshot for this finding and
+        // renders a "Later" / "Now" badge. Present only in the tech-debt view.
+        if in_techdebt {
+            let snap = bucket_snapshot.clone();
+            m.insert(
+                ColumnId("bucket"),
+                std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
+                    let bucket = snap.get(&finding_key(f)).map(|d| d.bucket).unwrap_or(TechDebtBucket::Later);
+                    let (label, cls) = match bucket {
+                        TechDebtBucket::Later => ("Later", "td-bucket later"),
+                        TechDebtBucket::Now => ("Now", "td-bucket now"),
+                    };
+                    rsx! { span { class: "{cls}", "{label}" } }
+                }) as RowCellRenderer<FindingView>,
+            );
+        }
         RowCellRenderers::new(m)
     };
 
@@ -2631,78 +2740,144 @@ fn FindingsTable(
             }
         }
         div { class: "findings-toolbar",
-            input {
-                class: "addressee-input ignore-reason",
-                placeholder: "reason to ignore (required)",
-                value: "{ignore_reason}",
-                oninput: move |e| ignore_reason.set(e.value()),
-            }
-            input {
-                class: "addressee-input ignore-ticket",
-                placeholder: "ticket (optional)",
-                value: "{ignore_ticket}",
-                oninput: move |e| ignore_ticket.set(e.value()),
-            }
-            button {
-                class: "btn-restart",
-                disabled: busy(),
-                onclick: move |_| {
-                    let sel = handle.selected_ids();
-                    let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_ig.get(id).cloned()).collect();
-                    if picked.is_empty() { return; }
-                    let reason = ignore_reason();
-                    if reason.trim().is_empty() {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to ignore a finding (it's recorded in the baseline).");
-                        return;
+            // View-specific triage actions. A move writes the new disposition for each
+            // selected finding and drops it from this table; it reappears under its target
+            // table on the next switch. Backend commit happens later, at Process.
+            match triage_view {
+                TriageState::Unresolved => rsx! {
+                    input {
+                        class: "addressee-input ignore-reason",
+                        placeholder: "reason to ignore (required)",
+                        value: "{ignore_reason}",
+                        oninput: move |e| ignore_reason.set(e.value()),
                     }
-                    let repo = repo_ig.clone();
-                    let ticket = { let t = ignore_ticket(); if t.trim().is_empty() { None } else { Some(t) } };
-                    busy.set(true);
-                    spawn(async move {
-                        match ignore_findings(&repo, &picked, &reason, ticket).await {
-                            Some(url) => {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Recorded {} ignore(s) in the baseline (PR): {url}", picked.len()));
-                                handle.remove_rows(&sel);
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let reason = ignore_reason();
+                            if reason.trim().is_empty() {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to ignore a finding (it's recorded in the baseline at Process).");
+                                return;
                             }
-                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Couldn't record the ignore — needs GitHub + Contents/PR write."),
-                        }
-                        busy.set(false);
-                    });
-                },
-                "Ignore selected (with reason)"
-            }
-            button {
-                class: "btn-restart",
-                onclick: move |_| {
-                    let sel = handle.selected_ids();
-                    if sel.is_empty() { return; }
-                    let n = sel.len();
-                    handle.remove_rows(&sel);
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Queued {n} for a governed fix (runs when Claude is connected)."));
-                },
-                "Resolve selected"
-            }
-            button {
-                class: "btn-run",
-                disabled: busy(),
-                onclick: move |_| {
-                    let sel = handle.selected_ids();
-                    let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map.get(id).cloned()).collect();
-                    if picked.is_empty() { return; }
-                    let repo = target_repo.clone();
-                    busy.set(true);
-                    spawn(async move {
-                        match create_ticket(&repo, &picked).await {
-                            Some(url) => {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Tech-debt ticket opened: {url}"));
-                                handle.remove_rows(&sel);
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked {
+                                let e = d.entry(finding_key(f)).or_default();
+                                e.state = TriageState::Ignored;
+                                e.reason = reason.clone();
                             }
-                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Couldn't open the ticket — needs Issues write on the connected token."),
-                        }
-                        busy.set(false);
-                    });
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
+                        },
+                        "Ignore with reason \u{2192}"
+                    }
+                    button {
+                        class: "btn-run",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
+                        },
+                        "Save as tech debt"
+                    }
                 },
-                if busy() { "Filing…" } else { "Accept as tech debt \u{2192} ticket" }
+                TriageState::Ignored => rsx! {
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
+                        },
+                        "Move to Unresolved"
+                    }
+                    button {
+                        class: "btn-run",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
+                        },
+                        "Move to Tech debt"
+                    }
+                },
+                TriageState::TechDebt => rsx! {
+                    // Bucket the selected tech-debt findings. These stay in the table; only the
+                    // Bucket flag column changes. Default is Later (a tracked ticket); Now pulls
+                    // the finding into the dev engine as a fix story at Process.
+                    button {
+                        class: "btn-edit-sm",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_c.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Later; }
+                            dispositions.set(d);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve later.", picked.len()));
+                        },
+                        "Mark: resolve later"
+                    }
+                    button {
+                        class: "btn-edit-sm",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_d.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Now; }
+                            dispositions.set(d);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve now.", picked.len()));
+                        },
+                        "Mark: resolve now"
+                    }
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
+                        },
+                        "Move to Unresolved"
+                    }
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut d = dispositions.peek().clone();
+                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Ignored; }
+                            dispositions.set(d);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
+                        },
+                        "Move to Ignored"
+                    }
+                },
             }
             button {
                 class: "btn-edit-sm",
@@ -3535,6 +3710,31 @@ fn ScanResults(report: ScanReportView) -> Element {
         .collect();
 
     let descriptions_modal = descriptions.clone();
+
+    // ── Triage state (issue #26) ──────────────────────────────────────────────
+    // Each finding lives in one of three tables: Unresolved (the default), Ignored, or
+    // Tech debt. The architect moves findings between them until nothing is Unresolved, then
+    // Processes the ignored + tech-debt buckets. State is LOCAL until Process.
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+    let mut triage_view = use_signal(|| TriageState::Unresolved);
+    let mut processing = use_signal(|| false);
+    // Live per-table counts (recompute reactively as dispositions change).
+    let (n_unresolved, n_ignored, n_techdebt) = {
+        let d = dispositions.read();
+        let mut u = 0usize;
+        let mut i = 0usize;
+        let mut t = 0usize;
+        for f in &findings {
+            match finding_state(&d, f) {
+                TriageState::Unresolved => u += 1,
+                TriageState::Ignored => i += 1,
+                TriageState::TechDebt => t += 1,
+            }
+        }
+        (u, i, t)
+    };
+
     rsx! {
         // Row-detail modal: hosted here, at the results-subtree root, so it is NOT a
         // sibling of the chorale table (see RuleDetailModal for why).
@@ -3866,12 +4066,114 @@ fn ScanResults(report: ScanReportView) -> Element {
             // ── Findings (after the audit runs) ────────────────────────────────
             if audited.is_some() {
                 p { class: "scan-section-h", "Findings" }
-                p { class: "scan-section-sub", "Select rows to Ignore, Resolve, or Accept as tech debt. Sort by severity/authority; filter by type or location." }
-                p { class: "scan-domains-note",
-                    b { "Two domains, two authorities. " }
-                    "“Rule · enforced” findings are deterministic rule violations — high-confidence, gateable, eligible for auto-fix. “AI · advisory” findings are the investigative layer — the agent thinks something's worth a look. They are review-only: they never auto-block work or auto-fix without you confirming. Enforcement is mechanical; advice needs the architect."
+                p { class: "scan-section-sub", "Triage every finding into one of three tables: leave it Unresolved, Ignore it (with a reason), or save it as Tech debt. Switch tables below; selected findings move between tables. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+
+                // Single-select over the three triage tables, each with a live count.
+                div { class: "triage-switch",
+                    for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt] {
+                        {
+                            let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt };
+                            let active = triage_view() == st;
+                            rsx! {
+                                button {
+                                    key: "{st.label()}",
+                                    class: if active { "triage-tab active" } else { "triage-tab" },
+                                    onclick: move |_| triage_view.set(st),
+                                    "{st.label()} "
+                                    span { class: "triage-tab-count", "{count}" }
+                                }
+                            }
+                        }
+                    }
                 }
-                FindingsTable { findings: findings.clone(), repos: report.repos.clone(), descriptions: descriptions.clone() }
+
+                // Wrapped so the key is the first node in its block (Dioxus requirement);
+                // keying on the view remounts the table so its frozen rows reflect the switch.
+                {
+                    rsx! {
+                        FindingsTable {
+                            key: "{triage_view().label()}",
+                            findings: findings.clone(),
+                            repos: report.repos.clone(),
+                            descriptions: descriptions.clone(),
+                            triage_view: triage_view(),
+                            dispositions,
+                        }
+                    }
+                }
+
+                // Process: commit the ignored bucket to the baseline and file the tech-debt
+                // bucket as tickets. Enabled only once nothing remains Unresolved.
+                if triage_view() == TriageState::TechDebt || n_unresolved == 0 {
+                    {
+                    let findings_for_process = findings.clone();
+                    rsx! {
+                    div { class: "triage-process",
+                        if n_unresolved > 0 {
+                            p { class: "section-hint", "Resolve the {n_unresolved} remaining Unresolved finding(s) (Ignore or save as Tech debt) before Processing." }
+                        }
+                        button {
+                            class: "btn-run",
+                            disabled: processing() || n_unresolved > 0 || (n_ignored == 0 && n_techdebt == 0),
+                            onclick: move |_| {
+                                let d = dispositions.read().clone();
+                                // Group ignored findings by (repo, reason) -> baseline waiver;
+                                // group tech-debt by repo -> a tracked ticket.
+                                let mut ignore_groups: std::collections::HashMap<(String, String), Vec<FindingView>> = Default::default();
+                                // Tech-debt "resolve later" -> a tracked ticket, grouped by repo.
+                                let mut debt_later: std::collections::HashMap<String, Vec<FindingView>> = Default::default();
+                                // Tech-debt "resolve now" -> the dev engine (Pillar 2); counted for now.
+                                let mut debt_now: usize = 0;
+                                for f in &findings_for_process {
+                                    let disp = d.get(&finding_key(f)).cloned().unwrap_or_default();
+                                    match disp.state {
+                                        TriageState::Ignored => {
+                                            ignore_groups.entry((f.repo.clone(), disp.reason.clone())).or_default().push(f.clone());
+                                        }
+                                        TriageState::TechDebt => match disp.bucket {
+                                            TechDebtBucket::Later => debt_later.entry(f.repo.clone()).or_default().push(f.clone()),
+                                            TechDebtBucket::Now => debt_now += 1,
+                                        },
+                                        TriageState::Unresolved => {}
+                                    }
+                                }
+                                if ignore_groups.is_empty() && debt_later.is_empty() && debt_now == 0 { return; }
+                                processing.set(true);
+                                spawn(async move {
+                                    let mut ok = 0usize;
+                                    let mut failed = 0usize;
+                                    for ((repo, reason), group) in &ignore_groups {
+                                        let r = if reason.trim().is_empty() { "Accepted during onboarding triage".to_string() } else { reason.clone() };
+                                        match ignore_findings(repo, group, &r, None).await {
+                                            Some(_) => ok += group.len(),
+                                            None => failed += group.len(),
+                                        }
+                                    }
+                                    for (repo, group) in &debt_later {
+                                        match create_ticket(repo, group).await {
+                                            Some(_) => ok += group.len(),
+                                            None => failed += group.len(),
+                                        }
+                                    }
+                                    let mut msg = format!("Processed {ok} finding(s): ignores → baseline, tech-debt-later → tickets.");
+                                    if debt_now > 0 {
+                                        // The dev-engine import is Pillar 2 (#12); surface intent until it lands.
+                                        msg.push_str(&format!(" {debt_now} marked resolve-now will import into the dev engine when Pillar 2 is wired."));
+                                    }
+                                    if failed == 0 {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, msg);
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Processed {ok}; {failed} failed (needs GitHub Contents/Issues/PR write). {}", if debt_now > 0 { format!("{debt_now} resolve-now pending Pillar 2.") } else { String::new() }));
+                                    }
+                                    processing.set(false);
+                                });
+                            },
+                            if processing() { "Processing…" } else { "Process ignored + tech-debt buckets" }
+                        }
+                    }
+                    }
+                    }
+                }
 
                 FixAuditedPanel { findings: findings.clone(), repos: report.repos.clone() }
             }
