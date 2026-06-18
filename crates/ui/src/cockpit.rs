@@ -4176,9 +4176,21 @@ fn ScanResults(report: ScanReportView) -> Element {
                 }
 
                 FixAuditedPanel { findings: findings.clone(), repos: report.repos.clone() }
-            }
 
-            CiRulesPanel { repos: report.repos.clone() }
+                // ── Final step: apply mechanical rules to CI (#32) ──────────────────
+                // Shown only once every finding is bucketed (nothing Unresolved). Wires the
+                // selected mechanical rules into each repo's EXISTING CI as enforced lint gates
+                // — checks what's already enforced, adds the rest, as a governed dev run. This
+                // is separate from fixing/ticketing the violations above; completing it is the
+                // last action before the repo(s) are considered onboarded (#27).
+                if n_unresolved == 0 {
+                    div { class: "onboard-final-step",
+                        span { class: "onboard-step-eyebrow", "Final step before onboarded" }
+                        CiRulesPanel { repos: report.repos.clone() }
+                        p { class: "section-hint", "Independent of the tech-debt / resolve-now work above. Once the mechanical rules are wired into CI, the repo(s) are considered onboarded." }
+                    }
+                }
+            }
         }
     }
 }

@@ -1483,6 +1483,15 @@ html, body {
 /* ---- rule detail modal (click a row) -------------------------------------- */
 /* Proposed-rules table: per-domain "select all" as a column-filter-style
    multi-select. Trigger opens a FIXED-HEIGHT, scrollable checkbox list. */
+.onboard-final-step {
+  margin-top: 16px; padding: 14px; border: 1px solid var(--accent);
+  border-radius: 11px; background: var(--accent-wash);
+}
+.onboard-step-eyebrow {
+  display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 8px;
+}
+
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
   display: inline-flex; align-items: center; gap: 7px;
