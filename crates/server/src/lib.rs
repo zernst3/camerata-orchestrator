@@ -143,6 +143,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/rules", get(rules))
+        .route("/api/corpus-rules", get(corpus_rules))
         .route("/api/stories", get(stories))
         .route("/api/stories/:id/run", post(start_run))
         .route("/api/runs/:id", get(get_run))
@@ -527,6 +528,15 @@ async fn set_active_project(
     Json(req): Json<SetActiveReq>,
 ) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": state.projects.set_active(&req.id) }))
+}
+
+/// Every corpus rule with its FULL context (title, domain, scope, options, default), regardless
+/// of any detected stack — feeds the Rules view's all-rules reference table and the
+/// option-switch editor. `propose_corpus_rules` with no repos returns the whole library
+/// (un-suggested, repos empty); the Rules view cross-references each against the project's
+/// selections to show which repos it's applied to.
+async fn corpus_rules() -> Json<Vec<crate::onboard::ProposedRule>> {
+    Json(crate::onboard::propose_corpus_rules(&[]).await)
 }
 
 /// Export the project's ruleset as JSON (the portable source of truth).

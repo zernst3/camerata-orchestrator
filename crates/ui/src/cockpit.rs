@@ -305,6 +305,28 @@ async fn import_ruleset(project_id: &str, json: String) -> bool {
         .unwrap_or(false)
 }
 
+/// Fetch ALL corpus rules (the full rule library, with full context).
+async fn fetch_corpus_rules() -> Option<Vec<ProposedRuleView>> {
+    reqwest::get(format!("{}/api/corpus-rules", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<ProposedRuleView>>()
+        .await
+        .ok()
+}
+
+/// Persist a full ruleset (read-modify-write). Always includes the existing `custom` array
+/// unchanged — callers must pass it through from the current project.
+async fn save_ruleset(project_id: &str, ruleset: serde_json::Value) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/ruleset", crate::BFF_URL, project_id))
+        .json(&ruleset)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// The project Rules-management screen: the active project's ruleset (repo-local,
 /// cross-repo, process, custom) + export/import. The full per-rule editor + re-emit
 /// is phased (see the ADR); this is the project-scoped management surface and the
@@ -509,6 +531,681 @@ fn RepoHealthPanel(project_id: String) -> Element {
     }
 }
 
+// ── Rules view: two editable chorale tables ────────────────────────────────
+
+/// Build the ruleset JSON body for a `POST /api/projects/{id}/ruleset` call.
+/// Merges the current project's selections with the provided override and
+/// always preserves the custom rules array unchanged.
+fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
+    serde_json::json!({
+        "selections": project.ruleset.selections.iter().map(|s| serde_json::json!({
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+        })).collect::<Vec<_>>(),
+        "cross_repo": project.ruleset.cross_repo.iter().map(|s| serde_json::json!({
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+        })).collect::<Vec<_>>(),
+        "process": project.ruleset.process.iter().map(|s| serde_json::json!({
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+        })).collect::<Vec<_>>(),
+        "custom": project.ruleset.custom.iter().map(|c| serde_json::json!({
+            "name": c.name, "body": c.body, "domain": c.domain
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Which of the three lists a rule_id lives in (selections / cross_repo / process).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionBucket { Selections, CrossRepo, Process }
+
+fn bucket_of(rule: &ProposedRuleView) -> SelectionBucket {
+    match rule.scope.as_str() {
+        "cross-repo" => SelectionBucket::CrossRepo,
+        "process"    => SelectionBucket::Process,
+        _            => SelectionBucket::Selections,
+    }
+}
+
+/// A row for Table 1: a selection from the project's ruleset, joined with the full
+/// corpus rule for title / domain / scope / options.
+#[derive(Clone, PartialEq)]
+struct AppliedRuleRow {
+    /// From the ruleset selection.
+    selection: RuleSelectionView,
+    /// Scope bucket (selections / cross_repo / process) — drives "applies to all repos" label.
+    bucket: SelectionBucket,
+    /// Full corpus rule (may be None for custom / unknown ids).
+    corpus: Option<ProposedRuleView>,
+}
+
+impl AppliedRuleRow {
+    fn domain(&self) -> String {
+        self.corpus.as_ref().map(|r| r.domain.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "general".to_string())
+    }
+    fn title(&self) -> String {
+        self.corpus.as_ref().map(|r| r.title.clone()).unwrap_or_else(|| self.selection.rule_id.clone())
+    }
+    fn scope_label(&self) -> &'static str {
+        match self.bucket {
+            SelectionBucket::Selections => "repo-local",
+            SelectionBucket::CrossRepo  => "cross-repo",
+            SelectionBucket::Process    => "process",
+        }
+    }
+    fn chosen_label(&self) -> String {
+        match (&self.selection.chosen_option, &self.corpus) {
+            (Some(oid), Some(rule)) => rule.options.iter()
+                .find(|o| &o.id == oid)
+                .map(|o| o.label.clone())
+                .unwrap_or_else(|| oid.clone()),
+            _ => String::from("\u{2014}"),
+        }
+    }
+}
+
+fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
+    let scope_badges = BadgeVariantMap::new()
+        .with("repo-local", BadgeVariant::new("Repo-local", "green"))
+        .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
+        .with("process",    BadgeVariant::new("Process", "gray"));
+    vec![
+        ColumnDef::new(ColumnId("domain"), "Domain", |r: &AppliedRuleRow| {
+            CellValue::Text(r.domain())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(140.0),
+        ColumnDef::new(ColumnId("rule"), "Rule", |r: &AppliedRuleRow| {
+            CellValue::Text(format!("{} — {}", r.selection.rule_id, r.title()))
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(300.0),
+        ColumnDef::new(ColumnId("scope"), "Scope", |r: &AppliedRuleRow| {
+            CellValue::Text(r.scope_label().to_string())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(scope_badges))
+        .initial_width(130.0),
+        ColumnDef::new(ColumnId("repos"), "Applies to", |r: &AppliedRuleRow| {
+            if r.bucket != SelectionBucket::Selections {
+                CellValue::Text("all repos".to_string())
+            } else {
+                CellValue::Text(if r.selection.repos.is_empty() { "\u{2014}".to_string() } else { r.selection.repos.join(", ") })
+            }
+        })
+        .filter(FilterKind::Text)
+        .initial_width(200.0),
+        ColumnDef::new(ColumnId("option"), "Chosen option", |r: &AppliedRuleRow| {
+            CellValue::Text(r.chosen_label())
+        })
+        .sortable()
+        .initial_width(180.0),
+    ]
+}
+
+fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
+    let scope_badges = BadgeVariantMap::new()
+        .with("repo-local", BadgeVariant::new("Repo-local", "green"))
+        .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
+        .with("process",    BadgeVariant::new("Process", "gray"));
+    vec![
+        ColumnDef::new(ColumnId("domain"), "Domain", |r: &ProposedRuleView| {
+            CellValue::Text(if r.domain.is_empty() { "general".to_string() } else { r.domain.clone() })
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(140.0),
+        ColumnDef::new(ColumnId("rule"), "Rule", |r: &ProposedRuleView| {
+            CellValue::Text(format!("{} — {}", r.id, r.title))
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(300.0),
+        ColumnDef::new(ColumnId("scope"), "Scope", |r: &ProposedRuleView| {
+            CellValue::Text(r.scope.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(scope_badges))
+        .initial_width(130.0),
+        ColumnDef::new(ColumnId("applied_to"), "Applied to", |r: &ProposedRuleView| {
+            CellValue::Text(if r.repos.is_empty() { String::new() } else { r.repos.join(", ") })
+        })
+        .filter(FilterKind::Text)
+        .initial_width(220.0),
+    ]
+}
+
+/// Table 1 — the project's applied rules (selections + cross_repo + process).
+/// Filterable by repo; each row is clickable to open the shared `RuleDetailModal`.
+/// After an option pick in the modal the ruleset is POSTed. "Remove from repo"
+/// removes the current repo from the selection's repos list (or drops the selection
+/// when repos becomes empty).
+#[component]
+fn ProjectRulesTable(
+    project: ProjectView,
+    corpus: Vec<ProposedRuleView>,
+    refresh: Signal<u32>,
+    /// Which repo Table 2 wants Table 1 to jump to (set by "Go to repo rule").
+    #[props(default)] goto_repo: Signal<Option<String>>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
+    let mut chosen_ctx = use_context::<Signal<std::collections::HashMap<String, String>>>();
+
+    // Current repo filter ("" = all repos).
+    let mut repo_filter = use_signal(String::new);
+
+    // Consume the goto_repo signal from Table 2: read the value, then clear in a second step.
+    use_effect(move || {
+        let maybe_repo = goto_repo.read().clone();
+        if let Some(repo) = maybe_repo {
+            repo_filter.set(repo);
+            goto_repo.write().take();
+        }
+    });
+
+    let corpus_by_id: std::collections::HashMap<String, ProposedRuleView> =
+        corpus.iter().map(|r| (r.id.clone(), r.clone())).collect();
+
+    // Build the flat list of applied rule rows.
+    let rows_data: Vec<AppliedRuleRow> = {
+        let mut out = Vec::new();
+        for sel in &project.ruleset.selections {
+            out.push(AppliedRuleRow {
+                selection: sel.clone(),
+                bucket: SelectionBucket::Selections,
+                corpus: corpus_by_id.get(&sel.rule_id).cloned(),
+            });
+        }
+        for sel in &project.ruleset.cross_repo {
+            out.push(AppliedRuleRow {
+                selection: sel.clone(),
+                bucket: SelectionBucket::CrossRepo,
+                corpus: corpus_by_id.get(&sel.rule_id).cloned(),
+            });
+        }
+        for sel in &project.ruleset.process {
+            out.push(AppliedRuleRow {
+                selection: sel.clone(),
+                bucket: SelectionBucket::Process,
+                corpus: corpus_by_id.get(&sel.rule_id).cloned(),
+            });
+        }
+        out
+    };
+
+    // Apply repo filter: cross_repo/process always show; selections filter by repo.
+    let filtered: Vec<AppliedRuleRow> = {
+        let rf = repo_filter();
+        if rf.is_empty() {
+            rows_data.clone()
+        } else {
+            rows_data
+                .iter()
+                .filter(|r| {
+                    r.bucket != SelectionBucket::Selections
+                        || r.selection.repos.iter().any(|rp| rp == &rf)
+                })
+                .cloned()
+                .collect()
+        }
+    };
+
+    // Mint RowIds ONCE per (project ruleset + filter) mount. Key the component on the
+    // refresh tick so a project update remounts with fresh rows.
+    let rows: Vec<(RowId, AppliedRuleRow)> = use_hook({
+        let filtered = filtered.clone();
+        move || filtered.iter().map(|r| (RowId::new(), r.clone())).collect()
+    });
+    let id_map: std::collections::HashMap<RowId, AppliedRuleRow> =
+        rows.iter().map(|(id, r)| (*id, r.clone())).collect();
+    let id_map_click = id_map.clone();
+    let id_map_remove = id_map.clone();
+
+    let handle = use_table(move || TableState::new(rows.clone(), applied_rule_columns()));
+    use_hook(move || {
+        handle.set_pagination_mode(PaginationMode::InfiniteScroll);
+        let _ = handle.set_page_size(2000);
+    });
+
+    let project_repos = project.repos.clone();
+    let project_id = project.id.clone();
+    let project_for_remove = project.clone();
+
+    // After the user picks an option in RuleDetailModal (via chosen_ctx), persist it.
+    // We watch chosen_ctx and when it changes relative to what's saved, POST the ruleset.
+    let project_for_opt = project.clone();
+    let pid_opt = project_id.clone();
+    let toasts_opt = toasts;
+    let mut refresh_opt = refresh;
+    use_effect(move || {
+        // Build the updated ruleset with any chosen-option changes applied.
+        let chosen = chosen_ctx.read().clone();
+        let mut p = project_for_opt.clone();
+        let mut changed = false;
+        for sel in p.ruleset.selections.iter_mut() {
+            if let Some(opt) = chosen.get(&sel.rule_id) {
+                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
+                    sel.chosen_option = Some(opt.clone());
+                    changed = true;
+                }
+            }
+        }
+        for sel in p.ruleset.cross_repo.iter_mut() {
+            if let Some(opt) = chosen.get(&sel.rule_id) {
+                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
+                    sel.chosen_option = Some(opt.clone());
+                    changed = true;
+                }
+            }
+        }
+        for sel in p.ruleset.process.iter_mut() {
+            if let Some(opt) = chosen.get(&sel.rule_id) {
+                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
+                    sel.chosen_option = Some(opt.clone());
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let body = build_ruleset_json(&p);
+            let pid = pid_opt.clone();
+            spawn(async move {
+                if save_ruleset(&pid, body).await {
+                    crate::toast::push_toast(toasts_opt, crate::toast::ToastKind::Info, "Option saved.");
+                    refresh_opt += 1;
+                } else {
+                    crate::toast::push_toast(toasts_opt, crate::toast::ToastKind::Error, "Could not save the option choice.");
+                }
+            });
+        }
+    });
+
+    let rf = repo_filter();
+    rsx! {
+        // Repo filter bar — mirrors the onboarding "Repo ruleset:" selector.
+        div { class: "repo-select",
+            label { class: "repo-select-label", "Filter by repo:" }
+            select {
+                class: "repo-select-input",
+                value: "{rf}",
+                onchange: move |e| repo_filter.set(e.value()),
+                option { value: "", "All repos" }
+                for repo in project_repos.iter() {
+                    option { key: "{repo}", value: "{repo}", "{repo}" }
+                }
+            }
+            span { class: "repo-select-hint",
+                "Repo-local rules filter to the selected repo. Cross-repo and process rules always show (project-level)."
+            }
+        }
+
+        Table {
+            handle,
+            sort_enabled: true,
+            filter_enabled: true,
+            selection_enabled: true,
+            sticky_header: true,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(row) = id_map_click.get(&rid) {
+                    if let Some(corpus_rule) = &row.corpus {
+                        detail_rule.set(Some(corpus_rule.clone()));
+                        // Seed chosen_ctx so the modal shows the current selection.
+                        if let Some(opt) = &row.selection.chosen_option {
+                            chosen_ctx.write().insert(corpus_rule.id.clone(), opt.clone());
+                        }
+                    }
+                }
+            }),
+        }
+
+        // Remove-from-repo action: removes the currently-filtered repo from the selection's
+        // repos list; if repos becomes empty, the selection is dropped entirely.
+        div { class: "rules-table-toolbar",
+            button {
+                class: "btn-restart",
+                title: if rf.is_empty() { "Select a repo filter first to remove a rule from a specific repo" } else { "Remove selected rules from the current repo filter" },
+                disabled: rf.is_empty(),
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    if sel.is_empty() { return; }
+                    let repo_to_remove = repo_filter();
+                    if repo_to_remove.is_empty() { return; }
+                    let rows: Vec<AppliedRuleRow> = sel.iter()
+                        .filter_map(|id| id_map_remove.get(id).cloned())
+                        .collect();
+                    let mut p = project_for_remove.clone();
+                    let pid = project_id.clone();
+                    let mut changed = false;
+                    // Update selections.
+                    for row in &rows {
+                        if row.bucket == SelectionBucket::Selections {
+                            if let Some(s) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == row.selection.rule_id) {
+                                s.repos.retain(|r| r != &repo_to_remove);
+                                changed = true;
+                            }
+                        }
+                    }
+                    // Drop selections with no repos left.
+                    p.ruleset.selections.retain(|s| !s.repos.is_empty());
+                    if changed {
+                        let body = build_ruleset_json(&p);
+                        let mut refresh = refresh;
+                        spawn(async move {
+                            if save_ruleset(&pid, body).await {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Removed rule(s) from {repo_to_remove}."));
+                                refresh += 1;
+                            } else {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not update the ruleset.");
+                            }
+                        });
+                    }
+                },
+                "Remove selected from \u{201c}{rf}\u{201d}"
+            }
+            span { class: "rules-table-hint",
+                "Click a row to edit the chosen option. Select rows + Remove to drop them from a repo."
+            }
+        }
+    }
+}
+
+/// Table 2 — the full corpus, with "Applied to" chips and an "Add to repo" control
+/// per row. Clicking "Go to repo rule" sets the Table-1 repo filter and focuses
+/// that view.
+#[component]
+fn AllRulesTable(
+    project: ProjectView,
+    corpus: Vec<ProposedRuleView>,
+    refresh: Signal<u32>,
+    /// Signal Table 1 to switch its repo filter to this repo.
+    goto_repo: Signal<Option<String>>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
+    let mut chosen_ctx = use_context::<Signal<std::collections::HashMap<String, String>>>();
+
+    // Build a map: rule_id -> Vec<repo> it's currently applied to.
+    let applied_repos: std::collections::HashMap<String, Vec<String>> = {
+        let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for sel in project.ruleset.selections.iter()
+            .chain(project.ruleset.cross_repo.iter())
+            .chain(project.ruleset.process.iter())
+        {
+            m.entry(sel.rule_id.clone()).or_default().extend(sel.repos.clone());
+        }
+        m
+    };
+    // Annotate the corpus with its currently-applied repos for the table column.
+    let annotated: Vec<ProposedRuleView> = corpus.iter().map(|r| {
+        let mut rv = r.clone();
+        rv.repos = applied_repos.get(&r.id).cloned().unwrap_or_default();
+        // deduplicate
+        rv.repos.sort();
+        rv.repos.dedup();
+        rv
+    }).collect();
+
+    // Mint row ids ONCE per mount.
+    let rows: Vec<(RowId, ProposedRuleView)> = use_hook({
+        let annotated = annotated.clone();
+        move || annotated.iter().map(|r| (RowId::new(), r.clone())).collect()
+    });
+    let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
+        rows.iter().map(|(id, r)| (*id, r.clone())).collect();
+    let id_map_click = id_map.clone();
+
+    let handle = use_table(move || TableState::new(rows.clone(), corpus_columns()));
+    use_hook(move || {
+        handle.set_pagination_mode(PaginationMode::InfiniteScroll);
+        let _ = handle.set_page_size(5000);
+    });
+
+    let project_repos = project.repos.clone();
+    let project_id = project.id.clone();
+
+    // The "Add to repo" action, handled below the table (not in a row renderer — row
+    // renderers are Arc<dyn Fn...> + Send + Sync and can't capture Dioxus signals).
+    // Signal<Option<(rule_id, repo)>>: set by the per-rule selects; use_effect acts on it.
+    let mut add_pending: Signal<Option<(String, String)>> = use_signal(|| None);
+    let project_for_add = project.clone();
+    let pid_add = project_id.clone();
+    let mut refresh_add = refresh;
+    use_effect(move || {
+        let maybe = add_pending.read().clone();
+        if let Some((rule_id, repo)) = maybe {
+            add_pending.set(None);
+            let mut p = project_for_add.clone();
+            let pid = pid_add.clone();
+            // Scope + default option come from the corpus.
+            let corpus_rule = corpus.iter().find(|r| r.id == rule_id).cloned();
+            let default_opt = corpus_rule.as_ref().and_then(|r| r.default_option.clone());
+            let scope_bucket = corpus_rule.as_ref().map(bucket_of).unwrap_or(SelectionBucket::Selections);
+            match scope_bucket {
+                SelectionBucket::CrossRepo => {
+                    if let Some(sel) = p.ruleset.cross_repo.iter_mut().find(|s| s.rule_id == rule_id) {
+                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                    } else {
+                        p.ruleset.cross_repo.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                    }
+                }
+                SelectionBucket::Process => {
+                    if let Some(sel) = p.ruleset.process.iter_mut().find(|s| s.rule_id == rule_id) {
+                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                    } else {
+                        p.ruleset.process.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                    }
+                }
+                SelectionBucket::Selections => {
+                    if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == rule_id) {
+                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                    } else {
+                        p.ruleset.selections.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                    }
+                }
+            }
+            let body = build_ruleset_json(&p);
+            spawn(async move {
+                if save_ruleset(&pid, body).await {
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added rule to {repo}."));
+                    refresh_add += 1;
+                } else {
+                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not update the ruleset.");
+                }
+            });
+        }
+    });
+
+    rsx! {
+        // The chorale table: "Applied to" column shows the repos (comma-joined text from
+        // the accessor). Row click opens the rule detail modal.
+        Table {
+            handle,
+            sort_enabled: true,
+            filter_enabled: true,
+            sticky_header: true,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(r) = id_map_click.get(&rid) {
+                    detail_rule.set(Some(r.clone()));
+                    if let Some(opt) = r.default_option.as_ref() {
+                        chosen_ctx.write().insert(r.id.clone(), opt.clone());
+                    }
+                }
+            }),
+        }
+
+        // Per-rule actions below the table: "Add to repo" and "Go to repo rule".
+        // These are here (not in a row renderer) because row renderers are Send+Sync
+        // and cannot capture Dioxus signals. The list shows ALL corpus rules for
+        // which the project has at least one repo they are not yet on.
+        {
+            let actionable: Vec<&ProposedRuleView> = annotated.iter().filter(|r| {
+                project.repos.iter().any(|rp| !r.repos.contains(rp))
+                || !r.repos.is_empty()  // also show go-to for applied rules
+            }).collect();
+            if actionable.is_empty() {
+                rsx! {}
+            } else {
+                let unapplied_count = annotated.iter().filter(|r| {
+                    project.repos.iter().any(|rp| !r.repos.contains(rp))
+                }).count();
+                rsx! {
+                    details { class: "add-to-repo-details",
+                        summary { class: "add-to-repo-summary",
+                            "Rule actions \u{2014} add to repo, go to project rules ({unapplied_count} rules have repos they\u{2019}re not yet on)"
+                        }
+                        div { class: "add-to-repo-list",
+                            for rule in annotated.iter() {
+                                {
+                                    let missing_repos: Vec<String> = project_repos.iter()
+                                        .filter(|rp| !rule.repos.contains(rp))
+                                        .cloned()
+                                        .collect();
+                                    let first_applied = rule.repos.first().cloned();
+                                    let rule_id = rule.id.clone();
+                                    let rule_title = rule.title.clone();
+                                    let has_actions = !missing_repos.is_empty() || first_applied.is_some();
+                                    if has_actions {
+                                        let mut add_pending = add_pending;
+                                        rsx! {
+                                            div { key: "{rule_id}", class: "add-to-repo-row",
+                                                span { class: "add-to-repo-rule-id", "{rule_id}" }
+                                                span { class: "add-to-repo-rule-title", "{rule_title}" }
+                                                if !missing_repos.is_empty() {
+                                                    select {
+                                                        class: "add-to-repo-select",
+                                                        onchange: {
+                                                            let rule_id = rule_id.clone();
+                                                            move |e: Event<FormData>| {
+                                                                let repo = e.value();
+                                                                if repo.is_empty() { return; }
+                                                                add_pending.set(Some((rule_id.clone(), repo)));
+                                                            }
+                                                        },
+                                                        option { value: "", "Add to repo\u{2026}" }
+                                                        for repo in missing_repos.iter() {
+                                                            option { key: "{repo}", value: "{repo}", "{repo}" }
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(first_repo) = first_applied {
+                                                    button {
+                                                        class: "btn-edit-sm go-to-repo-btn",
+                                                        title: "Jump Table 1\u{2019}s filter to this repo",
+                                                        onclick: move |_| { goto_repo.set(Some(first_repo.clone())); },
+                                                        "\u{2197} View in project rules"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        rsx! {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A thin modal wrapper for `RulesView`: provides the `detail_rule` + `chosen` contexts
+/// that `RuleDetailModal` reads, and renders the modal outside the table subtree
+/// (same ghost-click rationale as `ScanResults`).
+///
+/// After the user picks an option the caller's `on_option_picked` callback is invoked
+/// with `(rule_id, option_id)` so the parent can POST the updated ruleset.
+#[component]
+fn RulesDetailModalHost(
+    on_option_picked: EventHandler<(String, String)>,
+) -> Element {
+    let detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
+    let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let Some(r) = detail_rule() else {
+        return rsx! {};
+    };
+    let mut detail_rule_mut = use_context::<Signal<Option<ProposedRuleView>>>();
+    rsx! {
+        div { class: "rule-modal-overlay", onclick: move |_| detail_rule_mut.set(None),
+            div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                div { class: "rule-modal-head",
+                    span { class: "rule-modal-id", "{r.id}" }
+                    button { class: "rule-modal-close", onclick: move |_| detail_rule_mut.set(None), "\u{2715}" }
+                }
+                p { class: "rule-modal-title", "{r.title}" }
+                div { class: "rule-modal-meta",
+                    span { class: "rule-modal-tag", "domain \u{00b7} {r.domain}" }
+                    span { class: "rule-modal-tag", "scope \u{00b7} {r.scope}" }
+                    span { class: "rule-modal-tag", "kind \u{00b7} {r.kind}" }
+                    if !r.enforcement.is_empty() {
+                        span { class: "rule-modal-tag", "enforcement \u{00b7} {r.enforcement}" }
+                    }
+                }
+                if let Some(q) = r.decision_question.as_ref().filter(|s| !s.is_empty()) {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "The decision" }
+                        p { class: "rule-modal-question", "{q}" }
+                    }
+                }
+                if let Some(w) = r.decision_why.as_ref().filter(|s| !s.is_empty()) {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "Why the default" }
+                        p { class: "rule-modal-why", "{w}" }
+                    }
+                }
+                if r.options.is_empty() {
+                    p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
+                } else {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "Choose the alternative to adopt" }
+                        if r.default_option.is_none() {
+                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                        }
+                        div { class: "rule-modal-opts",
+                            for o in r.options.iter() {
+                                {
+                                    let rid = r.id.clone();
+                                    let oid = o.id.clone();
+                                    let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                                    let picked = cur.as_deref() == Some(o.id.as_str());
+                                    let is_default = r.default_option.as_deref() == Some(o.id.as_str());
+                                    let cls = if picked { "rule-opt on" } else { "rule-opt" };
+                                    let mut chosen = chosen;
+                                    rsx! {
+                                        button {
+                                            key: "{o.id}",
+                                            class: "{cls}",
+                                            onclick: move |_| {
+                                                chosen.write().insert(rid.clone(), oid.clone());
+                                                on_option_picked.call((rid.clone(), oid.clone()));
+                                            },
+                                            div { class: "rule-opt-head",
+                                                span { class: "rule-opt-label", "{o.label}" }
+                                                if is_default {
+                                                    span { class: "rule-opt-default-badge", "default" }
+                                                }
+                                                if picked {
+                                                    span { class: "rule-opt-picked-badge", "\u{2713} adopted" }
+                                                }
+                                            }
+                                            span { class: "rule-opt-directive", "{o.directive}" }
+                                            if !o.why.is_empty() {
+                                                span { class: "rule-opt-why", "Why: {o.why}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -520,6 +1217,11 @@ fn RulesView() -> Element {
         let _ = refresh();
         async move { fetch_projects().await }
     });
+    // Fetch ALL corpus rules for Table 2 (and for Table 1 join).
+    let corpus_res = use_resource(move || {
+        let _ = refresh();
+        async move { fetch_corpus_rules().await }
+    });
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut new_name = use_signal(String::new);
     let mut import_text = use_signal(String::new);
@@ -530,8 +1232,19 @@ fn RulesView() -> Element {
     let mut cr_body = use_signal(String::new);
     let mut emitting = use_signal(|| false);
 
+    // Shared context: the open rule in the detail modal (Tables 1 + 2 both write here).
+    let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
+    use_context_provider(|| detail_rule);
+    // Shared context: the per-rule chosen option (rule id -> option id).
+    let chosen: Signal<std::collections::HashMap<String, String>> = use_signal(std::collections::HashMap::new);
+    use_context_provider(|| chosen);
+
+    // Signal from Table 2 to Table 1: "go to this repo".
+    let goto_repo: Signal<Option<String>> = use_signal(|| None);
+
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
+    let corpus = corpus_res.read().clone().flatten().unwrap_or_default();
 
     rsx! {
         div { class: "page page-wide",
@@ -584,6 +1297,10 @@ fn RulesView() -> Element {
                     p { class: "section-hint", "Create a project, then onboard repos into it (the Onboard tab) to populate its ruleset." }
                 },
                 Some(p) => {
+                    // Clone everything from `p` up-front so closures below can move owned values
+                    // without borrowing the match-arm `p` ref (which doesn't live long enough
+                    // for the 'static EventHandler / spawn closures).
+                    let p_owned: ProjectView = p.clone();
                     let export = serde_json::to_string_pretty(&serde_json::json!({
                         "selections": p.ruleset.selections.iter().map(|s| serde_json::json!({"rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos})).collect::<Vec<_>>(),
                         "cross_repo": p.ruleset.cross_repo.iter().map(|s| serde_json::json!({"rule_id": s.rule_id, "repos": s.repos})).collect::<Vec<_>>(),
@@ -595,20 +1312,99 @@ fn RulesView() -> Element {
                     let pid_emit = p.id.clone();
                     let pid_sup = p.id.clone();
                     let pid_health = p.id.clone();
+                    let p_modal = p_owned.clone();
+                    let p_t1 = p_owned.clone();
+                    let p_t2 = p_owned.clone();
+                    let corpus_t1 = corpus.clone();
+                    let corpus_t2 = corpus.clone();
                     rsx! {
+                        // The modal host is rendered at this subtree root (outside the chorale
+                        // tables) to avoid the ghost-click-eater bug. option_picked persists
+                        // the chosen option immediately on every pick.
+                        RulesDetailModalHost {
+                            on_option_picked: move |(rule_id, opt_id): (String, String)| {
+                                // Build a ruleset with the new option applied to the right selection.
+                                let mut p2 = p_modal.clone();
+                                let mut saved = false;
+                                for sel in p2.ruleset.selections.iter_mut()
+                                    .chain(p2.ruleset.cross_repo.iter_mut())
+                                    .chain(p2.ruleset.process.iter_mut())
+                                {
+                                    if sel.rule_id == rule_id {
+                                        sel.chosen_option = Some(opt_id.clone());
+                                        saved = true;
+                                    }
+                                }
+                                if saved {
+                                    let body = build_ruleset_json(&p2);
+                                    let pid2 = p2.id.clone();
+                                    let mut refresh = refresh;
+                                    spawn(async move {
+                                        if save_ruleset(&pid2, body).await {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Option saved.");
+                                            refresh += 1;
+                                        } else {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the option choice.");
+                                        }
+                                    });
+                                }
+                            }
+                        }
+
                         // Broken-path health check (issue #33): up top so a path that doesn't
                         // resolve to a local checkout is the first thing the architect sees.
                         RepoHealthPanel { project_id: pid_health }
+
+                        // Table 1: the project's applied rules, filterable by repo, with
+                        // option-edit (via modal) and remove-from-repo actions.
+                        p { class: "section-label", "Project rules (applied)" }
+                        p { class: "section-hint", "Rules the project has selected. Filter by repo to focus on one repo\u{2019}s rules. Click a row to edit the chosen option; select rows and use Remove to drop them from a repo. Cross-repo and process rules are project-level (no repo owns them) and always show." }
+                        // Keyed wrapper divs remount the table components (and their use_hook
+                        // row ids) when the ruleset or corpus changes. The key is on the div
+                        // itself, which IS the first node of each expression block below.
+                        {
+                            let t1_key = format!("pt-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len());
+                            rsx! {
+                                div {
+                                    key: "{t1_key}",
+                                    ProjectRulesTable {
+                                        project: p_t1,
+                                        corpus: corpus_t1,
+                                        refresh,
+                                        goto_repo,
+                                    }
+                                }
+                            }
+                        }
+
+                        // Table 2: the full corpus, with "Applied to" and "Add to repo".
+                        p { class: "section-label", "All rules (corpus reference)" }
+                        p { class: "section-hint", "Every rule in the corpus. \u{201c}Applied to\u{201d} shows which project repos already have it. Use the add-to-repo panel below the table to add a rule to a new repo. Click a rule row to read its full context. Use \u{201c}View in project rules\u{201d} to jump Table 1\u{2019}s filter to a repo." }
+                        {
+                            let t2_key = format!("at-{}-{}", refresh(), corpus.len());
+                            rsx! {
+                                div {
+                                    key: "{t2_key}",
+                                    AllRulesTable {
+                                        project: p_t2,
+                                        corpus: corpus_t2,
+                                        refresh,
+                                        goto_repo,
+                                    }
+                                }
+                            }
+                        }
+
                         div { class: "rules-sections",
-                            RuleCount { label: "Repo-local rules", n: p.ruleset.selections.len() }
-                            RuleCount { label: "Cross-repo rules (API contracts)", n: p.ruleset.cross_repo.len() }
-                            RuleCount { label: "Process rules (commit/PR)", n: p.ruleset.process.len() }
-                            RuleCount { label: "Custom rules", n: p.ruleset.custom.len() }
+                            RuleCount { label: "Repo-local rules", n: p_owned.ruleset.selections.len() }
+                            RuleCount { label: "Cross-repo rules (API contracts)", n: p_owned.ruleset.cross_repo.len() }
+                            RuleCount { label: "Process rules (commit/PR)", n: p_owned.ruleset.process.len() }
+                            RuleCount { label: "Custom rules", n: p_owned.ruleset.custom.len() }
                         }
 
                         SuppressionsPanel { project_id: pid_sup }
 
-                        CiRulesPanel { repos: p.repos.clone() }
+                        CiRulesPanel { repos: p_owned.repos.clone() }
 
                         // Re-emit: rebuild the source-of-truth emit from this project's
                         // ruleset (base selections + custom) and open a PR per repo.
@@ -703,7 +1499,9 @@ fn RulesView() -> Element {
                         p { class: "section-label", "Custom rules" }
                         p { class: "section-hint", "Your own rules — no corpus source. They're carried into every emit and removed only when you delete them here. Adding a name that already exists edits it." }
                         {
-                            let pid_add = p.id.clone();
+                            let pid_add = p_owned.id.clone();
+                            let custom_rules = p_owned.ruleset.custom.clone();
+                            let project_id_cr = p_owned.id.clone();
                             rsx! {
                                 div { class: "routine-create-row",
                                     input { class: "addressee-input", placeholder: "name", value: "{cr_name}", oninput: move |e| cr_name.set(e.value()) }
@@ -725,10 +1523,10 @@ fn RulesView() -> Element {
                                     },
                                     "Save custom rule"
                                 }
+                                if !custom_rules.is_empty() {
+                                    CustomRulesTable { key: "cr-{refresh()}-{custom_rules.len()}", custom: custom_rules, project_id: project_id_cr, refresh }
+                                }
                             }
-                        }
-                        if !p.ruleset.custom.is_empty() {
-                            CustomRulesTable { key: "cr-{refresh()}-{p.ruleset.custom.len()}", custom: p.ruleset.custom.clone(), project_id: p.id.clone(), refresh }
                         }
 
                         p { class: "section-label", "Export ruleset (source of truth)" }

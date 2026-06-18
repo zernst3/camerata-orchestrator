@@ -1773,4 +1773,55 @@ html, body {
 .ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+
+/* ---- Rules view: project rules table (T1) + corpus table (T2) ------------- */
+
+/* Toolbar below Table 1 (remove-from-repo action + hint). */
+.rules-table-toolbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 6px 0 16px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+}
+.rules-table-hint { font-size: 11.5px; color: var(--ink-soft); flex: 1; min-width: 200px; }
+
+/* "Applied to" chips in Table 2 (corpus) — repo names rendered inline in the cell. */
+.rule-repo-chip {
+  display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--accent-wash); color: var(--accent-ink);
+  margin: 0 2px 2px 0;
+}
+.applied-to-empty { color: var(--ink-faint); font-size: 13px; }
+
+/* Expandable "add-to-repo / go-to" panel below Table 2. */
+.add-to-repo-details { margin: 8px 0 16px; }
+.add-to-repo-summary {
+  font-size: 12.5px; font-weight: 700; color: var(--ink-soft); cursor: pointer;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); list-style: none; user-select: none;
+}
+.add-to-repo-summary:hover { color: var(--ink); border-color: var(--accent); }
+.add-to-repo-list {
+  margin-top: 4px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); overflow: hidden;
+}
+.add-to-repo-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 12px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
+}
+.add-to-repo-row:last-child { border-bottom: none; }
+.add-to-repo-rule-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700;
+  color: var(--accent-ink); white-space: nowrap; min-width: 140px;
+}
+.add-to-repo-rule-title { color: var(--ink-soft); flex: 1; min-width: 160px; }
+.add-to-repo-select {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 12px; padding: 4px 8px; border-radius: 7px; cursor: pointer;
+  transition: border-color .15s var(--ease);
+}
+.add-to-repo-select:hover { border-color: var(--accent); }
+.go-to-repo-btn {
+  white-space: nowrap; font-size: 11.5px; padding: 3px 9px;
+}
 "#;
