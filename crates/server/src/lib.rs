@@ -465,7 +465,7 @@ async fn export_project(
 }
 
 /// A project import document (a prior export). `id` in the JSON is ignored — the import
-/// gets a fresh id so it never collides.
+/// always gets a fresh id (new) or preserves the existing id (overwrite).
 #[derive(serde::Deserialize)]
 struct ImportProjectReq {
     name: String,
@@ -473,15 +473,46 @@ struct ImportProjectReq {
     repos: Vec<String>,
     #[serde(default)]
     ruleset: crate::project::ProjectRuleset,
+    /// Repos already onboarded in the source project — travels with the export so
+    /// onboarding state is preserved across machines.
+    #[serde(default)]
+    onboarded: Vec<String>,
+    /// When `false` (the default) a name collision returns `conflict: true` so the UI
+    /// can ask before overwriting. Pass `true` to overwrite in place (same id, same
+    /// name, replaced repos/ruleset/onboarded).
+    #[serde(default)]
+    overwrite: bool,
 }
 
 /// Import a project from an exported JSON, make it active, and return it.
+///
+/// Conflict response (HTTP 200):
+/// `{ "ok": false, "conflict": true, "name": "…", "message": "…" }`
+///
+/// Success response (HTTP 200):
+/// `{ "ok": true, "project": {…}, "overwritten": <bool> }`
 async fn import_project(
     State(state): State<AppState>,
     Json(req): Json<ImportProjectReq>,
 ) -> Json<serde_json::Value> {
-    match state.projects.import(&req.name, req.repos, req.ruleset) {
-        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+    use crate::project::ImportOutcome;
+    let name = req.name.clone();
+    match state
+        .projects
+        .import_or_overwrite(&req.name, req.repos, req.ruleset, req.onboarded, req.overwrite)
+    {
+        Some(ImportOutcome::Created(p)) => {
+            Json(serde_json::json!({ "ok": true, "project": p, "overwritten": false }))
+        }
+        Some(ImportOutcome::Overwritten(p)) => {
+            Json(serde_json::json!({ "ok": true, "project": p, "overwritten": true }))
+        }
+        Some(ImportOutcome::Conflict) => Json(serde_json::json!({
+            "ok": false,
+            "conflict": true,
+            "name": name,
+            "message": format!("A project named \"{name}\" already exists. Importing will overwrite it."),
+        })),
         None => Json(serde_json::json!({ "ok": false, "message": "could not import project" })),
     }
 }

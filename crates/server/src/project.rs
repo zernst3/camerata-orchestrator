@@ -132,6 +132,35 @@ impl Project {
     }
 }
 
+/// Outcome of a [`ProjectStore::import_or_overwrite`] call.
+#[derive(Debug)]
+pub enum ImportOutcome {
+    /// No project with the same name existed; a new one was created.
+    Created(Project),
+    /// A project with the same name existed and was overwritten in place (same id).
+    Overwritten(Project),
+    /// A project with the same name existed and `overwrite=false`; nothing was changed.
+    Conflict,
+}
+
+impl ImportOutcome {
+    /// Unwrap the project from `Created` or `Overwritten`; panics on `Conflict`.
+    pub fn into_project(self) -> Project {
+        match self {
+            ImportOutcome::Created(p) | ImportOutcome::Overwritten(p) => p,
+            ImportOutcome::Conflict => panic!("ImportOutcome::Conflict has no project"),
+        }
+    }
+
+    /// Whether this outcome produced a project (i.e. not `Conflict`).
+    pub fn project(&self) -> Option<&Project> {
+        match self {
+            ImportOutcome::Created(p) | ImportOutcome::Overwritten(p) => Some(p),
+            ImportOutcome::Conflict => None,
+        }
+    }
+}
+
 /// Project store + the active selection, persisted to a JSON file so projects
 /// (their configs + pointers, NOT repo contents) survive across launches.
 /// Clone-shareable.
@@ -231,23 +260,53 @@ impl ProjectStore {
     /// collides with an existing one), make it active. Name / repos / ruleset come from
     /// the imported document.
     pub fn import(&self, name: &str, repos: Vec<String>, ruleset: ProjectRuleset) -> Option<Project> {
-        let project = {
+        Some(self.import_or_overwrite(name, repos, ruleset, Vec::new(), false)?.into_project())
+    }
+
+    /// Import (or overwrite) a project from an exported JSON document.
+    ///
+    /// - No existing project with the same `name` → create a fresh id, make active.
+    /// - Same `name` exists and `overwrite=false` → return `Conflict` (no mutation).
+    /// - Same `name` exists and `overwrite=true` → replace repos/ruleset/onboarded
+    ///   IN PLACE (same id), make active.
+    pub fn import_or_overwrite(
+        &self,
+        name: &str,
+        repos: Vec<String>,
+        ruleset: ProjectRuleset,
+        onboarded: Vec<String>,
+        overwrite: bool,
+    ) -> Option<ImportOutcome> {
+        let outcome = {
             let mut s = self.inner.lock().ok()?;
-            s.counter += 1;
-            let id = format!("proj-{}", s.counter);
-            let project = Project {
-                id: id.clone(),
-                name: name.to_string(),
-                repos,
-                ruleset,
-                onboarded: Vec::new(),
-            };
-            s.projects.push(project.clone());
-            s.active = Some(id);
-            project
+            if let Some(existing) = s.projects.iter_mut().find(|p| p.name == name) {
+                if !overwrite {
+                    return Some(ImportOutcome::Conflict);
+                }
+                // Overwrite in place — keep the same id.
+                existing.repos = repos;
+                existing.ruleset = ruleset;
+                existing.onboarded = onboarded;
+                let updated = existing.clone();
+                s.active = Some(updated.id.clone());
+                ImportOutcome::Overwritten(updated)
+            } else {
+                s.counter += 1;
+                let id = format!("proj-{}", s.counter);
+                let project = Project {
+                    id: id.clone(),
+                    name: name.to_string(),
+                    repos,
+                    ruleset,
+                    onboarded,
+                };
+                s.projects.push(project.clone());
+                s.active = Some(id);
+                ImportOutcome::Created(project)
+            }
         };
         self.save();
-        Some(project)
+        Some(outcome)
     }
 
     /// Delete a project by id. If it was the active one, the active pointer falls back
@@ -437,5 +496,104 @@ mod tests {
         let json = export_ruleset(&project);
         let back = parse_ruleset(&json).unwrap();
         assert_eq!(back, project.ruleset);
+    }
+
+    // ── import_or_overwrite ────────────────────────────────────────────────────
+
+    fn ruleset_with(rule: &str) -> ProjectRuleset {
+        ProjectRuleset {
+            selections: vec![sel(rule)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn import_or_overwrite_creates_new_when_no_collision() {
+        let store = ProjectStore::new();
+        let outcome = store
+            .import_or_overwrite("Alpha", vec!["me/api".into()], ruleset_with("R-1"), vec![], false)
+            .unwrap();
+        let project = match outcome {
+            ImportOutcome::Created(p) => p,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        // Fresh id minted.
+        assert!(project.id.starts_with("proj-"), "id was minted");
+        // Made active.
+        assert_eq!(store.active().unwrap().id, project.id);
+        // Fields round-trip.
+        assert_eq!(project.name, "Alpha");
+        assert_eq!(project.repos, vec!["me/api".to_string()]);
+        assert_eq!(project.ruleset.selections[0].rule_id, "R-1");
+    }
+
+    #[test]
+    fn import_or_overwrite_returns_conflict_without_mutation() {
+        let store = ProjectStore::new();
+        // Seed a project named "Beta".
+        let original = store.create("Beta", vec!["me/api".into()]).unwrap();
+        // Attempt import with same name, overwrite=false.
+        let outcome = store
+            .import_or_overwrite("Beta", vec!["me/web".into()], ruleset_with("R-NEW"), vec![], false)
+            .unwrap();
+        assert!(
+            matches!(outcome, ImportOutcome::Conflict),
+            "expected Conflict"
+        );
+        // Store is unchanged — original project untouched.
+        assert_eq!(store.list().len(), 1);
+        let still_original = store.get(&original.id).unwrap();
+        assert_eq!(still_original.repos, vec!["me/api".to_string()]);
+        assert!(still_original.ruleset.selections.is_empty());
+    }
+
+    #[test]
+    fn import_or_overwrite_overwrites_in_place_keeping_same_id() {
+        let store = ProjectStore::new();
+        let original = store.create("Gamma", vec!["me/old".into()]).unwrap();
+        let original_id = original.id.clone();
+        // Overwrite with new data.
+        let outcome = store
+            .import_or_overwrite(
+                "Gamma",
+                vec!["me/new1".into(), "me/new2".into()],
+                ruleset_with("R-REPLACED"),
+                vec!["me/new1".into()],
+                true,
+            )
+            .unwrap();
+        let overwritten = match outcome {
+            ImportOutcome::Overwritten(p) => p,
+            other => panic!("expected Overwritten, got {other:?}"),
+        };
+        // Same id preserved.
+        assert_eq!(overwritten.id, original_id, "id must not change on overwrite");
+        // Repos/ruleset/onboarded replaced.
+        assert_eq!(overwritten.repos, vec!["me/new1".to_string(), "me/new2".to_string()]);
+        assert_eq!(overwritten.ruleset.selections[0].rule_id, "R-REPLACED");
+        assert_eq!(overwritten.onboarded, vec!["me/new1".to_string()]);
+        // Still active.
+        assert_eq!(store.active().unwrap().id, original_id);
+        // Store still has exactly one project.
+        assert_eq!(store.list().len(), 1);
+    }
+
+    #[test]
+    fn import_or_overwrite_onboarded_round_trips() {
+        let store = ProjectStore::new();
+        let onboarded = vec!["me/api".to_string(), "me/web".to_string()];
+        let outcome = store
+            .import_or_overwrite(
+                "Delta",
+                vec!["me/api".into(), "me/web".into()],
+                Default::default(),
+                onboarded.clone(),
+                false,
+            )
+            .unwrap();
+        let p = outcome.project().unwrap().clone();
+        assert_eq!(p.onboarded, onboarded, "onboarded field round-trips through import");
+        // Verify it persists in the store too.
+        assert_eq!(store.get(&p.id).unwrap().onboarded, onboarded);
     }
 }

@@ -1060,7 +1060,7 @@ pub fn CockpitShell() -> Element {
 }
 
 /// Export a project as a JSON file (native save dialog). Returns true on success.
-async fn export_project_json(id: &str) -> bool {
+async fn export_project_json(id: &str, name: &str) -> bool {
     let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::BFF_URL, id)).await
     else {
         return false;
@@ -1068,14 +1068,37 @@ async fn export_project_json(id: &str) -> bool {
     let Ok(text) = resp.text().await else {
         return false;
     };
+    // Slug the project name for the filename: lowercase, spaces → hyphens, strip non-alnum.
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let filename = format!("camerata-project-{slug}.json");
     match rfd::AsyncFileDialog::new()
-        .set_file_name("camerata-project.json")
+        .set_file_name(&filename)
         .save_file()
         .await
     {
         Some(file) => file.write(text.as_bytes()).await.is_ok(),
         None => false,
     }
+}
+
+/// Result of an import attempt (first pass with `overwrite: false`).
+#[derive(Clone, PartialEq)]
+enum ImportResult {
+    /// The project was created or silently overwritten; the returned project is active.
+    Imported(ProjectView),
+    /// A project with the same name already exists; the user must confirm before we overwrite.
+    /// Holds the name for display and the raw JSON body to re-POST with `overwrite: true`.
+    Conflict { name: String, payload: String },
+    /// Something went wrong (network, parse, etc.).
+    Failed,
 }
 
 /// Delete a project by id. Returns true on success.
@@ -1088,33 +1111,65 @@ async fn delete_project(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Import a project from a JSON file (native open dialog → POST import). The server gives
-/// it a fresh id and makes it active. Returns true on success.
-async fn import_project_json() -> bool {
+/// Open a file picker, read the JSON, and POST it to the import endpoint with
+/// `overwrite: false`. Returns `ImportResult` so the caller can decide whether to
+/// prompt for overwrite confirmation.
+async fn import_project_json() -> ImportResult {
     let Some(file) = rfd::AsyncFileDialog::new()
         .add_filter("JSON", &["json"])
         .pick_file()
         .await
     else {
-        return false;
+        return ImportResult::Failed;
     };
-    let Ok(text) = String::from_utf8(file.read().await) else {
-        return false;
+    let Ok(raw) = String::from_utf8(file.read().await) else {
+        return ImportResult::Failed;
+    };
+    import_project_payload(&raw, false).await
+}
+
+/// POST `payload` to /api/projects/import with the given `overwrite` flag. Shared by
+/// the first-pass attempt and the confirmed overwrite.
+async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult {
+    // Merge the `overwrite` flag into the payload without re-parsing the whole doc:
+    // parse into a Value, set the flag, then re-serialise.
+    let mut body: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return ImportResult::Failed,
+    };
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("overwrite".to_string(), serde_json::Value::Bool(overwrite));
+    }
+    let Ok(body_str) = serde_json::to_string(&body) else {
+        return ImportResult::Failed;
     };
     let Ok(resp) = reqwest::Client::new()
         .post(format!("{}/api/projects/import", crate::BFF_URL))
         .header("content-type", "application/json")
-        .body(text)
+        .body(body_str)
         .send()
         .await
     else {
-        return false;
+        return ImportResult::Failed;
     };
-    resp.json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return ImportResult::Failed;
+    };
+    if v.get("conflict").and_then(|b| b.as_bool()).unwrap_or(false) {
+        let name = v
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        ImportResult::Conflict { name, payload: payload.to_string() }
+    } else if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        match serde_json::from_value::<ProjectView>(v.get("project").cloned().unwrap_or_default()) {
+            Ok(p) => ImportResult::Imported(p),
+            Err(_) => ImportResult::Failed,
+        }
+    } else {
+        ImportResult::Failed
+    }
 }
 
 /// The projects home: the first thing you see. Open a stored project, create one, or
@@ -1131,9 +1186,66 @@ fn ProjectGate() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // The project id awaiting a delete confirm (two-click, with a warning toast).
     let mut pending_delete = use_signal(|| Option::<String>::None);
+    // An import that hit a name collision: holds (project name, raw JSON payload).
+    // While set, a confirm modal is visible.
+    let mut pending_import_overwrite = use_signal(|| Option::<(String, String)>::None);
     let list = projects.read().clone().flatten().unwrap_or_default();
 
     rsx! {
+        // Overwrite-confirm modal — shown when an import collides with an existing name.
+        if let Some((ref conflict_name, ref conflict_payload)) = pending_import_overwrite() {
+            {
+                let conflict_name = conflict_name.clone();
+                let conflict_payload = conflict_payload.clone();
+                rsx! {
+                    div { class: "rule-modal-overlay", onclick: move |_| pending_import_overwrite.set(None),
+                        div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                            div { class: "rule-modal-head",
+                                span { class: "rule-modal-id", "Overwrite project?" }
+                                button {
+                                    class: "rule-modal-close",
+                                    onclick: move |_| pending_import_overwrite.set(None),
+                                    "\u{2715}"
+                                }
+                            }
+                            p { class: "rule-modal-detail",
+                                "A project named \u{201c}{conflict_name}\u{201d} already exists. \
+                                 Overwriting will replace its repos, ruleset, and onboarded state \
+                                 but keep its id. This cannot be undone."
+                            }
+                            div { class: "onboard-leave-actions",
+                                button {
+                                    class: "btn-edit-sm",
+                                    onclick: move |_| pending_import_overwrite.set(None),
+                                    "Cancel"
+                                }
+                                button {
+                                    class: "pg-btn-danger",
+                                    onclick: move |_| {
+                                        pending_import_overwrite.set(None);
+                                        let payload = conflict_payload.clone();
+                                        spawn(async move {
+                                            match import_project_payload(&payload, true).await {
+                                                ImportResult::Imported(_) => {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Imported. Resolve the repo paths in the Rules view.");
+                                                    refresh += 1;
+                                                    screen.set(CockpitScreen::InProject);
+                                                }
+                                                _ => {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Import failed.");
+                                                }
+                                            }
+                                        });
+                                    },
+                                    "Overwrite"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         div { class: "project-gate",
             div { class: "pg-inner",
                 p { class: "eyebrow", "Camerata" }
@@ -1147,6 +1259,7 @@ fn ProjectGate() -> Element {
                         for p in list.iter() {
                             {
                                 let id_export = p.id.clone();
+                                let name_export = p.name.clone();
                                 let id_open = p.id.clone();
                                 let id_del = p.id.clone();
                                 let name_del = p.name.clone();
@@ -1174,7 +1287,8 @@ fn ProjectGate() -> Element {
                                                 class: "pg-btn-secondary",
                                                 onclick: move |_| {
                                                     let id = id_export.clone();
-                                                    spawn(async move { let _ = export_project_json(&id).await; });
+                                                    let name = name_export.clone();
+                                                    spawn(async move { let _ = export_project_json(&id, &name).await; });
                                                 },
                                                 "Export"
                                             }
@@ -1244,9 +1358,16 @@ fn ProjectGate() -> Element {
                         class: "btn-edit-sm pg-import",
                         onclick: move |_| {
                             spawn(async move {
-                                if import_project_json().await {
-                                    refresh += 1;
-                                    screen.set(CockpitScreen::InProject);
+                                match import_project_json().await {
+                                    ImportResult::Imported(_) => {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Imported. Resolve the repo paths in the Rules view.");
+                                        refresh += 1;
+                                        screen.set(CockpitScreen::InProject);
+                                    }
+                                    ImportResult::Conflict { name, payload } => {
+                                        pending_import_overwrite.set(Some((name, payload)));
+                                    }
+                                    ImportResult::Failed => {}
                                 }
                             });
                         },
