@@ -974,19 +974,33 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
 /// NOT location-merged — unrelated file-level issues legitimately share line 0 — so each is
 /// passed through untouched (the exact `(path, line, rule_id)` dedup upstream already
 /// removed byte-identical line-0 repeats).
-fn merge_by_location(findings: Vec<Finding>) -> Vec<Finding> {
-    // `disambiguator` is 0 for real lines (so all hits at one line group together) and a
-    // unique counter for line 0 (so each line-0 finding stays its own group).
+fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
+    let by_path: std::collections::HashMap<&str, &str> =
+        files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    // `disambiguator` is 0 for co-located findings (so all hits at one real code line group
+    // together) and a unique counter for everything kept SOLO (line 0, or a finding whose
+    // snippet isn't actually in the file).
     let mut order: Vec<(String, usize, usize)> = Vec::new();
     let mut groups: std::collections::HashMap<(String, usize, usize), Vec<Finding>> =
         std::collections::HashMap::new();
     let mut solo: usize = 0;
     for f in findings {
-        let key = if f.line == 0 {
+        let snippet = f.snippet.trim();
+        // CO-LOCATION requires the finding to cite REAL code that is present in the file at this
+        // spot. The legit merge ("one smell reported under several rule names") cites the same
+        // offending code each time, so those findings ARE located and group together. But an
+        // ABSENCE / architectural finding ("no central error handler", "no API versioning")
+        // cites a DESCRIPTION, not code in the file — and the model anchors several such findings
+        // to the same representative line. Location-merging those wrongly fuses unrelated issues
+        // (the SECURITY-HEADERS-tagged-with-API-VERSIONING bug). Such findings are kept SOLO.
+        let located = f.line != 0
+            && snippet.len() >= MIN_MERGE_SNIPPET
+            && by_path.get(f.path.as_str()).is_some_and(|c| c.contains(snippet));
+        let key = if located {
+            (f.path.clone(), f.line, 0)
+        } else {
             solo += 1;
             (f.path.clone(), 0, solo)
-        } else {
-            (f.path.clone(), f.line, 0)
         };
         if !groups.contains_key(&key) {
             order.push(key.clone());
@@ -998,6 +1012,10 @@ fn merge_by_location(findings: Vec<Finding>) -> Vec<Finding> {
         .filter_map(|k| groups.remove(&k).map(merge_location_group))
         .collect()
 }
+
+/// Minimum snippet length for a finding to be considered co-located with others. Below this a
+/// snippet is too short to be a reliable "this is the same offending code" signal.
+const MIN_MERGE_SNIPPET: usize = 8;
 
 /// Run the AI architectural audit for one repo. Returns the findings + proposed rules.
 ///
@@ -1143,7 +1161,7 @@ pub async fn audit_repo(
     {
         let mut seen = std::collections::HashSet::new();
         all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
-        all_findings = merge_by_location(all_findings);
+        all_findings = merge_by_location(all_findings, files);
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
@@ -1254,12 +1272,16 @@ mod tests {
     fn merge_collapses_same_location_into_one_preferring_adopted_rule() {
         // One smell at h.rs:12 reported under two invented names PLUS the adopted id —
         // each with a DIFFERENT title (the exact case a title-keyed merge missed).
+        // All three cite the SAME real offending code (present in the file), so they're
+        // genuinely co-located even though each rule phrases it differently.
+        let code = "self.db.query(sql)";
+        let files = vec![("h.rs".to_string(), format!("fn handler() {{ {code} }}"))];
         let findings = vec![
-            site_finding("AI-CONTROLLER-DIRECT-DB", "h.rs", 12, "medium", "Controller accesses DB directly"),
-            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 12, "high", "Layering violation in handler"),
-            site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", "Handler bypasses repository"),
+            site_finding("AI-CONTROLLER-DIRECT-DB", "h.rs", 12, "medium", code),
+            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 12, "high", code),
+            site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", code),
         ];
-        let merged = merge_by_location(findings);
+        let merged = merge_by_location(findings, &files);
         assert_eq!(merged.len(), 1, "three labels at one location collapse to one row");
         // Adopted id wins as primary; highest severity kept; others demoted to also_matches.
         assert_eq!(merged[0].rule_id, "ARCH-STRICT-LAYERING-1");
@@ -1273,12 +1295,14 @@ mod tests {
     fn merge_folds_overlapping_corpus_rules_at_one_location() {
         // "Handler opens its own pool" legitimately trips layering + DI + entities-chain.
         // That's one finding that names all three, not three rows.
+        let code = "Pool::connect(url).await";
+        let files = vec![("h.rs".to_string(), format!("let pool = {code};"))];
         let findings = vec![
-            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 41, "high", "own pool"),
-            site_finding("ARCH-SERVICE-DI-1", "h.rs", 41, "medium", "own pool"),
-            site_finding("RUST-ENTITIES-13", "h.rs", 41, "low", "own pool"),
+            site_finding("ARCH-STRICT-LAYERING-1", "h.rs", 41, "high", code),
+            site_finding("ARCH-SERVICE-DI-1", "h.rs", 41, "medium", code),
+            site_finding("RUST-ENTITIES-13", "h.rs", 41, "low", code),
         ];
-        let merged = merge_by_location(findings);
+        let merged = merge_by_location(findings, &files);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].also_matches.len(), 2, "two non-primary rules demoted");
     }
@@ -1291,8 +1315,45 @@ mod tests {
             site_finding("AI-NO-MAPPERS-CRATE", "lib.rs", 0, "low", "no mappers crate"),
             site_finding("AI-NO-TESTS", "lib.rs", 0, "low", "no tests"),
         ];
-        let merged = merge_by_location(findings);
+        let merged = merge_by_location(findings, &[]);
         assert_eq!(merged.len(), 2, "distinct line-0 findings stay separate");
+    }
+
+    #[test]
+    fn merge_keeps_absence_findings_at_a_shared_line_separate() {
+        // The real bug from the agora-mini verification: two ABSENCE findings ("no error
+        // handler", "no API versioning") whose snippets describe a gap (NOT code in the file)
+        // got anchored to the same representative line and wrongly merged — the error-handler
+        // row picked up a spurious `ARCH-API-VERSIONING-1` in also_matches. They must stay
+        // separate, since neither snippet is real code present at that line.
+        let files = vec![(
+            "app.ts".to_string(),
+            "const app = express();\napp.use(express.json());\napp.listen(3000);".to_string(),
+        )];
+        let findings = vec![
+            site_finding("ARCH-CENTRAL-ERROR-HANDLER-1", "app.ts", 2, "high", "no central error handler is registered"),
+            site_finding("ARCH-API-VERSIONING-1", "app.ts", 2, "medium", "routes are not version-prefixed"),
+        ];
+        let merged = merge_by_location(findings, &files);
+        assert_eq!(merged.len(), 2, "unrelated absence findings at one line stay separate");
+        assert!(merged.iter().all(|f| f.also_matches.is_empty()), "no spurious also_matches");
+    }
+
+    #[test]
+    fn merge_collapses_colocated_real_code_even_with_varied_snippets() {
+        // Two findings that BOTH cite real code present at the same line still merge — the
+        // located check keys on (path, line) for genuinely-cited code, so differently-phrased
+        // snippets of the same offending line collapse.
+        let files = vec![(
+            "u.ts".to_string(),
+            "const q = `SELECT * FROM t WHERE name ILIKE '%${name}%'`;".to_string(),
+        )];
+        let findings = vec![
+            site_finding("SEC-NO-RAW-SQL-CONCAT-1", "u.ts", 1, "critical", "ILIKE '%${name}%'"),
+            site_finding("AI-SQL-INJECTION", "u.ts", 1, "high", "SELECT * FROM t WHERE name ILIKE"),
+        ];
+        let merged = merge_by_location(findings, &files);
+        assert_eq!(merged.len(), 1, "co-located real-code findings still merge");
     }
 
     #[test]
