@@ -14,20 +14,48 @@ pub const GLOBAL_CSS: &str = r#"
   --surface:    #ffffff;   /* raised cards */
   --line:       #ece9e3;   /* hairline borders */
   --line-soft:  #f3f1ec;
-  --accent:     #c8694a;   /* terracotta — the single accent */
-  --accent-ink: #a8523a;   /* accent text/hover */
-  --accent-wash:#f7ece7;   /* accent at 8% for fills */
+  --accent:     #b35636;   /* terracotta — deepened ~12% so it reads "considered" */
+  --accent-ink: #97442a;   /* accent text/hover (deeper still) */
+  --accent-wash:#f5e9e3;   /* accent at ~8% for fills */
   --good:       #5c8a5c;   /* the quiet check */
 
-  --r-lg: 22px;
-  --r-md: 16px;
-  --r-sm: 11px;
+  /* Enterprise-sharp corners (Linear/Vercel/Stripe register), not consumer-round. */
+  --r-lg: 12px;
+  --r-md: 8px;
+  --r-sm: 5px;
 
   --shadow-card: 0 1px 2px rgba(27,26,24,.04), 0 10px 30px rgba(27,26,24,.05);
   --shadow-pop:  0 1px 2px rgba(27,26,24,.05), 0 18px 50px rgba(27,26,24,.09);
 
   /* Slow, reassuring easing. Nothing snaps. */
   --ease: cubic-bezier(.22,.61,.36,1);
+
+  /* chorale table palette → mapped onto the app's warm cream/terracotta scheme so the
+     grouped tables stop reading as the library's default blue. (chorale exposes these as
+     overridable CSS variables.) */
+  --chorale-accent:            var(--accent);
+  --chorale-accent-contrast:   #ffffff;
+  --chorale-surface:           var(--surface);
+  --chorale-text:              var(--ink);
+  --chorale-text-muted:        var(--ink-soft);
+  --chorale-text-subtle:       var(--ink-faint);
+  --chorale-text-disabled:     var(--ink-faint);
+  --chorale-border:            var(--line);
+  --chorale-divider:           var(--line);
+  --chorale-separator-color:   var(--line);
+  --chorale-header-bg:         var(--paper);
+  --chorale-group-header-bg:   var(--accent-wash);
+  --chorale-group-header-border: var(--line);
+  --chorale-toolbar-bg:        var(--surface);
+  --chorale-input-bg:          var(--surface);
+  --chorale-input-border:      var(--line);
+  --chorale-button-bg:         var(--surface);
+  --chorale-button-disabled-bg: var(--line-soft);
+  --chorale-popover-bg:        var(--surface);
+  --chorale-range-bg:          var(--accent-wash);
+  --chorale-active-cell-outline: var(--accent);
+  --chorale-row-selected-divider: var(--accent);
+  --chorale-error:             #b3261e;
 }
 
 * { box-sizing: border-box; }
@@ -42,11 +70,22 @@ html, body {
   overflow: hidden;
   background: var(--paper);
   color: var(--ink);
-  font-family: system-ui, BlinkMacSystemFont, "Segoe UI",
-               Roboto, Helvetica, Arial, sans-serif;
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+               "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  line-height: 1.5;            /* let the body breathe */
+  font-feature-settings: "cv11", "ss01";
 }
+
+/* Typography is the #1 "designed vs default" tell: give headings tighter tracking + a clear
+   weight step over body, so type does work instead of sitting at system defaults. */
+.h1, .entity-name, .scan-section-h, .scan-stack-repo, .pg-card-name, .onboard-step-h,
+.rule-modal-title, .chat-title, .pg-title, .rules-title {
+  letter-spacing: -.017em;
+  font-weight: 700;
+}
+.h1 { font-weight: 760; }
 
 .app-root {
   height: 100vh;
@@ -1361,10 +1400,12 @@ html, body {
 
 /* ---- research chat bubble (floating overlay) ------------------------------ */
 .chat-fab {
+  /* A rounded SQUARE, not a SaaS-template circle FAB — reads as a tool affordance. */
   position: fixed; right: 22px; bottom: 22px; z-index: 1000;
-  width: 54px; height: 54px; border-radius: 50%; border: none;
-  background: var(--accent); color: #fff; font-size: 22px; cursor: pointer;
-  box-shadow: var(--shadow-pop); transition: transform .15s var(--ease), background .15s var(--ease);
+  width: 46px; height: 46px; border-radius: var(--r-md);
+  border: 1px solid var(--accent-ink);
+  background: var(--accent); color: #fff; font-size: 19px; cursor: pointer;
+  box-shadow: var(--shadow-card); transition: transform .15s var(--ease), background .15s var(--ease);
 }
 .chat-fab:hover { background: var(--accent-ink); transform: translateY(-1px); }
 .chat-panel {

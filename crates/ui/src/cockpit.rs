@@ -1456,9 +1456,9 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 "Routines"
             }
             button {
-                class: format!("{} secondary", cls(CockpitView::Workspace)),
+                class: cls(CockpitView::Workspace),
                 onclick: move |_| view.set(CockpitView::Workspace),
-                "Workspace"
+                "Development Workspace"
             }
         }
     }
