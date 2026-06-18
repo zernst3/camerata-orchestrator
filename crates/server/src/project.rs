@@ -72,6 +72,11 @@ pub struct Project {
     /// The project's ruleset (the source of truth).
     #[serde(default)]
     pub ruleset: ProjectRuleset,
+    /// Repos that have been ONBOARDED (`owner/repo`) — the governance ruleset has been applied
+    /// to them. Per-repo so a multi-repo project can be partially onboarded; travels with the
+    /// project's export. A repo NOT in this set is "not yet onboarded".
+    #[serde(default)]
+    pub onboarded: Vec<String>,
 }
 
 impl Project {
@@ -101,6 +106,19 @@ impl Project {
                 *existing = c.clone();
             } else {
                 self.ruleset.custom.push(c.clone());
+            }
+        }
+    }
+
+    /// Mark `repos` as onboarded (union, deduped). Repos not already in the project's `repos`
+    /// list are added there too, so onboarding a repo also brings it into scope.
+    pub fn mark_onboarded(&mut self, repos: &[String]) {
+        for r in repos {
+            if !self.onboarded.iter().any(|x| x == r) {
+                self.onboarded.push(r.clone());
+            }
+            if !self.repos.iter().any(|x| x == r) {
+                self.repos.push(r.clone());
             }
         }
     }
@@ -199,6 +217,7 @@ impl ProjectStore {
                 name: name.to_string(),
                 repos,
                 ruleset: ProjectRuleset::default(),
+                onboarded: Vec::new(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -221,6 +240,7 @@ impl ProjectStore {
                 name: name.to_string(),
                 repos,
                 ruleset,
+                onboarded: Vec::new(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -315,6 +335,7 @@ mod tests {
             id: "p1".into(),
             name: "Proj".into(),
             repos: vec!["me/api".into()],
+            onboarded: vec![],
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -349,6 +370,7 @@ mod tests {
             id: "p".into(),
             name: "P".into(),
             repos: vec![],
+            onboarded: vec![],
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -369,6 +391,7 @@ mod tests {
             id: "p".into(),
             name: "P".into(),
             repos: vec![],
+            onboarded: vec![],
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -403,6 +426,7 @@ mod tests {
             id: "p".into(),
             name: "P".into(),
             repos: vec!["me/api".into()],
+            onboarded: vec![],
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],

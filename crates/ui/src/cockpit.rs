@@ -98,6 +98,9 @@ struct ProjectView {
     repos: Vec<String>,
     #[serde(default)]
     ruleset: RulesetView,
+    /// Repos that have been onboarded (`owner/repo`). A repo not here is "not yet onboarded".
+    #[serde(default)]
+    onboarded: Vec<String>,
 }
 
 async fn fetch_projects() -> Option<Vec<ProjectView>> {
@@ -1039,6 +1042,18 @@ fn ProjectGate() -> Element {
                                         div { class: "pg-card-main",
                                             span { class: "pg-card-name", "{p.name}" }
                                             span { class: "pg-card-meta", "{p.repos.len()} repo(s) · {p.ruleset.selections.len()} repo-rules" }
+                                            {
+                                                let n_on = p.onboarded.iter().filter(|r| p.repos.contains(r)).count();
+                                                let total = p.repos.len();
+                                                let cls = if total > 0 && n_on == total { "pg-onboard-badge done" } else { "pg-onboard-badge" };
+                                                rsx! {
+                                                    span { class: "{cls}",
+                                                        if total > 0 && n_on == total { "✓ onboarded" }
+                                                        else if n_on > 0 { "{n_on}/{total} onboarded" }
+                                                        else { "not yet onboarded" }
+                                                    }
+                                                }
+                                            }
                                         }
                                         div { class: "pg-card-actions",
                                             button {
@@ -4225,8 +4240,8 @@ fn ScanResults(report: ScanReportView) -> Element {
 
             // ── Phase 2: the audit runs from the table's "Audit selected" button ──
             div { class: "audit-cta",
-                p { class: "scan-section-h", "Step 2 — audit the code against your selected rules" }
-                p { class: "scan-section-sub", "Tick the rules above, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
+                p { class: "scan-section-h", "Step 2 — audit the code against your selected rules (optional)" }
+                p { class: "scan-section-sub", "The audit is OPTIONAL — you can Apply the rules above and finish onboarding without it. Run it when you want to see existing violations to triage. Tick the rules, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
                 // Model picker — the user owns the speed/thoroughness trade-off. List is
                 // company-agnostic, served by /api/models.
                 if let Some(m) = models.as_ref() {

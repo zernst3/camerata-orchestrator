@@ -1005,6 +1005,7 @@ async fn onboard_apply(
     let baselines = baselines_from_findings(&req.findings, "architect");
 
     let mut results = Vec::new();
+    let mut applied: Vec<String> = Vec::new();
     for repo in &repos {
         let repo_rules: Vec<&crate::arm::ArmRule> =
             repo_local.iter().filter(|r| r.repos.iter().any(|x| x == repo)).collect();
@@ -1025,15 +1026,26 @@ async fn onboard_apply(
         )
         .await
         {
-            Ok(path) => results.push(serde_json::json!({
-                "repo": repo, "ok": true, "branch": crate::arm::ARM_BRANCH, "path": path
-            })),
+            Ok(path) => {
+                applied.push(repo.clone());
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": true, "branch": crate::arm::ARM_BRANCH, "path": path
+                }));
+            }
             Err(e) => results.push(serde_json::json!({
                 "repo": repo, "ok": false, "message": format!("{e}")
             })),
         }
     }
-    Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "results": results }))
+    // Applying the ruleset IS the completion act: mark the successfully-applied repos
+    // onboarded on the active project (no audit required — onboarding never gates on the
+    // optional violation scan). save_armed_to_project above guarantees an active project.
+    if !applied.is_empty() {
+        if let Some(active) = state.projects.active() {
+            state.projects.update(&active.id, |p| p.mark_onboarded(&applied));
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "onboarded": applied, "results": results }))
 }
 
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.

@@ -1501,6 +1501,13 @@ html, body {
 }
 .job-progress-scope-note { font-size: 11px; color: var(--ink-faint); flex-basis: 100%; }
 
+.pg-onboard-badge {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
+  text-transform: uppercase; border-radius: 999px; padding: 1px 8px; margin-left: 8px;
+  color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line);
+}
+.pg-onboard-badge.done { color: #166534; background: #dcfce7; border-color: #bbf7d0; }
+
 .nr-flag {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
   text-transform: uppercase; color: #92400e; background: #fde68a; border-radius: 999px;
