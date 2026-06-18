@@ -645,13 +645,20 @@ async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanRepo
     Json(crate::onboard::scan_repos(&repos, &token).await)
 }
 
-/// One selected rule the Phase-2 audit runs against.
+/// One selected rule the Phase-2 audit runs against, with its per-repo binding. An empty
+/// `repos` means PROJECT-LEVEL (scanned against every repo); a non-empty `repos` scopes the
+/// rule to just those repos. The UI sends each repo's selections plus the project-level set,
+/// and the audit scopes each repo to the rules that apply to it.
 #[derive(serde::Deserialize)]
 struct AuditRuleReq {
     #[serde(default)]
     id: String,
     #[serde(default)]
     directive: String,
+    /// Repos this rule applies to. Empty = project-level (all repos). Omitted by older
+    /// single-repo callers, which correctly reads as "applies to the one repo scanned".
+    #[serde(default)]
+    repos: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -705,11 +712,11 @@ async fn onboard_audit(
     let Some(token) = token else {
         return Json(crate::onboard::ScanReport::gated(&repos));
     };
-    let selected: Vec<(String, String)> = req
+    let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
         .filter(|r| !r.id.trim().is_empty())
-        .map(|r| (r.id, r.directive))
+        .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
         .collect();
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
@@ -744,11 +751,11 @@ async fn onboard_audit_start(
         .into_iter()
         .filter(|r| !r.trim().is_empty())
         .collect();
-    let selected: Vec<(String, String)> = req
+    let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
         .filter(|r| !r.id.trim().is_empty())
-        .map(|r| (r.id, r.directive))
+        .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
         .collect();
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());

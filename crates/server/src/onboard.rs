@@ -1085,12 +1085,39 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
     report
 }
 
+/// One rule the architect selected for the Phase-2 audit, with its per-repo binding.
+///
+/// A SelectedRule with an EMPTY `repos` is PROJECT-LEVEL: it applies to every repo in the
+/// scan. A SelectedRule with a NON-EMPTY `repos` applies ONLY to those repos. So the
+/// effective LLM rule set for any one repo is `(project-level rules) ∪ (rules bound to that
+/// repo)` — matching the onboarding decision that project-level rules scan across the board
+/// while per-repo selections are additive on top. This is what makes a multi-repo scan run
+/// each repo against ITS OWN chosen rules instead of every rule across the board.
+#[derive(Debug, Clone)]
+pub struct SelectedRule {
+    /// The rule id.
+    pub id: String,
+    /// The chosen directive text the audit prompt is parameterized by.
+    pub directive: String,
+    /// Repos this rule is scoped to. EMPTY = project-level (applies to all repos).
+    pub repos: Vec<String>,
+}
+
+impl SelectedRule {
+    /// Does this selected rule apply to `repo`? Project-level rules (empty `repos`) apply to
+    /// every repo; a repo-scoped rule applies only when `repo` is in its set.
+    pub fn applies_to(&self, repo: &str) -> bool {
+        self.repos.is_empty() || self.repos.iter().any(|r| r == repo)
+    }
+}
+
 /// Phase 2 — AUDIT against the SELECTED rules. After the architect picks rules (Phase 1),
 /// this audits the code: the deterministic content rules (secrets / raw-SQL / secret-URL)
 /// are the always-on SECURITY floor and produce ENFORCED findings; the AI audit is
 /// PARAMETERIZED by the selected rules' directives (so it checks the code against what the
 /// project actually adopted) and produces ADVISORY findings plus its investigative pass.
-/// `selected` is `(rule_id, directive)` for each adopted rule.
+/// Each repo is audited against only the rules that [`SelectedRule::applies_to`] it (its
+/// own selections plus the project-level set), never the whole selection across the board.
 /// Whether a rule describes what CODE should look like (audit it against source) vs how
 /// the FLEET/TEAM operates (governance/process — arm it, but don't code-audit). The
 /// orchestration (`ORCH-`), meta-principle (`SPIRIT-`), and process (`PROC-`) families
@@ -1102,7 +1129,7 @@ fn is_code_auditable_rule(id: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     specs: &[String],
-    selected: &[(String, String)],
+    selected: &[SelectedRule],
     token: &str,
     model: Option<&str>,
     calibration_model: Option<&str>,
@@ -1139,12 +1166,11 @@ pub async fn audit_repos(
     // application SOURCE against them is a category error ("this app doesn't track its
     // AI token budget"). The arm path still installs them; only the AI code-audit
     // prompt is filtered.
-    let semantic: Vec<(String, String)> = selected
-        .iter()
-        .filter(|(id, _)| camerata_gateway::lookup_arm(id).is_none())
-        .filter(|(id, _)| is_code_auditable_rule(id))
-        .cloned()
-        .collect();
+    //
+    // THIRD, scope by REPO. The engine/governance filters above are global, but which
+    // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
+    // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
+    // rules ∪ the project-level set, never the whole selection across the board.
 
     for spec in specs {
         let spec = spec.trim();
@@ -1155,17 +1181,28 @@ pub async fn audit_repos(
             notes.push(format!("{spec}: not `owner/repo`, skipped"));
             continue;
         };
+        // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
+        // project-level), minus the deterministic-arm and governance/process families.
+        let semantic: Vec<(String, String)> = selected
+            .iter()
+            .filter(|r| r.applies_to(spec))
+            .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
+            .filter(|r| is_code_auditable_rule(&r.id))
+            .map(|r| (r.id.clone(), r.directive.clone()))
+            .collect();
         match fetch_repo_files(owner, repo, token).await {
             Ok(ExtractedRepo { files, truncated, excluded_noise: _ }) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
-                // Deterministic security floor (always-on): ENFORCED findings. Push them to
-                // the job up front so the live preview shows the criticals immediately.
+                // Deterministic security floor (always-on, every repo): ENFORCED findings.
+                // This is the non-deselectable critical floor, so it is NOT repo-scoped —
+                // hardcoded secrets / raw-SQL concat are unsafe in any code repo. Push them
+                // to the job up front so the live preview shows the criticals immediately.
                 let mut repo_findings = audit_files(spec, &files);
                 if let Some((jstore, jid)) = job {
                     jstore.add_findings(jid, repo_findings.clone());
                 }
-                // AI audit parameterized by the SEMANTIC rules only: ADVISORY findings.
+                // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
                 match crate::ai_audit::audit_repo(
                     &llm, spec, &files, &semantic, model, calibration_model, mode, feedback, job,
                     Some(&meter),
@@ -1199,6 +1236,50 @@ pub async fn audit_repos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sel(id: &str, repos: &[&str]) -> SelectedRule {
+        SelectedRule {
+            id: id.to_string(),
+            directive: format!("directive for {id}"),
+            repos: repos.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn selected_rule_project_level_applies_to_every_repo() {
+        let r = sel("ARCH-1", &[]);
+        assert!(r.applies_to("acme/api"));
+        assert!(r.applies_to("acme/ui"));
+    }
+
+    #[test]
+    fn selected_rule_repo_scoped_applies_only_to_its_repos() {
+        let r = sel("RUST-DIOXUS-2", &["acme/ui"]);
+        assert!(r.applies_to("acme/ui"));
+        assert!(!r.applies_to("acme/api"));
+    }
+
+    #[test]
+    fn per_repo_semantic_set_is_union_of_project_level_and_repo_rules() {
+        // Mirrors the per-repo filter inside `audit_repos`: each repo sees project-level
+        // rules (empty `repos`) plus the rules bound to it, and nothing bound to a sibling.
+        let selected = vec![
+            sel("ARCH-1", &[]),               // project-level → both repos
+            sel("RUST-DIOXUS-2", &["acme/ui"]), // ui only
+            sel("SQL-1", &["acme/api"]),        // api only
+        ];
+
+        let for_repo = |spec: &str| -> Vec<String> {
+            selected
+                .iter()
+                .filter(|r| r.applies_to(spec))
+                .map(|r| r.id.clone())
+                .collect()
+        };
+
+        assert_eq!(for_repo("acme/ui"), vec!["ARCH-1", "RUST-DIOXUS-2"]);
+        assert_eq!(for_repo("acme/api"), vec!["ARCH-1", "SQL-1"]);
+    }
 
     #[test]
     fn extract_pulls_code_files_strips_top_dir_and_skips_binaries() {

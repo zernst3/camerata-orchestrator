@@ -1943,18 +1943,34 @@ async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
         .ok()
 }
 
-/// Phase 2 — audit the repos against the selected rules (`(id, directive)` each).
+/// A rule the user selected to audit against, carrying its per-repo binding. An empty
+/// `repos` means PROJECT-LEVEL (every repo); a non-empty `repos` scopes the rule to just
+/// those repos. The backend audits each repo against only the rules that apply to it, so a
+/// multi-repo scan runs each repo against its own rules ∪ the project-level set.
+#[derive(Clone, PartialEq)]
+struct SelectedAuditRule {
+    id: String,
+    directive: String,
+    repos: Vec<String>,
+}
+
+/// Serialize selected rules into the audit request shape (`{id, directive, repos}` each).
+fn audit_rules_json(rules: &[SelectedAuditRule]) -> Vec<serde_json::Value> {
+    rules
+        .iter()
+        .map(|r| serde_json::json!({ "id": r.id, "directive": r.directive, "repos": r.repos }))
+        .collect()
+}
+
+/// Phase 2 — audit the repos against the selected rules (each carrying its repo binding).
 async fn audit_against(
     repos: &[String],
-    rules: &[(String, String)],
+    rules: &[SelectedAuditRule],
     model: &str,
     calibration_model: &str,
     mode: &str,
 ) -> Option<ScanReportView> {
-    let rule_json: Vec<_> = rules
-        .iter()
-        .map(|(id, directive)| serde_json::json!({ "id": id, "directive": directive }))
-        .collect();
+    let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
         .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode }))
@@ -2095,15 +2111,12 @@ struct JobStateView {
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).
 async fn audit_job_start(
     repos: &[String],
-    rules: &[(String, String)],
+    rules: &[SelectedAuditRule],
     model: &str,
     calibration_model: &str,
     exec_mode: &str,
 ) -> Option<String> {
-    let rule_json: Vec<_> = rules
-        .iter()
-        .map(|(id, directive)| serde_json::json!({ "id": id, "directive": directive }))
-        .collect();
+    let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
         .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode }))
@@ -2727,7 +2740,7 @@ fn FindingsTable(
 fn ProposedRulesTable(
     rules: Vec<ProposedRuleView>,
     findings: Vec<FindingView>,
-    on_audit: EventHandler<Vec<(String, String)>>,
+    on_audit: EventHandler<Vec<SelectedAuditRule>>,
     auditing: bool,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -2865,7 +2878,7 @@ fn ProposedRulesTable(
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to audit against.");
                         return;
                     }
-                    let chosen_rules: Vec<(String, String)> = picked.iter().map(|r| {
+                    let chosen_rules: Vec<SelectedAuditRule> = picked.iter().map(|r| {
                         let directive = if r.options.is_empty() {
                             r.title.clone()
                         } else {
@@ -2874,7 +2887,10 @@ fn ProposedRulesTable(
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| r.title.clone())
                         };
-                        (r.id.clone(), directive)
+                        // Carry the rule's repo binding so the backend scopes each repo to
+                        // only the rules that apply to it (per-repo scanning). A rule bound
+                        // to every scanned repo reads as project-level.
+                        SelectedAuditRule { id: r.id.clone(), directive, repos: r.repos.clone() }
                     }).collect();
                     on_audit.call(chosen_rules);
                 },
@@ -3491,7 +3507,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                         rules: report.proposed_rules.clone(),
                         findings: findings.clone(),
                         auditing: auditing(),
-                        on_audit: move |rules: Vec<(String, String)>| {
+                        on_audit: move |rules: Vec<SelectedAuditRule>| {
                             let repos = repos_audit.clone();
                             let model = audit_model();
                             let calib = calibration_model();
