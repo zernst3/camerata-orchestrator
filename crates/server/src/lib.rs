@@ -173,6 +173,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
+        .route("/api/onboard/apply", post(onboard_apply))
+        .route("/api/onboard/open-pr", post(onboard_open_pr))
         .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
@@ -956,6 +958,117 @@ async fn onboard_arm(
     let baselines = baselines_from_findings(&req.findings, "architect");
 
     let results = emit_to_repos(&repos, &repo_local, &custom, &baselines, &token).await;
+    Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// Apply: write the approved ruleset onto a governance branch in each repo's LOCAL clone AND
+/// push that branch to origin — WITHOUT opening a PR. The architect can edit the working copy
+/// freely, then open the PR as a separate step (`onboard_open_pr`). Needs a workspace folder
+/// set + a token with Contents write. The branch lands BOTH locally and on origin.
+async fn onboard_apply(
+    State(state): State<AppState>,
+    Json(req): Json<ArmReq>,
+) -> Json<serde_json::Value> {
+    if req.rules.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }));
+    };
+    let Some(root) = state.settings.workspace_root() else {
+        return Json(serde_json::json!({ "ok": false, "message": "Set a local workspace folder first (Settings) — Apply writes into the repo's local clone." }));
+    };
+    let root = std::path::PathBuf::from(root);
+
+    // Source of truth: save the armed ruleset to the active project (create one if none).
+    save_armed_to_project(&state, &req.rules);
+
+    let repo_local: Vec<crate::arm::ArmRule> = req
+        .rules
+        .iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .cloned()
+        .collect();
+    let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
+    repos.sort();
+    repos.dedup();
+    let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
+    let baselines = baselines_from_findings(&req.findings, "architect");
+
+    let mut results = Vec::new();
+    for repo in &repos {
+        let repo_rules: Vec<&crate::arm::ArmRule> =
+            repo_local.iter().filter(|r| r.repos.iter().any(|x| x == repo)).collect();
+        let repo_custom: Vec<&crate::project::CustomRule> = custom
+            .iter()
+            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .collect();
+        if repo_rules.is_empty() && repo_custom.is_empty() {
+            continue;
+        }
+        let mut files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        if let Some(baseline_json) = baselines.get(repo) {
+            files.push((".camerata/baseline.json".to_string(), baseline_json.clone()));
+        }
+        let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
+        match crate::workspace::apply_local_and_push(
+            &root, repo, crate::arm::ARM_BRANCH, &files, &msg, &token,
+        )
+        .await
+        {
+            Ok(path) => results.push(serde_json::json!({
+                "repo": repo, "ok": true, "branch": crate::arm::ARM_BRANCH, "path": path
+            })),
+            Err(e) => results.push(serde_json::json!({
+                "repo": repo, "ok": false, "message": format!("{e}")
+            })),
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "results": results }))
+}
+
+#[derive(serde::Deserialize)]
+struct OpenPrReq {
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+/// Open the governance PR from the already-applied + pushed branch (the explicit, separate
+/// step after `onboard_apply`). One PR per repo into its default branch.
+async fn onboard_open_pr(
+    State(_state): State<AppState>,
+    Json(req): Json<OpenPrReq>,
+) -> Json<serde_json::Value> {
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to open the PR." }));
+    };
+    let mut repos: Vec<String> = req.repos.into_iter().filter(|r| !r.trim().is_empty()).collect();
+    repos.sort();
+    repos.dedup();
+    if repos.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No repos to open a PR for." }));
+    }
+    let title = "Camerata governance: adopt the selected ruleset";
+    let body = "Adopts the Camerata-selected ruleset for this repo (AGENTS.md / CONVENTIONS.md / \
+        CI gate / baseline). Applied locally and pushed by Camerata onboarding; opened as a PR \
+        on request.";
+    let mut results = Vec::new();
+    for repo in &repos {
+        match crate::workspace::open_branch_pr(repo, crate::arm::ARM_BRANCH, title, body, &token)
+            .await
+        {
+            Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
+            Err(e) => {
+                results.push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") }))
+            }
+        }
+    }
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 

@@ -206,6 +206,77 @@ pub async fn create_branch(root: &Path, repo: &str, branch: &str) -> anyhow::Res
     anyhow::bail!("git checkout {branch}: {}", stderr_of(&switched))
 }
 
+/// Apply governance files onto a branch in the repo's LOCAL clone AND push that branch to
+/// origin — WITHOUT opening a PR. The architect can then edit the working copy freely before
+/// opening the PR (a separate step). The branch therefore exists in BOTH places.
+///
+/// Steps: ensure the clone exists (clone if missing) → create/switch to `branch` →
+/// write each `(path, content)` file → `git add -A` → commit (tolerating "nothing to
+/// commit" on a re-apply) → push the branch with the authenticated URL (token stays out of
+/// config). Returns the local working-copy path.
+pub async fn apply_local_and_push(
+    root: &Path,
+    repo: &str,
+    branch: &str,
+    files: &[(String, String)],
+    commit_msg: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let dir = repo_dir(root, repo);
+    // The repo must be local. Clone it if it isn't already (local-first: a repo lives on disk).
+    if !is_git_repo(&dir) {
+        let res = clone_or_pull(root, repo, token).await;
+        if !res.cloned {
+            anyhow::bail!("{repo}: {} (couldn't get a local clone to apply into)", res.detail);
+        }
+    }
+    create_branch(root, repo, branch).await?;
+    // Write the governance files into the working copy, creating parent dirs as needed.
+    for (rel, content) in files {
+        let full = dir.join(rel);
+        if let Some(parent) = full.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
+        }
+        tokio::fs::write(&full, content)
+            .await
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
+    }
+    // Stage + commit. A no-op re-apply (identical files) leaves nothing to commit — tolerate it.
+    let add = git(Some(&dir), &["add", "-A"]).await?;
+    if !add.status.success() {
+        anyhow::bail!("git add: {}", stderr_of(&add));
+    }
+    let commit = git(Some(&dir), &["commit", "-m", commit_msg]).await?;
+    if !commit.status.success() {
+        let err = stderr_of(&commit);
+        let out = String::from_utf8_lossy(&commit.stdout);
+        let nothing = err.contains("nothing to commit") || out.contains("nothing to commit");
+        if !nothing {
+            anyhow::bail!("git commit: {err}");
+        }
+    }
+    // Push the branch to origin so it exists remotely too (no PR).
+    let push = git(Some(&dir), &["push", "--set-upstream", &authed_url(repo, token), branch]).await?;
+    if !push.status.success() {
+        anyhow::bail!("git push {branch}: {}", stderr_of(&push));
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Open a governance PR from an already-pushed branch (the explicit, separate step after
+/// `apply_local_and_push`). Returns the PR URL; tolerant of a pre-existing open PR.
+pub async fn open_branch_pr(
+    repo: &str,
+    branch: &str,
+    title: &str,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    open_pr(repo, branch, title, body, token).await
+}
+
 /// Push the local branch to GitHub (authenticated transient command), then open a PR
 /// into the default branch. Returns the PR URL. This is the explicit ship step.
 pub async fn ship(

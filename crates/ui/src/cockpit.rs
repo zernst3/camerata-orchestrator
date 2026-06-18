@@ -2288,13 +2288,41 @@ struct ArmResultView {
     url: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// Local working-copy path the governance files were written into (Apply step).
+    #[serde(default)]
+    path: Option<String>,
+    /// The governance branch created/pushed (Apply step).
+    #[serde(default)]
+    branch: Option<String>,
 }
 
-/// Arm: install the selected rules into their repos via governance PRs.
-async fn arm_rules(rules: &[ArmRuleReq], findings: &[FindingView]) -> Option<Vec<ArmResultView>> {
+/// Apply: write the selected rules onto a governance branch in each repo's LOCAL clone and
+/// push it to origin — NO pull request. The architect opens the PR separately.
+async fn apply_rules(rules: &[ArmRuleReq], findings: &[FindingView]) -> Option<(bool, String, Vec<ArmResultView>)> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/arm", crate::BFF_URL))
+        .post(format!("{}/api/onboard/apply", crate::BFF_URL))
         .json(&serde_json::json!({ "rules": rules, "findings": findings }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    let message = v.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    let results = v
+        .get("results")
+        .cloned()
+        .and_then(|r| serde_json::from_value(r).ok())
+        .unwrap_or_default();
+    Some((ok, message, results))
+}
+
+/// Open the governance PR for each repo from the already-applied branch (separate step).
+async fn open_governance_pr(repos: &[String]) -> Option<Vec<ArmResultView>> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/open-pr", crate::BFF_URL))
+        .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
         .ok()?
@@ -2306,6 +2334,7 @@ async fn arm_rules(rules: &[ArmRuleReq], findings: &[FindingView]) -> Option<Vec
     }
     serde_json::from_value(v.get("results").cloned()?).ok()
 }
+
 
 /// Accept selected findings as tech debt: open a GitHub issue. Returns the URL.
 async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
@@ -3047,6 +3076,10 @@ fn ProposedRulesTable(
         }
     });
     let mut arming = use_signal(|| false);
+    let mut opening_pr = use_signal(|| false);
+    // Repos that the Apply step wrote a governance branch into (local + pushed). The "Open
+    // governance PR" button targets exactly these, and is disabled until something is applied.
+    let mut applied_repos = use_signal(Vec::<String>::new);
     let mut domain_panel_open = use_signal(|| false);
     let arm_findings = findings;
     // Export the FULL cross-repo rule set (every repo's proposed rules), not just the
@@ -3242,23 +3275,63 @@ fn ProposedRulesTable(
                     arming.set(true);
                     let findings = arm_findings.clone();
                     spawn(async move {
-                        match arm_rules(&arm_reqs, &findings).await {
+                        match apply_rules(&arm_reqs, &findings).await {
+                            Some((ok, message, results)) => {
+                                if !ok && results.is_empty() {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, if message.is_empty() { "Apply failed.".to_string() } else { message });
+                                } else {
+                                    let mut done = Vec::new();
+                                    for r in results {
+                                        if r.ok {
+                                            let branch = r.branch.unwrap_or_default();
+                                            let path = r.path.unwrap_or_default();
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: applied to branch '{branch}' (local + pushed, no PR) — {path}", r.repo));
+                                            done.push(r.repo);
+                                        } else {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
+                                        }
+                                    }
+                                    if !done.is_empty() { applied_repos.set(done); }
+                                }
+                            }
+                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Apply failed — set a workspace folder + connect GitHub (Contents write)."),
+                        }
+                        arming.set(false);
+                    });
+                },
+                if arming() { "Applying…" } else { "Apply rules → local branch + push" }
+            }
+            button {
+                class: "btn-run",
+                disabled: opening_pr() || applied_repos().is_empty(),
+                title: if applied_repos().is_empty() { "Apply the rules first; then open the PR from the pushed branch." } else { "" },
+                onclick: move |_| {
+                    let repos = applied_repos();
+                    if repos.is_empty() { return; }
+                    opening_pr.set(true);
+                    spawn(async move {
+                        match open_governance_pr(&repos).await {
                             Some(results) => {
                                 for r in results {
                                     if r.ok {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: governance PR \u{2192} {}", r.repo, r.url.unwrap_or_default()));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: governance PR → {}", r.repo, r.url.unwrap_or_default()));
                                     } else {
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
                                     }
                                 }
                             }
-                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Arm failed — needs Contents + PR write on the connected token."),
+                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Open PR failed — needs PR write on the connected token."),
                         }
-                        arming.set(false);
+                        opening_pr.set(false);
                     });
                 },
-                if arming() { "Arming…" } else { "Arm selected rules \u{2192} governance PR" }
+                if opening_pr() { "Opening PR…" } else { "Open governance PR" }
             }
+        }
+        p { class: "arm-note",
+            "Apply writes the governance files (AGENTS.md / CONVENTIONS.md / CI gate / baseline) onto a "
+            code { "camerata/onboard-governance" }
+            " branch in each repo's local clone AND pushes it to origin — no PR is opened. Edit the working copy as much as you want, then Open governance PR when ready."
         }
     }
 }

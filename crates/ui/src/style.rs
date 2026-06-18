@@ -1501,6 +1501,9 @@ html, body {
 }
 .job-progress-scope-note { font-size: 11px; color: var(--ink-faint); flex-basis: 100%; }
 
+.arm-note { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0 0; max-width: 90ch; }
+.arm-note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
+
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
   display: inline-flex; align-items: center; gap: 7px;
