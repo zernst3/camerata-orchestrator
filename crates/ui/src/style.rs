@@ -1492,6 +1492,15 @@ html, body {
   text-transform: uppercase; color: var(--accent); margin-bottom: 8px;
 }
 
+.job-progress-scope { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 8px; }
+.job-progress-scope-h { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); }
+.job-progress-repo {
+  font-size: 11px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 999px; padding: 2px 9px;
+}
+.job-progress-scope-note { font-size: 11px; color: var(--ink-faint); flex-basis: 100%; }
+
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
   display: inline-flex; align-items: center; gap: 7px;

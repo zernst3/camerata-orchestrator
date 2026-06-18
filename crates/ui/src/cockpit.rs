@@ -4072,12 +4072,27 @@ fn ScanResults(report: ScanReportView) -> Element {
                 if let Some((done, total, nf)) = job_progress() {
                     {
                         let pct = (done * 100).checked_div(total).unwrap_or(0).min(100);
+                        let n_repos = report.repos.len();
                         rsx! {
                             div { class: "job-progress",
                                 div { class: "job-progress-track",
                                     div { class: "job-progress-fill", style: "width: {pct}%" }
                                 }
                                 span { class: "job-progress-label", "{done}/{total} passes · {nf} finding(s) so far" }
+                                // Multi-repo scans run ONE repo at a time, and the pass
+                                // denominator grows as each repo is reached — so the agent
+                                // activity below shows only the repo currently running, not all
+                                // of them. Make the full scope explicit so it doesn't look like
+                                // only one repo is being scanned.
+                                if n_repos > 1 {
+                                    div { class: "job-progress-scope",
+                                        span { class: "job-progress-scope-h", "{n_repos} repos in scope, scanned one at a time:" }
+                                        for repo in report.repos.iter() {
+                                            span { key: "{repo}", class: "job-progress-repo", "{repo}" }
+                                        }
+                                        span { class: "job-progress-scope-note", "The pass count climbs as each repo is reached; agent activity shows the repo running now." }
+                                    }
+                                }
                             }
                         }
                     }
