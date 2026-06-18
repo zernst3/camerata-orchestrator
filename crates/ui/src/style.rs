@@ -1536,6 +1536,88 @@ html, body {
 .chat-mode-btn:not(:last-child) { border-right: 1px solid var(--line); }
 .chat-mode-btn.active { background: var(--accent); color: #fff; }
 
+/* ---- in-app terminal (issue #38) ------------------------------------------ */
+/*
+ * Layout mirror of .chat-fab / .chat-panel, offset to the LEFT of the chat FAB
+ * so both are always reachable. The FAB is a rounded square (matching chat-fab)
+ * but uses the ink palette — a "tool" affordance, not a bright CTA.
+ *
+ * RUNTIME-TODO: xterm.js is injected from jsdelivr CDN. Offline or CSP-strict
+ * environments will need xterm.js vendored locally (served from the BFF or
+ * bundled as a data-URL). The CSS variables below keep the terminal colors
+ * consistent with the app palette.
+ */
+.term-fab {
+  /* Rounded square, ink-toned — reads as a tool affordance next to the terracotta chat FAB. */
+  position: fixed; right: 76px; bottom: 22px; z-index: 1000;
+  width: 46px; height: 46px; border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--ink); color: var(--paper); font-size: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700;
+  cursor: pointer; letter-spacing: -.02em;
+  box-shadow: var(--shadow-card); transition: transform .15s var(--ease), background .15s var(--ease);
+}
+.term-fab:hover { background: #2e2d2a; transform: translateY(-1px); }
+
+.term-panel {
+  position: fixed; right: 76px; bottom: 86px; z-index: 1000;
+  width: 640px; max-width: calc(100vw - 96px); height: 420px; max-height: calc(100vh - 130px);
+  display: flex; flex-direction: column;
+  background: #1b1a18; border: 1px solid #2e2d2a; border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); overflow: hidden;
+}
+
+/* Tab bar */
+.term-tabs {
+  display: flex; align-items: center; gap: 2px;
+  padding: 6px 8px 0; background: #111110;
+  border-bottom: 1px solid #2e2d2a; flex-shrink: 0; overflow-x: auto;
+}
+.term-tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px 5px 10px;
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: transparent; color: var(--ink-faint); font-size: 12px;
+  cursor: pointer; transition: background .15s var(--ease), color .15s var(--ease);
+  white-space: nowrap;
+}
+.term-tab:hover { background: #2e2d2a; color: var(--paper); }
+.term-tab.active { background: #1b1a18; color: var(--paper); border-color: #2e2d2a; }
+.term-tab-label { font-size: 12px; }
+.term-tab-close {
+  font-size: 13px; line-height: 1; color: var(--ink-faint);
+  padding: 1px 3px; border-radius: 4px;
+  transition: background .12s var(--ease), color .12s var(--ease);
+}
+.term-tab-close:hover { background: #3a3834; color: #fff; }
+.term-tab-add {
+  padding: 5px 11px; border: none; background: transparent;
+  color: var(--ink-faint); font-size: 16px; cursor: pointer; border-radius: 6px;
+  transition: background .12s var(--ease), color .12s var(--ease); line-height: 1;
+}
+.term-tab-add:hover { background: #2e2d2a; color: var(--paper); }
+
+/* Session body: fills remaining space */
+.term-body {
+  flex: 1; overflow: hidden; position: relative;
+}
+
+/* Each session div fills the body. Only the active one is display:block. */
+.term-session {
+  width: 100%; height: 100%;
+  /* xterm.js positions its canvas absolutely inside this container. */
+  position: relative; overflow: hidden;
+}
+
+/* Placeholder when no tabs are open */
+.term-empty {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%;
+  font-size: 13px; color: #6c6862;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 /* ---- agent-activity drawer ------------------------------------------------ */
 .agent-activity { margin: 10px 0; }
 .agent-activity-toggle {

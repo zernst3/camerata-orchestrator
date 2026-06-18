@@ -19,7 +19,7 @@ name = "camerata-server"
 path = "src/main.rs"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
 serde = { workspace = true }
@@ -40,6 +40,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 base64 = "0.22"
 # Timestamps for suppression/baseline provenance (accepted_at).
 chrono = { version = "0.4", features = ["clock"] }
+# PTY spawning for the in-app terminal (issue #38). Each WebSocket connection
+# gets its own PTY + shell process; they die when the ws closes.
+portable-pty = "0.8"
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }

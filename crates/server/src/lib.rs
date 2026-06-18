@@ -33,6 +33,7 @@ pub mod routine;
 pub mod run;
 pub mod settings;
 pub mod suppression;
+pub mod terminal;
 pub mod transcript;
 pub mod workspace;
 
@@ -232,6 +233,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
         .route("/api/uow/:story_id/history", post(uow_append_history))
+        // ── In-app terminal (issue #38) ───────────────────────────────────────
+        // Each connection spawns a PTY-backed shell; multiple tabs = multiple ws
+        // connections. No AppState needed — the handler is fully self-contained.
+        .route("/api/terminal/ws", get(terminal::ws_handler))
         .with_state(state)
 }
 

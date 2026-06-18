@@ -16,6 +16,7 @@ mod chat;
 mod cockpit;
 mod routines;
 mod style;
+mod terminal;
 mod toast;
 mod workspace;
 
@@ -78,5 +79,8 @@ fn App() -> Element {
         toast::ToastHost {}
         // The research chat bubble: a floating, always-available AI scratchpad.
         chat::ChatBubble {}
+        // The in-app terminal: a floating PTY-backed shell panel with tab support.
+        // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.
+        terminal::TerminalBubble {}
     }
 }
