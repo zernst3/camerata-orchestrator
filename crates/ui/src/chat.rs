@@ -6,10 +6,15 @@
 
 use dioxus::prelude::*;
 
+use crate::md::md_to_html;
+
 // Grounds the chat bubble's Guide mode in the CANONICAL repo user guide (docs/USER_GUIDE.md),
 // not a UI-local copy — so the assistant tracks the same doc the rest of the project maintains
 // and can't drift into describing features that aren't shipped.
 const USER_GUIDE: &str = include_str!("../../../docs/USER_GUIDE.md");
+
+// Grounds the Technical mode in the CANONICAL technical reference (docs/TECHNICAL.md).
+const TECHNICAL_DOC: &str = include_str!("../../../docs/TECHNICAL.md");
 
 /// One model the selector offers (`GET /api/models`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -41,18 +46,6 @@ struct Turn {
     text: String,
 }
 
-/// Render the assistant's markdown reply to HTML for display. GFM tables + strikethrough on,
-/// so the rule tables the model emits render as actual tables, not pipe soup.
-fn md_to_html(src: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    let parser = Parser::new_ext(src, opts);
-    let mut out = String::new();
-    html::push_html(&mut out, parser);
-    out
-}
 
 async fn fetch_models() -> Option<ModelsResp> {
     reqwest::get(format!("{}/api/models", crate::BFF_URL))
@@ -121,6 +114,21 @@ async fn fetch_rules_catalog() -> Option<String> {
 enum ChatMode {
     Research,
     Guide,
+    /// Grounded in docs/TECHNICAL.md: answers HOW Camerata works under the hood.
+    Technical,
+}
+
+/// Build the Technical-mode system prompt. Grounded exclusively in the canonical
+/// TECHNICAL.md so answers reflect actual code, not improvised architecture.
+fn technical_system_prompt() -> String {
+    format!(
+        "You are Camerata's in-app technical assistant. Answer questions about HOW \
+         Camerata works under the hood using ONLY the technical reference below. \
+         Cite real crate names, module paths, struct/function names, and file paths \
+         exactly as they appear in the doc. If a detail is not covered in the \
+         technical reference, say so clearly rather than guessing.\n\n\
+         === CAMERATA TECHNICAL REFERENCE ===\n{TECHNICAL_DOC}"
+    )
 }
 
 async fn send_chat(prompt: &str, model: &str, system: Option<&str>) -> Option<ChatResp> {
@@ -203,9 +211,13 @@ pub fn ChatBubble() -> Element {
             div { class: "chat-panel",
                 div { class: "chat-head",
                     span { class: "chat-title",
-                        if mode() == ChatMode::Guide { "Guide" } else { "Research chat" }
+                        match mode() {
+                            ChatMode::Guide => "Guide",
+                            ChatMode::Technical => "Technical",
+                            ChatMode::Research => "Research chat",
+                        }
                     }
-                    // Research / Guide mode toggle
+                    // Research / Guide / Technical mode toggle
                     div { class: "chat-mode-toggle",
                         button {
                             class: if mode() == ChatMode::Research { "chat-mode-btn active" } else { "chat-mode-btn" },
@@ -216,6 +228,11 @@ pub fn ChatBubble() -> Element {
                             class: if mode() == ChatMode::Guide { "chat-mode-btn active" } else { "chat-mode-btn" },
                             onclick: move |_| { mode.set(ChatMode::Guide); turns.write().clear(); },
                             "Guide"
+                        }
+                        button {
+                            class: if mode() == ChatMode::Technical { "chat-mode-btn active" } else { "chat-mode-btn" },
+                            onclick: move |_| { mode.set(ChatMode::Technical); turns.write().clear(); },
+                            "Technical"
                         }
                     }
                     select {
@@ -233,20 +250,20 @@ pub fn ChatBubble() -> Element {
                     }
                 }
                 p { class: "chat-disclaimer",
-                    if mode() == ChatMode::Guide {
-                        "Answers from the Camerata user guide only."
-                    } else {
-                        "Ungoverned scratchpad for research — not a governed build path."
+                    match mode() {
+                        ChatMode::Guide => "Answers from the Camerata user guide only.",
+                        ChatMode::Technical => "Answers grounded in the Camerata technical reference (crates, modules, code).",
+                        ChatMode::Research => "Ungoverned scratchpad for research — not a governed build path.",
                     }
                 }
 
                 div { class: "chat-log",
                     if turns().is_empty() {
                         p { class: "chat-empty",
-                            if mode() == ChatMode::Guide {
-                                "Ask how to do something in Camerata…"
-                            } else {
-                                "Ask anything. Pick a model above."
+                            match mode() {
+                                ChatMode::Guide => "Ask how to do something in Camerata…",
+                                ChatMode::Technical => "Ask how Camerata works under the hood…",
+                                ChatMode::Research => "Ask anything. Pick a model above.",
                             }
                         }
                     }
@@ -274,10 +291,10 @@ pub fn ChatBubble() -> Element {
                     textarea {
                         class: "chat-input",
                         rows: "2",
-                        placeholder: if mode() == ChatMode::Guide {
-                            "Ask how to do something in Camerata… (Enter to send)"
-                        } else {
-                            "Message… (Enter to send, Shift+Enter for newline)"
+                        placeholder: match mode() {
+                            ChatMode::Guide => "Ask how to do something in Camerata… (Enter to send)",
+                            ChatMode::Technical => "Ask how Camerata works under the hood… (Enter to send)",
+                            ChatMode::Research => "Message… (Enter to send, Shift+Enter for newline)",
                         },
                         value: "{draft}",
                         onkeydown: move |e| {
@@ -286,7 +303,11 @@ pub fn ChatBubble() -> Element {
                                 let prompt = draft().trim().to_string();
                                 if prompt.is_empty() || sending() { return; }
                                 let mdl = model();
-                                let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt(&catalog_kd)) } else { None };
+                                let sys = match mode() {
+                                    ChatMode::Guide => Some(guide_system_prompt(&catalog_kd)),
+                                    ChatMode::Technical => Some(technical_system_prompt()),
+                                    ChatMode::Research => None,
+                                };
                                 turns.write().push(Turn { role: "you", text: prompt.clone() });
                                 draft.set(String::new());
                                 sending.set(true);
@@ -314,7 +335,11 @@ pub fn ChatBubble() -> Element {
                             let prompt = draft().trim().to_string();
                             if prompt.is_empty() || sending() { return; }
                             let mdl = model();
-                            let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt(&catalog_btn)) } else { None };
+                            let sys = match mode() {
+                                ChatMode::Guide => Some(guide_system_prompt(&catalog_btn)),
+                                ChatMode::Technical => Some(technical_system_prompt()),
+                                ChatMode::Research => None,
+                            };
                             turns.write().push(Turn { role: "you", text: prompt.clone() });
                             draft.set(String::new());
                             sending.set(true);

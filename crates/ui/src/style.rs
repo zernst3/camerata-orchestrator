@@ -2032,4 +2032,18 @@ html, body {
 .go-to-repo-btn {
   white-space: nowrap; font-size: 11.5px; padding: 3px 9px;
 }
+
+/* ── Docs view ─────────────────────────────────────────────────────────────── */
+.docs-view {
+  display: flex; flex-direction: column; height: 100%; padding: 24px 28px; gap: 16px;
+}
+.docs-tabs { display: flex; gap: 8px; flex-shrink: 0; }
+.docs-body {
+  flex: 1; overflow-y: auto; max-width: 860px;
+  /* Inherit the chat markdown styling; add comfortable reading padding */
+  padding: 20px 24px !important;
+  font-size: 14px !important;
+  line-height: 1.6 !important;
+  border-radius: var(--r-md) !important;
+}
 "#;

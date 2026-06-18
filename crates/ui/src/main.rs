@@ -14,6 +14,7 @@ mod agent_activity;
 mod bombe;
 mod chat;
 mod cockpit;
+pub mod md;
 mod routines;
 mod style;
 mod terminal;

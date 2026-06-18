@@ -1928,6 +1928,8 @@ enum CockpitView {
     /// The local workspace: clone the active project's repos into the chosen folder,
     /// see their checkout status, and ship a branch (push + PR).
     Workspace,
+    /// In-app documentation viewer: USER_GUIDE.md and TECHNICAL.md rendered as markdown.
+    Docs,
 }
 
 /// The top-level screen of the enterprise app: the projects home, or inside a project.
@@ -2355,6 +2357,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 onclick: move |_| view.set(CockpitView::Workspace),
                 "Repository Workspace"
             }
+            button {
+                class: cls(CockpitView::Docs),
+                onclick: move |_| view.set(CockpitView::Docs),
+                "Docs"
+            }
         }
     }
 }
@@ -2452,6 +2459,16 @@ pub fn CockpitApp() -> Element {
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     crate::workspace::WorkspaceView {}
+                }
+            }
+        };
+    }
+    if view() == CockpitView::Docs {
+        return rsx! {
+            div { class: "cockpit",
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    DocsView {}
                 }
             }
         };
@@ -6233,6 +6250,49 @@ fn DecomposeSection(story_id: String) -> Element {
                     }
                 }
             }
+        }
+    }
+}
+
+// ── Docs view ─────────────────────────────────────────────────────────────────
+
+/// In-app documentation viewer. Renders USER_GUIDE.md and TECHNICAL.md as
+/// markdown, with a toggle to switch between them. Uses the same `md_to_html`
+/// renderer and `.chat-turn-text.md` CSS that the chat bubble uses, so tables,
+/// code blocks, and headings are styled consistently.
+const DOCS_USER_GUIDE: &str = include_str!("../../../docs/USER_GUIDE.md");
+const DOCS_TECHNICAL: &str = include_str!("../../../docs/TECHNICAL.md");
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocsTab {
+    UserGuide,
+    Technical,
+}
+
+#[component]
+fn DocsView() -> Element {
+    let mut tab = use_signal(|| DocsTab::UserGuide);
+
+    let content = match tab() {
+        DocsTab::UserGuide => crate::md::md_to_html(DOCS_USER_GUIDE),
+        DocsTab::Technical => crate::md::md_to_html(DOCS_TECHNICAL),
+    };
+
+    rsx! {
+        div { class: "docs-view",
+            div { class: "docs-tabs",
+                button {
+                    class: if tab() == DocsTab::UserGuide { "chat-mode-btn active" } else { "chat-mode-btn" },
+                    onclick: move |_| tab.set(DocsTab::UserGuide),
+                    "User Guide"
+                }
+                button {
+                    class: if tab() == DocsTab::Technical { "chat-mode-btn active" } else { "chat-mode-btn" },
+                    onclick: move |_| tab.set(DocsTab::Technical),
+                    "Technical"
+                }
+            }
+            div { class: "docs-body chat-turn-text md", dangerous_inner_html: content }
         }
     }
 }
