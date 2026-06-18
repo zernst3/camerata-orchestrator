@@ -1429,6 +1429,32 @@ html, body {
 .chat-turn-text { font-size: 13px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; word-break: break-word; padding: 8px 11px; border-radius: 12px; background: var(--paper); border: 1px solid var(--line-soft); }
 .chat-turn.you .chat-turn-text { background: var(--accent-wash); border-color: var(--accent-wash); }
 .chat-turn-text.dim { color: var(--ink-faint); font-style: italic; }
+/* Rendered-markdown assistant replies: normal whitespace + styled block elements. */
+.chat-turn-text.md { white-space: normal; }
+.chat-turn-text.md > :first-child { margin-top: 0; }
+.chat-turn-text.md > :last-child { margin-bottom: 0; }
+.chat-turn-text.md p { margin: 6px 0; line-height: 1.5; }
+.chat-turn-text.md ul, .chat-turn-text.md ol { margin: 6px 0; padding-left: 20px; }
+.chat-turn-text.md li { margin: 2px 0; }
+.chat-turn-text.md h1, .chat-turn-text.md h2, .chat-turn-text.md h3 {
+  font-size: 13.5px; font-weight: 700; letter-spacing: -.01em; margin: 10px 0 4px;
+}
+.chat-turn-text.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+  background: var(--accent-wash); padding: 1px 5px; border-radius: 4px;
+}
+.chat-turn-text.md pre {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px 10px; overflow-x: auto; margin: 6px 0;
+}
+.chat-turn-text.md pre code { background: none; padding: 0; }
+.chat-turn-text.md table { border-collapse: collapse; margin: 6px 0; font-size: 12px; width: 100%; }
+.chat-turn-text.md th, .chat-turn-text.md td {
+  border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top;
+}
+.chat-turn-text.md th { background: var(--accent-wash); font-weight: 700; }
+.chat-turn-text.md a { color: var(--accent-ink); }
+.chat-turn-text.md strong { font-weight: 700; }
 .chat-compose { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); align-items: flex-end; }
 .chat-input { flex: 1; resize: none; font: inherit; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .chat-send { border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; }

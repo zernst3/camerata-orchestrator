@@ -4677,11 +4677,12 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     // The flow steps differ slightly by path; both are gated on a connection.
     let steps: &[(&str, &str)] = match path() {
         OnboardPath::Brownfield => &[
-            ("Point at the repo", "Name an existing owner/repo your token can reach."),
-            ("Scan + propose a starter ruleset", "Camerata maps the stack and conventions and proposes a starting RuleSet — you review, you don't author from scratch."),
-            ("Approve / edit", "Adjust and approve the rules. You own the final set."),
-            ("Audit", "Scan the existing code against the approved rules and list what's already wrong (the 5-minute payoff). Secret/SQL content rules audit today; AST architecture rules follow."),
-            ("Arm", "Generate ONE governance PR: CONVENTIONS.md/AGENTS.md, an enforced CI workflow, and the gate's rule-subset config. Merge it and new violations are stopped at the gate."),
+            ("Point at the repo(s)", "Name the existing owner/repo(s) your token can reach, or browse to a local folder."),
+            ("Scan + propose per-repo rules", "Camerata detects each repo's stack and proposes a starter ruleset per repo — you review, you don't author from scratch."),
+            ("Pick rules", "Select rules per repo (project-level rules apply to all). Click a rule to read its options and choose an alternative."),
+            ("Audit (optional) + triage", "Optionally scan the code against your selected rules + the security floor, then triage findings (Unresolved / Ignored / Tech debt). Not required to finish onboarding."),
+            ("Apply", "Write the governance files onto a camerata/onboard-governance branch in each local clone and push it — no PR (Open governance PR separately). Applying marks the repo onboarded."),
+            ("Wire mechanical rules into CI", "The final step: add the selected mechanical rules to each repo's existing CI as enforced lint gates."),
         ],
         OnboardPath::Greenfield => &[
             ("Name the new repo", "Camerata scaffolds it with the rules baked in from commit zero."),

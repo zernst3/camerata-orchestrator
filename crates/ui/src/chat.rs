@@ -41,6 +41,19 @@ struct Turn {
     text: String,
 }
 
+/// Render the assistant's markdown reply to HTML for display. GFM tables + strikethrough on,
+/// so the rule tables the model emits render as actual tables, not pipe soup.
+fn md_to_html(src: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(src, opts);
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
+}
+
 async fn fetch_models() -> Option<ModelsResp> {
     reqwest::get(format!("{}/api/models", crate::BFF_URL))
         .await
@@ -240,7 +253,13 @@ pub fn ChatBubble() -> Element {
                     for (i , t) in turns().iter().enumerate() {
                         div { key: "{i}", class: if t.role == "you" { "chat-turn you" } else { "chat-turn ai" },
                             span { class: "chat-turn-role", "{t.role}" }
-                            span { class: "chat-turn-text", "{t.text}" }
+                            // The assistant replies in markdown; render it (tables/lists/bold/code)
+                            // instead of showing raw source. User turns stay plain text.
+                            if t.role == "ai" {
+                                div { class: "chat-turn-text md", dangerous_inner_html: md_to_html(&t.text) }
+                            } else {
+                                span { class: "chat-turn-text", "{t.text}" }
+                            }
                         }
                     }
                     if sending() {

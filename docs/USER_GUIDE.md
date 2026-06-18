@@ -69,36 +69,33 @@ Open **Onboard repos**. The flow: **scan → pick rules → apply → (optional 
 → onboarded.** Onboarding state **auto-saves** continuously, so you can quit and reopen without
 re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
-1. **Add repos** to the project (one `owner/repo` per line, or browse to a local folder).
-2. **Scan** — Camerata downloads each repo and detects its stack: languages from extensions,
-   frameworks from manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and
-   **CI/CD** (GitHub Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone,
-   Jenkins). It proposes a starter ruleset **per repo**.
+1. **Point at the repo(s)** — add them to the project (one `owner/repo` per line, or browse to a
+   local folder).
+2. **Scan + propose per-repo rules** — Camerata downloads each repo and detects its stack: languages
+   from extensions, frameworks from manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi,
+   CloudFormation) and **CI/CD** (GitHub Actions, GitLab CI, CircleCI, Azure Pipelines, Travis,
+   Bitbucket, Drone, Jenkins). It proposes a starter ruleset **per repo**.
 3. **Pick rules** — each repo has its **own** recommended-rule table; a repo single-select switches
    which repo you're editing. Selection is **per repo**: a rule ticked for repo A is bound to A only.
    **Project-level rules** apply to every repo. Click any rule to read its decision question, the
    options, the default, and each option's rationale, and to choose an alternative.
-4. **Apply rules** — writes the governance files onto a `camerata/onboard-governance` branch in each
-   repo's **local clone AND pushes that branch to origin — no pull request is opened.** The files:
-   `AGENTS.md` (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for
-   mechanical rules), and `.camerata/baseline.json` (accepted pre-existing debt). Edit the working
-   copy freely, then click **Open governance PR** (a separate button) when ready. **Applying marks the
-   repo onboarded** — the audit is **not** required to finish.
-5. **Audit (optional)** — run it to surface existing violations to triage. Each repo is scanned only
-   against **its own selected rules** plus the always-on **deterministic security floor** (hardcoded
-   secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free + instant). Pick the
-   **model** and the **scan mode** (*Parallel* / *Sequential* / *Background job* — a multi-repo or
-   large scan auto-selects Background, which runs one repo at a time and streams progress). A
-   pre-run **cost estimate** (biased high) shows tokens/passes before you commit.
-6. **Triage findings** — findings live in three tables you switch between: **Unresolved · Ignored ·
-   Tech debt**. Select findings and **Ignore (with reason)** or **Save as tech debt**; they move
-   tables, and you can re-bucket between any of the three. Findings carry a **Needs-review** column
-   when the calibration pass flags them (e.g. "over-engineered for a mini app") with the specific
-   reason. In the Tech-debt table mark each item **resolve later** or **resolve now**, then
-   **Process**: "later" → a tracked ticket (with CSV), "now" → the dev engine.
-7. **Apply mechanical rules to CI** — the final step (once nothing is Unresolved): wires the selected
-   mechanical rules into each repo's existing CI as enforced lint gates (checks what's already
-   enforced, adds the rest, as a governed run). Separate from fixing/ticketing the violations.
+4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
+   is scanned only against **its own selected rules** plus the always-on **deterministic security
+   floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
+   instant). Pick the **model** and the **scan mode** (*Parallel* / *Sequential* / *Background job*).
+   Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
+   **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
+   the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** (→ a
+   tracked ticket + CSV) or **resolve now** (→ the dev engine) and **Process**. This step is **not
+   required** to finish onboarding.
+5. **Apply** — writes the governance files onto a `camerata/onboard-governance` branch in each repo's
+   **local clone AND pushes that branch to origin — no pull request is opened.** The files: `AGENTS.md`
+   (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for mechanical rules),
+   and `.camerata/baseline.json` (accepted pre-existing debt). Edit the working copy freely, then click
+   **Open governance PR** (a separate button) when ready. **Applying marks the repo onboarded.**
+6. **Wire mechanical rules into CI** — the final step: add the selected mechanical rules to each repo's
+   existing CI as enforced lint gates (checks what's already enforced, adds the rest, as a governed
+   run). Separate from fixing/ticketing the violations.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.
