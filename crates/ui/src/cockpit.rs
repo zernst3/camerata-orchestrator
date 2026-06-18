@@ -2736,9 +2736,20 @@ fn FindingsTable(
 
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
+///
+/// Per-repo: `rules` is the subset bound to `view_repo` (the repo this table represents),
+/// while `all_rules` is the full cross-repo set used to resolve the OTHER repos' saved
+/// selections when building the audit/arm requests. `repo_selection` is the lifted, shared
+/// `repo -> selected rule ids` map: this table seeds its checkboxes from `view_repo`'s saved
+/// set (or the recommended rules on first view) and writes the live selection back to it, so
+/// switching repos preserves each repo's own picks. An empty `view_repo` is the single-repo /
+/// non-split case (no per-repo map; behaves like the original whole-set table).
 #[component]
 fn ProposedRulesTable(
     rules: Vec<ProposedRuleView>,
+    #[props(default)] all_rules: Vec<ProposedRuleView>,
+    #[props(default)] view_repo: String,
+    #[props(default)] repo_selection: Signal<std::collections::HashMap<String, Vec<String>>>,
     findings: Vec<FindingView>,
     on_audit: EventHandler<Vec<SelectedAuditRule>>,
     auditing: bool,
@@ -2746,6 +2757,13 @@ fn ProposedRulesTable(
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
+    // Full cross-repo rule lookup (by rule id) for building audit/arm requests that span
+    // every repo's saved selection, not just the one this table is currently showing.
+    let all_by_id: std::collections::HashMap<String, ProposedRuleView> = if all_rules.is_empty() {
+        rules.iter().map(|r| (r.id.clone(), r.clone())).collect()
+    } else {
+        all_rules.iter().map(|r| (r.id.clone(), r.clone())).collect()
+    };
     // Mint the row ids ONCE and persist them. `RowId::new()` is random, so doing this
     // in the render body would generate fresh ids every re-render: the Table keeps the
     // ids from its first render (use_table runs its initializer once), while id_map /
@@ -2760,10 +2778,32 @@ fn ProposedRulesTable(
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
         rows.iter().map(|(r, p)| (*r, p.clone())).collect();
     let id_map_audit = id_map.clone();
-    // Suggested rows (pre-selected on load) and a domain -> rows map (per-domain
-    // "select all" chips). Both derived BEFORE use_table consumes `rows`.
-    let suggested_ids: Vec<RowId> =
-        rows.iter().filter(|(_, p)| p.recommended).map(|(r, _)| *r).collect();
+    // The rows to PRE-SELECT on mount. If this repo already has a saved selection in the
+    // lifted map, restore exactly that (so switching repos preserves each repo's picks);
+    // otherwise fall back to the recommended rules (the first-view default). Derived BEFORE
+    // use_table consumes `rows`.
+    let suggested_ids: Vec<RowId> = {
+        let saved: Option<std::collections::HashSet<String>> = if view_repo.is_empty() {
+            None
+        } else {
+            repo_selection
+                .peek()
+                .get(&view_repo)
+                .map(|ids| ids.iter().cloned().collect())
+        };
+        match saved {
+            Some(ids) => rows
+                .iter()
+                .filter(|(_, p)| ids.contains(&p.id))
+                .map(|(r, _)| *r)
+                .collect(),
+            None => rows
+                .iter()
+                .filter(|(_, p)| p.recommended)
+                .map(|(r, _)| *r)
+                .collect(),
+        }
+    };
     let mut domain_rows: std::collections::BTreeMap<String, Vec<RowId>> = Default::default();
     for (rid, p) in &rows {
         let d = if p.domain.is_empty() { "general".to_string() } else { p.domain.clone() };
@@ -2798,22 +2838,49 @@ fn ProposedRulesTable(
         }
     });
     // Publish the live selected-rule count to ScanResults (Step 2) so its cost estimate
-    // tracks what the user has ticked. Reactive: re-runs whenever the selection changes.
-    // ProposedRulesTable only mounts inside ScanResults, which provides this signal.
+    // tracks what the user has ticked, AND persist this repo's selection back to the lifted
+    // map so a repo switch (which remounts this table) restores it. Reactive: re-runs
+    // whenever the selection changes. ProposedRulesTable only mounts inside ScanResults,
+    // which provides the count signal.
     let mut selected_count = use_context::<Signal<usize>>();
+    let id_map_writeback = id_map.clone();
+    let view_repo_wb = view_repo.clone();
+    let mut repo_selection_wb = repo_selection;
     use_effect(move || {
-        selected_count.set(handle.selected_ids().len());
+        let live_ids: Vec<String> = handle
+            .selected_ids()
+            .iter()
+            .filter_map(|rid| id_map_writeback.get(rid).map(|r| r.id.clone()))
+            .collect();
+        if view_repo_wb.is_empty() {
+            // Single-repo / non-split: no per-repo map, count is just this table's picks.
+            selected_count.set(live_ids.len());
+        } else {
+            // Write this repo's selection, then report the cross-repo total so the cost
+            // estimate reflects every repo that will be scanned, not just the visible one.
+            let mut map = repo_selection_wb.peek().clone();
+            map.insert(view_repo_wb.clone(), live_ids);
+            let total: usize = map.values().map(|v| v.len()).sum();
+            repo_selection_wb.set(map);
+            selected_count.set(total);
+        }
     });
     let mut arming = use_signal(|| false);
     let mut domain_panel_open = use_signal(|| false);
     let arm_findings = findings;
-    let csv_rules = rules.clone();
+    // Export the FULL cross-repo rule set (every repo's proposed rules), not just the
+    // currently-viewed repo's subset, so the CSV stays lossless for a multi-repo scan.
+    let csv_rules = if all_rules.is_empty() { rules.clone() } else { all_rules.clone() };
 
     // Current selection as a set, read reactively so each domain's checkbox reflects
     // whether ALL of that domain's rows are selected (tri-state-ish: checked only when
     // every row in the domain is selected).
     let selected_set: std::collections::HashSet<RowId> =
         handle.selected_ids().into_iter().collect();
+
+    // Dedicated clones for the audit closure; the originals are consumed by the arm closure.
+    let all_by_id_audit = all_by_id.clone();
+    let view_repo_audit = view_repo.clone();
 
     rsx! {
         // Per-domain "select all" — styled like a column's multi-select filter: a
@@ -2869,29 +2936,47 @@ fn ProposedRulesTable(
                 class: "btn-run",
                 disabled: auditing,
                 onclick: move |_| {
-                    // Read the SELECTED rows at click time and audit ONLY those (their
-                    // chosen/default directive). The audit must scan against the picked
-                    // subset, never all proposed rules.
-                    let sel = handle.selected_ids();
-                    let picked: Vec<ProposedRuleView> = sel.iter().filter_map(|id| id_map_audit.get(id).cloned()).collect();
-                    if picked.is_empty() {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to audit against.");
-                        return;
-                    }
-                    let chosen_rules: Vec<SelectedAuditRule> = picked.iter().map(|r| {
-                        let directive = if r.options.is_empty() {
+                    // Build the audit request from EVERY repo's saved selection, so one scan
+                    // covers all repos, each against its own chosen rules. The current repo's
+                    // live table selection is authoritative for it (the write-back effect may
+                    // not have flushed yet); other repos come from the lifted map.
+                    let resolve_directive = |r: &ProposedRuleView| -> String {
+                        if r.options.is_empty() {
                             r.title.clone()
                         } else {
                             let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
                             oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| r.title.clone())
-                        };
-                        // Carry the rule's repo binding so the backend scopes each repo to
-                        // only the rules that apply to it (per-repo scanning). A rule bound
-                        // to every scanned repo reads as project-level.
-                        SelectedAuditRule { id: r.id.clone(), directive, repos: r.repos.clone() }
-                    }).collect();
+                        }
+                    };
+                    let live_ids: Vec<String> = handle.selected_ids().iter()
+                        .filter_map(|id| id_map_audit.get(id).map(|r| r.id.clone())).collect();
+                    let chosen_rules: Vec<SelectedAuditRule> = if view_repo_audit.is_empty() {
+                        // Single-repo / non-split: audit this table's picks, each carrying
+                        // the rule's own repo binding (a rule bound to every repo = project-level).
+                        live_ids.iter().filter_map(|id| all_by_id_audit.get(id)).map(|r| {
+                            SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(r), repos: r.repos.clone() }
+                        }).collect()
+                    } else {
+                        // Per-repo: each (repo, selected rule) becomes one entry scoped to that
+                        // repo. The backend audits each repo against only the rules bound to it.
+                        let mut map = repo_selection.peek().clone();
+                        map.insert(view_repo_audit.clone(), live_ids);
+                        let mut out = Vec::new();
+                        for (repo, ids) in &map {
+                            for id in ids {
+                                if let Some(r) = all_by_id_audit.get(id) {
+                                    out.push(SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(r), repos: vec![repo.clone()] });
+                                }
+                            }
+                        }
+                        out
+                    };
+                    if chosen_rules.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) to audit against.");
+                        return;
+                    }
                     on_audit.call(chosen_rules);
                 },
                 if auditing {
@@ -2913,9 +2998,30 @@ fn ProposedRulesTable(
                 class: "btn-run",
                 disabled: arming(),
                 onclick: move |_| {
-                    let sel = handle.selected_ids();
-                    let picked: Vec<ProposedRuleView> = sel.iter().filter_map(|id| id_map.get(id).cloned()).collect();
-                    if picked.is_empty() {
+                    // Arm across EVERY repo's selection: a rule selected in one or more repos'
+                    // tables arms to exactly those repos (an explicit placement override still
+                    // wins). The current repo's live table selection is authoritative for it.
+                    let live_ids: Vec<String> = handle.selected_ids().iter()
+                        .filter_map(|id| id_map.get(id).map(|r| r.id.clone())).collect();
+                    // rule id -> the repos that selected it.
+                    let mut rule_repos: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+                    if view_repo.is_empty() {
+                        // Single-repo / non-split: each picked rule keeps its own repo binding.
+                        for id in &live_ids {
+                            if let Some(r) = all_by_id.get(id) {
+                                rule_repos.insert(id.clone(), r.repos.clone());
+                            }
+                        }
+                    } else {
+                        let mut map = repo_selection.peek().clone();
+                        map.insert(view_repo.clone(), live_ids);
+                        for (repo, ids) in &map {
+                            for id in ids {
+                                rule_repos.entry(id.clone()).or_default().push(repo.clone());
+                            }
+                        }
+                    }
+                    if rule_repos.is_empty() {
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Select at least one rule (tick its checkbox) before arming.");
                         return;
                     }
@@ -2923,7 +3029,8 @@ fn ProposedRulesTable(
                     // with alternatives and no choice yet blocks arming.
                     let mut arm_reqs = Vec::new();
                     let mut unresolved = Vec::new();
-                    for r in &picked {
+                    for (id, selected_repos) in &rule_repos {
+                        let Some(r) = all_by_id.get(id) else { continue; };
                         let (directive, option) = if r.options.is_empty() {
                             (r.title.clone(), None)
                         } else {
@@ -2933,9 +3040,9 @@ fn ProposedRulesTable(
                                 _ => { unresolved.push(r.id.clone()); continue; }
                             }
                         };
-                        // Use the architect's placement override if set, else the
-                        // domain-matched suggestion. A rule routed to zero repos is skipped.
-                        let repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| r.repos.clone());
+                        // Architect's explicit placement override wins; otherwise arm to the
+                        // repos that selected this rule. A rule routed to zero repos is skipped.
+                        let repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| selected_repos.clone());
                         if repos.is_empty() { continue; }
                         arm_reqs.push(ArmRuleReq {
                             id: r.id.clone(),
@@ -3333,6 +3440,35 @@ fn ScanResults(report: ScanReportView) -> Element {
     // (the estimate also depends on the model + mode pickers, which live in this component).
     let selected_count = use_signal(|| 0usize);
     use_context_provider(|| selected_count);
+
+    // Per-repo rule selection. For a multi-repo scan the architect views ONE repo's rule
+    // table at a time (the single-select below) and each repo keeps its own picks. This
+    // lifted `repo -> selected rule ids` map is the source of truth the per-repo tables seed
+    // from and write back to, so switching repos preserves each repo's selection and one
+    // audit covers every repo against its own rules. Empty for a single-repo scan (the table
+    // then behaves as the original whole-set table).
+    //
+    // PRE-SEED every repo with its recommended rules so a repo the architect never opens
+    // still audits against a sensible default set (not just the always-on security floor).
+    let repo_seed = {
+        let mut m = std::collections::HashMap::<String, Vec<String>>::new();
+        if report.repos.len() > 1 {
+            for repo in &report.repos {
+                let ids: Vec<String> = report
+                    .proposed_rules
+                    .iter()
+                    .filter(|r| r.recommended && r.repos.iter().any(|rp| rp == repo))
+                    .map(|r| r.id.clone())
+                    .collect();
+                m.insert(repo.clone(), ids);
+            }
+        }
+        m
+    };
+    let repo_selection = use_signal(|| repo_seed);
+    // Which repo's rule table is in view. Defaults to the first scanned repo.
+    let mut viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
+    let multi_repo = report.repos.len() > 1;
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
         .as_ref()
@@ -3500,11 +3636,45 @@ fn ScanResults(report: ScanReportView) -> Element {
             p { class: "scan-section-h", "Step 1 — proposed starter ruleset" }
             p { class: "scan-section-sub", "Camerata mapped the stack and proposes these rules. Pick the ones to enforce and choose alternatives; you own the final set (arming generates the governance PR)." }
             p { class: "scan-section-sub", "Click a rule row to read its full context and choose its alternative." }
+            // Per-repo view switch (multi-repo only): pick which repo's recommended-rule
+            // table to view + select. Each repo keeps its own selection; the audit runs every
+            // repo against its own picks.
+            if multi_repo {
+                div { class: "repo-select",
+                    label { class: "repo-select-label", "Repo ruleset:" }
+                    select {
+                        class: "repo-select-input",
+                        value: "{viewed_repo}",
+                        onchange: move |e| viewed_repo.set(e.value()),
+                        for repo in report.repos.iter() {
+                            option { key: "{repo}", value: "{repo}", "{repo}" }
+                        }
+                    }
+                    span { class: "repo-select-hint",
+                        "Showing rules for this repo. Each repo has its own selection; the audit scans every repo against its own rules."
+                    }
+                }
+            }
             {
                 let repos_audit = report.repos.clone();
+                // The rules bound to the viewed repo (its own per-repo table). For a single-repo
+                // scan, show the whole set and leave `view_repo` empty (whole-set behavior).
+                let view_repo = if multi_repo { viewed_repo() } else { String::new() };
+                let all_rules = report.proposed_rules.clone();
+                let visible_rules: Vec<ProposedRuleView> = if multi_repo {
+                    all_rules.iter().filter(|r| r.repos.iter().any(|rp| rp == &view_repo)).cloned().collect()
+                } else {
+                    all_rules.clone()
+                };
                 rsx! {
                     ProposedRulesTable {
-                        rules: report.proposed_rules.clone(),
+                        // Key on the viewed repo so switching remounts the table with that
+                        // repo's rule subset and its seeded selection.
+                        key: "{view_repo}",
+                        rules: visible_rules,
+                        all_rules,
+                        view_repo,
+                        repo_selection,
                         findings: findings.clone(),
                         auditing: auditing(),
                         on_audit: move |rules: Vec<SelectedAuditRule>| {

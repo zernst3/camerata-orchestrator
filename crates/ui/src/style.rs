@@ -1483,6 +1483,21 @@ html, body {
 /* ---- rule detail modal (click a row) -------------------------------------- */
 /* Proposed-rules table: per-domain "select all" as a column-filter-style
    multi-select. Trigger opens a FIXED-HEIGHT, scrollable checkbox list. */
+.repo-select {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 4px 0 12px; padding: 9px 12px;
+  background: var(--accent-wash); border: 1px solid var(--line); border-radius: 9px;
+}
+.repo-select-label { font-size: 12px; font-weight: 700; color: var(--ink); }
+.repo-select-input {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 12.5px; font-weight: 600; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  transition: border-color .15s var(--ease);
+}
+.repo-select-input:hover { border-color: var(--accent); }
+.repo-select-hint { font-size: 11.5px; color: var(--ink-soft); flex: 1; min-width: 220px; }
+
 .domain-select { position: relative; margin-bottom: 10px; }
 .domain-select-trigger {
   display: inline-flex; align-items: center; gap: 6px;
