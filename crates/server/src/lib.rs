@@ -128,6 +128,9 @@ impl AppState {
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+            // Routines persist too, so a scheduled governed run an architect set up
+            // survives a restart instead of being lost on every launch.
+            state.routines = RoutineStore::at(dir.join("routines.json"));
         }
         state
     }

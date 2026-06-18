@@ -7,13 +7,14 @@
 //! is the remaining wiring; this turn ships the model, the store, and run-now so the
 //! dashboard can list, toggle, and run routines.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 /// The outcome summary of a routine's last run: real counts from the gate script.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RoutineRunSummary {
     /// "passed" when the governed run completed (denies are the gate working, not
     /// failures).
@@ -24,7 +25,7 @@ pub struct RoutineRunSummary {
 }
 
 /// A scheduled governed routine.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Routine {
     pub id: String,
     pub name: String,
@@ -113,16 +114,51 @@ pub struct SetEnabledReq {
     pub enabled: bool,
 }
 
-/// In-memory routine store.
+/// Routine store. In-memory by default ([`new`]/[`seeded`]); [`at`] additionally
+/// persists to `<data_dir>/camerata/routines.json` so an architect's routines survive
+/// a restart (routines were previously lost on every launch). `Clone` is a shallow
+/// handle (shared `Arc`s) so it can live in [`crate::AppState`].
 #[derive(Clone, Default)]
 pub struct RoutineStore {
     items: Arc<Mutex<Vec<Routine>>>,
     counter: Arc<AtomicUsize>,
+    /// Disk path when persistence is on; `None` for the in-memory store.
+    path: Option<Arc<PathBuf>>,
 }
 
 impl RoutineStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Persist to (and rehydrate from) `path`. On load, the id counter is advanced
+    /// past the highest existing `rt-N` so new ids never collide with rehydrated ones.
+    pub fn at(path: PathBuf) -> Self {
+        let items: Vec<Routine> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let max = items
+            .iter()
+            .filter_map(|r| r.id.strip_prefix("rt-"))
+            .filter_map(|n| n.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        Self {
+            items: Arc::new(Mutex::new(items)),
+            counter: Arc::new(AtomicUsize::new(max)),
+            path: Some(Arc::new(path)),
+        }
+    }
+
+    /// Best-effort flush of the in-memory list to disk. The in-memory state is always
+    /// authoritative; a failed write never blocks the mutation that triggered it.
+    fn flush(&self) {
+        let Some(p) = &self.path else { return };
+        let Ok(items) = self.items.lock() else { return };
+        if let Ok(s) = serde_json::to_string(&*items) {
+            let _ = std::fs::write(p.as_ref(), s);
+        }
     }
 
     /// A store seeded with representative routines so the dashboard has content.
@@ -201,6 +237,7 @@ impl RoutineStore {
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
         }
+        self.flush();
         routine
     }
 
@@ -220,7 +257,10 @@ impl RoutineStore {
         } else {
             req.prompt.clone()
         };
-        Some(r.clone())
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
     }
 
     /// Delete a routine by id. Returns true if one was removed.
@@ -230,14 +270,22 @@ impl RoutineStore {
         };
         let before = guard.len();
         guard.retain(|r| r.id != id);
-        guard.len() != before
+        let removed = guard.len() != before;
+        drop(guard);
+        if removed {
+            self.flush();
+        }
+        removed
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Option<Routine> {
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
         r.enabled = enabled;
-        Some(r.clone())
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
     }
 
     /// Run a routine now: execute a governed run via the REAL gate script and record
@@ -255,7 +303,10 @@ impl RoutineStore {
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
         r.last_run = Some(summary);
-        Some(r.clone())
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
     }
 }
 
@@ -331,6 +382,62 @@ mod tests {
             name: "x".into(), schedule: "daily 09:00".into(), intent: "x".into(),
             prompt: String::new(), scope: "read-only".into(),
         }).is_none());
+    }
+
+    #[test]
+    fn persists_across_reload_and_advances_counter() {
+        // A temp path unique to this test (no Date/rand available; use the test name).
+        let path =
+            std::env::temp_dir().join("camerata-routine-persist-across-reload-test.json");
+        let _ = std::fs::remove_file(&path);
+
+        // First store: create one routine, which flushes to disk.
+        {
+            let store = RoutineStore::at(path.clone());
+            assert_eq!(store.list().len(), 0, "starts empty when file is absent");
+            let created = store.create(&CreateRoutineReq {
+                name: "Nightly".to_string(),
+                schedule: "daily 04:00".to_string(),
+                intent: "scan deps".to_string(),
+                prompt: String::new(),
+                scope: "read-only".to_string(),
+            });
+            assert_eq!(created.id, "rt-1");
+            store.set_enabled("rt-1", false);
+        }
+
+        // Second store at the same path: rehydrates the routine AND its disabled flag,
+        // and the counter is advanced so the next id is rt-2 (no collision).
+        {
+            let store = RoutineStore::at(path.clone());
+            let list = store.list();
+            assert_eq!(list.len(), 1, "rehydrated the persisted routine");
+            assert_eq!(list[0].id, "rt-1");
+            assert!(!list[0].enabled, "disabled flag survived the reload");
+
+            let next = store.create(&CreateRoutineReq {
+                name: "Second".to_string(),
+                schedule: "weekly Mon 09:00".to_string(),
+                intent: "audit PRs".to_string(),
+                prompt: String::new(),
+                scope: "read-only".to_string(),
+            });
+            assert_eq!(next.id, "rt-2", "counter advanced past the rehydrated max id");
+        }
+
+        // Delete also persists: a third store sees only the survivor.
+        {
+            let store = RoutineStore::at(path.clone());
+            assert!(store.delete("rt-1"));
+        }
+        {
+            let store = RoutineStore::at(path.clone());
+            let list = store.list();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].id, "rt-2", "delete persisted across reload");
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
