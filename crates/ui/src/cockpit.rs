@@ -1436,14 +1436,14 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 "← Projects"
             }
             button {
-                class: cls(CockpitView::Stories),
-                onclick: move |_| view.set(CockpitView::Stories),
-                "Control surface"
-            }
-            button {
                 class: cls(CockpitView::Onboard),
                 onclick: move |_| view.set(CockpitView::Onboard),
                 "Onboard repos"
+            }
+            button {
+                class: cls(CockpitView::Stories),
+                onclick: move |_| view.set(CockpitView::Stories),
+                "Development Surface"
             }
             button {
                 class: cls(CockpitView::Rules),
@@ -1451,14 +1451,14 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 "Rules"
             }
             button {
-                class: cls(CockpitView::Workspace),
-                onclick: move |_| view.set(CockpitView::Workspace),
-                "Workspace"
-            }
-            button {
                 class: cls(CockpitView::Routines),
                 onclick: move |_| view.set(CockpitView::Routines),
                 "Routines"
+            }
+            button {
+                class: format!("{} secondary", cls(CockpitView::Workspace)),
+                onclick: move |_| view.set(CockpitView::Workspace),
+                "Workspace"
             }
         }
     }

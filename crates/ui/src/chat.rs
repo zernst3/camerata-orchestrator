@@ -6,6 +6,8 @@
 
 use dioxus::prelude::*;
 
+const USER_GUIDE: &str = include_str!("../docs/USER_GUIDE.md");
+
 /// One model the selector offers (`GET /api/models`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ModelOption {
@@ -45,16 +47,36 @@ async fn fetch_models() -> Option<ModelsResp> {
         .ok()
 }
 
-async fn send_chat(prompt: &str, model: &str) -> Option<ChatResp> {
+/// Which mode the chat panel is in.
+#[derive(Clone, Copy, PartialEq)]
+enum ChatMode {
+    Research,
+    Guide,
+}
+
+async fn send_chat(prompt: &str, model: &str, system: Option<&str>) -> Option<ChatResp> {
+    let mut body = serde_json::json!({ "prompt": prompt, "model": model });
+    if let Some(sys) = system {
+        body["system"] = serde_json::Value::String(sys.to_string());
+    }
     reqwest::Client::new()
         .post(format!("{}/api/chat", crate::BFF_URL))
-        .json(&serde_json::json!({ "prompt": prompt, "model": model }))
+        .json(&body)
         .send()
         .await
         .ok()?
         .json::<ChatResp>()
         .await
         .ok()
+}
+
+/// Build the Guide-mode system prompt at call time (avoids a large const).
+fn guide_system_prompt() -> String {
+    format!(
+        "You are Camerata's in-app assistant. Answer the user's question about HOW TO USE \
+         Camerata, using ONLY the user guide below. If the answer isn't in the guide, say so \
+         briefly. Be concise and concrete.\n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
+    )
 }
 
 #[component]
@@ -74,6 +96,7 @@ pub fn ChatBubble() -> Element {
     }
     let backend = models.as_ref().map(|m| m.backend.clone()).unwrap_or_default();
 
+    let mut mode = use_signal(|| ChatMode::Research);
     let mut turns = use_signal(Vec::<Turn>::new);
     let mut draft = use_signal(String::new);
     let mut sending = use_signal(|| false);
@@ -90,7 +113,22 @@ pub fn ChatBubble() -> Element {
         if open() {
             div { class: "chat-panel",
                 div { class: "chat-head",
-                    span { class: "chat-title", "Research chat" }
+                    span { class: "chat-title",
+                        if mode() == ChatMode::Guide { "Guide" } else { "Research chat" }
+                    }
+                    // Research / Guide mode toggle
+                    div { class: "chat-mode-toggle",
+                        button {
+                            class: if mode() == ChatMode::Research { "chat-mode-btn active" } else { "chat-mode-btn" },
+                            onclick: move |_| { mode.set(ChatMode::Research); turns.write().clear(); },
+                            "Research"
+                        }
+                        button {
+                            class: if mode() == ChatMode::Guide { "chat-mode-btn active" } else { "chat-mode-btn" },
+                            onclick: move |_| { mode.set(ChatMode::Guide); turns.write().clear(); },
+                            "Guide"
+                        }
+                    }
                     select {
                         class: "chat-model",
                         value: "{model}",
@@ -105,11 +143,23 @@ pub fn ChatBubble() -> Element {
                         span { class: "chat-backend", "{backend}" }
                     }
                 }
-                p { class: "chat-disclaimer", "Ungoverned scratchpad for research — not a governed build path." }
+                p { class: "chat-disclaimer",
+                    if mode() == ChatMode::Guide {
+                        "Answers from the Camerata user guide only."
+                    } else {
+                        "Ungoverned scratchpad for research — not a governed build path."
+                    }
+                }
 
                 div { class: "chat-log",
                     if turns().is_empty() {
-                        p { class: "chat-empty", "Ask anything. Pick a model above." }
+                        p { class: "chat-empty",
+                            if mode() == ChatMode::Guide {
+                                "Ask how to do something in Camerata…"
+                            } else {
+                                "Ask anything. Pick a model above."
+                            }
+                        }
                     }
                     for (i , t) in turns().iter().enumerate() {
                         div { key: "{i}", class: if t.role == "you" { "chat-turn you" } else { "chat-turn ai" },
@@ -129,7 +179,11 @@ pub fn ChatBubble() -> Element {
                     textarea {
                         class: "chat-input",
                         rows: "2",
-                        placeholder: "Message… (Enter to send, Shift+Enter for newline)",
+                        placeholder: if mode() == ChatMode::Guide {
+                            "Ask how to do something in Camerata… (Enter to send)"
+                        } else {
+                            "Message… (Enter to send, Shift+Enter for newline)"
+                        },
                         value: "{draft}",
                         onkeydown: move |e| {
                             if e.key() == Key::Enter && !e.modifiers().shift() {
@@ -137,11 +191,12 @@ pub fn ChatBubble() -> Element {
                                 let prompt = draft().trim().to_string();
                                 if prompt.is_empty() || sending() { return; }
                                 let mdl = model();
+                                let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt()) } else { None };
                                 turns.write().push(Turn { role: "you", text: prompt.clone() });
                                 draft.set(String::new());
                                 sending.set(true);
                                 spawn(async move {
-                                    let reply = send_chat(&prompt, &mdl).await;
+                                    let reply = send_chat(&prompt, &mdl, sys.as_deref()).await;
                                     sending.set(false);
                                     match reply {
                                         Some(r) if !r.text.trim().is_empty() => {
@@ -164,11 +219,12 @@ pub fn ChatBubble() -> Element {
                             let prompt = draft().trim().to_string();
                             if prompt.is_empty() || sending() { return; }
                             let mdl = model();
+                            let sys = if mode() == ChatMode::Guide { Some(guide_system_prompt()) } else { None };
                             turns.write().push(Turn { role: "you", text: prompt.clone() });
                             draft.set(String::new());
                             sending.set(true);
                             spawn(async move {
-                                let reply = send_chat(&prompt, &mdl).await;
+                                let reply = send_chat(&prompt, &mdl, sys.as_deref()).await;
                                 sending.set(false);
                                 match reply {
                                     Some(r) if !r.text.trim().is_empty() => {

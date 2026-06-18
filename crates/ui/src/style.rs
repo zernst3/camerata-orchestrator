@@ -1392,6 +1392,10 @@ html, body {
 .chat-input { flex: 1; resize: none; font: inherit; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .chat-send { border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
 .chat-send:disabled { opacity: .5; cursor: default; }
+.chat-mode-toggle { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex-shrink: 0; }
+.chat-mode-btn { border: none; background: transparent; color: var(--ink-soft); font-size: 11.5px; font-weight: 700; padding: 4px 10px; cursor: pointer; transition: background .12s var(--ease), color .12s var(--ease); }
+.chat-mode-btn:not(:last-child) { border-right: 1px solid var(--line); }
+.chat-mode-btn.active { background: var(--accent); color: #fff; }
 
 /* ---- agent-activity drawer ------------------------------------------------ */
 .agent-activity { margin: 10px 0; }
@@ -1703,6 +1707,9 @@ html, body {
 .pg-import { margin-top: 6px; }
 .cockpit-nav-tab.back { color: var(--accent-ink); font-weight: 600; }
 .cockpit-nav-tab.back:hover { background: var(--accent-wash); }
+.cockpit-nav-tab.secondary { margin-left: auto; color: var(--ink-faint); font-weight: 600; }
+.cockpit-nav-tab.secondary:hover { color: var(--ink-soft); }
+.cockpit-nav-tab.secondary.on { color: var(--ink); }
 
 /* ---- local workspace surface ---------------------------------------------- */
 .ws-folder { margin: 18px 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
