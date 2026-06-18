@@ -409,13 +409,54 @@ fn detect_frameworks(path: &str, content: &str, out: &mut std::collections::BTre
             }
         }
     }
-    // Path/extension signals that aren't keyed on a manifest basename:
-    // any Terraform file → IaC; any file under .github/workflows/ → CI/CD.
+    // Path/extension signals that aren't keyed on a manifest basename. These are detected by
+    // PATH/basename across ANY file (not just manifests), and every match maps to the `iac`
+    // or `ci-cd` corpus domain in domains_for_stack. Detection was previously GitHub-Actions-
+    // and-Terraform-only, so any other CI/IaC tooling silently produced nothing.
+    //
+    // Infrastructure-as-code → `iac`:
     if file.ends_with(".tf") || file.ends_with(".tf.json") {
         add("Terraform");
     }
+    if file == "terragrunt.hcl" || file.ends_with(".terragrunt.hcl") {
+        add("Terragrunt");
+    }
+    if file.ends_with(".bicep") {
+        add("Bicep");
+    }
+    if file == "Pulumi.yaml" || file == "Pulumi.yml" {
+        add("Pulumi");
+    }
+    // CloudFormation templates declare a format version or AWS::* resource types.
+    if (file.ends_with(".yaml") || file.ends_with(".yml") || file.ends_with(".json"))
+        && (lc.contains("awstemplateformatversion") || lc.contains("aws::"))
+    {
+        add("CloudFormation");
+    }
+    // CI/CD → `ci-cd`:
     if path.contains(".github/workflows/") {
         add("GitHub Actions");
+    }
+    if file == ".gitlab-ci.yml" || file.ends_with(".gitlab-ci.yml") {
+        add("GitLab CI");
+    }
+    if path.contains(".circleci/") {
+        add("CircleCI");
+    }
+    if file.starts_with("azure-pipelines") && (file.ends_with(".yml") || file.ends_with(".yaml")) {
+        add("Azure Pipelines");
+    }
+    if file == ".travis.yml" {
+        add("Travis CI");
+    }
+    if file == "bitbucket-pipelines.yml" {
+        add("Bitbucket Pipelines");
+    }
+    if file == ".drone.yml" {
+        add("Drone CI");
+    }
+    if file == "Jenkinsfile" || file.starts_with("Jenkinsfile") {
+        add("Jenkins");
     }
 }
 
@@ -527,12 +568,13 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             "Axum" | "Actix" | "FastAPI" | "Flask" | "Django" | "Rails" | "ASP.NET" => {
                 domains.insert("api-layer");
             }
-            // Infrastructure-as-code and CI: detected from .tf files and
-            // .github/workflows/ respectively, mapped to their corpus domains.
-            "Terraform" => {
+            // Infrastructure-as-code tooling → the `iac` corpus domain.
+            "Terraform" | "Terragrunt" | "Bicep" | "Pulumi" | "CloudFormation" => {
                 domains.insert("iac");
             }
-            "GitHub Actions" => {
+            // CI/CD platforms → the `ci-cd` corpus domain.
+            "GitHub Actions" | "GitLab CI" | "CircleCI" | "Azure Pipelines" | "Travis CI"
+            | "Bitbucket Pipelines" | "Drone CI" | "Jenkins" => {
                 domains.insert("ci-cd");
             }
             _ => {}
@@ -750,9 +792,20 @@ const MAX_FILE_BYTES: usize = 400_000;
 const CODE_EXTS: &[&str] = &[
     "rs", "ts", "tsx", "js", "jsx", "py", "go", "java", "rb", "php", "cs", "sql", "toml", "yaml",
     "yml", "json", "sh", "env", "cfg", "ini", "tf", "kt", "swift", "c", "cpp", "h",
+    // IaC: Terragrunt/Packer HCL, Azure Bicep (Terraform `.tf` is already above).
+    "hcl", "bicep",
 ];
 
+/// Extensionless basenames that still carry stack/CI signal and must be extracted so
+/// detection can see them (e.g. a Jenkins pipeline). Without this they'd be dropped as
+/// "no code extension" and the CI/CD domain would never be detected from them.
+const CODE_BASENAMES: &[&str] = &["Jenkinsfile"];
+
 fn has_code_ext(path: &str) -> bool {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if CODE_BASENAMES.iter().any(|b| basename == *b || basename.starts_with(b)) {
+        return true;
+    }
     match path.rsplit_once('.') {
         Some((_, ext)) => CODE_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
         None => false,
@@ -1515,6 +1568,34 @@ mod tests {
         let domains = domains_for_stack(&stack);
         assert!(domains.contains(&"iac".to_string()), "{domains:?}");
         assert!(domains.contains(&"ci-cd".to_string()), "{domains:?}");
+    }
+
+    #[test]
+    fn detect_stack_finds_non_github_ci_and_non_terraform_iac() {
+        // CI/IaC tooling beyond GitHub Actions + Terraform must still map to ci-cd / iac.
+        let cases: &[(&str, &str, &str)] = &[
+            (".gitlab-ci.yml", "stages: [test]", "GitLab CI"),
+            (".circleci/config.yml", "version: 2.1", "CircleCI"),
+            ("azure-pipelines.yml", "trigger: [main]", "Azure Pipelines"),
+            ("Jenkinsfile", "pipeline { agent any }", "Jenkins"),
+            ("infra/main.bicep", "resource sa 'Microsoft.Storage'", "Bicep"),
+            ("live/terragrunt.hcl", "include { path = \"x\" }", "Terragrunt"),
+            ("infra/Pulumi.yaml", "name: my-stack\nruntime: nodejs", "Pulumi"),
+            ("cfn/stack.yaml", "AWSTemplateFormatVersion: '2010-09-09'", "CloudFormation"),
+        ];
+        for (path, content, fw) in cases {
+            // has_code_ext must keep the file so detection can see it.
+            assert!(has_code_ext(path), "{path} should be extracted");
+            let stack = detect_stack("acme/infra", &[(path.to_string(), content.to_string())]);
+            assert!(stack.frameworks.contains(&fw.to_string()), "{path} -> {fw}: {stack:?}");
+            let domains = domains_for_stack(&stack);
+            let expect = if ["Jenkins", "GitLab CI", "CircleCI", "Azure Pipelines"].contains(fw) {
+                "ci-cd"
+            } else {
+                "iac"
+            };
+            assert!(domains.contains(&expect.to_string()), "{path} -> {expect}: {domains:?}");
+        }
     }
 
     #[test]

@@ -3857,19 +3857,19 @@ fn ScanResults(report: ScanReportView) -> Element {
             }
             {
                 let repos_audit = report.repos.clone();
-                // The rules bound to the viewed repo (its own per-repo table). For a single-repo
-                // scan, show the whole set and leave `view_repo` empty (whole-set behavior).
+                // Per-repo binding drives RECOMMENDATION (pre-selection), NOT visibility: every
+                // repo's table shows the WHOLE rule library so the architect can manually add
+                // ANY rule to ANY repo. (Filtering visibility by the repo binding hid rules that
+                // were auto-suggested for a sibling repo — e.g. ci-cd suggested for repo A never
+                // appeared in repo B's table, so it couldn't be added there at all.) The viewed
+                // repo only changes which rules are pre-checked, via the seeded per-repo selection.
                 let view_repo = if multi_repo { viewed_repo() } else { String::new() };
                 let all_rules = report.proposed_rules.clone();
-                let visible_rules: Vec<ProposedRuleView> = if multi_repo {
-                    all_rules.iter().filter(|r| r.repos.iter().any(|rp| rp == &view_repo)).cloned().collect()
-                } else {
-                    all_rules.clone()
-                };
+                let visible_rules = all_rules.clone();
                 rsx! {
                     ProposedRulesTable {
                         // Key on the viewed repo so switching remounts the table with that
-                        // repo's rule subset and its seeded selection.
+                        // repo's seeded selection.
                         key: "{view_repo}",
                         rules: visible_rules,
                         all_rules,
