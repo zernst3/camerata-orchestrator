@@ -334,8 +334,18 @@ pub async fn apply_local_and_push(
             anyhow::bail!("git commit: {err}");
         }
     }
-    // Push the branch to origin so it exists remotely too (no PR).
-    let push = git(Some(dir), &["push", "--set-upstream", &authed_url(repo, token), branch]).await?;
+    // Push the branch to origin so it exists remotely too (no PR). FORCE the push: this is a
+    // Camerata-MANAGED branch that Apply fully REGENERATES each run (the governance files are
+    // rewritten from the current ruleset). Re-applying — especially after re-cloning/re-
+    // onboarding a repo — creates a fresh local branch whose history doesn't descend from the
+    // stale remote one left by a prior Apply, so an ordinary push is rejected non-fast-forward.
+    // Force-pushing makes origin mirror the freshly regenerated branch, which is exactly the
+    // intent. It only ever touches `camerata/onboard-governance`, never the repo's own branches.
+    let push = git(
+        Some(dir),
+        &["push", "--force", "--set-upstream", &authed_url(repo, token), branch],
+    )
+    .await?;
     if !push.status.success() {
         anyhow::bail!("git push {branch}: {}", stderr_of(&push));
     }
