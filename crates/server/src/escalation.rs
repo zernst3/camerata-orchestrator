@@ -174,11 +174,25 @@ pub fn chat_user_prompt(esc: &Escalation, new_message: &str) -> String {
 /// during an unattended/scheduled run. Richer, rule-level detail is a follow-up (it needs
 /// `run_now` to surface the denied rule ids); this is the honest first cut.
 pub fn blocked_run_escalation_req(routine: &Routine, denies: usize) -> RaiseEscalationReq {
+    let denied_rules: Vec<String> = routine
+        .last_run
+        .as_ref()
+        .map(|s| s.denied_rules.clone())
+        .unwrap_or_default();
+    let rules_clause = if denied_rules.is_empty() {
+        String::new()
+    } else {
+        format!(" (rule(s): {})", denied_rules.join(", "))
+    };
+    let mut raw_context = format!("scope: {}", routine.scope);
+    if !denied_rules.is_empty() {
+        raw_context.push_str(&format!("\ndenied rules: {}", denied_rules.join(", ")));
+    }
     RaiseEscalationReq {
         routine_id: routine.id.clone(),
         reason: format!(
-            "The governed run was blocked by {denies} gate denial(s) — an action the \
-             routine can't take unattended and that needs a human decision."
+            "The governed run was blocked by {denies} gate denial(s){rules_clause} — an action \
+             the routine can't take unattended and that needs a human decision."
         ),
         stopped_for: "Whether to proceed past the blocked action(s), adjust the routine, \
                       or cancel this run."
@@ -188,7 +202,7 @@ pub fn blocked_run_escalation_req(routine: &Routine, denies: usize) -> RaiseEsca
             "Adjust the routine's scope or prompt, then re-run".to_string(),
             "Cancel this run".to_string(),
         ],
-        raw_context: format!("scope: {}", routine.scope),
+        raw_context,
     }
 }
 

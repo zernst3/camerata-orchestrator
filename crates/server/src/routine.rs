@@ -22,6 +22,10 @@ pub struct RoutineRunSummary {
     pub total_verdicts: usize,
     pub denies: usize,
     pub allows: usize,
+    /// The rule ids the gate denied this run, so a blocked routine can say WHICH rules
+    /// stopped it (not just a count) in its escalation. Empty when nothing was denied.
+    #[serde(default)]
+    pub denied_rules: Vec<String>,
 }
 
 /// A scheduled governed routine.
@@ -440,11 +444,22 @@ impl RoutineStore {
         let events = crate::run::run_event_script();
         let denies = events.iter().filter(|e| e.verdict == "deny").count();
         let allows = events.iter().filter(|e| e.verdict == "allow").count();
+        // Capture WHICH rules were denied (deduped, in order) so a blocked routine can name
+        // them in its escalation rather than just reporting a count.
+        let mut denied_rules: Vec<String> = Vec::new();
+        for e in events.iter().filter(|e| e.verdict == "deny") {
+            if let Some(rule) = &e.rule {
+                if !denied_rules.contains(rule) {
+                    denied_rules.push(rule.clone());
+                }
+            }
+        }
         let summary = RoutineRunSummary {
             outcome: "passed".to_string(),
             total_verdicts: events.len(),
             denies,
             allows,
+            denied_rules,
         };
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
