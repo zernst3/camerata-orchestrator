@@ -271,8 +271,14 @@ pub fn TerminalBubble() -> Element {
             if open() { "✕" } else { ">_" }
         }
 
-        if open() {
-            div { class: "term-panel",
+        // Render the panel whenever it has sessions (or is open), and just HIDE it when
+        // closed rather than unmounting it. Unmounting would destroy the xterm DOM nodes
+        // while the JS term/ws state survives, so a reopen would re-attach to dead nodes
+        // (blank, untypeable). Keeping it mounted preserves live shells across close/reopen.
+        if open() || !tabs.read().is_empty() {
+            div {
+                class: "term-panel",
+                style: if open() { "" } else { "display:none;" },
                 // ── Tab bar ──────────────────────────────────────────────────
                 div { class: "term-tabs",
                     for tab in tabs.read().clone() {

@@ -1503,9 +1503,12 @@ html, body {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md);
   box-shadow: var(--shadow-pop); overflow: hidden;
 }
-.chat-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
-.chat-title { font-size: 13px; font-weight: 700; color: var(--ink); flex: 1; }
-.chat-model { font-size: 12px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); }
+/* The header holds the title + the mode tabs + the model select + the backend badge.
+   At 380px these don't fit on one row (the model select got clipped), so the header WRAPS:
+   the title claims the first row, the controls flow onto the next. */
+.chat-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.chat-title { font-size: 13px; font-weight: 700; color: var(--ink); flex: 1 1 100%; }
+.chat-model { font-size: 12px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); flex: 1 1 auto; min-width: 0; }
 .chat-backend { font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-faint); background: var(--paper); border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; }
 .chat-disclaimer { font-size: 10.5px; color: var(--ink-faint); margin: 0; padding: 6px 12px; border-bottom: 1px solid var(--line-soft); }
 .chat-log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
