@@ -92,6 +92,14 @@ pub struct ClaudeCliDriver {
     /// process cwd AND is passed via `--add-dir`, scoping the agent to its
     /// worktree. When `None` the agent inherits the orchestrator's cwd.
     pub worktree: Option<PathBuf>,
+    /// Optional model id (e.g. `claude-sonnet-4-6`) passed via `--model`. When `None`
+    /// the CLI uses its configured default. Lets a caller (a routine, the fleet) run a
+    /// run on a chosen model.
+    pub model: Option<String>,
+    /// Optional prior session id to RESUME via `--resume`. Used to continue a run that
+    /// stopped at a governance escalation, once a human has authorized a directive — the
+    /// directive is passed as the task and the agent picks up its prior context.
+    pub resume_session_id: Option<String>,
 }
 
 impl ClaudeCliDriver {
@@ -103,6 +111,8 @@ impl ClaudeCliDriver {
                 .map(|s| s.to_string())
                 .collect(),
             worktree: None,
+            model: None,
+            resume_session_id: None,
         }
     }
 
@@ -110,6 +120,21 @@ impl ClaudeCliDriver {
     /// its cwd and `--add-dir` scope. Builder form.
     pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
         self.worktree = Some(worktree.into());
+        self
+    }
+
+    /// Run on a specific model (`--model`). A blank id is ignored (CLI default). Builder.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        let m = model.into();
+        self.model = if m.trim().is_empty() { None } else { Some(m) };
+        self
+    }
+
+    /// Resume a prior session (`--resume <session_id>`) — continue a run that stopped at
+    /// an escalation, with the authorized directive passed as the task. Builder.
+    pub fn resuming(mut self, session_id: impl Into<String>) -> Self {
+        let s = session_id.into();
+        self.resume_session_id = if s.trim().is_empty() { None } else { Some(s) };
         self
     }
 
@@ -137,6 +162,18 @@ impl ClaudeCliDriver {
         if let Some(wt) = &self.worktree {
             args.push("--add-dir".to_string());
             args.push(wt.display().to_string());
+        }
+
+        // Run on a chosen model when set (else the CLI default).
+        if let Some(model) = &self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+
+        // Resume a prior session when set (the task carries the authorized directive).
+        if let Some(session) = &self.resume_session_id {
+            args.push("--resume".to_string());
+            args.push(session.clone());
         }
 
         args
@@ -258,6 +295,36 @@ mod tests {
             .position(|a| a == "--add-dir")
             .expect("--add-dir present");
         assert_eq!(args[idx + 1], "/tmp/wt/backend");
+    }
+
+    #[test]
+    fn build_args_without_model_or_resume_omits_those_flags() {
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json");
+        let args = driver.build_args(&role(), "task");
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn build_args_with_model_passes_model_flag() {
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-4-6");
+        let args = driver.build_args(&role(), "task");
+        let i = args.iter().position(|a| a == "--model").expect("--model present");
+        assert_eq!(args[i + 1], "claude-sonnet-4-6");
+        // A blank model id is ignored (CLI default).
+        let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
+        assert!(!blank.build_args(&role(), "task").iter().any(|a| a == "--model"));
+    }
+
+    #[test]
+    fn build_args_resuming_passes_resume_flag() {
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json").resuming("sess-abc123");
+        let args = driver.build_args(&role(), "the authorized directive");
+        let i = args.iter().position(|a| a == "--resume").expect("--resume present");
+        assert_eq!(args[i + 1], "sess-abc123");
+        // The directive still rides as the -p task.
+        let p = args.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(args[p + 1], "the authorized directive");
     }
 
     #[test]
