@@ -1597,6 +1597,10 @@ html, body {
   background: #1b1a18; border: 1px solid #2e2d2a; border-radius: var(--r-md);
   box-shadow: var(--shadow-pop); overflow: hidden;
 }
+/* Hidden state for a closed-but-mounted panel. visibility:hidden (NOT display:none)
+   keeps the layout box sized so the xterm canvas stays alive + painted across reopen;
+   pointer-events:none lets clicks pass through the invisible box. */
+.term-panel.term-hidden { visibility: hidden; pointer-events: none; }
 
 /* Tab bar */
 .term-tabs {

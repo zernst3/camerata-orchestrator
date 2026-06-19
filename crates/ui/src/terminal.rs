@@ -153,6 +153,11 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
   if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
 
   var observer = new ResizeObserver(function() {{
+    // Skip fitting while the panel is hidden (display:none collapses el to 0x0).
+    // Fitting to a zero-size box corrupts xterm's geometry, leaving the terminal
+    // blank/untypeable when the panel is shown again. offsetParent is null when
+    // the element (or an ancestor) is display:none.
+    if (el.offsetParent === null || el.clientWidth === 0 || el.clientHeight === 0) {{ return; }}
     if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
   }});
   observer.observe(el);
@@ -222,19 +227,35 @@ fn make_cleanup_script(id: usize) -> String {
     )
 }
 
-/// Re-fit + focus a terminal after the panel is shown again. Closing the panel hides it
-/// (`display:none`), which collapses the xterm box to 0x0; on reopen we must re-fit so it
-/// doesn't render blank/collapsed, then re-focus so keystrokes land. Deferred a tick so it
-/// runs after the panel has been laid out.
+/// Re-fit + repaint + focus a terminal after the panel is shown again. Closing the panel
+/// hides it (`display:none`), which collapses the xterm box to 0x0 and clears its canvas;
+/// on reopen we must wait for the panel to actually have a non-zero layout, then re-fit so
+/// the geometry is right, force a full `refresh()` so the screen buffer repaints (a plain
+/// `fit()` no-ops if the dimensions didn't change, leaving the canvas blank), then re-focus
+/// so keystrokes land. We poll a few animation frames because the `display:none` → visible
+/// flip and Dioxus's re-render race this eval; a fixed `setTimeout` was flaky.
 fn make_reveal_script(id: usize) -> String {
     format!(
         r#"
-setTimeout(function() {{
-  var s = window['__term_{id}'];
-  if (!s) {{ return; }}
-  try {{ if (s.fitAddon) s.fitAddon.fit(); }} catch (e) {{}}
-  try {{ s.term.focus(); }} catch (e) {{}}
-}}, 40);
+(function() {{
+  var tries = 0;
+  function attempt() {{
+    var s = window['__term_{id}'];
+    if (!s) {{ return; }}
+    var el = document.getElementById('xterm-{id}');
+    // Wait until the panel is actually laid out (not display:none, non-zero size).
+    if (!el || el.offsetParent === null || el.clientWidth === 0 || el.clientHeight === 0) {{
+      if (tries++ < 30) {{ requestAnimationFrame(attempt); }}
+      return;
+    }}
+    try {{ if (s.fitAddon) s.fitAddon.fit(); }} catch (e) {{}}
+    // Force a full repaint of the viewport — fit() alone won't redraw if rows/cols
+    // are unchanged, so the canvas (cleared while hidden) would stay blank.
+    try {{ s.term.refresh(0, s.term.rows - 1); }} catch (e) {{}}
+    try {{ s.term.focus(); }} catch (e) {{}}
+  }}
+  requestAnimationFrame(attempt);
+}})();
 "#,
         id = id
     )
@@ -247,6 +268,13 @@ setTimeout(function() {{
 #[component]
 pub fn TerminalBubble() -> Element {
     let mut open = use_signal(|| false);
+    // Once the panel has been opened even once, we keep it MOUNTED for the rest of the
+    // session and only toggle its visibility. Unmounting/remounting (the old approach)
+    // destroyed the xterm DOM while the JS term/ws state lived on, so a reopen reattached
+    // to dead nodes (blank, untypeable) — or, with display:none, collapsed the canvas to
+    // 0x0 and cleared it. Keeping it mounted + hiding via `visibility:hidden` (which retains
+    // the layout box, unlike display:none) keeps live shells fully rendered across reopen.
+    let mut ever_opened = use_signal(|| false);
     let mut tabs = use_signal(Vec::<TermTab>::new);
     let mut active_tab = use_signal(|| 0usize);
 
@@ -265,6 +293,7 @@ pub fn TerminalBubble() -> Element {
             onclick: move |_| {
                 let opening = !open();
                 open.set(opening);
+                if opening { ever_opened.set(true); }
                 if opening && tabs.read().is_empty() {
                     // Auto-open the first tab when the panel is first expanded.
                     let id = next_tab_id();
@@ -296,14 +325,13 @@ pub fn TerminalBubble() -> Element {
             if open() { "✕" } else { ">_" }
         }
 
-        // Render the panel whenever it has sessions (or is open), and just HIDE it when
-        // closed rather than unmounting it. Unmounting would destroy the xterm DOM nodes
-        // while the JS term/ws state survives, so a reopen would re-attach to dead nodes
-        // (blank, untypeable). Keeping it mounted preserves live shells across close/reopen.
-        if open() || !tabs.read().is_empty() {
+        // Once opened, the panel stays MOUNTED for the session; closing just hides it via
+        // the `term-hidden` class (`visibility:hidden`, which keeps the layout box sized so
+        // xterm's canvas never collapses or clears). This preserves live shells — including
+        // their scrollback and running processes — across any number of close/reopen cycles.
+        if ever_opened() {
             div {
-                class: "term-panel",
-                style: if open() { "" } else { "display:none;" },
+                class: if open() { "term-panel" } else { "term-panel term-hidden" },
                 // ── Tab bar ──────────────────────────────────────────────────
                 div { class: "term-tabs",
                     for tab in tabs.read().clone() {
