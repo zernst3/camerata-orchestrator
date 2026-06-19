@@ -297,10 +297,25 @@ so the model can cite accurate line numbers.
 This gives every chunk architectural context (which dirs are repositories vs.
 services) without needing every file body.
 
-**Scan modes (`ScanMode`):**
-- `Sequential` — one call per chunk, all rules at once. Debug/fallback floor.
-- `Parallel` (default) — rule-batches of up to 15 rules run concurrently (up to
-  6 concurrent calls) across chunks. Wall-clock is the slowest batch, not the sum.
+**Scan modes.** The audit picker offers THREE choices, but they are two orthogonal
+dimensions — the `ScanMode` enum has only two variants (the batching algorithm), and
+"Background job" is a separate EXECUTION dimension (foreground vs detached), not a third
+`ScanMode`. This is the common point of confusion.
+
+`ScanMode` (`ai_audit.rs`) — how the LLM calls are batched; `tuning()` returns
+`(max_concurrent_calls, rules_per_batch)`:
+- `Sequential` — `(1, usize::MAX)`: one call per file-chunk with ALL rules at once,
+  chunks one after another. Simplest, gentlest on rate limits — the debug/fallback floor.
+- `Parallel` (default) — `(PARALLEL_CONCURRENCY=6, RULE_BATCH_SIZE=15)`: rule-batches ×
+  file-chunks run concurrently (capped). Wall-clock is the slowest batch, not the sum.
+
+The picker's third option, **"Background job"**, runs the audit (Parallel batching)
+SERVER-SIDE as a detached `JobStore` job instead of inline in the request: the UI gets a
+job id and polls `JobState` (status / done / total / live `findings` preview / final
+`report`), so the architect can leave and watch findings stream in. Best for huge /
+multi-repo scans where a foreground request would be long-lived. Foreground Parallel and
+Sequential block until the audit returns. `from_wire("sequential") -> Sequential`, else
+`Parallel`; the "job" choice selects detached execution and still uses Parallel batching.
 
 **Resolution round:** passes may defer a judgment by returning `needs_files`. A
 single bounded resolution round re-runs those requested files together. The

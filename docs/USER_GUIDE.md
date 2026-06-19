@@ -82,7 +82,15 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
    is scanned only against **its own selected rules** plus the always-on **deterministic security
    floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
-   instant). Pick the **model** and the **scan mode** (*Parallel* / *Sequential* / *Background job*).
+   instant). Pick the **model** and the **scan mode**:
+   - **Parallel** (default) — runs rule-batches concurrently; fastest. Wall-clock is the slowest
+     batch, not the sum of every call.
+   - **Sequential** — one call at a time, all rules together; slower but gentlest on rate limits
+     (a fallback when Parallel hits throttling).
+   - **Background job** — same Parallel scan, but it runs server-side and detached: you get a
+     progress view and can walk away while findings stream in. Best for huge / multi-repo scans
+     where a foreground scan would tie up the page. (Parallel and Sequential run in the
+     foreground and block until they finish; Background job is the same work, just detached.)
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
    the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** (→ a
