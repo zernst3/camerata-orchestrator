@@ -3740,7 +3740,7 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
     cols
 }
 
-fn rule_columns(domains: Vec<String>, repos: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
+fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
     let kind = BadgeVariantMap::new()
         .with("mechanical", BadgeVariant::new("Mechanical", "green"))
         .with("review", BadgeVariant::new("Review", "yellow"));
@@ -3791,20 +3791,8 @@ fn rule_columns(domains: Vec<String>, repos: Vec<String>) -> Vec<ColumnDef<Propo
         .sortable()
         .render_kind(RenderKind::Badge(scope))
         .initial_width(130.0),
-        // Show EVERY repo this rule applies to (comma-joined). chorale 0.2.3's
-        // MultiSelectContains is the proper per-value set filter for a list-valued cell:
-        // the architect picks repos from a checkbox list and a row matches if it references
-        // ANY of them — the "show anywhere this repo appears" behavior, without the old
-        // Text-substring stand-in or an exact-combo MultiSelect.
-        ColumnDef::new(ColumnId("repos"), "Applies to", |r: &ProposedRuleView| {
-            CellValue::Text(if r.repos.is_empty() {
-                "—".to_string()
-            } else {
-                r.repos.join(", ")
-            })
-        })
-        .filter(FilterKind::MultiSelectContains { options: repos, separator: ", ".to_string() })
-        .initial_width(180.0),
+        // (The "Applies to" column was removed: the repo this ruleset is for is already
+        // chosen in the "Repo ruleset" selector above the table, so per-row repo was redundant.)
         ColumnDef::new(ColumnId("placement"), "Gate placement", |r: &ProposedRuleView| {
             CellValue::Text(r.placement.clone())
         })
@@ -4250,17 +4238,10 @@ fn ProposedRulesTable(
     // Distinct domains (sorted, "general" for blank — matches the cell value) for the
     // Domain column's multi-select filter options.
     let domain_options: Vec<String> = domain_rows.keys().cloned().collect();
-    // Distinct repos across all proposed rules, for the "Applies to" per-value set filter.
-    let repo_options: Vec<String> = {
-        let mut v: Vec<String> = rows.iter().flat_map(|(_, p)| p.repos.clone()).collect();
-        v.sort();
-        v.dedup();
-        v
-    };
     let handle = use_table(move || {
         TableState::new(
             rows.clone(),
-            rule_columns(domain_options.clone(), repo_options.clone()),
+            rule_columns(domain_options.clone()),
         )
     });
     // The row-detail modal is hosted by ScanResults (OUTSIDE this table's subtree)
@@ -4338,6 +4319,10 @@ fn ProposedRulesTable(
             sort_enabled: true,
             selection_enabled: true,
             filter_enabled: true,
+            // 0.2.3: expand-all / collapse-all control in the grouped header. The table is
+            // grouped by domain and mounts collapsed, so this lets the architect open every
+            // domain's rules (and re-collapse them) in one click.
+            group_expand_toggle: true,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
                     detail_rule.set(Some(r.clone()));
