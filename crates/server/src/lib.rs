@@ -560,6 +560,9 @@ struct ImportedRoutine {
     prompt: String,
     #[serde(default)]
     scope: String,
+    /// The routine's model travels with it; blank/absent falls back to the server default.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// Create the imported routines under `project_id` (un-provisioned + stopped), replacing
@@ -582,6 +585,7 @@ fn import_project_routines(state: &AppState, project_id: &str, routines: &[Impor
                 r.scope.clone()
             },
             project_id: Some(project_id.to_string()),
+            model: r.model.clone(),
         })
         .collect();
     state.routines.replace_for_project(project_id, &reqs);

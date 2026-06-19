@@ -61,10 +61,29 @@ pub struct Routine {
     /// travel with any single project's export.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The model this routine's agent runs on (an id from the `/api/models` catalog).
+    /// Defaults to the server default so routines persisted before this field rehydrate
+    /// with a sensible model.
+    #[serde(default = "default_model")]
+    pub model: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_model() -> String {
+    crate::llm::DEFAULT_MODEL.to_string()
+}
+
+/// Resolve a requested model id to a concrete one: a blank/None request falls back to the
+/// server default, so a routine always carries a real model id.
+fn resolve_model(req: &Option<String>) -> String {
+    req.as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_model)
 }
 
 /// Request body to create a routine. The user supplies `intent`; `prompt` is the
@@ -78,6 +97,9 @@ pub struct CreateRoutineReq {
     #[serde(default)]
     pub prompt: String,
     pub scope: String,
+    /// The model id the routine's agent should run on. `None`/blank -> the server default.
+    #[serde(default)]
+    pub model: Option<String>,
     /// The project this routine belongs to (`project.id`), or `None` for a global
     /// routine. Routines execute globally regardless of the viewed project; this only
     /// controls organization (dashboard grouping) and which export a routine travels in.
@@ -204,6 +226,7 @@ impl RoutineStore {
                 provisioned: true,
                 last_fired: None,
                 project_id: None,
+                model: default_model(),
             }
         };
         let seed = vec![
@@ -265,6 +288,7 @@ impl RoutineStore {
             provisioned: true,
             last_fired: None,
             project_id: req.project_id.clone(),
+            model: resolve_model(&req.model),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -296,6 +320,7 @@ impl RoutineStore {
             provisioned: false,
             last_fired: None,
             project_id: Some(project_id.to_string()),
+            model: resolve_model(&req.model),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -348,6 +373,7 @@ impl RoutineStore {
             req.prompt.clone()
         };
         r.project_id = req.project_id.clone();
+        r.model = resolve_model(&req.model);
         let updated = r.clone();
         drop(guard);
         self.flush();
@@ -453,6 +479,7 @@ mod tests {
             prompt: String::new(),
             scope: "read-only".to_string(),
             project_id: None,
+            model: None,
         });
         assert_eq!(created.id, "rt-4");
         assert_eq!(store.list().len(), 4);
@@ -487,6 +514,7 @@ mod tests {
                     prompt: String::new(), // empty -> re-scaffolded from intent
                     scope: "write (gated)".to_string(),
                     project_id: None,
+                    model: None,
                 },
             )
             .unwrap();
@@ -499,7 +527,7 @@ mod tests {
 
         assert!(store.update("nope", &CreateRoutineReq {
             name: "x".into(), schedule: "daily 09:00".into(), intent: "x".into(),
-            prompt: String::new(), scope: "read-only".into(), project_id: None,
+            prompt: String::new(), scope: "read-only".into(), project_id: None, model: None,
         }).is_none());
     }
 
@@ -521,6 +549,7 @@ mod tests {
                 prompt: String::new(),
                 scope: "read-only".to_string(),
                 project_id: None,
+                model: None,
             });
             assert_eq!(created.id, "rt-1");
             store.set_enabled("rt-1", false);
@@ -542,6 +571,7 @@ mod tests {
                 prompt: String::new(),
                 scope: "read-only".to_string(),
                 project_id: None,
+                model: None,
             });
             assert_eq!(next.id, "rt-2", "counter advanced past the rehydrated max id");
         }
@@ -572,6 +602,7 @@ mod tests {
             prompt: String::new(),
             scope: "read-only".into(),
             project_id: None,
+            model: None,
         });
 
         let reqs = vec![
@@ -582,6 +613,7 @@ mod tests {
                 prompt: String::new(),
                 scope: "read-only".into(),
                 project_id: None, // create_imported sets the project id from its arg
+                model: None,
             },
             CreateRoutineReq {
                 name: "B".into(),
@@ -590,6 +622,7 @@ mod tests {
                 prompt: String::new(),
                 scope: "read-only".into(),
                 project_id: None,
+                model: None,
             },
         ];
         assert_eq!(store.replace_for_project("p1", &reqs), 2);

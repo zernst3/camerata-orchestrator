@@ -86,6 +86,7 @@ mod tests {
             prompt: String::new(),
             scope: "read-only".to_string(),
             project_id: None,
+            model: None,
         }
     }
 

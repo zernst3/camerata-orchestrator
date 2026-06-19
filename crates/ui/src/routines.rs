@@ -119,6 +119,33 @@ struct RoutineView {
     /// dashboard grouping; execution is global regardless.
     #[serde(default)]
     project_id: Option<String>,
+    /// The model the routine's agent runs on (id from `/api/models`).
+    #[serde(default)]
+    model: String,
+}
+
+/// One model the routine form's picker offers (`GET /api/models`).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ModelOption {
+    label: String,
+    id: String,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ModelsResp {
+    models: Vec<ModelOption>,
+    #[serde(default)]
+    default: String,
+}
+
+/// Fetch the model catalog so the routine form can pick the model its agent runs on.
+async fn fetch_models() -> Option<ModelsResp> {
+    reqwest::get(format!("{}/api/models", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<ModelsResp>()
+        .await
+        .ok()
 }
 
 /// The slice of a project the routine dashboard needs: id + name, for the form's project
@@ -260,12 +287,13 @@ async fn create_routine(
     prompt: &str,
     scope: &str,
     project_id: Option<&str>,
+    model: &str,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
         .post(format!("{}/api/routines", crate::BFF_URL))
         .json(&serde_json::json!({
             "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
-            "scope": scope, "project_id": project_id
+            "scope": scope, "project_id": project_id, "model": model
         }))
         .send()
         .await
@@ -275,6 +303,7 @@ async fn create_routine(
         .ok()
 }
 
+#[allow(clippy::too_many_arguments)] // a flat routine payload reads clearer than a struct here
 async fn update_routine(
     id: &str,
     name: &str,
@@ -283,12 +312,13 @@ async fn update_routine(
     prompt: &str,
     scope: &str,
     project_id: Option<&str>,
+    model: &str,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
         .put(format!("{}/api/routines/{}", crate::BFF_URL, id))
         .json(&serde_json::json!({
             "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
-            "scope": scope, "project_id": project_id
+            "scope": scope, "project_id": project_id, "model": model
         }))
         .send()
         .await
@@ -345,6 +375,9 @@ pub fn RoutineDashboard() -> Element {
         let _dep = refresh();
         async move { fetch_projects().await }
     });
+    // Model catalog, for the form's model picker (every AI-agent surface lets the user
+    // pick the model). Fetched once; doesn't depend on refresh.
+    let models_res = use_resource(fetch_models);
     // Which escalation's review panel is currently expanded (by escalation id).
     let mut reviewing = use_signal(|| Option::<String>::None);
     // Per-escalation answer text. Keyed by escalation id; we store a flat
@@ -373,6 +406,9 @@ pub fn RoutineDashboard() -> Element {
     let mut scope = use_signal(|| "read-only".to_string());
     // The project the form will assign the routine to (None = global).
     let mut routine_project = use_signal(|| Option::<String>::None);
+    // The model the form will run the routine on; seeded from the server default once the
+    // catalog loads (see below).
+    let mut routine_model = use_signal(String::new);
     // When Some(id), the form is EDITING that routine (Save updates it) rather than
     // creating a new one. `pending_delete` holds the id awaiting a confirm click.
     let mut editing = use_signal(|| Option::<String>::None);
@@ -386,6 +422,14 @@ pub fn RoutineDashboard() -> Element {
     let escalations: Vec<EscalationView> =
         escalations_res.read().clone().flatten().unwrap_or_default();
     let projects: Vec<ProjectView> = projects_res.read().clone().flatten().unwrap_or_default();
+    let models_resp = models_res.read().clone().flatten();
+    let models: Vec<ModelOption> = models_resp.as_ref().map(|m| m.models.clone()).unwrap_or_default();
+    let model_default = models_resp.as_ref().map(|m| m.default.clone()).unwrap_or_default();
+    // Seed the form's model from the server default once the catalog loads (only when the
+    // form hasn't been given a model yet, e.g. fresh or just reset).
+    if routine_model().is_empty() && !model_default.is_empty() {
+        routine_model.set(model_default.clone());
+    }
 
     // Group routines by project for display: each row carries an optional header that is
     // shown on the FIRST routine of each group. Routines run globally regardless of
@@ -575,6 +619,10 @@ pub fn RoutineDashboard() -> Element {
                                             prompt.set(rt.prompt.clone());
                                             scope.set(rt.scope.clone());
                                             routine_project.set(rt.project_id.clone());
+                                            // Prefill the model; an older routine with none
+                                            // recorded leaves it blank and the seeding
+                                            // effect refills the default on next render.
+                                            routine_model.set(rt.model.clone());
                                             authored_by.set(String::new());
                                             editing.set(Some(rt.id.clone()));
                                             pending_delete.set(None);
@@ -732,6 +780,17 @@ pub fn RoutineDashboard() -> Element {
                             option { value: "", "Global (no project)" }
                             for p in projects.iter() {
                                 option { key: "{p.id}", value: "{p.id}", "{p.name}" }
+                            }
+                        }
+                    }
+                    label { class: "sched-field sched-scope-field",
+                        span { "Model" }
+                        select {
+                            class: "addressee-input",
+                            value: "{routine_model}",
+                            onchange: move |e| routine_model.set(e.value()),
+                            for m in models.iter() {
+                                option { key: "{m.id}", value: "{m.id}", "{m.label}" }
                             }
                         }
                     }
@@ -897,11 +956,12 @@ pub fn RoutineDashboard() -> Element {
                             }
                             let edit_id = editing();
                             let pid = routine_project();
+                            let md = routine_model();
                             spawn(async move {
                                 let pid = pid.as_deref();
                                 let ok = match &edit_id {
-                                    Some(id) => update_routine(id, &n, &s, &i, &p, &sc, pid).await.is_some(),
-                                    None => create_routine(&n, &s, &i, &p, &sc, pid).await.is_some(),
+                                    Some(id) => update_routine(id, &n, &s, &i, &p, &sc, pid, &md).await.is_some(),
+                                    None => create_routine(&n, &s, &i, &p, &sc, pid, &md).await.is_some(),
                                 };
                                 if ok {
                                     refresh += 1;
@@ -919,6 +979,9 @@ pub fn RoutineDashboard() -> Element {
                             monthday.set(1);
                             scope.set("read-only".to_string());
                             routine_project.set(None);
+                            // Clear the model; the seeding effect refills it with the
+                            // server default on the next render.
+                            routine_model.set(String::new());
                             editing.set(None);
                         },
                         if editing().is_some() { "Save changes" } else { "Add routine" }

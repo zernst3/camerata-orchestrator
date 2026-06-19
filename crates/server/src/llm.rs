@@ -39,7 +39,6 @@ pub const MODELS: &[ModelInfo] = &[
     ModelInfo { vendor: "anthropic", label: "Opus 4.8", id: "claude-opus-4-8", price_in: 15.0, price_out: 75.0 },
     ModelInfo { vendor: "anthropic", label: "Sonnet 4.6", id: "claude-sonnet-4-6", price_in: 3.0, price_out: 15.0 },
     ModelInfo { vendor: "anthropic", label: "Haiku 4.5", id: "claude-haiku-4-5-20251001", price_in: 1.0, price_out: 5.0 },
-    ModelInfo { vendor: "anthropic", label: "Fable 5", id: "claude-fable-5", price_in: 15.0, price_out: 75.0 },
 ];
 
 /// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
