@@ -4309,6 +4309,55 @@ fn ProposedRulesTable(
     let all_by_id_audit = all_by_id.clone();
     let view_repo_audit = view_repo.clone();
 
+    // Rules whose alternative is still UNRESOLVED — they have options but no chosen choice
+    // AND no usable default directive, so the architect must pick one before the rule can be
+    // enforced. Recomputed each render (reads `chosen`), so picking an alternative clears it.
+    // These are highlighted yellow (row_class below) so they're easy to spot.
+    let needs_choice: std::collections::HashSet<String> = {
+        let chosen_map = chosen.read();
+        id_map
+            .values()
+            .filter(|r| {
+                if r.options.is_empty() {
+                    return false;
+                }
+                let oid = chosen_map.get(&r.id).cloned().or_else(|| r.default_option.clone());
+                oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+            })
+            .map(|r| r.id.clone())
+            .collect()
+    };
+    // The SELECTED unresolved rules (across every repo's picks, matching the arm guard). These
+    // BLOCK both buttons: an unresolved rule you've selected can't be audited or armed. An
+    // unresolved rule you HAVEN'T selected is only highlighted, not blocking. This is also why
+    // audit no longer silently falls back to the rule title — it's gated the same as arm now.
+    let unresolved_selected: Vec<String> = {
+        let live_ids: Vec<String> = handle
+            .selected_ids()
+            .iter()
+            .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
+            .collect();
+        let selected: std::collections::BTreeSet<String> = if view_repo.is_empty() {
+            live_ids.into_iter().collect()
+        } else {
+            let mut map = repo_selection.peek().clone();
+            map.insert(view_repo.clone(), live_ids);
+            map.values().flatten().cloned().collect()
+        };
+        selected
+            .into_iter()
+            .filter(|id| needs_choice.contains(id))
+            .collect()
+    };
+    let has_unresolved = !unresolved_selected.is_empty();
+    let unresolved_hint = if has_unresolved {
+        format!("Choose an alternative first for: {}", unresolved_selected.join(", "))
+    } else {
+        String::new()
+    };
+
     rsx! {
         // Per-domain "select all" is now native: the table is grouped by domain and
         // chorale 0.2.3 renders a tri-state select-all checkbox in each group header
@@ -4323,6 +4372,11 @@ fn ProposedRulesTable(
             // grouped by domain and mounts collapsed, so this lets the architect open every
             // domain's rules (and re-collapse them) in one click.
             group_expand_toggle: true,
+            // Highlight rules that still need an alternative chosen (yellow), so the rules
+            // that block audit/arm are easy to spot. Clears when a choice is made.
+            row_class: RowClass::new(move |r: &ProposedRuleView| {
+                needs_choice.contains(&r.id).then(|| "rule-row-needs-choice".to_string())
+            }),
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
                     detail_rule.set(Some(r.clone()));
@@ -4332,7 +4386,8 @@ fn ProposedRulesTable(
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
-                disabled: auditing,
+                disabled: auditing || has_unresolved,
+                title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan
                     // covers all repos, each against its own chosen rules. The current repo's
@@ -4394,7 +4449,8 @@ fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: arming(),
+                disabled: arming() || has_unresolved,
+                title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Arm across EVERY repo's selection: a rule selected in one or more repos'
                     // tables arms to exactly those repos (an explicit placement override still

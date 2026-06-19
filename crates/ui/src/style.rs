@@ -1024,6 +1024,12 @@ html, body {
 .finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
 
+/* Needs-a-choice row highlight (proposed-rules table): a rule with alternatives but no
+   chosen option + no usable default. Yellow tint + amber left border marks the rows that
+   block audit/arm until the architect picks an alternative; clears once a choice is made. */
+.rule-row-needs-choice > td:first-child { box-shadow: inset 4px 0 0 0 #d99e16; }
+.rule-row-needs-choice > td { background: rgba(217, 158, 22, 0.10); }
+
 /* Key above the findings table: what the stripe means. */
 .findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }
 .findings-key-item {
