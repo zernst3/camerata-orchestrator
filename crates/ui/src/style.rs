@@ -1815,33 +1815,6 @@ html, body {
 .repo-select-input:hover { border-color: var(--accent); }
 .repo-select-hint { font-size: 11.5px; color: var(--ink-soft); flex: 1; min-width: 220px; }
 
-.domain-select { position: relative; margin-bottom: 10px; }
-.domain-select-trigger {
-  display: inline-flex; align-items: center; gap: 6px;
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  font-size: 12px; font-weight: 600; padding: 6px 11px; border-radius: 8px; cursor: pointer;
-  transition: border-color .15s var(--ease);
-}
-.domain-select-trigger:hover { border-color: var(--accent); }
-.domain-select-caret { font-size: 10px; color: var(--ink-soft); }
-.domain-select-panel {
-  position: absolute; z-index: 40; margin-top: 4px; min-width: 240px;
-  /* FIXED height: 100 domains scroll, they don't blow up the layout. */
-  max-height: 260px; overflow-y: auto;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
-  box-shadow: var(--shadow-pop); padding: 5px;
-}
-.domain-select-item {
-  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px;
-  font-size: 12.5px; color: var(--ink); cursor: pointer;
-}
-.domain-select-item:hover { background: var(--accent-wash); }
-.domain-select-item input { cursor: pointer; accent-color: var(--accent); }
-.domain-select-name { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.domain-select-count {
-  font-size: 11px; font-weight: 700; color: var(--ink-soft);
-  background: var(--accent-wash); border-radius: 999px; padding: 1px 8px;
-}
 
 /* "It's working" spinner — paired with Auditing… / running status text. */
 @keyframes camerata-spin { to { transform: rotate(360deg); } }

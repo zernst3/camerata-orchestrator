@@ -4382,60 +4382,20 @@ fn ProposedRulesTable(
     // Repos that the Apply step wrote a governance branch into (local + pushed). The "Open
     // governance PR" button targets exactly these, and is disabled until something is applied.
     let mut applied_repos = use_signal(Vec::<String>::new);
-    let mut domain_panel_open = use_signal(|| false);
     let arm_findings = findings;
     // Export the FULL cross-repo rule set (every repo's proposed rules), not just the
     // currently-viewed repo's subset, so the CSV stays lossless for a multi-repo scan.
     let csv_rules = if all_rules.is_empty() { rules.clone() } else { all_rules.clone() };
-
-    // Current selection as a set, read reactively so each domain's checkbox reflects
-    // whether ALL of that domain's rows are selected (tri-state-ish: checked only when
-    // every row in the domain is selected).
-    let selected_set: std::collections::HashSet<RowId> =
-        handle.selected_ids().into_iter().collect();
 
     // Dedicated clones for the audit closure; the originals are consumed by the arm closure.
     let all_by_id_audit = all_by_id.clone();
     let view_repo_audit = view_repo.clone();
 
     rsx! {
-        // Per-domain "select all" — styled like a column's multi-select filter: a
-        // trigger that opens a FIXED-HEIGHT, scrollable checkbox list (so 100 domains
-        // don't blow up the layout). Checking a domain selects every rule in it across
-        // all pages; unchecking clears them.
-        div { class: "domain-select",
-            button {
-                class: "domain-select-trigger",
-                onclick: move |_| { let o = domain_panel_open(); domain_panel_open.set(!o); },
-                "Select rules by domain "
-                span { class: "domain-select-caret", if domain_panel_open() { "\u{25B4}" } else { "\u{25BE}" } }
-            }
-            if domain_panel_open() {
-                div { class: "domain-select-panel",
-                    for (domain , rids) in domain_rows.iter() {
-                        {
-                            let rids = rids.clone();
-                            let all_selected = !rids.is_empty()
-                                && rids.iter().all(|r| selected_set.contains(r));
-                            rsx! {
-                                label { key: "{domain}", class: "domain-select-item",
-                                    input {
-                                        r#type: "checkbox",
-                                        checked: all_selected,
-                                        onchange: move |_| {
-                                            let target = !all_selected;
-                                            for rid in &rids { handle.set_selection(*rid, target); }
-                                        },
-                                    }
-                                    span { class: "domain-select-name", "{domain}" }
-                                    span { class: "domain-select-count", "{rids.len()}" }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Per-domain "select all" is now native: the table is grouped by domain and
+        // chorale 0.2.3 renders a tri-state select-all checkbox in each group header
+        // (selection_enabled + grouping), so the old custom "Select rules by domain"
+        // dropdown is gone.
         Table {
             handle,
             sort_enabled: true,
