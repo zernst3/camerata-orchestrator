@@ -2389,7 +2389,29 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
 pub fn CockpitApp() -> Element {
     // Which cockpit view (control surface vs routines). Declared first so all hooks
     // below run unconditionally in a stable order regardless of the view.
-    let view = use_signal(|| CockpitView::Stories);
+    let mut view = use_signal(|| CockpitView::Stories);
+    // On open, land on the right view: Onboard while onboarding is incomplete, Governed
+    // Development once every repo is onboarded. Set ONCE (a guard) so it never overrides the
+    // user's manual nav after the first load.
+    let active_proj = use_resource(fetch_active_project);
+    let mut view_inited = use_signal(|| false);
+    use_effect(move || {
+        if view_inited() {
+            return;
+        }
+        if let Some(maybe) = &*active_proj.read() {
+            let fully_onboarded = matches!(
+                maybe,
+                Some(p) if !p.repos.is_empty() && p.repos.iter().all(|r| p.onboarded.contains(r))
+            );
+            view.set(if fully_onboarded {
+                CockpitView::Stories
+            } else {
+                CockpitView::Onboard
+            });
+            view_inited.set(true);
+        }
+    });
 
     // Both data sets come from the BFF over HTTP. `use_resource` runs the fetch when
     // the cockpit mounts; the embedded server (see main.rs) is up by then.

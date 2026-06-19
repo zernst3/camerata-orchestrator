@@ -1327,7 +1327,9 @@ html, body {
    (also_matches). Muted so it reads as a secondary annotation, not a second rule. */
 .finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
 /* Action row for the "leave onboarding?" confirm dialog: Cancel + Leave anyway. */
-.onboard-leave-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.onboard-leave-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+/* Drop btn-run's standalone bottom margin so the primary lines up with the secondary. */
+.onboard-leave-actions .btn-run { margin-bottom: 0; }
 /* Pre-audit cost estimate card: the price of the configured scan, before running it. */
 .audit-cost { margin: 12px 0 4px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .audit-cost-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
@@ -1747,6 +1749,8 @@ html, body {
   margin: 12px 0 4px;
 }
 .onboard-actionbar-spacer { flex: 1 1 auto; }
+/* Drop btn-run's standalone bottom margin so "Complete onboarding" lines up with "Start over". */
+.onboard-actionbar .btn-run { margin-bottom: 0; }
 .onboard-saved {
   font-size: 12px; font-weight: 600; color: #2f8f5b;
 }
