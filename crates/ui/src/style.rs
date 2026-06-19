@@ -1014,8 +1014,8 @@ html, body {
 .custom-rule-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
 .custom-rule-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); }
 .custom-rule-scope { font-size: 11px; color: var(--ink-soft); background: var(--accent-wash); border-radius: 5px; padding: 2px 7px; }
-.custom-rule-row .btn-edit-sm, .custom-rule-row .btn-secondary { margin-left: auto; }
-.custom-rule-row .btn-secondary { margin-left: 0; }
+/* Push the Edit/Delete pair to the right; they share the row's 8px gap. */
+.custom-rule-row .btn-edit-sm { margin-left: auto; }
 .custom-rule-editor { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .custom-rule-editor-actions { display: flex; align-items: center; gap: 8px; }
 .custom-rule-editor-actions .custom-rule-scope { margin-right: auto; }

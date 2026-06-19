@@ -4874,7 +4874,7 @@ fn CustomRulesPanel(all_repos: Vec<String>) -> Element {
                                                 "Edit"
                                             }
                                             button {
-                                                class: "btn-secondary danger",
+                                                class: "btn-delete-sm",
                                                 onclick: move |_| {
                                                     let id = c_del.rule_id();
                                                     custom_rules.write().retain(|x| x.name != c_del.name);
