@@ -1487,16 +1487,90 @@ struct CiRulesReq {
     repo: String,
 }
 
-/// Finish onboarding for the active project: mark all its repos onboarded and clear the
-/// onboarding draft. The post-scan steps (audit, triage, Apply, wire-CI) are all optional;
-/// this is the explicit "I'm done" action so onboarding never gates on the CI step.
+/// Finish onboarding for the active project. The post-scan steps (audit, triage, Apply,
+/// wire-CI) are all optional, so this is the explicit "I'm done" action — and it must
+/// PERSIST the onboarding result, not just flip a flag: it rebuilds the project's repos +
+/// selected rules from the draft (the repos/rules otherwise only save at Apply), marks the
+/// repos onboarded, and clears the draft.
 async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Value> {
     let Some(active) = state.projects.active() else {
         return Json(serde_json::json!({ "ok": false, "message": "no active project" }));
     };
-    let repos = active.repos.clone();
-    state.projects.update(&active.id, |p| p.mark_onboarded(&repos));
-    state.draft.clear(&active.id);
+    let pid = active.id.clone();
+
+    // The draft is UI-owned JSON; we read only the fields we need to recover the result.
+    #[derive(serde::Deserialize)]
+    struct DraftRule {
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        scope: String,
+        #[serde(default)]
+        default_option: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DraftScan {
+        #[serde(default)]
+        repos: Vec<String>,
+        #[serde(default)]
+        proposed_rules: Vec<DraftRule>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DraftForComplete {
+        scan: DraftScan,
+        #[serde(default)]
+        repo_selection: std::collections::HashMap<String, Vec<String>>,
+    }
+
+    let parsed = state
+        .draft
+        .load(&pid)
+        .and_then(|v| serde_json::from_value::<DraftForComplete>(v).ok());
+
+    let (repos, selections, cross_repo, process) = if let Some(d) = parsed {
+        use crate::project::RuleSelection;
+        // rule_id -> the repos that selected it.
+        let mut by_rule: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (repo, ids) in &d.repo_selection {
+            for id in ids {
+                by_rule.entry(id.clone()).or_default().push(repo.clone());
+            }
+        }
+        let by_id: std::collections::HashMap<&str, &DraftRule> =
+            d.scan.proposed_rules.iter().map(|r| (r.id.as_str(), r)).collect();
+        let (mut selections, mut cross_repo, mut process) = (Vec::new(), Vec::new(), Vec::new());
+        for (rule_id, mut repos) in by_rule {
+            repos.sort();
+            repos.dedup();
+            let Some(pr) = by_id.get(rule_id.as_str()) else { continue };
+            let sel = RuleSelection {
+                rule_id: rule_id.clone(),
+                chosen_option: pr.default_option.clone(),
+                repos,
+            };
+            match pr.scope.as_str() {
+                "cross-repo" => cross_repo.push(sel),
+                "process" => process.push(sel),
+                _ => selections.push(sel),
+            }
+        }
+        (d.scan.repos, selections, cross_repo, process)
+    } else {
+        (active.repos.clone(), Vec::new(), Vec::new(), Vec::new())
+    };
+
+    let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
+    state.projects.update(&pid, |p| {
+        if has_rules {
+            // Replace the base rules from onboarding; custom rules are preserved.
+            p.ruleset.selections = selections.clone();
+            p.ruleset.cross_repo = cross_repo.clone();
+            p.ruleset.process = process.clone();
+        }
+        // Adds the repos to the project AND marks them onboarded (union, deduped).
+        p.mark_onboarded(&repos);
+    });
+    state.draft.clear(&pid);
     Json(serde_json::json!({ "ok": true, "onboarded": repos }))
 }
 

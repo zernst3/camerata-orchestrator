@@ -2390,6 +2390,8 @@ pub fn CockpitApp() -> Element {
     // Which cockpit view (control surface vs routines). Declared first so all hooks
     // below run unconditionally in a stable order regardless of the view.
     let mut view = use_signal(|| CockpitView::Stories);
+    // Shared so a child (e.g. ScanResults' "Complete onboarding") can switch the tab.
+    use_context_provider(|| view);
     // On open, land on the right view: Onboard while onboarding is incomplete, Governed
     // Development once every repo is onboarded. Set ONCE (a guard) so it never overrides the
     // user's manual nav after the first load.
@@ -5043,9 +5045,10 @@ fn ScanResults(report: ScanReportView) -> Element {
     // Tech debt. The architect moves findings between them until nothing is Unresolved, then
     // Processes the ignored + tech-debt buckets. State is LOCAL until Process.
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    // The shared scan state (reset to None to "start over") + screen nav (to finish).
+    // The shared scan state (reset to None to "start over") + the cockpit view (so
+    // "Complete onboarding" can switch the tab to Governed Development).
     let mut onboard_scan = use_context::<Signal<Option<ScanReportView>>>();
-    let mut screen = use_context::<Signal<CockpitScreen>>();
+    let mut view = use_context::<Signal<CockpitView>>();
     // When the draft last auto-saved (shown with a check), the two-click "start over"
     // arm, and the in-flight "complete onboarding" flag.
     let mut last_saved = use_signal(|| Option::<String>::None);
@@ -5264,9 +5267,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                         finishing.set(true);
                         spawn(async move {
                             if complete_onboarding().await {
-                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Onboarding complete — repos marked onboarded.");
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Onboarding complete. Rules saved to the project.");
                                 onboard_scan.set(None);
-                                screen.set(CockpitScreen::Projects);
+                                view.set(CockpitView::Stories);
                             } else {
                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not complete onboarding.");
                             }
