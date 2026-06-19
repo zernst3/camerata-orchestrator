@@ -1002,6 +1002,24 @@ html, body {
 .onboard-repo-chip-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); }
 .onboard-repo-chip-x { border: none; background: transparent; color: var(--ink-faint); font-size: 13px; line-height: 1; cursor: pointer; padding: 2px 5px; border-radius: 5px; transition: background .12s var(--ease), color .12s var(--ease); }
 .onboard-repo-chip-x:hover { background: #f3e6e0; color: var(--ink); }
+
+/* Custom rules panel (#49): author free-text rules that appear in the Custom / Custom Global
+   table groups. Sits above the proposed-rules table. */
+.custom-rules { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 12px 0 16px; background: var(--surface); }
+.custom-rules-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.custom-rules-title { font-weight: 700; font-size: 13px; color: var(--ink); margin-right: auto; }
+.custom-rules-sub { font-size: 12px; color: var(--ink-soft); margin: 6px 0 0; line-height: 1.5; }
+.custom-rules-empty { font-size: 12px; color: var(--ink-faint); margin: 8px 0 0; }
+.custom-rules-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.custom-rule-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.custom-rule-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); }
+.custom-rule-scope { font-size: 11px; color: var(--ink-soft); background: var(--accent-wash); border-radius: 5px; padding: 2px 7px; }
+.custom-rule-row .btn-edit-sm, .custom-rule-row .btn-secondary { margin-left: auto; }
+.custom-rule-row .btn-secondary { margin-left: 0; }
+.custom-rule-editor { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.custom-rule-editor-actions { display: flex; align-items: center; gap: 8px; }
+.custom-rule-editor-actions .custom-rule-scope { margin-right: auto; }
+.custom-rule-editor-actions .btn-run { margin-bottom: 0; }
 .onboard-cta {
   align-self: flex-start;
   padding: 9px 16px; border-radius: 8px; border: none;

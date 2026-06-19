@@ -1088,6 +1088,10 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
 struct ArmReq {
     /// Fully-resolved rules (each with its chosen directive + which repos it goes to).
     rules: Vec<crate::arm::ArmRule>,
+    /// User-authored custom rules (#49) — saved to the project's ruleset.custom and rendered
+    /// as CUSTOM-<name> blocks in AGENTS.md. `domain` routes them (`*` = all repos, else a repo).
+    #[serde(default)]
+    custom: Vec<crate::project::CustomRule>,
     /// The current findings to snapshot as the baseline (accepted pre-existing debt),
     /// so the team is unblocked at onboarding and the gate enforces only on new code.
     #[serde(default)]
@@ -1163,7 +1167,7 @@ async fn onboard_arm(
 
     // Save the armed ruleset to the active project (create one if none) so the
     // project is the source of truth and re-emit works.
-    save_armed_to_project(&state, &req.rules);
+    save_armed_to_project(&state, &req.rules, &req.custom);
 
     // Only repo-local rules emit into repo files; cross-repo + process rules are
     // project-level (the gates read them from the project store).
@@ -1195,7 +1199,9 @@ async fn onboard_apply(
     Json(req): Json<ArmReq>,
 ) -> Json<serde_json::Value> {
     if req.rules.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
+        if req.custom.is_empty() {
+            return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
+        }
     }
     let token = std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
@@ -1210,7 +1216,7 @@ async fn onboard_apply(
     let workspace_root = state.settings.workspace_root();
 
     // Source of truth: save the armed ruleset to the active project (create one if none).
-    save_armed_to_project(&state, &req.rules);
+    save_armed_to_project(&state, &req.rules, &req.custom);
 
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
@@ -1575,6 +1581,8 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
         scan: DraftScan,
         #[serde(default)]
         repo_selection: std::collections::HashMap<String, Vec<String>>,
+        #[serde(default)]
+        custom: Vec<crate::project::CustomRule>,
     }
 
     let parsed = state
@@ -1582,7 +1590,7 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
         .load(&pid)
         .and_then(|v| serde_json::from_value::<DraftForComplete>(v).ok());
 
-    let (repos, selections, cross_repo, process) = if let Some(d) = parsed {
+    let (repos, selections, cross_repo, process, custom) = if let Some(d) = parsed {
         use crate::project::RuleSelection;
         // rule_id -> the repos that selected it.
         let mut by_rule: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -1609,9 +1617,9 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
                 _ => selections.push(sel),
             }
         }
-        (d.scan.repos, selections, cross_repo, process)
+        (d.scan.repos, selections, cross_repo, process, d.custom)
     } else {
-        (active.repos.clone(), Vec::new(), Vec::new(), Vec::new())
+        (active.repos.clone(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
     };
 
     let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
@@ -1621,6 +1629,14 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
             p.ruleset.selections = selections.clone();
             p.ruleset.cross_repo = cross_repo.clone();
             p.ruleset.process = process.clone();
+        }
+        // Upsert the draft's custom rules (#49) by name (preserve any pre-existing).
+        for c in &custom {
+            if let Some(slot) = p.ruleset.custom.iter_mut().find(|x| x.name == c.name) {
+                *slot = c.clone();
+            } else {
+                p.ruleset.custom.push(c.clone());
+            }
         }
         // Adds the repos to the project AND marks them onboarded (union, deduped).
         p.mark_onboarded(&repos);
@@ -1670,7 +1686,11 @@ async fn onboard_ci_rules(
 /// one from the rules' repos if none exists). This is the upsert: it replaces the
 /// project's BASE rules (selections / cross-repo / process) and leaves custom rules
 /// untouched.
-fn save_armed_to_project(state: &AppState, rules: &[crate::arm::ArmRule]) {
+fn save_armed_to_project(
+    state: &AppState,
+    rules: &[crate::arm::ArmRule],
+    custom: &[crate::project::CustomRule],
+) {
     use crate::project::RuleSelection;
     let mut selections = Vec::new();
     let mut cross = Vec::new();
@@ -1691,6 +1711,13 @@ fn save_armed_to_project(state: &AppState, rules: &[crate::arm::ArmRule]) {
             _ => selections.push(s),
         }
     }
+    // Repo-scoped custom rules pull their repo into the project too (covers a custom-only apply).
+    for c in custom {
+        let d = c.domain.trim();
+        if !d.is_empty() && d != "*" {
+            all_repos.insert(d.to_string());
+        }
+    }
     let pid = match state.projects.active() {
         Some(p) => p.id,
         None => match state.projects.create("My project", all_repos.iter().cloned().collect()) {
@@ -1700,6 +1727,14 @@ fn save_armed_to_project(state: &AppState, rules: &[crate::arm::ArmRule]) {
     };
     state.projects.update(&pid, |p| {
         p.upsert_base_rules(selections, cross, process);
+        // Upsert custom rules by name (preserve any not in this apply).
+        for c in custom {
+            if let Some(slot) = p.ruleset.custom.iter_mut().find(|x| x.name == c.name) {
+                *slot = c.clone();
+            } else {
+                p.ruleset.custom.push(c.clone());
+            }
+        }
         for repo in &all_repos {
             if !p.repos.contains(repo) {
                 p.repos.push(repo.clone());
@@ -2687,6 +2722,7 @@ mod tests {
                 arm_rule("XREPO-1", "cross-repo", &["me/api", "me/web"]),
                 arm_rule("PROC-1", "process", &["me/api"]),
             ],
+            &[],
         );
         let p = state.projects.active().expect("a project was created");
         assert_eq!(p.ruleset.selections.len(), 1, "repo-local -> selections");
@@ -2709,7 +2745,7 @@ mod tests {
             }]);
         });
         // Arming (saving base rules) must keep the custom rule.
-        save_armed_to_project(&state, &[arm_rule("REPO-1", "repo-local", &["me/api"])]);
+        save_armed_to_project(&state, &[arm_rule("REPO-1", "repo-local", &["me/api"])], &[]);
         let after = state.projects.get(&p.id).unwrap();
         assert_eq!(after.ruleset.selections.len(), 1);
         assert_eq!(after.ruleset.custom.len(), 1, "custom survived the re-arm upsert");

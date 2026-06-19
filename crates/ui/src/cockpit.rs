@@ -3127,6 +3127,59 @@ struct StackView {
     frameworks: Vec<String>,
 }
 
+/// Custom-rule helpers for onboarding. `domain` routes a rule: a repo's `owner/repo` =
+/// repo-scoped (the "Custom" domain, shown only in that repo's table); `*` = all repos (the
+/// "Custom Global" domain, shown everywhere like a project-level rule). `body` is the free-text
+/// directive — the architect owns its wording. (Struct defined above; this adds onboarding methods.)
+impl CustomRuleView {
+    /// True for a Custom Global rule (applies to every repo).
+    fn is_global(&self) -> bool {
+        let d = self.domain.trim();
+        d == "*" || d.is_empty()
+    }
+    /// Stable table id for this custom rule.
+    fn rule_id(&self) -> String {
+        format!("CUSTOM-{}", self.name)
+    }
+    /// Render as a proposed-rule row so it lives in the table alongside corpus rules. A single
+    /// option carries the body, so directive resolution (audit/arm) returns the body, not the
+    /// name, and it never reads as "needs a choice".
+    fn to_proposed(&self, all_repos: &[String]) -> ProposedRuleView {
+        let repos = if self.is_global() {
+            all_repos.to_vec()
+        } else {
+            vec![self.domain.clone()]
+        };
+        ProposedRuleView {
+            id: self.rule_id(),
+            title: self.name.clone(),
+            kind: "review".to_string(),
+            enforcement: "prose".to_string(),
+            options: vec![RuleOptionView {
+                id: "custom".to_string(),
+                label: self.name.clone(),
+                directive: self.body.clone(),
+                why: String::new(),
+            }],
+            default_option: Some("custom".to_string()),
+            decision_question: None,
+            decision_why: None,
+            scope: "repo-local".to_string(),
+            domain: if self.is_global() { "Custom Global".to_string() } else { "Custom".to_string() },
+            repos,
+            placement: "Guidance in AGENTS.md, reviewed at PR (custom · prose)".to_string(),
+            finding_count: 0,
+            recommended: true,
+        }
+    }
+}
+
+/// True when a rule id is a user-authored custom rule (so apply routes it through the project's
+/// `ruleset.custom` / CUSTOM-block emit, not the regular arm-request path).
+fn is_custom_rule_id(id: &str) -> bool {
+    id.starts_with("CUSTOM-")
+}
+
 /// Real audit usage from the server (the actual half of actual-vs-estimated).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct ActualUsageView {
@@ -3193,6 +3246,10 @@ struct OnboardingDraft {
     // non-default option survives reload — without this the choices reset to defaults.
     #[serde(default)]
     chosen: std::collections::HashMap<String, String>,
+    // User-authored custom rules created during onboarding (Custom + Custom Global). Persisted
+    // so they survive reload; written to the project's ruleset.custom on apply/complete.
+    #[serde(default)]
+    custom: Vec<CustomRuleView>,
     #[serde(default)]
     dispositions: std::collections::HashMap<String, Disposition>,
     #[serde(default)]
@@ -3538,10 +3595,10 @@ struct ArmResultView {
 
 /// Apply: write the selected rules onto a governance branch in each repo's LOCAL clone and
 /// push it to origin — NO pull request. The architect opens the PR separately.
-async fn apply_rules(rules: &[ArmRuleReq], findings: &[FindingView]) -> Option<(bool, String, Vec<ArmResultView>)> {
+async fn apply_rules(rules: &[ArmRuleReq], custom: &[CustomRuleView], findings: &[FindingView]) -> Option<(bool, String, Vec<ArmResultView>)> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/apply", crate::BFF_URL))
-        .json(&serde_json::json!({ "rules": rules, "findings": findings }))
+        .json(&serde_json::json!({ "rules": rules, "custom": custom, "findings": findings }))
         .send()
         .await
         .ok()?
@@ -4552,9 +4609,26 @@ fn ProposedRulesTable(
                     // Resolve each selected rule to its adopted directive; a rule
                     // with alternatives and no choice yet blocks arming.
                     let mut arm_reqs = Vec::new();
+                    let mut custom_reqs: Vec<CustomRuleView> = Vec::new();
                     let mut unresolved = Vec::new();
                     for (id, selected_repos) in &rule_repos {
                         let Some(r) = all_by_id.get(id) else { continue; };
+                        // Custom rules route through the project's ruleset.custom (rendered as
+                        // CUSTOM-<name> blocks), NOT the arm-request path — a base RuleSelection
+                        // with a CUSTOM- id has no corpus rule to resolve on reconcile.
+                        if is_custom_rule_id(id) {
+                            let is_global = r.domain == "Custom Global";
+                            let body = r.options.first().map(|o| o.directive.clone()).unwrap_or_default();
+                            let domain = if is_global {
+                                "*".to_string()
+                            } else {
+                                selected_repos.first().cloned().unwrap_or_default()
+                            };
+                            if !custom_reqs.iter().any(|c| c.name == r.title) {
+                                custom_reqs.push(CustomRuleView { name: r.title.clone(), body, domain });
+                            }
+                            continue;
+                        }
                         // Architect's explicit placement override wins; otherwise arm to the
                         // repos that selected this rule. A rule routed to zero repos is skipped.
                         let target_repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| selected_repos.clone());
@@ -4591,7 +4665,7 @@ fn ProposedRulesTable(
                     arming.set(true);
                     let findings = arm_findings.clone();
                     spawn(async move {
-                        match apply_rules(&arm_reqs, &findings).await {
+                        match apply_rules(&arm_reqs, &custom_reqs, &findings).await {
                             Some((ok, message, results)) => {
                                 if !ok && results.is_empty() {
                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, if message.is_empty() { "Apply failed.".to_string() } else { message });
@@ -4735,6 +4809,144 @@ fn RuleDetailModal() -> Element {
                                             }
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Create / edit / delete the architect's custom rules during onboarding (#49). Custom rules
+/// also show in the proposed-rules table (Custom / Custom Global domain groups) and are
+/// selectable there; this panel manages their lifecycle. A "Custom rule" is scoped to the
+/// viewed repo; a "Global custom rule" applies to every repo. Reads/writes the shared
+/// `custom_rules` + `repo_selection` contexts so a new rule appears in the table auto-selected.
+#[component]
+fn CustomRulesPanel(all_repos: Vec<String>) -> Element {
+    let mut custom_rules = use_context::<Signal<Vec<CustomRuleView>>>();
+    let mut repo_selection =
+        use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
+    let viewed_repo = use_context::<Signal<String>>();
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // Open editor: (original_name | None for a new rule, name, body, is_global).
+    let mut editor = use_signal(|| Option::<(Option<String>, String, String, bool)>::None);
+
+    rsx! {
+        div { class: "custom-rules",
+            div { class: "custom-rules-head",
+                span { class: "custom-rules-title", "Custom rules" }
+                button {
+                    class: "btn-edit-sm",
+                    onclick: move |_| editor.set(Some((None, String::new(), String::new(), false))),
+                    "+ Custom rule (this repo)"
+                }
+                button {
+                    class: "btn-edit-sm",
+                    onclick: move |_| editor.set(Some((None, String::new(), String::new(), true))),
+                    "+ Global custom rule"
+                }
+            }
+            p { class: "custom-rules-sub",
+                "Free-text rules you author. The text IS the directive (you own its wording); name the rule so it reads in the table. They appear under the Custom / Custom Global groups, are selectable like any rule, and are written into AGENTS.md on apply."
+            }
+            {
+                let rules = custom_rules.read().clone();
+                rsx! {
+                    if rules.is_empty() {
+                        p { class: "custom-rules-empty", "No custom rules yet." }
+                    } else {
+                        div { class: "custom-rules-list",
+                            for c in rules {
+                                {
+                                    let c_edit = c.clone();
+                                    let c_del = c.clone();
+                                    let scope_label = if c.is_global() { "global".to_string() } else { c.domain.clone() };
+                                    rsx! {
+                                        div { class: "custom-rule-row", key: "{c.name}",
+                                            span { class: "custom-rule-name", "{c.name}" }
+                                            span { class: "custom-rule-scope", "{scope_label}" }
+                                            button {
+                                                class: "btn-edit-sm",
+                                                onclick: move |_| editor.set(Some((Some(c_edit.name.clone()), c_edit.name.clone(), c_edit.body.clone(), c_edit.is_global()))),
+                                                "Edit"
+                                            }
+                                            button {
+                                                class: "btn-secondary danger",
+                                                onclick: move |_| {
+                                                    let id = c_del.rule_id();
+                                                    custom_rules.write().retain(|x| x.name != c_del.name);
+                                                    let mut m = repo_selection.peek().clone();
+                                                    for v in m.values_mut() { v.retain(|x| x != &id); }
+                                                    repo_selection.set(m);
+                                                },
+                                                "Delete"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((orig, name, body, global)) = editor() {
+                {
+                    let all_repos = all_repos.clone();
+                    let cur_repo = viewed_repo();
+                    let scope_text = if global { "applies to all repos".to_string() } else { format!("applies to {cur_repo}") };
+                    rsx! {
+                        div { class: "custom-rule-editor",
+                            input {
+                                class: "addressee-input",
+                                placeholder: "rule name",
+                                value: "{name}",
+                                oninput: move |e| { if let Some(ed) = editor.write().as_mut() { ed.1 = e.value(); } },
+                            }
+                            textarea {
+                                class: "routine-intent-input",
+                                rows: "3",
+                                placeholder: "the directive the agent should follow…",
+                                value: "{body}",
+                                oninput: move |e| { if let Some(ed) = editor.write().as_mut() { ed.2 = e.value(); } },
+                            }
+                            div { class: "custom-rule-editor-actions",
+                                span { class: "custom-rule-scope", "{scope_text}" }
+                                button { class: "btn-secondary", onclick: move |_| editor.set(None), "Cancel" }
+                                button {
+                                    class: "btn-run",
+                                    onclick: move |_| {
+                                        let name = name.trim().to_string();
+                                        if name.is_empty() {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Name the custom rule.");
+                                            return;
+                                        }
+                                        let domain = if global { "*".to_string() } else { cur_repo.clone() };
+                                        let rule = CustomRuleView { name: name.clone(), body: body.clone(), domain };
+                                        let id = rule.rule_id();
+                                        {
+                                            let mut list = custom_rules.write();
+                                            match &orig {
+                                                Some(old) => {
+                                                    if let Some(slot) = list.iter_mut().find(|x| &x.name == old) { *slot = rule; }
+                                                    else { list.push(rule); }
+                                                }
+                                                None => list.push(rule),
+                                            }
+                                        }
+                                        // Auto-select the rule for its repo(s) so it's included by default.
+                                        let repos: Vec<String> = if global { all_repos.clone() } else { vec![cur_repo.clone()] };
+                                        let mut m = repo_selection.peek().clone();
+                                        for r in &repos {
+                                            let e = m.entry(r.clone()).or_default();
+                                            if !e.contains(&id) { e.push(id.clone()); }
+                                        }
+                                        repo_selection.set(m);
+                                        editor.set(None);
+                                    },
+                                    "Save"
                                 }
                             }
                         }
@@ -5127,6 +5339,8 @@ fn ScanResults(report: ScanReportView) -> Element {
         m
     };
     let repo_selection = use_signal(|| repo_seed);
+    // Shared so the custom-rules panel can auto-select a newly created rule for its repo(s).
+    use_context_provider(|| repo_selection);
     // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
     // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
     let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
@@ -5163,6 +5377,13 @@ fn ScanResults(report: ScanReportView) -> Element {
         m
     });
     use_context_provider(|| chosen);
+
+    // User-authored custom rules (Custom + Custom Global), shared via context so the table, the
+    // create/edit/delete modal, and the audit/arm closures all read/write the same list. Seeded
+    // from the active project's existing custom rules (so re-opening shows them); the draft
+    // restore below overlays any in-flight onboarding additions.
+    let custom_rules = use_signal(Vec::<CustomRuleView>::new);
+    use_context_provider(|| custom_rules);
 
     // Per-rule repo placement OVERRIDE (rule id -> repos it installs into). Starts EMPTY:
     // an entry exists only when the architect explicitly overrides a rule's target repos.
@@ -5232,6 +5453,7 @@ fn ScanResults(report: ScanReportView) -> Element {
     let mut repo_selection_w = repo_selection;
     let mut dispositions_w = dispositions;
     let mut chosen_w = chosen;
+    let mut custom_rules_w = custom_rules;
     let mut draft_loaded = use_signal(|| false);
     {
         let report_repos = report.repos.clone();
@@ -5248,6 +5470,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                         if !d.chosen.is_empty() {
                             chosen_w.set(d.chosen);
+                        }
+                        if !d.custom.is_empty() {
+                            custom_rules_w.set(d.custom);
                         }
                         if !d.dispositions.is_empty() {
                             dispositions_w.set(d.dispositions);
@@ -5269,6 +5494,7 @@ fn ScanResults(report: ScanReportView) -> Element {
             let audit_v = audit.read().clone();
             let sel = repo_selection.read().clone();
             let cho = chosen.read().clone();
+            let cust = custom_rules.read().clone();
             let disp = dispositions.read().clone();
             let vr = viewed_repo();
             let tv = triage_view();
@@ -5280,6 +5506,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 audit: audit_v,
                 repo_selection: sel,
                 chosen: cho,
+                custom: cust,
                 dispositions: disp,
                 viewed_repo: vr,
                 triage_view: tv,
@@ -5499,6 +5726,8 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
             }
+            // Author custom rules (#49) — they appear in the Custom / Custom Global groups below.
+            CustomRulesPanel { all_repos: report.repos.clone() }
             {
                 let repos_audit = report.repos.clone();
                 // Per-repo binding drives RECOMMENDATION (pre-selection), NOT visibility: every
@@ -5508,13 +5737,33 @@ fn ScanResults(report: ScanReportView) -> Element {
                 // appeared in repo B's table, so it couldn't be added there at all.) The viewed
                 // repo only changes which rules are pre-checked, via the seeded per-repo selection.
                 let view_repo = if multi_repo { viewed_repo() } else { String::new() };
-                let all_rules = report.proposed_rules.clone();
-                let visible_rules = all_rules.clone();
+                // Merge in the user's custom rules (#49). VISIBLE in this repo's table = corpus
+                // rules + Custom Global + this repo's own Custom rules (repo-scoped customs don't
+                // leak into sibling repos). The cross-repo `all_rules` lookup gets EVERY custom
+                // (all repos) so arm/audit can resolve them. The table is re-keyed on a custom
+                // signature so creating/editing/deleting a custom rule remounts it with the change.
+                let actual_repo = viewed_repo();
+                let (visible_customs, all_customs, custom_sig) = {
+                    let cust = custom_rules.read();
+                    let all_repos = report.repos.clone();
+                    let visible: Vec<ProposedRuleView> = cust
+                        .iter()
+                        .filter(|c| c.is_global() || c.domain.trim() == actual_repo)
+                        .map(|c| c.to_proposed(&all_repos))
+                        .collect();
+                    let all: Vec<ProposedRuleView> = cust.iter().map(|c| c.to_proposed(&all_repos)).collect();
+                    let sig = cust.iter().map(|c| format!("{}\u{1}{}", c.name, c.domain)).collect::<Vec<_>>().join("\u{2}");
+                    (visible, all, sig)
+                };
+                let mut all_rules = report.proposed_rules.clone();
+                all_rules.extend(all_customs);
+                let mut visible_rules = report.proposed_rules.clone();
+                visible_rules.extend(visible_customs);
                 rsx! {
                     ProposedRulesTable {
-                        // Key on the viewed repo so switching remounts the table with that
-                        // repo's seeded selection.
-                        key: "{view_repo}",
+                        // Key on the viewed repo + custom signature so switching repos OR adding/
+                        // editing/deleting a custom rule remounts the table with the change.
+                        key: "{view_repo}\u{1f}{custom_sig}",
                         rules: visible_rules,
                         all_rules,
                         view_repo,
