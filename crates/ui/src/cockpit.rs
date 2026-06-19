@@ -3189,6 +3189,10 @@ struct OnboardingDraft {
     audit: Option<ScanReportView>,
     #[serde(default)]
     repo_selection: std::collections::HashMap<String, Vec<String>>,
+    // The architect's chosen alternative per rule (rule id -> option id). Persisted so a
+    // non-default option survives reload — without this the choices reset to defaults.
+    #[serde(default)]
+    chosen: std::collections::HashMap<String, String>,
     #[serde(default)]
     dispositions: std::collections::HashMap<String, Disposition>,
     #[serde(default)]
@@ -5153,6 +5157,7 @@ fn ScanResults(report: ScanReportView) -> Element {
     let mut audit_w = audit;
     let mut repo_selection_w = repo_selection;
     let mut dispositions_w = dispositions;
+    let mut chosen_w = chosen;
     let mut draft_loaded = use_signal(|| false);
     {
         let report_repos = report.repos.clone();
@@ -5166,6 +5171,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                         if !d.repo_selection.is_empty() {
                             repo_selection_w.set(d.repo_selection);
+                        }
+                        if !d.chosen.is_empty() {
+                            chosen_w.set(d.chosen);
                         }
                         if !d.dispositions.is_empty() {
                             dispositions_w.set(d.dispositions);
@@ -5186,6 +5194,7 @@ fn ScanResults(report: ScanReportView) -> Element {
             // Track every persisted slice so the effect re-runs on any change.
             let audit_v = audit.read().clone();
             let sel = repo_selection.read().clone();
+            let cho = chosen.read().clone();
             let disp = dispositions.read().clone();
             let vr = viewed_repo();
             let tv = triage_view();
@@ -5196,6 +5205,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 scan: report.clone(),
                 audit: audit_v,
                 repo_selection: sel,
+                chosen: cho,
                 dispositions: disp,
                 viewed_repo: vr,
                 triage_view: tv,
