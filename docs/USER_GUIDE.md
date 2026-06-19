@@ -91,7 +91,20 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
    is scanned only against **its own selected rules** plus the always-on **deterministic security
    floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
-   instant). Pick the **model** and the **scan mode**:
+   instant).
+
+   **Two kinds of finding, and the difference matters:**
+   - **Deterministic floor** (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
+     `ARCH-NO-SECRETS-IN-URL-1`) — pure regex/logic, no LLM. **Repeatable** (same code → same result,
+     same rule-id, same line), and these are the exact checks the layer-1 gate enforces on new writes.
+     Treat their rule-ids as **stable/canonical**.
+   - **AI-suggested (architectural)** — model-inferred issues regex can't catch (layering violations,
+     N+1, missing auth on writes, god objects, GET-with-side-effects). These are **advisory**, and the
+     model **invents the rule-id** per finding, so the id, severity, and exact set can **vary run to
+     run**. Read them as "the model flagged this pattern," not as a fixed rule. The calibration pass
+     recalibrates severity and flags low-confidence ones but never drops any — you make the final call.
+
+   Pick the **model** and the **scan mode**:
    - **Parallel** (default) — runs rule-batches concurrently; fastest. Wall-clock is the slowest
      batch, not the sum of every call.
    - **Sequential** — one call at a time, all rules together; slower but gentlest on rate limits

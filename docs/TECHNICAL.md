@@ -297,6 +297,15 @@ the AI audit pass. It finds genuine architectural/security violations that are n
 line-level lint — layering violations, N+1 patterns, missing auth on write paths,
 god objects, etc.
 
+> **Stable vs. drifting findings.** The deterministic floor (`onboard.rs`,
+> `audit_files`) is repeatable: same code → same finding, same rule-id, same line —
+> and those ids are canonical (they're the gate's own arms). The AI audit, by
+> contrast, **invents the rule-id per finding** (e.g. `AI-HANDLER-DIRECT-DB-ACCESS`)
+> and re-runs the model each scan, so the rule-ids, severities, and exact finding set
+> **drift run-to-run**. Treat AI findings as advisory ("the model flagged this
+> pattern") and rely on exact rule-ids only for the deterministic floor. UI/prose
+> should label AI findings as advisory and not present their ids as fixed rules.
+
 **Chunking:** files are packed into contiguous chunks at most `CHUNK_DIGEST_CHARS`
 (350,000 raw chars) each via `chunk_files`. Each chunk is audited in its own model
 call so the whole repo is covered regardless of size. A file larger than the
