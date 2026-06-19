@@ -318,9 +318,32 @@ others become `also_matches`. Line 0 (file-level/uncited) findings are never
 merged. Verbatim snippet-based line resolution (`resolve_finding_lines`) corrects
 the model's approximate line estimates to actual line numbers from the code.
 
-**Suppression:** findings can be suppressed inline (`camerata:allow` comment) or
-via a project-level baseline. The `suppression.rs` module in `camerata-server`
-manages this. Active-only findings drive gate enforcement.
+**Suppression (the baseline ratchet):** a finding is suppressed when it matches an
+accepted-debt record; only `Active` findings drive gate enforcement. `suppression.rs`
+(`camerata-server`) owns this, and `classify_one(finding, inline_waivers, baseline)`
+computes a finding's status:
+
+- **`suppressed-inline`** — a `camerata:allow` comment (WITH a reason) at the site. A
+  reason-less waiver does NOT suppress; the waiver itself becomes a violation.
+- **`suppressed-baseline`** — a `.camerata/baseline.json` entry matches. The match is
+  `entry.rule_id == finding.rule_id && entry.fingerprint == fingerprint(finding)`, where
+  `fingerprint(rule_id, snippet)` is an FNV-1a hash of `rule_id | whitespace-normalized
+  snippet`. So matching is by **rule + offending code content**, NOT line number:
+  - It **survives line drift / reformatting** (content-based, whitespace-insensitive) — a
+    finding stays suppressed when surrounding code moves or is reindented.
+  - It **ratchets on edit**: changing the offending code changes the fingerprint, so the
+    baseline entry no longer matches and the finding **re-surfaces as `Active`**. Touch the
+    debt and you own it.
+- Otherwise **`Active`** — the gate enforces it.
+
+**Where the baseline comes from:** the onboarding **Apply** step (writes the governance
+files to the `camerata/onboard-governance` branch, `arm::ARM_BRANCH`) snapshots EVERY
+currently-active finding into `.camerata/baseline.json` as "pre-existing at onboarding"
+(`baselines_from_findings`) — accepting the whole pre-existing debt set, not only the ones
+triaged "Ignored". Triaging a single finding "Ignore (with reason)" later appends just that
+entry to the committed baseline (the per-finding suppress endpoint). The file is
+version-controlled and auditable; future scans read it from the default branch
+(`fetch_baseline`) and classify against it.
 
 ---
 
