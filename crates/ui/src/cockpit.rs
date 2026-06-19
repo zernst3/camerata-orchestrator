@@ -4789,6 +4789,12 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     use_future(move || async move {
         if scan.peek().is_none() {
             if let Some(draft) = load_onboarding_draft().await {
+                // Rehydrate the repos textarea too — otherwise it reloads empty (showing the
+                // placeholder) even though the scan + rules restored, which reads as "the repos
+                // were lost." The repo set is exactly the scanned repos.
+                if repo.peek().trim().is_empty() {
+                    repo.set(draft.scan.repos.join("\n"));
+                }
                 scan.set(Some(draft.scan));
             }
         }
