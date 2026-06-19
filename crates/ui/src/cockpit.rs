@@ -4160,6 +4160,22 @@ fn FindingsTable(
 }
 
 
+/// A rule can be armed WITHOUT the architect picking an alternative when it has no options,
+/// or its `default_option` resolves to a non-empty directive. Rules that DON'T satisfy this
+/// ("needs a choice") are never pre-selected: auto-selecting one would block audit/arm out of
+/// the box for a decision the architect never actively made. They still show (highlighted) and
+/// can be selected manually, at which point the gate asks for the choice.
+fn rule_has_usable_default(r: &ProposedRuleView) -> bool {
+    if r.options.is_empty() {
+        return true;
+    }
+    r.default_option
+        .as_ref()
+        .and_then(|o| r.options.iter().find(|x| &x.id == o))
+        .map(|x| !x.directive.is_empty())
+        .unwrap_or(false)
+}
+
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -4223,9 +4239,12 @@ fn ProposedRulesTable(
                 .filter(|(_, p)| ids.contains(&p.id))
                 .map(|(r, _)| *r)
                 .collect(),
+            // First view: pre-select the recommended rules, but NOT ones that still need an
+            // alternative chosen — auto-selecting those would block audit/arm immediately for
+            // a decision the architect never made. They stay visible (highlighted) to opt into.
             None => rows
                 .iter()
-                .filter(|(_, p)| p.recommended)
+                .filter(|(_, p)| p.recommended && rule_has_usable_default(p))
                 .map(|(r, _)| *r)
                 .collect(),
         }
@@ -4312,7 +4331,6 @@ fn ProposedRulesTable(
     // Rules whose alternative is still UNRESOLVED — they have options but no chosen choice
     // AND no usable default directive, so the architect must pick one before the rule can be
     // enforced. Recomputed each render (reads `chosen`), so picking an alternative clears it.
-    // These are highlighted yellow (row_class below) so they're easy to spot.
     let needs_choice: std::collections::HashSet<String> = {
         let chosen_map = chosen.read();
         id_map
@@ -4329,21 +4347,26 @@ fn ProposedRulesTable(
             .map(|r| r.id.clone())
             .collect()
     };
+    // The VIEWED table's live selection (rule ids). Drives the per-row highlight: a needs-a-
+    // choice rule is yellow ONLY while selected-but-unresolved; unselected = no highlight,
+    // selected-and-resolved = the normal blue selection.
+    let selected_rule_ids: std::collections::HashSet<String> = handle
+        .selected_ids()
+        .iter()
+        .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
+        .collect();
+    let needs_choice_hl = needs_choice.clone();
+    let selected_rule_ids_hl = selected_rule_ids.clone();
     // The SELECTED unresolved rules (across every repo's picks, matching the arm guard). These
     // BLOCK both buttons: an unresolved rule you've selected can't be audited or armed. An
     // unresolved rule you HAVEN'T selected is only highlighted, not blocking. This is also why
     // audit no longer silently falls back to the rule title — it's gated the same as arm now.
     let unresolved_selected: Vec<String> = {
-        let live_ids: Vec<String> = handle
-            .selected_ids()
-            .iter()
-            .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
-            .collect();
         let selected: std::collections::BTreeSet<String> = if view_repo.is_empty() {
-            live_ids.into_iter().collect()
+            selected_rule_ids.iter().cloned().collect()
         } else {
             let mut map = repo_selection.peek().clone();
-            map.insert(view_repo.clone(), live_ids);
+            map.insert(view_repo.clone(), selected_rule_ids.iter().cloned().collect());
             map.values().flatten().cloned().collect()
         };
         selected
@@ -4372,16 +4395,31 @@ fn ProposedRulesTable(
             // grouped by domain and mounts collapsed, so this lets the architect open every
             // domain's rules (and re-collapse them) in one click.
             group_expand_toggle: true,
-            // Highlight rules that still need an alternative chosen (yellow), so the rules
-            // that block audit/arm are easy to spot. Clears when a choice is made.
+            // Highlight a rule yellow ONLY while it's selected AND still needs an alternative
+            // chosen — that's the state that blocks audit/arm. Unselected = no highlight;
+            // selected-and-resolved = the normal blue selection. Clears when a choice is made.
             row_class: RowClass::new(move |r: &ProposedRuleView| {
-                needs_choice.contains(&r.id).then(|| "rule-row-needs-choice".to_string())
+                (selected_rule_ids_hl.contains(&r.id) && needs_choice_hl.contains(&r.id))
+                    .then(|| "rule-row-needs-choice".to_string())
             }),
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
                     detail_rule.set(Some(r.clone()));
                 }
             }),
+        }
+        // Explain WHY the buttons below are disabled: one or more selected rules still need an
+        // alternative chosen (highlighted yellow above). Click each to pick one; the buttons
+        // re-enable once all are resolved.
+        if has_unresolved {
+            div { class: "rule-gate-warning", role: "alert",
+                span { class: "rule-gate-warning-icon", "\u{26A0}" }
+                span {
+                    "These selected rules need an alternative chosen before you can audit or add them (highlighted yellow above): "
+                    strong { "{unresolved_selected.join(\", \")}" }
+                    ". Click each rule to pick an option."
+                }
+            }
         }
         div { class: "findings-toolbar",
             button {
@@ -5002,7 +5040,11 @@ fn ScanResults(report: ScanReportView) -> Element {
                 let ids: Vec<String> = report
                     .proposed_rules
                     .iter()
-                    .filter(|r| r.recommended && r.repos.iter().any(|rp| rp == repo))
+                    .filter(|r| {
+                        r.recommended
+                            && rule_has_usable_default(r)
+                            && r.repos.iter().any(|rp| rp == repo)
+                    })
                     .map(|r| r.id.clone())
                     .collect();
                 m.insert(repo.clone(), ids);

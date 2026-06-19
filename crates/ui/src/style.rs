@@ -1024,11 +1024,29 @@ html, body {
 .finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
 .finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
 
-/* Needs-a-choice row highlight (proposed-rules table): a rule with alternatives but no
-   chosen option + no usable default. Yellow tint + amber left border marks the rows that
-   block audit/arm until the architect picks an alternative; clears once a choice is made. */
-.rule-row-needs-choice > td:first-child { box-shadow: inset 4px 0 0 0 #d99e16; }
-.rule-row-needs-choice > td { background: rgba(217, 158, 22, 0.10); }
+/* Needs-a-choice row highlight (proposed-rules table): a SELECTED rule with alternatives but
+   no chosen option. Amber tint + left border marks the rows that block audit/arm until the
+   architect picks an alternative; clears once a choice is made (row reverts to normal blue).
+   The class is only applied to selected rows, so this must out-specify chorale's selected-row
+   rule (`.chorale-root tr[data-chorale-row-selected="true"] > td`, specificity 0,2,2) — the
+   extra attribute selector here makes it 0,3,2 so the amber wins over the blue. */
+.chorale-root tr.rule-row-needs-choice[data-chorale-row-selected="true"] > td {
+  background: rgba(217, 158, 22, 0.18);
+}
+.chorale-root tr.rule-row-needs-choice[data-chorale-row-selected="true"] > td:first-child {
+  box-shadow: inset 4px 0 0 0 #d99e16;
+}
+
+/* Why-are-the-buttons-disabled banner: sits under the proposed-rules table, above the
+   audit/apply buttons. Amber to match the needs-a-choice row highlight. */
+.rule-gate-warning {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 0 0 8px; padding: 9px 12px;
+  background: rgba(217, 158, 22, 0.10); border: 1px solid rgba(217, 158, 22, 0.45);
+  border-radius: var(--r-sm); color: var(--ink-soft); font-size: 13px; line-height: 1.4;
+}
+.rule-gate-warning-icon { color: #b8860b; font-size: 14px; line-height: 1.3; flex-shrink: 0; }
+.rule-gate-warning strong { color: var(--ink); font-weight: 600; }
 
 /* Key above the findings table: what the stripe means. */
 .findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }
