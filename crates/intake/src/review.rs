@@ -266,7 +266,7 @@ impl RefinementReviewer for StubRefinementReviewer {
 // ─── live Claude reviewer ────────────────────────────────────────────────────
 
 /// The default model id the live review call uses.
-pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-5";
+pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
 /// session and returns the review JSON. Read-only and ungoverned (it plans, it

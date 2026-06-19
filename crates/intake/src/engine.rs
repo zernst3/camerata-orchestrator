@@ -461,7 +461,7 @@ impl LeadEngineer for StubLeadEngineer {
 
 /// The default model id the live lead-engineer call uses. Behind the seam, so
 /// only this concrete type names a model.
-pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-5";
+pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
 
 /// The REAL lead engineer: a headless `claude -p` call that evaluates the form
 /// as a staff engineer and returns a strict-JSON [`ModelOutput`] (checklist,
