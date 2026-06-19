@@ -991,6 +991,17 @@ html, body {
 .onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
 .onboard-repos-input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; }
+
+/* Non-blocking onboarding note (replaces the old connect-GitHub gate). */
+.onboard-note { font-size: 12px; color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; margin-bottom: 16px; line-height: 1.5; }
+
+/* Added-repos list (browse-only onboarding): one chip per local repo, with a remove ×. */
+.onboard-repos-empty { font-size: 13px; color: var(--ink-faint); padding: 9px 11px; border: 1px dashed var(--line); border-radius: 8px; }
+.onboard-repos-list { display: flex; flex-direction: column; gap: 4px; }
+.onboard-repo-chip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.onboard-repo-chip-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); }
+.onboard-repo-chip-x { border: none; background: transparent; color: var(--ink-faint); font-size: 13px; line-height: 1; cursor: pointer; padding: 2px 5px; border-radius: 5px; transition: background .12s var(--ease), color .12s var(--ease); }
+.onboard-repo-chip-x:hover { background: #f3e6e0; color: var(--ink); }
 .onboard-cta {
   align-self: flex-start;
   padding: 9px 16px; border-radius: 8px; border: none;

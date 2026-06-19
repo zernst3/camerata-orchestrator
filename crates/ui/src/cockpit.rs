@@ -4730,8 +4730,8 @@ enum OnboardPath {
 enum RepoDetect {
     /// The user cancelled the dialog.
     Cancelled,
-    /// Derived `owner/repo`.
-    Found(String),
+    /// Derived `owner/repo` AND the local folder it lives in (recorded as the repo's path).
+    Found { repo: String, path: String },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
 }
@@ -4762,7 +4762,7 @@ async fn detect_local_repo() -> RepoDetect {
     };
     if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         match v.get("repo").and_then(|r| r.as_str()) {
-            Some(r) => RepoDetect::Found(r.to_string()),
+            Some(r) => RepoDetect::Found { repo: r.to_string(), path },
             None => RepoDetect::Failed("no repo in the response".to_string()),
         }
     } else {
@@ -4847,33 +4847,57 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                 }
             }
 
-            // Connection gate.
+            // No GitHub gate: onboarding reads LOCAL code only. A token is only needed LATER
+            // (development time) to push the governance branch / open a PR — surface that when
+            // it's missing, but never block onboarding on it.
             if !connected {
-                div { class: "onboard-gate",
-                    span { class: "onboard-gate-dot" }
-                    div {
-                        p { class: "onboard-gate-h", "Connect GitHub to begin" }
-                        p { class: "onboard-gate-b",
-                            "Set "
-                            span { class: "mono", "CAMERATA_GITHUB_TOKEN" }
-                            " (and restart the app) so Camerata can read the repo. The steps below activate once a token is connected. See "
-                            span { class: "mono", "docs/USER_GUIDE.md" }
-                            "."
-                        }
-                    }
+                div { class: "onboard-note",
+                    "Onboarding works on your local repo folders — no GitHub connection needed here. (A token is only needed later, to push the governance branch and open a PR.)"
                 }
             }
 
-            // Repo input — a SET of repos (a brownfield onboarding spans
-            // inter-related repos), one owner/repo per line.
+            // Repo input — a SET of LOCAL repos (a brownfield onboarding spans inter-related
+            // repos). You add a repo by browsing to its local folder; the path is recorded so
+            // the repo is immediately a workspace repo (scan/audit/apply all read it locally).
             div { class: "onboard-repo-block",
-                label { class: "onboard-repo-label", "Repositories — one owner/repo per line (a feature often spans several)" }
-                textarea {
-                    class: "onboard-repos-input",
-                    rows: "4",
-                    placeholder: "acme/api\nacme/worker\nacme/web",
-                    value: "{repo}",
-                    oninput: move |e| repo.set(e.value()),
+                label { class: "onboard-repo-label", "Repositories — browse to each repo's local folder (a feature often spans several)" }
+                {
+                    let names: Vec<String> = repo()
+                        .lines()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    rsx! {
+                        if names.is_empty() {
+                            p { class: "onboard-repos-empty", "No repos yet — browse to a local repo folder to add one." }
+                        } else {
+                            div { class: "onboard-repos-list",
+                                for name in names {
+                                    {
+                                        let name_rm = name.clone();
+                                        rsx! {
+                                            div { class: "onboard-repo-chip", key: "{name}",
+                                                span { class: "onboard-repo-chip-name", "{name}" }
+                                                button {
+                                                    class: "onboard-repo-chip-x",
+                                                    title: "Remove",
+                                                    onclick: move |_| {
+                                                        let kept: Vec<String> = repo()
+                                                            .lines()
+                                                            .map(|s| s.trim().to_string())
+                                                            .filter(|s| !s.is_empty() && s != &name_rm)
+                                                            .collect();
+                                                        repo.set(kept.join("\n"));
+                                                    },
+                                                    "\u{2715}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 button {
                     class: "btn-edit-sm onboard-browse",
@@ -4881,7 +4905,11 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         spawn(async move {
                             match detect_local_repo().await {
                                 RepoDetect::Cancelled => {}
-                                RepoDetect::Found(found) => {
+                                RepoDetect::Found { repo: found, path: folder } => {
+                                    // Record the local path FIRST so the repo is immediately a
+                                    // workspace repo (scan/audit/apply read it locally), then add
+                                    // it to the list.
+                                    let saved = set_repo_path(&found, &folder).await;
                                     let mut cur = repo();
                                     let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
                                     if exists {
@@ -4892,11 +4920,15 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                                         }
                                         cur.push_str(&found);
                                         repo.set(cur);
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} from the folder."));
+                                        if saved {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                                        } else {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
+                                        }
                                     }
                                 }
                                 RepoDetect::Failed(msg) => {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a git repo cloned from GitHub — or paste owner/repo above instead."));
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
                                 }
                             }
                         });
@@ -4905,9 +4937,9 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                 }
                 button {
                     class: "onboard-cta",
-                    disabled: !connected || repo().trim().is_empty() || scanning(),
-                    // Brownfield scans the whole repo SET (audit + propose rules) via
-                    // the gated /api/onboard/scan; greenfield scaffolding is next.
+                    disabled: repo().trim().is_empty() || scanning(),
+                    // Brownfield scans the whole repo SET (audit + propose rules) from each
+                    // repo's LOCAL working tree; greenfield scaffolding is next.
                     onclick: move |_| {
                         if path() != OnboardPath::Brownfield { return; }
                         let repos: Vec<String> = repo()

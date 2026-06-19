@@ -827,11 +827,7 @@ pub async fn create_issue(
     Ok(v["html_url"].as_str().unwrap_or_default().to_string())
 }
 
-// ── GitHub repo reader (needs the token) ────────────────────────────────────────
-
-use std::io::Read as _;
-
-use flate2::read::GzDecoder;
+// ── Local repo reader (reads code from disk; never GitHub) ──────────────────────
 
 /// Safety net for pathological monorepos so one scan can't exhaust memory. This
 /// is NOT a per-scan window that rotates: a single tarball download covers the
@@ -933,42 +929,7 @@ fn extra_exclude_dirs() -> Vec<String> {
         .collect()
 }
 
-/// Fetch the WHOLE repo's auditable files in ONE request: download the repo
-/// tarball (gzipped tar) and gunzip + untar it in memory, keeping the text/code
-/// files under the size cap. No per-file API calls, so a large repo is scanned
-/// fully without N requests or rate-limit blowups. Returns the files and whether
-/// the `HARD_CAP_FILES` safety net was hit (only for pathological monorepos).
-pub async fn fetch_repo_files(
-    owner: &str,
-    repo: &str,
-    token: &str,
-) -> anyhow::Result<ExtractedRepo> {
-    // The shared transport is text-only; the tarball is binary, so use reqwest
-    // directly. GitHub redirects the tarball to a pre-signed codeload URL, so the
-    // Authorization header being dropped on the cross-host redirect is fine.
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("camerata-orchestrator/", env!("CARGO_PKG_VERSION")))
-        .use_rustls_tls()
-        .build()?;
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/tarball");
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("GitHub tarball {owner}/{repo}: HTTP {}", resp.status());
-    }
-    let bytes = resp.bytes().await?;
-
-    // Decompress + untar over the in-memory bytes on a blocking thread (sync IO).
-    tokio::task::spawn_blocking(move || extract_code_files(&bytes))
-        .await
-        .map_err(|e| anyhow::anyhow!("tarball extraction task failed: {e}"))?
-}
-
-/// What `extract_code_files` pulled from a tarball: the auditable files, whether the file
+/// What `read_local_repo_files` pulled from a working tree: the auditable files, whether the file
 /// cap was hit, and how many would-be-scannable files were pruned as noise (so the scan can
 /// SHOW the filter doing its job — "1,583 scanned, 2,800 excluded as build/generated noise").
 pub struct ExtractedRepo {
@@ -977,56 +938,68 @@ pub struct ExtractedRepo {
     pub excluded_noise: usize,
 }
 
-/// Gunzip + untar a repo tarball, returning its auditable text/code files (path
-/// relative to the repo root), whether the file cap was hit, and the noise-pruned count.
-/// Pure over bytes.
-fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<ExtractedRepo> {
-    let gz = GzDecoder::new(gz_bytes);
-    let mut archive = tar::Archive::new(gz);
-    let mut files = Vec::new();
-    let mut truncated = false;
-    let mut excluded_noise = 0usize;
+/// Read a repo's auditable files from its LOCAL working tree — the local-first scan source.
+/// Onboarding (scan + audit) reads the code that's on disk; GitHub is never consulted for
+/// code (only later, at development time, for clone/fetch/push). Applies the same filters
+/// the scan has always used: noise pruning, code-extension filter, per-file size cap, and HARD_CAP_FILES
+/// safety net, but walks the directory on disk. Paths are relative to the repo root,
+/// forward-slashed. Noise directories (.git / node_modules / target / …) are pruned DURING
+/// descent so we never recurse into them. Synchronous (blocking IO) — call via spawn_blocking.
+pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
+    if !root.join(".git").exists() {
+        anyhow::bail!("{} is not a local git clone", root.display());
+    }
     let extra_dirs = extra_exclude_dirs();
-
-    for entry in archive.entries()? {
-        let mut e = entry?;
-        if e.header().entry_type() != tar::EntryType::Regular {
-            continue;
-        }
-        // Tarball paths are `<repo>-<sha>/<path>`; strip the top dir.
-        let raw = e.path()?.to_string_lossy().into_owned();
-        let Some((_, path)) = raw.split_once('/') else {
+    let mut files = Vec::new();
+    let mut excluded_noise = 0usize;
+    let mut truncated = false;
+    // Iterative DFS so a deep tree can't blow the stack.
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        if path.is_empty() {
-            continue;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            // Path relative to the repo root, forward-slashed (matches tarball paths).
+            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel.is_empty() {
+                continue;
+            }
+            if ft.is_dir() {
+                // Prune noise dirs (don't descend) — is_noise_path matches any segment, so a
+                // noise dir name prunes the whole subtree before we read a single file in it.
+                if !is_noise_path(&rel, &extra_dirs) {
+                    stack.push(p);
+                }
+                continue;
+            }
+            if !ft.is_file() {
+                continue; // skip symlinks / fifos / etc.
+            }
+            let noise = is_noise_path(&rel, &extra_dirs);
+            let code = has_code_ext(&rel);
+            if noise && code {
+                excluded_noise += 1;
+            }
+            if noise || !code {
+                continue;
+            }
+            if entry.metadata().map(|m| m.len() as usize).unwrap_or(usize::MAX) > MAX_FILE_BYTES {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&p) else {
+                continue; // skip non-UTF-8 / unreadable
+            };
+            files.push((rel, content));
+            if files.len() >= HARD_CAP_FILES {
+                truncated = true;
+                break;
+            }
         }
-        // Prune build/dep/cache/generated dirs + lockfiles/minified/codegen BEFORE the ext
-        // check, so a repo's node_modules / .turbo / *.gen.ts / package-lock never enters the
-        // scan (or the token bill). Count the ones that WOULD have been scanned (code ext) so
-        // the report can show how much the filter saved.
-        let noise = is_noise_path(path, &extra_dirs);
-        let code = has_code_ext(path);
-        if noise && code {
-            excluded_noise += 1;
-        }
-        if noise || !code {
-            continue;
-        }
-        if e.header().size().unwrap_or(0) as usize > MAX_FILE_BYTES {
-            continue;
-        }
-        // Read the whole entry (keeps tar positioning correct), skip non-UTF-8.
-        let mut buf = Vec::new();
-        if e.read_to_end(&mut buf).is_err() {
-            continue;
-        }
-        let Ok(content) = String::from_utf8(buf) else {
-            continue;
-        };
-        files.push((path.to_string(), content));
-        if files.len() >= HARD_CAP_FILES {
-            truncated = true;
+        if truncated {
             break;
         }
     }
@@ -1049,16 +1022,16 @@ fn extract_code_files(gz_bytes: &[u8]) -> anyhow::Result<ExtractedRepo> {
 /// waived" audit view (the require-indexing invariant). Uses the cheap mechanical audit
 /// for stale-detection (free, deterministic).
 pub async fn suppression_registry(
-    repos: &[String],
-    token: &str,
+    sources: &[(String, std::path::PathBuf)],
 ) -> Vec<crate::suppression::SuppressionRecord> {
     use crate::suppression::{parse_inline_waivers, registry, Baseline, FindingRef};
     let mut out = Vec::new();
-    for spec in repos {
-        let Some((owner, repo)) = spec.split_once('/') else {
-            continue;
-        };
-        let Ok(extracted) = fetch_repo_files(owner, repo, token).await else {
+    for (spec, dir) in sources {
+        let spec = spec.as_str();
+        let dir = dir.clone();
+        let Ok(Ok(extracted)) =
+            tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await
+        else {
             continue;
         };
         let files = extracted.files;
@@ -1143,25 +1116,30 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
 /// It does NOT audit code yet — that's [`audit_repos`], run after the architect picks
 /// which rules to enforce. This is the "scan to determine languages / frameworks /
 /// domains → suggest rules" step the two-phase flow opens with.
-pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
+/// Scan a set of LOCAL repo working trees: detect each stack and propose a starter ruleset.
+/// `sources` pairs each repo's `owner/repo` label with its local clone directory. Reads code
+/// from disk (local-first); GitHub is never consulted here. `extra_notes` carries messages
+/// from the caller's path resolution (e.g. repos that had no local folder) so they surface in
+/// the report alongside per-repo scan notes.
+pub async fn scan_repos(
+    sources: &[(String, std::path::PathBuf)],
+    extra_notes: Vec<String>,
+) -> ScanReport {
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut files_excluded = 0usize;
     let mut code_chars = 0usize;
     let mut repos_ok = Vec::new();
-    let mut notes = Vec::new();
+    let mut notes = extra_notes;
 
-    for spec in specs {
+    for (spec, dir) in sources {
         let spec = spec.trim();
         if spec.is_empty() {
             continue;
         }
-        let Some((owner, repo)) = spec.split_once('/') else {
-            notes.push(format!("{spec}: not `owner/repo`, skipped"));
-            continue;
-        };
-        match fetch_repo_files(owner, repo, token).await {
-            Ok(extracted) => {
+        let dir = dir.clone();
+        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await {
+            Ok(Ok(extracted)) => {
                 let ExtractedRepo { files, truncated, excluded_noise } = extracted;
                 files_total += files.len();
                 files_excluded += excluded_noise;
@@ -1174,7 +1152,8 @@ pub async fn scan_repos(specs: &[String], token: &str) -> ScanReport {
                     ));
                 }
             }
-            Err(e) => notes.push(format!("{spec}: scan failed ({e})")),
+            Ok(Err(e)) => notes.push(format!("{spec}: scan failed ({e})")),
+            Err(e) => notes.push(format!("{spec}: scan task failed ({e})")),
         }
     }
 
@@ -1235,9 +1214,9 @@ fn is_code_auditable_rule(id: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
-    specs: &[String],
+    sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
-    token: &str,
+    extra_notes: Vec<String>,
     model: Option<&str>,
     calibration_model: Option<&str>,
     mode: crate::ai_audit::ScanMode,
@@ -1248,7 +1227,7 @@ pub async fn audit_repos(
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
-    let mut notes = Vec::new();
+    let mut notes = extra_notes;
     let llm = crate::llm::Llm::from_env();
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
@@ -1279,15 +1258,11 @@ pub async fn audit_repos(
     // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
     // rules ∪ the project-level set, never the whole selection across the board.
 
-    for spec in specs {
+    for (spec, dir) in sources {
         let spec = spec.trim();
         if spec.is_empty() {
             continue;
         }
-        let Some((owner, repo)) = spec.split_once('/') else {
-            notes.push(format!("{spec}: not `owner/repo`, skipped"));
-            continue;
-        };
         // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
         // project-level), minus the deterministic-arm and governance/process families.
         let semantic: Vec<(String, String)> = selected
@@ -1297,7 +1272,11 @@ pub async fn audit_repos(
             .filter(|r| is_code_auditable_rule(&r.id))
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
-        match fetch_repo_files(owner, repo, token).await {
+        let dir = dir.clone();
+        match tokio::task::spawn_blocking(move || read_local_repo_files(&dir))
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
+        {
             Ok(ExtractedRepo { files, truncated, excluded_noise: _ }) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
@@ -1389,37 +1368,28 @@ mod tests {
     }
 
     #[test]
-    fn extract_pulls_code_files_strips_top_dir_and_skips_binaries() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use std::io::Write;
+    fn read_local_pulls_code_files_and_prunes_noise() {
+        use std::fs;
 
-        // Build a gzipped tar like GitHub's: entries under a `<repo>-<sha>/` root.
-        let mut tar_buf = Vec::new();
-        {
-            let mut builder = tar::Builder::new(&mut tar_buf);
-            let mut add = |name: &str, data: &[u8]| {
-                let mut h = tar::Header::new_gnu();
-                h.set_size(data.len() as u64);
-                h.set_entry_type(tar::EntryType::Regular);
-                h.set_mode(0o644);
-                h.set_cksum();
-                builder.append_data(&mut h, name, data).unwrap();
-            };
-            add("repo-abc123/src/main.rs", b"fn main() {}\n");
-            add("repo-abc123/README.md", b"# readme"); // not a code ext -> skipped
-            add("repo-abc123/logo.png", b"\x89PNG\r\n"); // not code -> skipped
-            builder.finish().unwrap();
-        }
-        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-        gz.write_all(&tar_buf).unwrap();
-        let gz_bytes = gz.finish().unwrap();
+        // A real on-disk working tree: a .git marker, a code file, a non-code file, and a
+        // noise dir. The reader keeps only the auditable code and never descends node_modules.
+        let base =
+            std::env::temp_dir().join(format!("camerata_localreader_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join(".git")).unwrap(); // marks it a local clone
+        fs::create_dir_all(base.join("src")).unwrap();
+        fs::create_dir_all(base.join("node_modules/x")).unwrap();
+        fs::write(base.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(base.join("README.md"), "# readme").unwrap(); // not a code ext -> skipped
+        fs::write(base.join("node_modules/x/index.js"), "noise").unwrap(); // noise dir -> skipped
 
-        let extracted = extract_code_files(&gz_bytes).unwrap();
+        let extracted = read_local_repo_files(&base).unwrap();
         let files = extracted.files;
+        let _ = fs::remove_dir_all(&base);
+
         assert!(!extracted.truncated);
         assert_eq!(files.len(), 1, "only the .rs file is auditable: {files:?}");
-        assert_eq!(files[0].0, "src/main.rs", "top dir stripped");
+        assert_eq!(files[0].0, "src/main.rs");
         assert_eq!(files[0].1, "fn main() {}\n");
     }
 

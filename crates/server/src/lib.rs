@@ -784,7 +784,44 @@ struct ScanReq {
 /// token — without it, returns a gated report (no scan) so the UI shows "connect
 /// GitHub". The audit reuses the gate's own arms, so it reports exactly what the
 /// gate would deny on a new write.
-async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanReport> {
+/// Resolve a set of repos to their LOCAL working-tree dirs for an onboarding read (scan /
+/// audit / waiver registry). Local-first: a repo's dir is its per-repo path override, else
+/// `<workspace_root>/<owner>/<repo>`. Repos with no local git clone are returned as NOTES
+/// (not sources) so the caller can surface "browse to the repo's folder" — onboarding reads
+/// code from disk, never from GitHub.
+fn resolve_local_sources(
+    state: &AppState,
+    repos: &[String],
+) -> (Vec<(String, std::path::PathBuf)>, Vec<String>) {
+    let workspace_root = state.settings.workspace_root();
+    let mut sources = Vec::new();
+    let mut notes = Vec::new();
+    for spec in repos {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        let override_path = state.settings.repo_path(spec);
+        match crate::workspace::resolve_repo_dir(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            spec,
+        ) {
+            Some(dir) if dir.join(".git").exists() => sources.push((spec.to_string(), dir)),
+            Some(dir) => notes.push(format!(
+                "{spec}: {} is not a local git clone — browse to the repo's folder",
+                dir.display()
+            )),
+            None => notes.push(format!("{spec}: no local folder set — browse to the repo's folder")),
+        }
+    }
+    (sources, notes)
+}
+
+async fn onboard_scan(
+    State(state): State<AppState>,
+    Json(req): Json<ScanReq>,
+) -> Json<crate::onboard::ScanReport> {
     let mut repos = req.repos;
     if let Some(r) = req.repo {
         repos.push(r);
@@ -793,17 +830,13 @@ async fn onboard_scan(Json(req): Json<ScanReq>) -> Json<crate::onboard::ScanRepo
     if repos.is_empty() {
         let mut r = crate::onboard::ScanReport::gated(&repos);
         r.gated = false;
-        r.message = Some("Name at least one `owner/repo` to scan.".to_string());
+        r.message = Some("Add at least one repo (browse to its local folder) to scan.".to_string());
         return Json(r);
     }
 
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
-    let Some(token) = token else {
-        return Json(crate::onboard::ScanReport::gated(&repos));
-    };
-    Json(crate::onboard::scan_repos(&repos, &token).await)
+    // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
+    let (sources, notes) = resolve_local_sources(&state, &repos);
+    Json(crate::onboard::scan_repos(&sources, notes).await)
 }
 
 /// One selected rule the Phase-2 audit runs against, with its per-repo binding. An empty
@@ -901,12 +934,8 @@ async fn onboard_audit(
         r.message = Some("No repos to audit.".to_string());
         return Json(r);
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
-    let Some(token) = token else {
-        return Json(crate::onboard::ScanReport::gated(&repos));
-    };
+    // Local-first: the audit reads the repos' local working trees, not GitHub.
+    let (sources, notes) = resolve_local_sources(&state, &repos);
     let selected: Vec<crate::onboard::SelectedRule> = req
         .rules
         .into_iter()
@@ -921,9 +950,9 @@ async fn onboard_audit(
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     let mut report = crate::onboard::audit_repos(
-        &repos,
+        &sources,
         &selected,
-        &token,
+        notes,
         model.as_deref(),
         calibration_model.as_deref(),
         mode,
@@ -959,9 +988,8 @@ async fn onboard_audit_start(
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
+    let (sources, notes) = resolve_local_sources(&state, &repos);
 
     let job_id = state.jobs.create();
     state.transcripts.clear(SCAN_AUDIT_KEY);
@@ -970,18 +998,17 @@ async fn onboard_audit_start(
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
     tokio::spawn(async move {
-        let Some(token) = token else {
-            jobs.fail(&jid, "No GitHub token connected (set CAMERATA_GITHUB_TOKEN).");
-            return;
-        };
-        if repos.is_empty() {
-            jobs.fail(&jid, "No repos to audit.");
+        if sources.is_empty() {
+            jobs.fail(
+                &jid,
+                "No local repos to audit — browse to each repo's local folder first.",
+            );
             return;
         }
         let mut report = crate::onboard::audit_repos(
-            &repos,
+            &sources,
             &selected,
-            &token,
+            notes,
             model.as_deref(),
             calibration_model.as_deref(),
             mode,
@@ -1505,13 +1532,9 @@ async fn project_suppressions(
         .projects
         .get(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
-    if token.trim().is_empty() {
-        return Ok(Json(Vec::new()));
-    }
-    Ok(Json(
-        crate::onboard::suppression_registry(&project.repos, &token).await,
-    ))
+    // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
+    let (sources, _notes) = resolve_local_sources(&state, &project.repos);
+    Ok(Json(crate::onboard::suppression_registry(&sources).await))
 }
 
 #[derive(serde::Deserialize)]
