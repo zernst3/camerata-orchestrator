@@ -220,6 +220,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/routines/:id/run", post(run_routine_now))
         // Routine escalations: a blocked routine awaiting human review.
         .route("/api/escalations", get(list_escalations).post(raise_escalation))
+        .route("/api/escalations/:id/chat", post(chat_escalation))
         .route("/api/escalations/:id/answer", post(answer_escalation))
         // Local workspace: the user picks a visible folder; project repos clone under
         // it, the fleet edits there, the dev runs/tests locally, then ship pushes + PRs.
@@ -1927,7 +1928,7 @@ async fn draft_routine_prompt(
     );
     let llm = crate::llm::Llm::from_env();
     match llm
-        .complete(crate::llm::LlmRequest::new(user).with_system(system))
+        .complete(crate::llm::LlmRequest::new(user).with_model(req.model).with_system(system))
         .await
     {
         Ok(resp) if !resp.text.trim().is_empty() => Json(crate::routine::DraftPromptResp {
@@ -2016,6 +2017,46 @@ async fn raise_escalation(
         .map(|r| r.name)
         .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
     Ok(Json(state.escalations.raise_deduped(req, &name)))
+}
+
+/// Body for a turn in the escalation review conversation: the human's message + the model
+/// the lead-engineer agent should answer on (blank -> server default).
+#[derive(serde::Deserialize)]
+struct ChatEscalationReq {
+    message: String,
+    #[serde(default)]
+    model: String,
+}
+
+/// One turn of the human <-> lead-engineer review conversation. The agent is grounded on
+/// the escalation and is instructed NOT to act — only `answer` (authorization) unblocks.
+/// Persists both the human message and the reply, and returns the updated escalation.
+async fn chat_escalation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ChatEscalationReq>,
+) -> Result<Json<crate::escalation::Escalation>, AppError> {
+    let esc = state
+        .escalations
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+    let system = crate::escalation::chat_system_prompt(&esc);
+    let user = crate::escalation::chat_user_prompt(&esc, &req.message);
+    let llm = crate::llm::Llm::from_env();
+    let reply = match llm
+        .complete(crate::llm::LlmRequest::new(user).with_model(req.model).with_system(system))
+        .await
+    {
+        Ok(r) if !r.text.trim().is_empty() => r.text,
+        _ => "I couldn't reach the model just now. You can still authorize a decision \
+              below, or try again."
+            .to_string(),
+    };
+    state
+        .escalations
+        .append_turn(&id, &req.message, &reply)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))
 }
 
 /// Resolve an escalation with the human's answer; the answer is translated into a resume

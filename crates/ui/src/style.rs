@@ -2143,4 +2143,43 @@ html, body {
   padding: 8px 12px; line-height: 1.5;
   animation: slideIn .3s var(--ease) both;
 }
+
+/* ---- escalation review conversation (lead-engineer chat) ----------------- */
+.escalation-chat-thread {
+  display: flex; flex-direction: column; gap: 10px;
+  max-height: 320px; overflow-y: auto;
+  padding: 10px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.escalation-turn { display: flex; flex-direction: column; gap: 3px; }
+.escalation-turn-role {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.escalation-turn.you .escalation-turn-role { color: var(--accent-ink); }
+.escalation-turn-text { font-size: 13px; line-height: 1.55; color: var(--ink); }
+/* Markdown from the lead engineer: compact table/code/list styling. */
+.escalation-turn-text.md p { margin: 0 0 6px; }
+.escalation-turn-text.md p:last-child { margin-bottom: 0; }
+.escalation-turn-text.md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--accent-wash); padding: 1px 4px; border-radius: 4px;
+}
+.escalation-turn-text.md pre {
+  background: var(--accent-wash); padding: 8px 10px; border-radius: var(--r-sm);
+  overflow-x: auto; margin: 0 0 6px;
+}
+.escalation-turn-text.md ul, .escalation-turn-text.md ol { margin: 0 0 6px; padding-left: 18px; }
+.escalation-chat-row { display: flex; flex-direction: column; gap: 8px; }
+.escalation-chat-controls { display: flex; align-items: center; gap: 10px; }
+.escalation-chat-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.escalation-model { max-width: 180px; font-size: 12px; padding: 4px 8px; }
+/* The authorize section is visually separated: it's the only control that unblocks. */
+.escalation-authorize {
+  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line);
+}
 "#;

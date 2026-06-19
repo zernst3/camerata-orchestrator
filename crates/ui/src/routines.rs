@@ -6,6 +6,8 @@
 
 use dioxus::prelude::*;
 
+use crate::md::md_to_html;
+
 /// Weekday labels, Sunday-first (matches the `weekdays` toggle vector order).
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -209,6 +211,20 @@ pub struct EscalationView {
     pub created: String,
     #[serde(default)]
     pub resolved: Option<String>,
+    /// The human <-> lead-engineer review conversation.
+    #[serde(default)]
+    pub conversation: Vec<EscalationMsgView>,
+}
+
+/// One turn in the escalation review conversation.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub struct EscalationMsgView {
+    /// "user" | "assistant"
+    pub role: String,
+    pub text: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub ts: String,
 }
 
 async fn fetch_routines() -> Option<Vec<RoutineView>> {
@@ -230,7 +246,22 @@ async fn fetch_open_escalations() -> Option<Vec<EscalationView>> {
         .ok()
 }
 
-/// Submit the architect's answer to an escalation. Returns the resolved
+/// Send one message in the escalation review conversation; the lead-engineer agent
+/// replies (it never unblocks — only `answer_escalation` does). Returns the updated
+/// escalation with both turns appended.
+async fn chat_escalation(id: &str, message: &str, model: &str) -> Option<EscalationView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/escalations/{}/chat", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "message": message, "model": model }))
+        .send()
+        .await
+        .ok()?
+        .json::<EscalationView>()
+        .await
+        .ok()
+}
+
+/// Submit the architect's authorization to an escalation. Returns the resolved
 /// escalation (including the server's `translated_directive`) on success.
 async fn answer_escalation(id: &str, answer: &str) -> Option<EscalationView> {
     reqwest::Client::new()
@@ -338,10 +369,10 @@ async fn delete_routine(id: &str) -> bool {
 }
 
 /// Draft the operational prompt from the user's intent. Returns (prompt, authored_by).
-async fn draft_prompt(intent: &str, scope: &str) -> Option<(String, String)> {
+async fn draft_prompt(intent: &str, scope: &str, model: &str) -> Option<(String, String)> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/routines/draft-prompt", crate::BFF_URL))
-        .json(&serde_json::json!({ "intent": intent, "scope": scope }))
+        .json(&serde_json::json!({ "intent": intent, "scope": scope, "model": model }))
         .send()
         .await
         .ok()?
@@ -387,6 +418,11 @@ pub fn RoutineDashboard() -> Element {
     // After a successful submit the server returns a translated_directive. We
     // show it briefly before the panel closes on refresh.
     let mut last_directive = use_signal(|| Option::<String>::None);
+    // The message being composed to the lead-engineer review agent, an in-flight flag,
+    // and the model that agent answers on (seeded from the server default below).
+    let mut chat_input = use_signal(String::new);
+    let mut chatting = use_signal(|| false);
+    let mut esc_model = use_signal(String::new);
 
     let mut name = use_signal(String::new);
     // Structured schedule builder. These drive a typical frequency picker (one-off /
@@ -429,6 +465,10 @@ pub fn RoutineDashboard() -> Element {
     // form hasn't been given a model yet, e.g. fresh or just reset).
     if routine_model().is_empty() && !model_default.is_empty() {
         routine_model.set(model_default.clone());
+    }
+    // Seed the escalation review agent's model from the same default.
+    if esc_model().is_empty() && !model_default.is_empty() {
+        esc_model.set(model_default.clone());
     }
 
     // Group routines by project for display: each row carries an optional header that is
@@ -535,6 +575,7 @@ pub fn RoutineDashboard() -> Element {
                                                         } else {
                                                             reviewing.set(Some(esc_id_click.clone()));
                                                             answer_draft.set(String::new());
+                                                            chat_input.set(String::new());
                                                             last_directive.set(None);
                                                         }
                                                     },
@@ -657,6 +698,7 @@ pub fn RoutineDashboard() -> Element {
                                 {
                                     let esc_id_submit = esc.id.clone();
                                     let esc_id_close = esc.id.clone();
+                                    let esc_id_chat = esc.id.clone();
                                     rsx! {
                                         div { class: "escalation-panel",
                                             div { class: "escalation-panel-head",
@@ -667,21 +709,25 @@ pub fn RoutineDashboard() -> Element {
                                             p { class: "escalation-reason", "{esc.reason}" }
                                             // The specific decision needed: most prominent field.
                                             div { class: "escalation-stopped-for", "{esc.stopped_for}" }
-                                            // AI suggestions: each click prefills the answer textarea.
-                                            if !esc.suggestions.is_empty() {
-                                                div {
-                                                    p { class: "escalation-suggestions-label", "Suggested answers" }
-                                                    div { class: "escalation-suggestions",
-                                                        for suggestion in esc.suggestions.iter() {
-                                                            {
-                                                                let text = suggestion.clone();
-                                                                rsx! {
-                                                                    button {
-                                                                        class: "escalation-suggestion",
-                                                                        onclick: move |_| {
-                                                                            answer_draft.set(text.clone());
-                                                                        },
-                                                                        "{suggestion}"
+
+                                            // ── Conversation with the lead engineer ──────────────
+                                            // A real back-and-forth: ask why, get clarification.
+                                            // Chatting NEVER unblocks; only Authorize (below) does.
+                                            if !esc.conversation.is_empty() {
+                                                div { class: "escalation-chat-thread",
+                                                    for m in esc.conversation.iter() {
+                                                        {
+                                                            let is_ai = m.role == "assistant";
+                                                            let cls = if is_ai { "escalation-turn ai" } else { "escalation-turn you" };
+                                                            rsx! {
+                                                                div { class: "{cls}",
+                                                                    span { class: "escalation-turn-role",
+                                                                        if is_ai { "Lead engineer" } else { "You" }
+                                                                    }
+                                                                    if is_ai {
+                                                                        div { class: "escalation-turn-text md", dangerous_inner_html: md_to_html(&m.text) }
+                                                                    } else {
+                                                                        div { class: "escalation-turn-text", "{m.text}" }
                                                                     }
                                                                 }
                                                             }
@@ -689,12 +735,71 @@ pub fn RoutineDashboard() -> Element {
                                                     }
                                                 }
                                             }
-                                            // Answer composer + submit.
-                                            div { class: "escalation-answer-row",
+
+                                            // Ask the lead engineer (with a model picker for this agent).
+                                            div { class: "escalation-chat-row",
+                                                div { class: "escalation-chat-controls",
+                                                    span { class: "escalation-chat-label", "Ask the lead engineer" }
+                                                    select {
+                                                        class: "addressee-input escalation-model",
+                                                        value: "{esc_model}",
+                                                        onchange: move |e| esc_model.set(e.value()),
+                                                        for mo in models.iter() {
+                                                            option { key: "{mo.id}", value: "{mo.id}", "{mo.label}" }
+                                                        }
+                                                    }
+                                                }
                                                 textarea {
                                                     class: "escalation-answer-input",
-                                                    rows: "3",
-                                                    placeholder: "Your answer or directive...",
+                                                    rows: "2",
+                                                    placeholder: "Ask why it stopped, or for clarification (this does NOT unblock)...",
+                                                    value: "{chat_input}",
+                                                    oninput: move |e| chat_input.set(e.value()),
+                                                }
+                                                button {
+                                                    class: "btn-restart",
+                                                    disabled: chat_input().trim().is_empty() || chatting(),
+                                                    onclick: move |_| {
+                                                        let id = esc_id_chat.clone();
+                                                        let msg = chat_input();
+                                                        let md = esc_model();
+                                                        if msg.trim().is_empty() { return; }
+                                                        chatting.set(true);
+                                                        spawn(async move {
+                                                            if chat_escalation(&id, &msg, &md).await.is_some() {
+                                                                chat_input.set(String::new());
+                                                                refresh += 1;
+                                                            }
+                                                            chatting.set(false);
+                                                        });
+                                                    },
+                                                    if chatting() { "Asking…" } else { "Ask" }
+                                                }
+                                            }
+
+                                            // ── Authorize & unblock — the ONLY thing that resolves it ──
+                                            div { class: "escalation-authorize",
+                                                p { class: "escalation-suggestions-label", "Authorize a decision to unblock" }
+                                                if !esc.suggestions.is_empty() {
+                                                    div { class: "escalation-suggestions",
+                                                        for suggestion in esc.suggestions.iter() {
+                                                            {
+                                                                let text = suggestion.clone();
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "escalation-suggestion",
+                                                                        onclick: move |_| { answer_draft.set(text.clone()); },
+                                                                        "{suggestion}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                textarea {
+                                                    class: "escalation-answer-input",
+                                                    rows: "2",
+                                                    placeholder: "Your decision (e.g. \"go ahead with option B\") — this unblocks the routine...",
                                                     value: "{answer_draft}",
                                                     oninput: move |e| answer_draft.set(e.value()),
                                                 }
@@ -708,35 +813,32 @@ pub fn RoutineDashboard() -> Element {
                                                             if text.trim().is_empty() { return; }
                                                             spawn(async move {
                                                                 if let Some(resolved) = answer_escalation(&id, &text).await {
-                                                                    // Show the translated directive briefly, then
-                                                                    // refresh both routines and escalations so the
-                                                                    // badge clears and the panel closes.
                                                                     if let Some(directive) = resolved.translated_directive {
                                                                         last_directive.set(Some(directive));
                                                                     }
                                                                     reviewing.set(None);
                                                                     answer_draft.set(String::new());
+                                                                    chat_input.set(String::new());
                                                                     refresh += 1;
                                                                 }
                                                             });
                                                         },
-                                                        "Submit answer"
+                                                        "Authorize & unblock"
                                                     }
                                                     button {
                                                         class: "btn-restart",
                                                         onclick: move |_| {
-                                                            // Dismiss the panel without answering.
+                                                            // Dismiss the panel without authorizing.
                                                             if reviewing().as_deref() == Some(esc_id_close.as_str()) {
                                                                 reviewing.set(None);
                                                                 answer_draft.set(String::new());
+                                                                chat_input.set(String::new());
                                                                 last_directive.set(None);
                                                             }
                                                         },
                                                         "Dismiss"
                                                     }
                                                 }
-                                                // Show the translated directive returned by the server after
-                                                // the most recent submit (clears on next panel open).
                                                 if let Some(directive) = last_directive() {
                                                     p { class: "escalation-directive", "Directive: {directive}" }
                                                 }
@@ -912,11 +1014,11 @@ pub fn RoutineDashboard() -> Element {
                         class: "btn-restart",
                         disabled: intent().trim().is_empty() || drafting(),
                         onclick: move |_| {
-                            let (i, sc) = (intent(), scope());
+                            let (i, sc, md) = (intent(), scope(), routine_model());
                             if i.trim().is_empty() { return; }
                             drafting.set(true);
                             spawn(async move {
-                                if let Some((p, by)) = draft_prompt(&i, &sc).await {
+                                if let Some((p, by)) = draft_prompt(&i, &sc, &md).await {
                                     prompt.set(p);
                                     authored_by.set(by);
                                 }

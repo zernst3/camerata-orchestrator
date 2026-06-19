@@ -113,6 +113,9 @@ pub struct DraftPromptReq {
     pub intent: String,
     #[serde(default)]
     pub scope: String,
+    /// The model to author the operational prompt on (blank -> server default).
+    #[serde(default)]
+    pub model: String,
 }
 
 /// Response from the draft-prompt step.

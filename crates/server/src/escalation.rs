@@ -32,6 +32,16 @@ pub enum EscalationStatus {
     Resolved,
 }
 
+/// One turn in the human <-> lead-engineer review conversation. Chatting clarifies; it
+/// never unblocks (only explicit authorization does).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EscalationMsg {
+    /// "user" | "assistant"
+    pub role: String,
+    pub text: String,
+    pub ts: String,
+}
+
 /// A blocked routine awaiting (or having received) human review.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Escalation {
@@ -58,6 +68,10 @@ pub struct Escalation {
     pub created: String,
     #[serde(default)]
     pub resolved: Option<String>,
+    /// The human <-> lead-engineer review conversation. Chatting clarifies; only explicit
+    /// authorization (resolve) unblocks the routine.
+    #[serde(default)]
+    pub conversation: Vec<EscalationMsg>,
 }
 
 /// Request to raise an escalation against a routine.
@@ -104,6 +118,56 @@ pub fn translate_answer(esc: &Escalation, answer: &str) -> (String, String) {
         reason = esc.reason,
     );
     (directive, "scaffold".to_string())
+}
+
+/// System grounding for the lead-engineer review agent. It must HELP the human understand
+/// and decide, and must NOT act — only the human's explicit authorization (a separate
+/// control) unblocks the routine.
+pub fn chat_system_prompt(esc: &Escalation) -> String {
+    let suggestions = if esc.suggestions.is_empty() {
+        "(none offered)".to_string()
+    } else {
+        esc.suggestions
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "You are Camerata's lead engineer. An autonomous, governed routine has STOPPED and \
+         escalated to a human for a decision. Your job is to help the human UNDERSTAND the \
+         situation and decide: explain trade-offs, answer clarifying questions, and lay out \
+         the pros and cons of each option. You must NOT take any action or unblock anything \
+         yourself; only the human's explicit authorization (a separate control they press) \
+         unblocks the routine. Be concise and concrete. When the human states a decision, \
+         restate it crisply and remind them to use the Authorize control to apply it.\n\n\
+         Routine: {name}\n\
+         Why it stopped: {reason}\n\
+         Decision needed: {stopped_for}\n\
+         Options the routine proposed:\n{suggestions}\n\
+         Additional context: {raw}",
+        name = esc.routine_name,
+        reason = esc.reason,
+        stopped_for = esc.stopped_for,
+        raw = if esc.raw_context.is_empty() { "(none)" } else { esc.raw_context.as_str() },
+    )
+}
+
+/// Fold the prior conversation + the new user message into one prompt for the single-shot
+/// completion backend (which has no native multi-turn memory).
+pub fn chat_user_prompt(esc: &Escalation, new_message: &str) -> String {
+    let mut s = String::new();
+    if !esc.conversation.is_empty() {
+        s.push_str("Conversation so far:\n");
+        for m in &esc.conversation {
+            s.push_str(&format!("{}: {}\n", m.role, m.text));
+        }
+        s.push('\n');
+    }
+    s.push_str(&format!(
+        "user: {new_message}\n\nRespond as the lead engineer to the latest user message."
+    ));
+    s
 }
 
 /// Build the generic escalation a governed run raises when it is blocked (gate denials)
@@ -205,6 +269,39 @@ impl EscalationStore {
         }).cloned()
     }
 
+    /// One escalation by id.
+    pub fn get(&self, id: &str) -> Option<Escalation> {
+        self.items.lock().ok()?.iter().find(|e| e.id == id).cloned()
+    }
+
+    /// Append a user message + the lead-engineer's reply to an escalation's conversation.
+    /// Chatting never resolves the escalation (only explicit authorization does), so even a
+    /// resolved escalation can still be discussed as a read-back. Returns the updated record.
+    pub fn append_turn(
+        &self,
+        id: &str,
+        user_text: &str,
+        assistant_text: &str,
+    ) -> Option<Escalation> {
+        let mut guard = self.items.lock().ok()?;
+        let e = guard.iter_mut().find(|e| e.id == id)?;
+        let ts = Self::now_rfc3339();
+        e.conversation.push(EscalationMsg {
+            role: "user".to_string(),
+            text: user_text.to_string(),
+            ts: ts.clone(),
+        });
+        e.conversation.push(EscalationMsg {
+            role: "assistant".to_string(),
+            text: assistant_text.to_string(),
+            ts,
+        });
+        let updated = e.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
     /// Raise an escalation. `routine_name` is denormalized in for standalone display.
     pub fn raise(&self, req: RaiseEscalationReq, routine_name: &str) -> Escalation {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
@@ -221,6 +318,7 @@ impl EscalationStore {
             translated_directive: None,
             created: Self::now_rfc3339(),
             resolved: None,
+            conversation: Vec::new(),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(esc.clone());
