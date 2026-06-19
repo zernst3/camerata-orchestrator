@@ -2121,7 +2121,7 @@ fn ProjectGate() -> Element {
                                     "Cancel"
                                 }
                                 button {
-                                    class: "pg-btn-danger",
+                                    class: "btn-edit-sm pg-btn-danger",
                                     onclick: move |_| {
                                         pending_import_overwrite.set(None);
                                         let payload = conflict_payload.clone();
@@ -2160,7 +2160,9 @@ fn ProjectGate() -> Element {
                     }
                     div { class: "onboard-leave-actions",
                         button {
-                            class: "pg-btn-danger",
+                            // btn-edit-sm provides the base button styling; pg-btn-danger
+                            // layers the danger (destructive) colors on top.
+                            class: "btn-edit-sm pg-btn-danger",
                             onclick: move |_| {
                                 spawn(async move {
                                     // Discard the saved draft, then enter for a fresh onboarding.
