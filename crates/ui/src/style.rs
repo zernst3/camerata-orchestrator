@@ -1414,6 +1414,15 @@ html, body {
 .routine-last { font-size: 12px; }
 .routine-passed { color: #2f8f5b; font-weight: 600; }
 .routine-never { color: var(--ink-faint); font-style: italic; }
+/* An imported routine that hasn't been set up on this backend yet. */
+.routine-needs-setup {
+  margin-left: 8px; padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .02em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent-ink); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.btn-setup { border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
 .routine-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .btn-run-sm {
   border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;

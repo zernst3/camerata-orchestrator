@@ -15,6 +15,7 @@
 
 pub mod ai_audit;
 pub mod arm;
+pub mod auto_fire;
 pub mod draft;
 pub mod uow;
 pub mod clarify;
@@ -31,6 +32,7 @@ pub mod llm;
 pub mod provider;
 pub mod routine;
 pub mod run;
+pub mod schedule;
 pub mod settings;
 pub mod suppression;
 pub mod terminal;
@@ -207,6 +209,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_routine).delete(delete_routine),
         )
         .route("/api/routines/:id/enable", post(set_routine_enabled))
+        .route("/api/routines/:id/provision", post(provision_routine))
         .route("/api/routines/:id/run", post(run_routine_now))
         // Local workspace: the user picks a visible folder; project repos clone under
         // it, the fleet edits there, the dev runs/tests locally, then ship pushes + PRs.
@@ -257,6 +260,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
         state.notifications.clone(),
     );
     crate::notify::spawn_deploy_poller(state.notifications.clone());
+
+    // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
+    // comes due. Spawned here (not in `router`) so tests that build the router don't
+    // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
+    crate::auto_fire::spawn_routine_scheduler(state.routines.clone());
 
     // Shutdown hook: on Ctrl+C / SIGTERM, reap any in-flight `claude` audit subprocesses
     // before exiting so a signal-driven quit never orphans them (kill_on_drop only covers
@@ -1867,6 +1875,20 @@ async fn set_routine_enabled(
     state
         .routines
         .set_enabled(&id, req.enabled)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+}
+
+/// Provision a routine on this backend (the "Set up" action for one that arrived via a
+/// project import). Registers it with the scheduler; does not enable it — the architect
+/// still presses Start.
+async fn provision_routine(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Routine>, AppError> {
+    state
+        .routines
+        .set_provisioned(&id)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
 }

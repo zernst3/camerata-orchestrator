@@ -105,6 +105,20 @@ struct RoutineView {
     scope: String,
     enabled: bool,
     last_run: Option<RoutineRunSummaryView>,
+    /// Whether this routine is set up on this backend. Imported routines arrive
+    /// un-provisioned and need a "Set up" before Start does anything. Defaults true so
+    /// the field is optional against older BFFs.
+    #[serde(default = "default_true")]
+    provisioned: bool,
+    /// When the scheduler last fired it (RFC3339). Carried for future display; not yet
+    /// rendered.
+    #[serde(default)]
+    #[allow(dead_code)]
+    last_fired: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -129,6 +143,19 @@ async fn set_enabled(id: &str, enabled: bool) -> Option<RoutineView> {
     reqwest::Client::new()
         .post(format!("{}/api/routines/{}/enable", crate::BFF_URL, id))
         .json(&serde_json::json!({ "enabled": enabled }))
+        .send()
+        .await
+        .ok()?
+        .json::<RoutineView>()
+        .await
+        .ok()
+}
+
+/// Provision an imported routine on this backend (the "Set up" action). Returns the
+/// updated routine (now `provisioned`, still stopped).
+async fn provision(id: &str) -> Option<RoutineView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/routines/{}/provision", crate::BFF_URL, id))
         .send()
         .await
         .ok()?
@@ -274,10 +301,12 @@ pub fn RoutineDashboard() -> Element {
                 for r in routines.iter() {
                     {
                         let id_toggle = r.id.clone();
+                        let id_provision = r.id.clone();
                         let id_run = r.id.clone();
                         let id_del = r.id.clone();
                         let r_edit = r.clone();
                         let enabled = r.enabled;
+                        let provisioned = r.provisioned;
                         let last = r.last_run.clone();
                         let is_pending_delete = pending_delete().as_deref() == Some(r.id.as_str());
                         let is_editing_row = editing().as_deref() == Some(r.id.as_str());
@@ -292,7 +321,12 @@ pub fn RoutineDashboard() -> Element {
                                     span { class: "routine-title", "{r.name}" }
                                     span { class: "routine-prompt", "{r.intent}" }
                                 }
-                                span { class: "routine-sched", "{r.schedule}" }
+                                span { class: "routine-sched",
+                                    "{r.schedule}"
+                                    if !provisioned {
+                                        span { class: "routine-needs-setup", "needs setup" }
+                                    }
+                                }
                                 span { class: "routine-scope", "{r.scope}" }
                                 span { class: "routine-last",
                                     {
@@ -305,17 +339,34 @@ pub fn RoutineDashboard() -> Element {
                                     }
                                 }
                                 div { class: "routine-actions",
-                                    button {
-                                        class: "btn-restart",
-                                        onclick: move |_| {
-                                            let id = id_toggle.clone();
-                                            spawn(async move {
-                                                if set_enabled(&id, !enabled).await.is_some() {
-                                                    refresh += 1;
-                                                }
-                                            });
-                                        },
-                                        if enabled { "Disable" } else { "Enable" }
+                                    if provisioned {
+                                        // Start / Stop arms or disarms the scheduler for this routine.
+                                        button {
+                                            class: "btn-restart",
+                                            onclick: move |_| {
+                                                let id = id_toggle.clone();
+                                                spawn(async move {
+                                                    if set_enabled(&id, !enabled).await.is_some() {
+                                                        refresh += 1;
+                                                    }
+                                                });
+                                            },
+                                            if enabled { "Stop" } else { "Start" }
+                                        }
+                                    } else {
+                                        // Imported routine: must be set up on this backend before it can run.
+                                        button {
+                                            class: "btn-restart btn-setup",
+                                            onclick: move |_| {
+                                                let id = id_provision.clone();
+                                                spawn(async move {
+                                                    if provision(&id).await.is_some() {
+                                                        refresh += 1;
+                                                    }
+                                                });
+                                            },
+                                            "Set up"
+                                        }
                                     }
                                     button {
                                         class: "btn-run-sm",

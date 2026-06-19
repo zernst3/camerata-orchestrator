@@ -45,6 +45,26 @@ pub struct Routine {
     pub scope: String,
     pub enabled: bool,
     pub last_run: Option<RoutineRunSummary>,
+    /// Whether this routine is provisioned on THIS backend (registered with the
+    /// scheduler). Locally-created routines are provisioned on creation; routines that
+    /// arrive via a project import start UN-provisioned and need an explicit "Set up"
+    /// before the scheduler will fire them — so a "Start" can't silently no-op because
+    /// the routine doesn't actually exist on the importer's machine. Defaults `true` so
+    /// routines persisted before this field gain it rehydrate as already provisioned.
+    #[serde(default = "default_true")]
+    pub provisioned: bool,
+    /// RFC3339 timestamp of the last time the auto-fire scheduler ran this routine, so a
+    /// "daily 09:00" routine fires once per slot rather than once per tick.
+    #[serde(default)]
+    pub last_fired: Option<String>,
+    /// Optional owning project (`project.id`). `None` = a global routine that does not
+    /// travel with any single project's export.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Request body to create a routine. The user supplies `intent`; `prompt` is the
@@ -176,6 +196,9 @@ impl RoutineStore {
                 scope: scope.to_string(),
                 enabled,
                 last_run: None,
+                provisioned: true,
+                last_fired: None,
+                project_id: None,
             }
         };
         let seed = vec![
@@ -233,6 +256,10 @@ impl RoutineStore {
             scope: req.scope.clone(),
             enabled: true,
             last_run: None,
+            // Created here, so it's provisioned on this backend immediately.
+            provisioned: true,
+            last_fired: None,
+            project_id: None,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -282,6 +309,32 @@ impl RoutineStore {
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
         r.enabled = enabled;
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
+    /// Mark a routine provisioned on this backend (the "Set up" action for an imported
+    /// routine). Idempotent; provisioning never auto-enables — the architect still
+    /// presses Start.
+    pub fn set_provisioned(&self, id: &str) -> Option<Routine> {
+        let mut guard = self.items.lock().ok()?;
+        let r = guard.iter_mut().find(|r| r.id == id)?;
+        r.provisioned = true;
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
+    /// Record that the scheduler fired this routine at `ts` (RFC3339), so the same slot
+    /// isn't fired again on the next tick. Separate from `run_now`'s summary so the
+    /// scheduler can stamp the fire even when it drives the run itself.
+    pub fn mark_fired(&self, id: &str, ts: &str) -> Option<Routine> {
+        let mut guard = self.items.lock().ok()?;
+        let r = guard.iter_mut().find(|r| r.id == id)?;
+        r.last_fired = Some(ts.to_string());
         let updated = r.clone();
         drop(guard);
         self.flush();
