@@ -34,13 +34,66 @@ fn main() {
     // GitHub token etc. are available to the embedded BFF without exporting them.
     // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.
     let _ = dotenvy::dotenv();
-    // Set the OS window title (the bare `dioxus::launch` defaults it to "Dioxus App").
+    // Set the OS window title (the bare `dioxus::launch` defaults it to "Dioxus App"),
+    // and install an explicit menu bar with a proper App menu + full Edit menu so
+    // copy/cut/paste/select-all (and their Cmd-key equivalents) are wired through the
+    // macOS responder chain to the webview's text fields. See `app_menu_bar`.
     use dioxus::desktop::{Config, WindowBuilder};
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
-            Config::new().with_window(WindowBuilder::new().with_title("Camerata Orchestrator")),
+            Config::new()
+                .with_menu(app_menu_bar())
+                .with_window(WindowBuilder::new().with_title("Camerata Orchestrator")),
         )
         .launch(App);
+}
+
+/// Build the application menu bar.
+///
+/// The bare default menu bar puts a "Window" submenu first and, in practice, copy/paste
+/// did not reach the WKWebView's inputs on macOS. A correctly-ordered menu — a named App
+/// menu FIRST, then a full Edit menu whose items use the standard `copy:`/`paste:`/`cut:`/
+/// `selectAll:` selectors (that's exactly what `PredefinedMenuItem` emits) — restores
+/// clipboard behavior across every text field and selectable region in the app. The same
+/// predefined items are used cross-platform (they're what the framework's own default does),
+/// so this is safe on Windows/Linux too; only the App-menu-first convention is macOS-shaped.
+fn app_menu_bar() -> dioxus::desktop::muda::Menu {
+    use dioxus::desktop::muda::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+    let menu = Menu::new();
+
+    // App menu (first submenu = the bold, app-named menu on macOS).
+    let app = Submenu::new("Camerata Orchestrator", true);
+    let _ = app.append_items(&[
+        &PredefinedMenuItem::about(
+            None,
+            Some(AboutMetadata {
+                name: Some("Camerata Orchestrator".to_string()),
+                ..Default::default()
+            }),
+        ),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::hide(None),
+        &PredefinedMenuItem::hide_others(None),
+        &PredefinedMenuItem::show_all(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::quit(None),
+    ]);
+
+    // Edit menu — the part that makes Cmd+C / Cmd+V / Cmd+X / Cmd+A work in the webview.
+    let edit = Submenu::new("Edit", true);
+    let _ = edit.append_items(&[
+        &PredefinedMenuItem::undo(None),
+        &PredefinedMenuItem::redo(None),
+        &PredefinedMenuItem::separator(),
+        &PredefinedMenuItem::cut(None),
+        &PredefinedMenuItem::copy(None),
+        &PredefinedMenuItem::paste(None),
+        &PredefinedMenuItem::select_all(None),
+    ]);
+
+    let _ = menu.append_items(&[&app, &edit]);
+    menu
 }
 
 /// Root. Injects the global stylesheet, stands up the embedded BFF once, and shows the
