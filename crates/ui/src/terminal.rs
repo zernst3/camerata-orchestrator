@@ -102,12 +102,29 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     format!(
         r#"
 (async function() {{
-  // Wait for xterm.js to be available (may already be loaded).
-  await (window.__xtermLoadPromise || Promise.resolve());
-
   var containerId = 'xterm-{id}';
   var el = document.getElementById(containerId);
-  if (!el) {{ console.error('[terminal] container #' + containerId + ' not found'); return; }}
+  if (!el) {{ return; }}
+
+  // Guard against double-init: onmounted AND tab-click both fire this script.
+  // If already initialized, just re-focus so keystrokes land.
+  if (window['__term_{id}']) {{
+    try {{ window['__term_{id}'].term.focus(); }} catch (e) {{}}
+    return;
+  }}
+
+  // Wait for xterm.js to load; surface a visible error if the CDN is blocked
+  // (strict webview CSP / offline) instead of failing to a blank box.
+  try {{
+    await (window.__xtermLoadPromise || Promise.resolve());
+  }} catch (e) {{
+    el.textContent = 'Terminal could not load xterm.js (network/CSP blocked the CDN). ' + e;
+    return;
+  }}
+  if (typeof Terminal === 'undefined') {{
+    el.textContent = 'Terminal could not load: xterm.js unavailable (CDN blocked?).';
+    return;
+  }}
 
   var term = new Terminal({{
     cursorBlink: true,
@@ -120,30 +137,37 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     }},
   }});
 
-  // FitAddon resizes the PTY to the container dimensions.
-  var fitAddon = new FitAddOn.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(el);
-  fitAddon.fit();
+  // FitAddon resizes the PTY to the container. The UMD global is `FitAddon`
+  // (namespace) with a `FitAddon` class -> `new FitAddon.FitAddon()`. Optional:
+  // if the addon didn't load, the terminal still works at a fixed size.
+  var fitAddon = null;
+  try {{
+    if (window.FitAddon && window.FitAddon.FitAddon) {{
+      fitAddon = new window.FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+    }}
+  }} catch (e) {{ fitAddon = null; }}
 
-  // RUNTIME-TODO: wry may clip the terminal container height. If the terminal
-  // appears too tall/short, adjust .term-session height in style.rs.
-  var observer = new ResizeObserver(function() {{ fitAddon.fit(); }});
+  term.open(el);
+  term.focus();
+  if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
+
+  var observer = new ResizeObserver(function() {{
+    if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
+  }});
   observer.observe(el);
 
   // Open the WebSocket to the embedded BFF.
-  // RUNTIME-TODO: cwd is currently empty (defaults to $HOME on the server).
-  //   A future improvement: pass the active project's repo dir as ?cwd=<path>.
   var ws = new WebSocket('{ws_url}');
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = function() {{
     // Send initial size so the PTY matches the rendered terminal.
-    var dims = term._core._renderService.dimensions;
     ws.send(JSON.stringify({{ resize: {{ cols: term.cols, rows: term.rows }} }}));
+    term.focus();
   }};
 
-  // PTY output → xterm.js
+  // PTY output -> xterm.js
   ws.onmessage = function(evt) {{
     if (typeof evt.data === 'string') {{
       term.write(evt.data);
@@ -153,9 +177,9 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
   }};
 
   ws.onclose = function() {{ term.write('\r\n[session closed]\r\n'); }};
-  ws.onerror = function() {{ term.write('\r\n[connection error — is the BFF running?]\r\n'); }};
+  ws.onerror = function() {{ term.write('\r\n[connection error - is the BFF running?]\r\n'); }};
 
-  // xterm.js input → ws
+  // xterm.js input -> ws
   term.onData(function(data) {{
     if (ws.readyState === WebSocket.OPEN) {{ ws.send(data); }}
   }});
@@ -165,11 +189,15 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     if (ws.readyState === WebSocket.OPEN) {{
       ws.send(JSON.stringify({{ resize: {{ cols: size.cols, rows: size.rows }} }}));
     }}
-    fitAddon.fit();
+    if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
   }});
 
   // Store references for cleanup when the tab closes.
   window['__term_{id}'] = {{ term: term, ws: ws, observer: observer }};
+
+  // Re-focus after a tick so the hidden xterm textarea reliably grabs keystrokes
+  // (the webview can steal focus during mount).
+  setTimeout(function() {{ try {{ term.focus(); }} catch (e) {{}} }}, 60);
 }})();
 "#,
         id = id,
@@ -328,6 +356,12 @@ pub fn TerminalBubble() -> Element {
                                     onmounted: move |_| {
                                         let script = make_session_script(tab_id, &ws_url_for_mount);
                                         let _ = document::eval(&script);
+                                    },
+                                    // Clicking the pane re-focuses the terminal so keystrokes land.
+                                    onclick: move |_| {
+                                        let _ = document::eval(&format!(
+                                            "try {{ window['__term_{tab_id}'].term.focus(); }} catch(e) {{}}"
+                                        ));
                                     },
                                 }
                             }

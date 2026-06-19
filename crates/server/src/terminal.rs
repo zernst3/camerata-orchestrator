@@ -161,11 +161,13 @@ async fn run_terminal(socket: WebSocket, cwd: Option<String>) -> anyhow::Result<
                             // Plain text → write bytes to the PTY (keystrokes / paste).
                             use std::io::Write;
                             let _ = pty_writer.write_all(text.as_bytes());
+                            let _ = pty_writer.flush();
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         use std::io::Write;
                         let _ = pty_writer.write_all(&data);
+                        let _ = pty_writer.flush();
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     // Ping/Pong handled by axum's ws layer automatically.
