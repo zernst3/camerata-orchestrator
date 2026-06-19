@@ -1176,10 +1176,11 @@ async fn onboard_apply(
     let Some(token) = token else {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }));
     };
-    let Some(root) = state.settings.workspace_root() else {
-        return Json(serde_json::json!({ "ok": false, "message": "Set a local workspace folder first (Settings) — Apply writes into the repo's local clone." }));
-    };
-    let root = std::path::PathBuf::from(root);
+    // Apply writes into each repo's LOCAL clone. A repo's local dir is resolved per-repo:
+    // a per-repo path override (chosen via repo health) wins; otherwise it's cloned under the
+    // workspace folder. We no longer hard-require the workspace folder up front — a project
+    // whose repos all have explicit local folders can apply without one.
+    let workspace_root = state.settings.workspace_root();
 
     // Source of truth: save the armed ruleset to the active project (create one if none).
     save_armed_to_project(&state, &req.rules);
@@ -1193,6 +1194,16 @@ async fn onboard_apply(
     let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
     repos.sort();
     repos.dedup();
+
+    // Fail fast (with the actionable message) only when NOTHING local is available: no
+    // workspace folder AND no per-repo override for any target repo. Otherwise apply
+    // per-repo, reporting any individually-unresolved repo in its result row.
+    let has_any_local = workspace_root.is_some()
+        || repos.iter().any(|r| state.settings.repo_path(r).is_some());
+    if !has_any_local {
+        return Json(serde_json::json!({ "ok": false, "message": "Set a local workspace folder (Settings) or choose each repo's local folder (repo health) — Apply writes into the repo's local clone." }));
+    }
+
     let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
     let baselines = baselines_from_findings(&req.findings, "architect");
 
@@ -1212,9 +1223,30 @@ async fn onboard_apply(
         if let Some(baseline_json) = baselines.get(repo) {
             files.push((".camerata/baseline.json".to_string(), baseline_json.clone()));
         }
+        // Resolve THIS repo's local dir: per-repo override wins, else <workspace_root>/<repo>.
+        let override_path = state.settings.repo_path(repo);
+        let Some(dir) = crate::workspace::resolve_repo_dir(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        ) else {
+            results.push(serde_json::json!({
+                "repo": repo, "ok": false,
+                "message": "No local path — choose this repo's folder (repo health) or set a workspace folder."
+            }));
+            continue;
+        };
+        // Clone into the workspace root only when there's no explicit override (never clone
+        // over a folder the architect chose by hand).
+        let clone_root = if override_path.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false)
+        {
+            None
+        } else {
+            workspace_root.as_deref().map(std::path::Path::new)
+        };
         let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
         match crate::workspace::apply_local_and_push(
-            &root, repo, crate::arm::ARM_BRANCH, &files, &msg, &token,
+            &dir, repo, clone_root, crate::arm::ARM_BRANCH, &files, &msg, &token,
         )
         .await
         {
