@@ -1313,6 +1313,16 @@ html, body {
    Export/Delete secondaries. Drop the standalone bottom margin and match their padding
    so all three buttons share the same baseline/height. */
 .pg-card-actions .btn-run { margin-bottom: 0; padding: 8px 16px; }
+/* Secondary button that MATCHES .btn-run's geometry (same padding/font/radius) so a
+   primary + secondary pair in a modal/action row are balanced, not mismatched sizes.
+   `.danger` tints the hover red for destructive actions (e.g. Start over). */
+.btn-secondary {
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 8px;
+  cursor: pointer; transition: border-color .15s var(--ease), color .15s var(--ease);
+}
+.btn-secondary:hover { border-color: var(--accent); color: var(--accent-ink); }
+.btn-secondary.danger:hover { border-color: #c0392b; color: #c0392b; }
 /* "+N" chip on a findings "type" cell: N other rule ids the server merged into this row
    (also_matches). Muted so it reads as a secondary annotation, not a second rule. */
 .finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
@@ -1924,8 +1934,10 @@ html, body {
 .rule-opt-directive { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; }
 .rule-opt-why { font-size: 12px; color: var(--ink-faint); line-height: 1.5; font-style: italic; margin-top: 2px; }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
-.pg-create-row { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.pg-create-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
 .pg-create-row .addressee-input { flex: 1; min-width: 180px; }
+/* Drop btn-run's standalone bottom margin so it centers against the name input. */
+.pg-create-row .btn-run { margin-bottom: 0; }
 .pg-import { margin-top: 6px; }
 .cockpit-nav-tab.back { color: var(--accent-ink); font-weight: 600; }
 .cockpit-nav-tab.back:hover { background: var(--accent-wash); }

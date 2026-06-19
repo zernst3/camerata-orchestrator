@@ -28,7 +28,7 @@ pub fn BombeSpinner(#[props(default)] title: Option<String>) -> Element {
                     // spin: the CSS `steps()` timing (see .bombe-mark) advances the mark in
                     // discrete clicks. So `col` no longer affects timing; the whole row is
                     // one synchronized rate.
-                    let dur = 1.4 + (row as f64) * 2.5;
+                    let dur = 2.2 + (row as f64) * 3.6;
                     rsx! {
                         div { class: "bombe-row", key: "{row}",
                             for col in 0..COLS {

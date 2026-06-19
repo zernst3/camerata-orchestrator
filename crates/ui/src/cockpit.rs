@@ -2160,9 +2160,8 @@ fn ProjectGate() -> Element {
                     }
                     div { class: "onboard-leave-actions",
                         button {
-                            // btn-edit-sm provides the base button styling; pg-btn-danger
-                            // layers the danger (destructive) colors on top.
-                            class: "btn-edit-sm pg-btn-danger",
+                            // Secondary button sized to match the primary beside it (danger tint).
+                            class: "btn-secondary danger",
                             onclick: move |_| {
                                 spawn(async move {
                                     // Discard the saved draft, then enter for a fresh onboarding.
@@ -5222,7 +5221,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 }
                 div { class: "onboard-actionbar-spacer" }
                 button {
-                    class: "btn-edit-sm pg-btn-danger",
+                    class: "btn-secondary danger",
                     onclick: move |_| {
                         if restart_arm() {
                             spawn(async move {
