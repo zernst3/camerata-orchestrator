@@ -17,6 +17,7 @@ pub mod ai_audit;
 pub mod arm;
 pub mod auto_fire;
 pub mod draft;
+pub mod escalation;
 pub mod uow;
 pub mod clarify;
 pub mod connections;
@@ -79,6 +80,7 @@ pub struct AppState {
     jobs: crate::jobs::JobStore,
     draft: crate::draft::DraftStore,
     uow: crate::uow::UowStore,
+    escalations: crate::escalation::EscalationStore,
 }
 
 impl AppState {
@@ -99,6 +101,7 @@ impl AppState {
             jobs: crate::jobs::JobStore::new(),
             draft: crate::draft::DraftStore::new(),
             uow: crate::uow::UowStore::new(),
+            escalations: crate::escalation::EscalationStore::new(),
         }
     }
 
@@ -133,6 +136,10 @@ impl AppState {
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
             state.routines = RoutineStore::at(dir.join("routines.json"));
+            // Open human-review escalations survive a restart so a blocked routine isn't
+            // silently un-blocked by quitting the app.
+            state.escalations =
+                crate::escalation::EscalationStore::at(dir.join("escalations.json"));
         }
         state
     }
@@ -211,6 +218,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/routines/:id/enable", post(set_routine_enabled))
         .route("/api/routines/:id/provision", post(provision_routine))
         .route("/api/routines/:id/run", post(run_routine_now))
+        // Routine escalations: a blocked routine awaiting human review.
+        .route("/api/escalations", get(list_escalations).post(raise_escalation))
+        .route("/api/escalations/:id/answer", post(answer_escalation))
         // Local workspace: the user picks a visible folder; project repos clone under
         // it, the fleet edits there, the dev runs/tests locally, then ship pushes + PRs.
         // AI: the model provider seam (CLI locally, Anthropic API in production). The
@@ -264,7 +274,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // Auto-fire scheduler: runs provisioned + enabled routines when their schedule
     // comes due. Spawned here (not in `router`) so tests that build the router don't
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
-    crate::auto_fire::spawn_routine_scheduler(state.routines.clone());
+    crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
 
     // Shutdown hook: on Ctrl+C / SIGTERM, reap any in-flight `claude` audit subprocesses
     // before exiting so a signal-driven quit never orphans them (kill_on_drop only covers
@@ -1893,16 +1903,68 @@ async fn provision_routine(
         .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
 }
 
-/// Run a routine now (a governed run via the real gate; records the summary).
+/// Run a routine now (a governed run via the real gate; records the summary). If the run
+/// is blocked (gate denials), raise a human-review escalation — same hook the scheduler
+/// uses, so a blocked routine surfaces a review whether it fired on a timer or by hand.
 async fn run_routine_now(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Routine>, AppError> {
-    state
+    let routine = state
         .routines
         .run_now(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))?;
+    crate::escalation::raise_if_blocked(&state.escalations, &routine);
+    Ok(Json(routine))
+}
+
+/// Query for `GET /api/escalations`: `?open=true` returns only open reviews.
+#[derive(serde::Deserialize)]
+struct EscalationListQuery {
+    #[serde(default)]
+    open: bool,
+}
+
+/// List escalations (all, or only open ones with `?open=true`).
+async fn list_escalations(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<EscalationListQuery>,
+) -> Json<Vec<crate::escalation::Escalation>> {
+    if q.open {
+        Json(state.escalations.list_open())
+    } else {
+        Json(state.escalations.list())
+    }
+}
+
+/// Raise an escalation against a routine (deduped per routine). The routine's display name
+/// is denormalized in from the routine store.
+async fn raise_escalation(
+    State(state): State<AppState>,
+    Json(req): Json<crate::escalation::RaiseEscalationReq>,
+) -> Result<Json<crate::escalation::Escalation>, AppError> {
+    let name = state
+        .routines
+        .list()
+        .into_iter()
+        .find(|r| r.id == req.routine_id)
+        .map(|r| r.name)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
+    Ok(Json(state.escalations.raise_deduped(req, &name)))
+}
+
+/// Resolve an escalation with the human's answer; the answer is translated into a resume
+/// directive and stored on the (now resolved) escalation.
+async fn answer_escalation(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::escalation::AnswerEscalationReq>,
+) -> Result<Json<crate::escalation::Escalation>, AppError> {
+    state
+        .escalations
+        .resolve(&id, &req.answer)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))
 }
 
 /// Edit an existing routine (name / schedule / intent / prompt / scope).
