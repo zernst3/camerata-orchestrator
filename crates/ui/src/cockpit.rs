@@ -3702,15 +3702,20 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         // over-engineering / YAGNI on a small codebase). Surfaced as its own column + reason
         // so the architect can triage the hedged ones at a glance. Text-filterable so you can
         // show only the flagged rows. Drawn by a cell renderer (orange chip + reason).
+        // The cell VALUE is just yes/no ("does this need review?") so the filter is a simple
+        // two-option toggle, not a free-text box over every distinct reason. The visible chip +
+        // reason are drawn by the row renderer (which reads f.detail), so the reason still shows.
         ColumnDef::new(ColumnId("needs_review"), "Needs review", |f: &FindingView| {
-            match split_needs_review(&f.detail).1 {
-                Some(reason) if !reason.is_empty() => CellValue::Text(reason),
-                Some(_) => CellValue::Text("needs review".to_string()),
-                None => CellValue::Text(String::new()),
-            }
+            CellValue::Text(if split_needs_review(&f.detail).1.is_some() {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            })
         })
         .sortable()
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelect {
+            options: vec!["yes".to_string(), "no".to_string()],
+        })
         .initial_width(300.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
