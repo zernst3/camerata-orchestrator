@@ -93,17 +93,25 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
      foreground and block until they finish; Background job is the same work, just detached.)
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
-   the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** (→ a
-   tracked ticket + CSV) or **resolve now** (→ the dev engine) and **Process**. This step is **not
-   required** to finish onboarding.
+   the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** or
+   **resolve now**, then **Process**: ignores become baseline waivers, and **every tech-debt item is
+   filed as a GitHub issue** (the story). Resolve-now issues are titled for pickup by the dev engine
+   (the actual dev work is Pillar 2; onboarding only *writes the story*). There is no separate "fix the
+   findings" button — fixing a finding is just its resolve-now story flowing into the dev layer.
+   Triage/Process is **not required** to finish onboarding.
+
+   **Note:** **mechanical** rules (CI/runtime/DB-context checks like a query-plan/index audit) are NOT
+   run by this code scan — they can't be judged from a static digest, so they're enforced in CI instead
+   (step 6). The scan header shows how many were excluded for that reason.
 5. **Apply** — writes the governance files onto a `camerata/onboard-governance` branch in each repo's
    **local clone AND pushes that branch to origin — no pull request is opened.** The files: `AGENTS.md`
    (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for mechanical rules),
    and `.camerata/baseline.json` (accepted pre-existing debt). Edit the working copy freely, then click
    **Open governance PR** (a separate button) when ready. **Applying marks the repo onboarded.**
-6. **Wire mechanical rules into CI** — the final step: add the selected mechanical rules to each repo's
-   existing CI as enforced lint gates (checks what's already enforced, adds the rest, as a governed
-   run). Separate from fixing/ticketing the violations.
+6. **Wire mechanical rules into CI** — the final step: file a **story (GitHub issue)** per repo to add
+   the selected mechanical rules to that repo's existing CI as enforced lint gates (checks what's
+   already enforced, adds the rest). Like resolve-now, onboarding *writes the story*; the dev layer
+   (Pillar 2) does the work. Separate from the tech-debt issues above.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.

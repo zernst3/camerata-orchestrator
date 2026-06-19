@@ -799,14 +799,27 @@ pub async fn create_tech_debt_ticket(
     title: &str,
     findings: &[Finding],
 ) -> anyhow::Result<String> {
+    create_issue(owner, repo, token, title, &tech_debt_issue_body(findings)).await
+}
+
+/// Create a GitHub issue (the generic "emit a story to the tracker" primitive). Onboarding
+/// produces stories — tech-debt tickets, the CI-wiring task, resolve-now items — as issues;
+/// the dev layer (Pillar 2) does the actual work. Returns the issue's html_url.
+pub async fn create_issue(
+    owner: &str,
+    repo: &str,
+    token: &str,
+    title: &str,
+    body: &str,
+) -> anyhow::Result<String> {
     use camerata_worktracker::{HttpTransport, ReqwestTransport};
     let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
     let url = format!("https://api.github.com/repos/{owner}/{repo}/issues");
-    let body = serde_json::to_string(&serde_json::json!({
+    let payload = serde_json::to_string(&serde_json::json!({
         "title": title,
-        "body": tech_debt_issue_body(findings),
+        "body": body,
     }))?;
-    let resp = transport.post(&url, &body).await?;
+    let resp = transport.post(&url, &payload).await?;
     if !(200..300).contains(&resp.status) {
         anyhow::bail!("GitHub create issue: HTTP {} {}", resp.status, resp.body);
     }

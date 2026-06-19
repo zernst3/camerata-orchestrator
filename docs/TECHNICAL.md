@@ -360,6 +360,27 @@ entry to the committed baseline (the per-finding suppress endpoint). The file is
 version-controlled and auditable; future scans read it from the default branch
 (`fetch_baseline`) and classify against it.
 
+### Mechanical rules are re-tiered OUT of the code scan
+
+`split_scannable_rules` (`lib.rs`, both audit handlers) drops `EnforcementKind::Mechanical`
+rules from the AI code-only audit. Mechanical rules are enforced in CI from build/runtime/DB
+context (query-plan inspection, migration/index audit, AST lint) — e.g. `SQL-DB-INDEX-2`,
+whose `qualifies` defines it as an `EXPLAIN`/`pg_stat_statements` check on a live DB. Judging
+those from a static code digest yields only weak, low-confidence findings, so the scan skips
+them and they ride `.camerata/ci-checks.json` instead. The excluded ids are surfaced on
+`ScanReport.excluded_mechanical_rules` (shown in the scan header). The corpus is the source of
+each rule's tier; rules absent from the corpus (custom) default to scannable.
+
+### Onboarding emits stories; the dev layer does the work
+
+Onboarding never launches a governed dev run. Triage **Process** turns dispositions into
+durable artifacts: ignores → baseline waivers; **all tech-debt items → GitHub issues**
+(`create_issue`/`create_tech_debt_ticket`), with resolve-now issues titled for dev-engine
+pickup. The "wire mechanical rules into CI" step likewise files a GitHub issue
+(`onboard_ci_rules` → `create_issue`), not a run. Actually *running* a resolve-now or CI story
+through the governed pipeline (the ingest) is Pillar 2. (The old `onboard_fix` endpoint and the
+"Fix the audited items" panel — which launched runs from onboarding — were removed.)
+
 ---
 
 ## 7. Persistence
@@ -368,14 +389,16 @@ Camerata is local-first. All state lives on the user's machine.
 
 ### JSON stores
 
-Four JSON files in `dirs::data_dir()/camerata/`:
+JSON files in `dirs::data_dir()/camerata/`:
 
 | File | Store type | Contents |
 |---|---|---|
 | `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set. |
 | `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export). |
-| `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | The in-flight brownfield onboarding state (opaque JSON blob whose shape the UI owns). One active draft at a time. Survives an app restart; lost only if the scan hasn't produced output yet. |
+| `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus` (New/InProgress/Done), and `history: Vec<HistoryEntry>`. |
+| `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, last_run/last_fired, project_id. The auto-fire scheduler (`auto_fire.rs`) ticks over these. |
+| `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
 
 Each store type follows the same pattern: `Arc<Mutex<T>>` in-memory mirror,
 optional `Arc<PathBuf>` for disk persistence, load-or-default on startup,

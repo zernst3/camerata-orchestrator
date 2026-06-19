@@ -53,7 +53,7 @@ use serde::Serialize;
 
 use camerata_gateway::RULE_REGISTRY;
 use camerata_worktracker::{
-    CanonicalStory, ExternalRef, FeatureStatus, InMemoryStoryStore, RepoTarget, StoryStore,
+    CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore,
 };
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
@@ -201,7 +201,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/draft/clear", post(onboard_draft_clear))
         .route("/api/projects/:id/repo-health", get(project_repo_health))
         .route("/api/repo-path", post(set_repo_path))
-        .route("/api/onboard/fix", post(onboard_fix))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/onboard/ignore", post(onboard_ignore))
@@ -1364,10 +1363,22 @@ async fn onboard_open_pr(
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
+/// A finding subset the UI sends with a triage action (ignore). `rule_id` + `path` +
+/// `snippet` identify the violation for the baseline waiver (extra fields are ignored).
+#[derive(serde::Deserialize)]
+struct OnboardFinding {
+    #[serde(default)]
+    rule_id: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    snippet: String,
+}
+
 #[derive(serde::Deserialize)]
 struct IgnoreReq {
     repo: String,
-    findings: Vec<FixFinding>,
+    findings: Vec<OnboardFinding>,
     /// Mandatory justification — a reason-less suppression is rejected (the invariant).
     reason: String,
     #[serde(default)]
@@ -1470,151 +1481,46 @@ async fn project_suppressions(
     ))
 }
 
-/// One audited finding to remediate (the subset the UI sends to the fix run).
-#[derive(serde::Deserialize)]
-struct FixFinding {
-    #[serde(default)]
-    rule_id: String,
-    #[serde(default)]
-    path: String,
-    #[serde(default)]
-    line: usize,
-    #[serde(default)]
-    detail: String,
-    #[serde(default)]
-    snippet: String,
-}
-
-#[derive(serde::Deserialize)]
-struct FixReq {
-    repo: String,
-    findings: Vec<FixFinding>,
-}
-
 #[derive(serde::Deserialize)]
 struct CiRulesReq {
     repo: String,
 }
 
-/// Wire the mechanical (CI-tier) governance rules into a repo's CI — as a GOVERNED
-/// DEVELOPMENT TASK. Arming emits `.camerata/ci-checks.json` (the declared mechanical
-/// rules) but a config doesn't enforce itself; turning each declared check into a real
-/// CI mechanism (an ESLint rule, a migration/index audit, an AST lint) is development
-/// work. So it runs through the SAME governed pipeline as any dev task: the agent reads
-/// the declared checks, sees which are already enforced in CI, and implements the rest,
-/// every write passing the gate.
+/// Emit the "wire mechanical rules into CI" task as a STORY on the tracker — a GitHub
+/// issue — NOT a governed run launched from onboarding. Onboarding's job is to produce
+/// stories; the dev layer (Pillar 2) picks the issue up and does the work (every write
+/// gated). Arming already emits `.camerata/ci-checks.json` (the declared mechanical rules);
+/// this issue is the development task of turning each declared check into a real CI gate.
 async fn onboard_ci_rules(
-    State(state): State<AppState>,
     Json(req): Json<CiRulesReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let spec = format!(
-        "Wire Camerata's mechanical governance rules into {}'s CI so a pull request that \
-         violates one FAILS the build. This is development work, governed: every write \
-         passes the deny-before-execute gate.\n\n\
-         The rules to enforce are declared in `.camerata/ci-checks.json` (id, title, \
-         directive, conformance). For EACH rule:\n\
-         1. Check whether it is ALREADY enforced in CI (inspect `.github/workflows/`, the \
-         linter config, package scripts).\n\
+) -> Json<serde_json::Value> {
+    let Some((owner, repo)) = req.repo.split_once('/') else {
+        return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN").ok().filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }));
+    };
+    let title = format!("Wire mechanical rules into CI — {}", req.repo);
+    let body = format!(
+        "Camerata onboarding story: wire the mechanical governance rules into **{repo}**'s CI so \
+         a pull request that violates one FAILS the build.\n\n\
+         The rules to enforce are declared in `.camerata/ci-checks.json` (id, title, directive, \
+         conformance). For EACH rule:\n\
+         1. Check whether it is ALREADY enforced in CI (inspect `.github/workflows/`, the linter \
+         config, package scripts).\n\
          2. If it is, leave it.\n\
-         3. If not, implement the enforcement using THIS repo's stack — e.g. an ESLint \
-         `no-restricted-syntax`/`no-restricted-imports` rule, a migration/index audit \
-         step, or an AST lint — following the rule's `conformance` description, and wire it \
-         into the `camerata-governance` workflow so it runs on every PR.\n\n\
-         Do not weaken or delete existing checks. Add a focused, minimal enforcement per \
-         rule.",
-        req.repo
+         3. If not, implement the enforcement using this repo's stack — an ESLint rule, a \
+         migration/index audit step, or an AST lint — per the rule's `conformance`, wired into \
+         the CI workflow so it runs on every PR.\n\n\
+         Do not weaken or delete existing checks. When the dev layer (Pillar 2) is wired, this \
+         story is picked up and run as a governed development task; for now it's filed as a \
+         tracked issue.\n\n_Filed by Camerata onboarding._"
     );
-    let slug: String = req
-        .repo
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let story_id = format!("ci-{slug}");
-    let story = CanonicalStory {
-        id: story_id.clone(),
-        external_ref: None,
-        title: format!("Wire CI governance — {}", req.repo),
-        description: spec,
-        status: FeatureStatus::Intake,
-        created_by: "architect".to_string(),
-        targets: vec![RepoTarget::new(&req.repo)],
-    };
-    state.stories.upsert(story).await.map_err(AppError)?;
-    let (run_id, mode) = start_governed_run(&state, &story_id).await;
-    Ok(Json(serde_json::json!({
-        "story_id": story_id,
-        "run_id": run_id,
-        "mode": mode,
-    })))
-}
-
-/// Fix the audited items — as a GOVERNED DEVELOPMENT TASK, not a special path.
-///
-/// This is the architectural point: remediating the violations a brownfield audit
-/// found IS a development task (the first one, usually), so it must run through the
-/// EXACT same pipeline every other dev task uses — the worktree, the deny-before-execute
-/// gate, the layer-2 post-task checks, the bounce-on-fail loop. The only brownfield-
-/// specific step is that ARM first installs the rules + CI gate the fix is then held to.
-/// Here we turn the findings into a remediation story (its spec) and start a governed
-/// run on it via `start_governed_run` — the same call `start_run` makes. It won't earn
-/// its keep unless the fix is gated identically to normal development.
-async fn onboard_fix(
-    State(state): State<AppState>,
-    Json(req): Json<FixReq>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    if req.findings.is_empty() {
-        return Err(AppError(anyhow::anyhow!("no findings to fix")));
+    match crate::onboard::create_issue(owner, repo, &token, &title, &body).await {
+        Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
-    // The remediation spec: the audited violations, as the task description the
-    // governed fleet works from.
-    let mut spec = format!(
-        "Remediate the violations Camerata's audit found in {}. Fix each WITHOUT \
-         introducing new violations — every write passes the governance gate.\n\n\
-         Findings:\n",
-        req.repo
-    );
-    for (i, f) in req.findings.iter().enumerate() {
-        spec.push_str(&format!(
-            "{}. [{}] {}:{} — {}{}\n",
-            i + 1,
-            f.rule_id,
-            f.path,
-            f.line,
-            if f.detail.is_empty() { &f.snippet } else { &f.detail },
-            if f.snippet.is_empty() || f.detail.is_empty() {
-                String::new()
-            } else {
-                format!(" (`{}`)", f.snippet)
-            }
-        ));
-    }
-
-    // A stable-ish remediation story id per repo, so re-running updates the same story.
-    let slug: String = req
-        .repo
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let story_id = format!("fix-{slug}");
-    let story = CanonicalStory {
-        id: story_id.clone(),
-        external_ref: None,
-        title: format!("Remediate audited violations — {}", req.repo),
-        description: spec,
-        status: FeatureStatus::Intake,
-        created_by: "architect".to_string(),
-        targets: vec![RepoTarget::new(&req.repo)],
-    };
-    state.stories.upsert(story).await.map_err(AppError)?;
-
-    // Start a governed run through the SAME pipeline as any development task.
-    let (run_id, mode) = start_governed_run(&state, &story_id).await;
-    Ok(Json(serde_json::json!({
-        "story_id": story_id,
-        "run_id": run_id,
-        "mode": mode,
-        "findings": req.findings.len(),
-    })))
 }
 
 /// Classify the armed rules by scope and save them to the active project (creating

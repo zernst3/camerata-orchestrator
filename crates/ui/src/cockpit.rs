@@ -3000,7 +3000,8 @@ fn finding_state(
 
 /// Wire the mechanical (CI-tier) governance rules into a repo's CI as a governed dev run.
 /// Returns `(run_id, mode)`.
-async fn wire_ci_rules(repo: &str) -> Option<(String, String)> {
+/// Emit the "wire mechanical rules into CI" story as a GitHub issue. Returns the issue URL.
+async fn wire_ci_rules(repo: &str) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/ci-rules", crate::BFF_URL))
         .json(&serde_json::json!({ "repo": repo }))
@@ -3010,19 +3011,15 @@ async fn wire_ci_rules(repo: &str) -> Option<(String, String)> {
         .json()
         .await
         .ok()?;
-    let run = v.get("run_id")?.as_str()?.to_string();
-    let mode = v
-        .get("mode")
-        .and_then(|m| m.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some((run, mode))
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    v.get("url").and_then(|u| u.as_str()).map(String::from)
 }
 
-/// The "wire CI-enforced rules" panel: spawns a governed dev run per repo that
-/// implements the declared mechanical rules' CI enforcement (checks what's already
-/// enforced, adds what's missing). This is development work, so it runs the same
-/// governed pipeline as any dev task. Reused in onboarding and the Rules view.
+/// The "add CI-enforced rules" panel: per repo, emit the CI-wiring task as a STORY (a
+/// GitHub issue), not a dev run launched from onboarding. Onboarding produces stories; the
+/// dev layer (Pillar 2) picks the issue up and does the work. Reused in onboarding + Rules.
 #[component]
 fn CiRulesPanel(repos: Vec<String>) -> Element {
     let mut msg = use_signal(String::new);
@@ -3030,7 +3027,7 @@ fn CiRulesPanel(repos: Vec<String>) -> Element {
     rsx! {
         div { class: "fix-panel",
             p { class: "scan-section-h", "Add CI-enforced rules" }
-            p { class: "scan-section-sub", "Mechanical rules are declared in .camerata/ci-checks.json at arm time, but a config doesn't enforce itself. This spawns a governed development run that checks what's already enforced in CI and implements the rest (ESLint rule, query-plan/migration audit, AST lint) — same gate-governed pipeline as any dev task." }
+            p { class: "scan-section-sub", "Mechanical rules are declared in .camerata/ci-checks.json at arm time, but a config doesn't enforce itself. This files a story (a GitHub issue) to wire each declared check into CI (ESLint rule, query-plan/migration audit, AST lint). The dev layer picks it up and does the work — onboarding just writes the story." }
             for repo in repos.iter() {
                 {
                     let repo = repo.clone();
@@ -3047,67 +3044,15 @@ fn CiRulesPanel(repos: Vec<String>) -> Element {
                                     msg.set(String::new());
                                     spawn(async move {
                                         match wire_ci_rules(&repo).await {
-                                            Some((run, mode)) => msg.set(format!(
-                                                "Started a governed {mode} run ({run}) to wire CI governance for {repo}. Watch it in the control surface (Agent activity)."
+                                            Some(url) => msg.set(format!(
+                                                "Filed a CI-wiring story for {repo}: {url}"
                                             )),
-                                            None => msg.set(format!("Could not start the CI-wiring run for {repo}.")),
+                                            None => msg.set(format!("Could not file the CI-wiring story for {repo} (is GitHub connected?).")),
                                         }
                                         busy.set(false);
                                     });
                                 },
-                                "Wire CI rules (governed)"
-                            }
-                        }
-                    }
-                }
-            }
-            if !msg().is_empty() {
-                p { class: "fix-msg", "{msg}" }
-            }
-        }
-    }
-}
-
-/// The "fix the audited items" panel: one governed remediation run per repo. Fixing
-/// runs through the SAME worktree → gate → layer-2 → bounce pipeline as any dev task.
-#[component]
-fn FixAuditedPanel(findings: Vec<FindingView>, repos: Vec<String>) -> Element {
-    let mut msg = use_signal(String::new);
-    let mut busy = use_signal(|| false);
-    rsx! {
-        div { class: "fix-panel",
-            p { class: "scan-section-h", "Fix the audited items" }
-            p { class: "scan-section-sub", "Remediation runs as a governed development task — the same worktree → gate → layer-2 checks → bounce loop as any dev work, not a special path. Arm the ruleset first so the fix is held to the rules it installs." }
-            for repo in repos.iter() {
-                {
-                    let repo = repo.clone();
-                    let repo_findings: Vec<FindingView> =
-                        findings.iter().filter(|f| f.repo == repo).cloned().collect();
-                    let n = repo_findings.len();
-                    let repo_click = repo.clone();
-                    rsx! {
-                        div { class: "fix-row", key: "{repo}",
-                            span { class: "fix-repo", "{repo}" }
-                            span { class: "fix-count", "{n} findings" }
-                            button {
-                                class: "btn-run",
-                                disabled: busy() || n == 0,
-                                onclick: move |_| {
-                                    let repo = repo_click.clone();
-                                    let rf = repo_findings.clone();
-                                    busy.set(true);
-                                    msg.set(String::new());
-                                    spawn(async move {
-                                        match fix_audited(&repo, &rf).await {
-                                            Some((run, mode)) => msg.set(format!(
-                                                "Started a governed {mode} run ({run}) to fix {repo}. Watch each agent's prompt + output in the control surface (Agent activity)."
-                                            )),
-                                            None => msg.set(format!("Could not start the fix run for {repo}.")),
-                                        }
-                                        busy.set(false);
-                                    });
-                                },
-                                "Fix (governed)"
+                                "Create CI-rules story"
                             }
                         }
                     }
@@ -3141,27 +3086,6 @@ async fn ignore_findings(
         return None;
     }
     v.get("url").and_then(|u| u.as_str()).map(String::from)
-}
-
-/// Fix the audited findings for a repo as a GOVERNED development run (the same
-/// worktree → gate → layer-2 pipeline as any dev task). Returns `(run_id, mode)`.
-async fn fix_audited(repo: &str, findings: &[FindingView]) -> Option<(String, String)> {
-    let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/fix", crate::BFF_URL))
-        .json(&serde_json::json!({ "repo": repo, "findings": findings }))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let run = v.get("run_id")?.as_str()?.to_string();
-    let mode = v
-        .get("mode")
-        .and_then(|m| m.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some((run, mode))
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3639,11 +3563,12 @@ async fn open_governance_pr(repos: &[String]) -> Option<Vec<ArmResultView>> {
 }
 
 
-/// Accept selected findings as tech debt: open a GitHub issue. Returns the URL.
-async fn create_ticket(repo: &str, findings: &[FindingView]) -> Option<String> {
+/// Accept selected findings as tech debt: open a GitHub issue (the story). `title` lets the
+/// caller distinguish resolve-later from resolve-now; `None` uses the server default.
+async fn create_ticket(repo: &str, findings: &[FindingView], title: Option<&str>) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/ticket", crate::BFF_URL))
-        .json(&serde_json::json!({ "repo": repo, "findings": findings }))
+        .json(&serde_json::json!({ "repo": repo, "findings": findings, "title": title }))
         .send()
         .await
         .ok()?
@@ -5611,10 +5536,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 // Group ignored findings by (repo, reason) -> baseline waiver;
                                 // group tech-debt by repo -> a tracked ticket.
                                 let mut ignore_groups: std::collections::HashMap<(String, String), Vec<FindingView>> = Default::default();
-                                // Tech-debt "resolve later" -> a tracked ticket, grouped by repo.
+                                // Tech-debt "resolve later" -> a tracked ticket (GitHub issue), grouped by repo.
                                 let mut debt_later: std::collections::HashMap<String, Vec<FindingView>> = Default::default();
-                                // Tech-debt "resolve now" -> the dev engine (Pillar 2); counted for now.
-                                let mut debt_now: usize = 0;
+                                // Tech-debt "resolve now" -> ALSO a GitHub issue (the story), grouped by repo.
+                                // The story makes it into GitHub now (Pillar 1); the dev-engine INGEST of a
+                                // resolve-now story is Pillar 2 — same issue, flagged in its title for pickup.
+                                let mut debt_now: std::collections::HashMap<String, Vec<FindingView>> = Default::default();
                                 for f in &findings_for_process {
                                     let disp = d.get(&finding_key(f)).cloned().unwrap_or_default();
                                     match disp.state {
@@ -5623,12 +5550,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                                         }
                                         TriageState::TechDebt => match disp.bucket {
                                             TechDebtBucket::Later => debt_later.entry(f.repo.clone()).or_default().push(f.clone()),
-                                            TechDebtBucket::Now => debt_now += 1,
+                                            TechDebtBucket::Now => debt_now.entry(f.repo.clone()).or_default().push(f.clone()),
                                         },
                                         TriageState::Unresolved => {}
                                     }
                                 }
-                                if ignore_groups.is_empty() && debt_later.is_empty() && debt_now == 0 { return; }
+                                if ignore_groups.is_empty() && debt_later.is_empty() && debt_now.is_empty() { return; }
                                 processing.set(true);
                                 spawn(async move {
                                     let mut ok = 0usize;
@@ -5641,20 +5568,25 @@ fn ScanResults(report: ScanReportView) -> Element {
                                         }
                                     }
                                     for (repo, group) in &debt_later {
-                                        match create_ticket(repo, group).await {
+                                        match create_ticket(repo, group, None).await {
                                             Some(_) => ok += group.len(),
                                             None => failed += group.len(),
                                         }
                                     }
-                                    let mut msg = format!("Processed {ok} finding(s): ignores → baseline, tech-debt-later → tickets.");
-                                    if debt_now > 0 {
-                                        // The dev-engine import is Pillar 2 (#12); surface intent until it lands.
-                                        msg.push_str(&format!(" {debt_now} marked resolve-now will import into the dev engine when Pillar 2 is wired."));
+                                    // Resolve-now -> a GitHub issue titled so the dev layer (Pillar 2) can pick
+                                    // it up for ingest. For Pillar 1 the win is: the story lands in GitHub.
+                                    for (repo, group) in &debt_now {
+                                        let title = format!("Tech debt (resolve now): {} finding(s) for the dev engine", group.len());
+                                        match create_ticket(repo, group, Some(&title)).await {
+                                            Some(_) => ok += group.len(),
+                                            None => failed += group.len(),
+                                        }
                                     }
+                                    let msg = format!("Processed {ok} finding(s): ignores → baseline; tech-debt → GitHub issues (resolve-now issues are flagged for the dev engine when Pillar 2 lands).");
                                     if failed == 0 {
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, msg);
                                     } else {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Processed {ok}; {failed} failed (needs GitHub Contents/Issues/PR write). {}", if debt_now > 0 { format!("{debt_now} resolve-now pending Pillar 2.") } else { String::new() }));
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Processed {ok}; {failed} failed (needs GitHub Issues write)."));
                                     }
                                     processing.set(false);
                                 });
@@ -5665,8 +5597,6 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                     }
                 }
-
-                FixAuditedPanel { findings: findings.clone(), repos: report.repos.clone() }
 
                 // ── Final step: apply mechanical rules to CI (#32) ──────────────────
                 // Shown only once every finding is bucketed (nothing Unresolved). Wires the
