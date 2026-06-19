@@ -4986,15 +4986,14 @@ fn ScanResults(report: ScanReportView) -> Element {
     });
     use_context_provider(|| chosen);
 
-    // Per-rule repo placement (rule id -> repos it installs into), seeded with the
-    // domain-matched suggestion. The architect can override it; arm uses this map.
-    let placement = use_signal(|| {
-        let mut m = std::collections::HashMap::<String, Vec<String>>::new();
-        for r in &report.proposed_rules {
-            m.insert(r.id.clone(), r.repos.clone());
-        }
-        m
-    });
+    // Per-rule repo placement OVERRIDE (rule id -> repos it installs into). Starts EMPTY:
+    // an entry exists only when the architect explicitly overrides a rule's target repos.
+    // With no entry, arm falls back to the per-repo SELECTION — i.e. the rule installs into
+    // exactly the repos whose table checked it (matching what the audit scans). Seeding this
+    // with each rule's scan binding (the old behavior) made the override always-present, so
+    // arm ignored the per-repo selection and pushed every "available" rule to all repos.
+    // (There's no placement-editor UI yet; this map is the seam for one.)
+    let placement = use_signal(std::collections::HashMap::<String, Vec<String>>::new);
     use_context_provider(|| placement);
 
     // The open row-detail rule, shared with ProposedRulesTable. Provided HERE (not in
