@@ -115,6 +115,28 @@ struct RoutineView {
     #[serde(default)]
     #[allow(dead_code)]
     last_fired: Option<String>,
+    /// The project this routine belongs to, or `None` for a global routine. Drives the
+    /// dashboard grouping; execution is global regardless.
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+/// The slice of a project the routine dashboard needs: id + name, for the form's project
+/// picker and the grouped table.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct ProjectView {
+    id: String,
+    name: String,
+}
+
+/// Fetch the project list so routines can be assigned to (and grouped by) a project.
+async fn fetch_projects() -> Option<Vec<ProjectView>> {
+    reqwest::get(format!("{}/api/projects", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<ProjectView>>()
+        .await
+        .ok()
 }
 
 fn default_true() -> bool {
@@ -237,11 +259,13 @@ async fn create_routine(
     intent: &str,
     prompt: &str,
     scope: &str,
+    project_id: Option<&str>,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
         .post(format!("{}/api/routines", crate::BFF_URL))
         .json(&serde_json::json!({
-            "name": name, "schedule": schedule, "intent": intent, "prompt": prompt, "scope": scope
+            "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
+            "scope": scope, "project_id": project_id
         }))
         .send()
         .await
@@ -258,11 +282,13 @@ async fn update_routine(
     intent: &str,
     prompt: &str,
     scope: &str,
+    project_id: Option<&str>,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
         .put(format!("{}/api/routines/{}", crate::BFF_URL, id))
         .json(&serde_json::json!({
-            "name": name, "schedule": schedule, "intent": intent, "prompt": prompt, "scope": scope
+            "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
+            "scope": scope, "project_id": project_id
         }))
         .send()
         .await
@@ -314,6 +340,11 @@ pub fn RoutineDashboard() -> Element {
         let _dep = refresh();
         async move { fetch_open_escalations().await }
     });
+    // Projects, for the form's project picker and the grouped table.
+    let projects_res = use_resource(move || {
+        let _dep = refresh();
+        async move { fetch_projects().await }
+    });
     // Which escalation's review panel is currently expanded (by escalation id).
     let mut reviewing = use_signal(|| Option::<String>::None);
     // Per-escalation answer text. Keyed by escalation id; we store a flat
@@ -340,6 +371,8 @@ pub fn RoutineDashboard() -> Element {
     let mut authored_by = use_signal(String::new);
     let mut drafting = use_signal(|| false);
     let mut scope = use_signal(|| "read-only".to_string());
+    // The project the form will assign the routine to (None = global).
+    let mut routine_project = use_signal(|| Option::<String>::None);
     // When Some(id), the form is EDITING that routine (Save updates it) rather than
     // creating a new one. `pending_delete` holds the id awaiting a confirm click.
     let mut editing = use_signal(|| Option::<String>::None);
@@ -352,6 +385,36 @@ pub fn RoutineDashboard() -> Element {
     // Open escalations: keyed by routine_id for O(1) lookup when rendering rows.
     let escalations: Vec<EscalationView> =
         escalations_res.read().clone().flatten().unwrap_or_default();
+    let projects: Vec<ProjectView> = projects_res.read().clone().flatten().unwrap_or_default();
+
+    // Group routines by project for display: each row carries an optional header that is
+    // shown on the FIRST routine of each group. Routines run globally regardless of
+    // project; this is purely organization. Order: by project name, with a "Global" group
+    // (no/unknown project) last. Built here so the render loop stays a flat pass.
+    let project_name = |id: &str| projects.iter().find(|p| p.id == id).map(|p| p.name.clone());
+    // (group_key, group_label) for a routine; unknown/None project -> the Global group.
+    let group_of = |r: &RoutineView| -> (String, String) {
+        match r.project_id.as_deref().and_then(|id| project_name(id).map(|n| (id.to_string(), n))) {
+            Some((id, name)) => (id, name),
+            None => ("\u{7f}global".to_string(), "Global".to_string()),
+        }
+    };
+    let mut sorted: Vec<RoutineView> = routines.clone();
+    // "\u{7f}global" sorts after real project names (DEL is a high code point), so the
+    // Global group lands last; ties break by routine name for stable order.
+    sorted.sort_by(|a, b| {
+        let (ka, _) = group_of(a);
+        let (kb, _) = group_of(b);
+        ka.cmp(&kb).then_with(|| a.name.cmp(&b.name))
+    });
+    let mut rows: Vec<(Option<String>, RoutineView)> = Vec::with_capacity(sorted.len());
+    let mut last_key: Option<String> = None;
+    for r in sorted {
+        let (key, label) = group_of(&r);
+        let header = (last_key.as_deref() != Some(key.as_str())).then_some(label);
+        last_key = Some(key);
+        rows.push((header, r));
+    }
 
     rsx! {
         div { class: "page page-wide routines-page",
@@ -372,7 +435,7 @@ pub fn RoutineDashboard() -> Element {
                 } else if routines.is_empty() {
                     p { class: "routine-empty", "No routines yet. Add one below to schedule a governed run." }
                 }
-                for r in routines.iter() {
+                for (group_header, r) in rows.iter() {
                     {
                         let id_toggle = r.id.clone();
                         let id_provision = r.id.clone();
@@ -400,6 +463,13 @@ pub fn RoutineDashboard() -> Element {
                             (false, _) => "routine-row off",
                         };
                         rsx! {
+                            // A project header on the first routine of each group. Routines
+                            // run globally; this grouping is organization only.
+                            if let Some(h) = group_header {
+                                div { class: "routine-group-head",
+                                    span { class: "routine-group-name", "{h}" }
+                                }
+                            }
                             // Row + optional review panel wrapped in a fragment so the
                             // panel can sit outside the grid as a full-width sibling.
                             div { class: "{row_cls}",
@@ -504,6 +574,7 @@ pub fn RoutineDashboard() -> Element {
                                             intent.set(rt.intent.clone());
                                             prompt.set(rt.prompt.clone());
                                             scope.set(rt.scope.clone());
+                                            routine_project.set(rt.project_id.clone());
                                             authored_by.set(String::new());
                                             editing.set(Some(rt.id.clone()));
                                             pending_delete.set(None);
@@ -647,6 +718,21 @@ pub fn RoutineDashboard() -> Element {
                             option { value: "read-only", "Read-only — inspect & report, no file changes" }
                             option { value: "write (gated)", "Write — gated edits on a branch, no push" }
                             option { value: "write + open PR", "Write + open PR — gated edits, pushed for review" }
+                        }
+                    }
+                    label { class: "sched-field sched-scope-field",
+                        span { "Project" }
+                        select {
+                            class: "addressee-input",
+                            value: "{routine_project().unwrap_or_default()}",
+                            onchange: move |e| {
+                                let v = e.value();
+                                routine_project.set(if v.is_empty() { None } else { Some(v) });
+                            },
+                            option { value: "", "Global (no project)" }
+                            for p in projects.iter() {
+                                option { key: "{p.id}", value: "{p.id}", "{p.name}" }
+                            }
                         }
                     }
                 }
@@ -810,10 +896,12 @@ pub fn RoutineDashboard() -> Element {
                                 return;
                             }
                             let edit_id = editing();
+                            let pid = routine_project();
                             spawn(async move {
+                                let pid = pid.as_deref();
                                 let ok = match &edit_id {
-                                    Some(id) => update_routine(id, &n, &s, &i, &p, &sc).await.is_some(),
-                                    None => create_routine(&n, &s, &i, &p, &sc).await.is_some(),
+                                    Some(id) => update_routine(id, &n, &s, &i, &p, &sc, pid).await.is_some(),
+                                    None => create_routine(&n, &s, &i, &p, &sc, pid).await.is_some(),
                                 };
                                 if ok {
                                     refresh += 1;
@@ -830,6 +918,7 @@ pub fn RoutineDashboard() -> Element {
                             weekdays.set(vec![false, true, false, false, false, false, false]);
                             monthday.set(1);
                             scope.set("read-only".to_string());
+                            routine_project.set(None);
                             editing.set(None);
                         },
                         if editing().is_some() { "Save changes" } else { "Add routine" }

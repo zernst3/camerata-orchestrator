@@ -85,6 +85,7 @@ mod tests {
             intent: "do a thing".to_string(),
             prompt: String::new(),
             scope: "read-only".to_string(),
+            project_id: None,
         }
     }
 

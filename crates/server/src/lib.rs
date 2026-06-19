@@ -496,17 +496,31 @@ async fn delete_project(
     Json(serde_json::json!({ "ok": state.projects.delete(&id) }))
 }
 
-/// Export a project as a portable JSON document (the full project: name, repos, ruleset)
-/// — for backup or moving a project between machines/installs.
+/// A project export: the full project (name, repos, ruleset, onboarded) PLUS its
+/// routines, so the autonomous plane travels with the project. `#[serde(flatten)]` keeps
+/// the project fields at the top level, so an older importer that only reads project
+/// fields still works (it just ignores `routines`).
+#[derive(serde::Serialize)]
+struct ProjectExportDoc {
+    #[serde(flatten)]
+    project: crate::project::Project,
+    /// The project's routines. On import they arrive un-provisioned + stopped (the
+    /// importer explicitly sets them up). Empty for a project with no routines.
+    routines: Vec<Routine>,
+}
+
+/// Export a project as a portable JSON document (project + its routines) — for backup or
+/// moving a project between machines/installs.
 async fn export_project(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<crate::project::Project>, AppError> {
-    state
+) -> Result<Json<ProjectExportDoc>, AppError> {
+    let project = state
         .projects
         .get(&id)
-        .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))
+        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    let routines = state.routines.list_for_project(&id);
+    Ok(Json(ProjectExportDoc { project, routines }))
 }
 
 /// A project import document (a prior export). `id` in the JSON is ignored — the import
@@ -527,6 +541,50 @@ struct ImportProjectReq {
     /// name, replaced repos/ruleset/onboarded).
     #[serde(default)]
     overwrite: bool,
+    /// The source project's routines, travelling with the export. Imported routines are
+    /// created un-provisioned + stopped. Empty (default) leaves the target's routines
+    /// untouched; a non-empty list REPLACES the target project's routines.
+    #[serde(default)]
+    routines: Vec<ImportedRoutine>,
+}
+
+/// A routine inside a project import. Deserializes from an exported full `Routine` (extra
+/// fields like id / enabled / last_run are ignored); only the authoring fields travel.
+#[derive(serde::Deserialize)]
+struct ImportedRoutine {
+    name: String,
+    schedule: String,
+    #[serde(default)]
+    intent: String,
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    scope: String,
+}
+
+/// Create the imported routines under `project_id` (un-provisioned + stopped), replacing
+/// any the target project already had. No-op when the import carried none, so importing a
+/// routine-less export never wipes routines the importer added locally.
+fn import_project_routines(state: &AppState, project_id: &str, routines: &[ImportedRoutine]) {
+    if routines.is_empty() {
+        return;
+    }
+    let reqs: Vec<crate::routine::CreateRoutineReq> = routines
+        .iter()
+        .map(|r| crate::routine::CreateRoutineReq {
+            name: r.name.clone(),
+            schedule: r.schedule.clone(),
+            intent: r.intent.clone(),
+            prompt: r.prompt.clone(),
+            scope: if r.scope.trim().is_empty() {
+                "read-only".to_string()
+            } else {
+                r.scope.clone()
+            },
+            project_id: Some(project_id.to_string()),
+        })
+        .collect();
+    state.routines.replace_for_project(project_id, &reqs);
 }
 
 /// Import a project from an exported JSON, make it active, and return it.
@@ -542,14 +600,17 @@ async fn import_project(
 ) -> Json<serde_json::Value> {
     use crate::project::ImportOutcome;
     let name = req.name.clone();
+    let imported_routines = req.routines;
     match state
         .projects
         .import_or_overwrite(&req.name, req.repos, req.ruleset, req.onboarded, req.overwrite)
     {
         Some(ImportOutcome::Created(p)) => {
+            import_project_routines(&state, &p.id, &imported_routines);
             Json(serde_json::json!({ "ok": true, "project": p, "overwritten": false }))
         }
         Some(ImportOutcome::Overwritten(p)) => {
+            import_project_routines(&state, &p.id, &imported_routines);
             Json(serde_json::json!({ "ok": true, "project": p, "overwritten": true }))
         }
         Some(ImportOutcome::Conflict) => Json(serde_json::json!({

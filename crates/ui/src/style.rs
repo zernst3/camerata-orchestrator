@@ -1423,6 +1423,15 @@ html, body {
   color: var(--accent-ink); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .btn-setup { border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
+/* Project group header in the routine table. Routines run globally; grouping is org only. */
+.routine-group-head {
+  grid-column: 1 / -1;
+  padding: 14px 4px 6px; border-bottom: 1px solid var(--line); margin-bottom: 2px;
+}
+.routine-group-name {
+  font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--ink-faint);
+}
 .routine-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .btn-run-sm {
   border: none; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;

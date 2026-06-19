@@ -78,6 +78,11 @@ pub struct CreateRoutineReq {
     #[serde(default)]
     pub prompt: String,
     pub scope: String,
+    /// The project this routine belongs to (`project.id`), or `None` for a global
+    /// routine. Routines execute globally regardless of the viewed project; this only
+    /// controls organization (dashboard grouping) and which export a routine travels in.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// Request body for the draft-prompt step: the user's intent + scope.
@@ -259,13 +264,71 @@ impl RoutineStore {
             // Created here, so it's provisioned on this backend immediately.
             provisioned: true,
             last_fired: None,
-            project_id: None,
+            project_id: req.project_id.clone(),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
         }
         self.flush();
         routine
+    }
+
+    /// Create a routine that arrived via a project import: associated with `project_id`,
+    /// and deliberately UN-provisioned + stopped, so the importer explicitly sets it up
+    /// and starts it (never silently auto-running someone else's unattended agent on
+    /// import). Shares the id counter with [`create`] so ids never collide.
+    pub fn create_imported(&self, req: &CreateRoutineReq, project_id: &str) -> Routine {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let prompt = if req.prompt.trim().is_empty() {
+            scaffold_prompt(&req.intent, &req.scope)
+        } else {
+            req.prompt.clone()
+        };
+        let routine = Routine {
+            id: format!("rt-{n}"),
+            name: req.name.clone(),
+            schedule: req.schedule.clone(),
+            intent: req.intent.clone(),
+            prompt,
+            scope: req.scope.clone(),
+            enabled: false,
+            last_run: None,
+            provisioned: false,
+            last_fired: None,
+            project_id: Some(project_id.to_string()),
+        };
+        if let Ok(mut guard) = self.items.lock() {
+            guard.push(routine.clone());
+        }
+        self.flush();
+        routine
+    }
+
+    /// Routines belonging to a project (`project_id` match), for export + grouping.
+    pub fn list_for_project(&self, project_id: &str) -> Vec<Routine> {
+        self.items
+            .lock()
+            .map(|g| {
+                g.iter()
+                    .filter(|r| r.project_id.as_deref() == Some(project_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Replace a project's routines wholesale (used on project overwrite-import so a
+    /// re-import doesn't duplicate). Drops the project's existing routines, then creates
+    /// each incoming one as imported (un-provisioned + stopped). Returns the count added.
+    pub fn replace_for_project(&self, project_id: &str, reqs: &[CreateRoutineReq]) -> usize {
+        if let Ok(mut guard) = self.items.lock() {
+            guard.retain(|r| r.project_id.as_deref() != Some(project_id));
+        }
+        self.flush();
+        for req in reqs {
+            self.create_imported(req, project_id);
+        }
+        reqs.len()
     }
 
     /// Edit a routine's user-facing fields in place (name / schedule / intent /
@@ -284,6 +347,7 @@ impl RoutineStore {
         } else {
             req.prompt.clone()
         };
+        r.project_id = req.project_id.clone();
         let updated = r.clone();
         drop(guard);
         self.flush();
@@ -388,6 +452,7 @@ mod tests {
             intent: "do a thing".to_string(),
             prompt: String::new(),
             scope: "read-only".to_string(),
+            project_id: None,
         });
         assert_eq!(created.id, "rt-4");
         assert_eq!(store.list().len(), 4);
@@ -421,6 +486,7 @@ mod tests {
                     intent: "new intent".to_string(),
                     prompt: String::new(), // empty -> re-scaffolded from intent
                     scope: "write (gated)".to_string(),
+                    project_id: None,
                 },
             )
             .unwrap();
@@ -433,7 +499,7 @@ mod tests {
 
         assert!(store.update("nope", &CreateRoutineReq {
             name: "x".into(), schedule: "daily 09:00".into(), intent: "x".into(),
-            prompt: String::new(), scope: "read-only".into(),
+            prompt: String::new(), scope: "read-only".into(), project_id: None,
         }).is_none());
     }
 
@@ -454,6 +520,7 @@ mod tests {
                 intent: "scan deps".to_string(),
                 prompt: String::new(),
                 scope: "read-only".to_string(),
+                project_id: None,
             });
             assert_eq!(created.id, "rt-1");
             store.set_enabled("rt-1", false);
@@ -474,6 +541,7 @@ mod tests {
                 intent: "audit PRs".to_string(),
                 prompt: String::new(),
                 scope: "read-only".to_string(),
+                project_id: None,
             });
             assert_eq!(next.id, "rt-2", "counter advanced past the rehydrated max id");
         }
@@ -491,6 +559,55 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn imported_routines_are_project_scoped_unprovisioned_and_replaceable() {
+        let store = RoutineStore::new();
+        // A global routine (no project) created the normal way: provisioned + enabled.
+        store.create(&CreateRoutineReq {
+            name: "Global".into(),
+            schedule: "daily 09:00".into(),
+            intent: "x".into(),
+            prompt: String::new(),
+            scope: "read-only".into(),
+            project_id: None,
+        });
+
+        let reqs = vec![
+            CreateRoutineReq {
+                name: "A".into(),
+                schedule: "daily 09:00".into(),
+                intent: "a".into(),
+                prompt: String::new(),
+                scope: "read-only".into(),
+                project_id: None, // create_imported sets the project id from its arg
+            },
+            CreateRoutineReq {
+                name: "B".into(),
+                schedule: "weekly Mon 09:00".into(),
+                intent: "b".into(),
+                prompt: String::new(),
+                scope: "read-only".into(),
+                project_id: None,
+            },
+        ];
+        assert_eq!(store.replace_for_project("p1", &reqs), 2);
+
+        let p1 = store.list_for_project("p1");
+        assert_eq!(p1.len(), 2);
+        assert!(
+            p1.iter().all(|r| !r.provisioned && !r.enabled),
+            "imported routines arrive un-provisioned + stopped"
+        );
+        assert!(p1.iter().all(|r| r.project_id.as_deref() == Some("p1")));
+        // The global routine is untouched.
+        assert_eq!(store.list().len(), 3);
+
+        // Re-import REPLACES (no duplicate pile-up).
+        assert_eq!(store.replace_for_project("p1", &reqs[..1]), 1);
+        assert_eq!(store.list_for_project("p1").len(), 1);
+        assert_eq!(store.list().len(), 2, "global + one project routine");
     }
 
     #[test]
