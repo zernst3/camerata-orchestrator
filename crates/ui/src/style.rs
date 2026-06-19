@@ -1731,6 +1731,15 @@ html, body {
   margin-top: 16px; padding: 14px; border: 1px solid var(--accent);
   border-radius: 11px; background: var(--accent-wash);
 }
+/* Onboarding status + lifecycle action bar (auto-saved indicator, start-over, finish). */
+.onboard-actionbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 12px 0 4px;
+}
+.onboard-actionbar-spacer { flex: 1 1 auto; }
+.onboard-saved {
+  font-size: 12px; font-weight: 600; color: #2f8f5b;
+}
 .onboard-step-eyebrow {
   display: inline-block; font-size: 10.5px; font-weight: 800; letter-spacing: .06em;
   text-transform: uppercase; color: var(--accent); margin-bottom: 8px;

@@ -202,6 +202,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/repo-health", get(project_repo_health))
         .route("/api/repo-path", post(set_repo_path))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
+        .route("/api/onboard/complete", post(onboard_complete))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/onboard/ignore", post(onboard_ignore))
         .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
@@ -1484,6 +1485,19 @@ async fn project_suppressions(
 #[derive(serde::Deserialize)]
 struct CiRulesReq {
     repo: String,
+}
+
+/// Finish onboarding for the active project: mark all its repos onboarded and clear the
+/// onboarding draft. The post-scan steps (audit, triage, Apply, wire-CI) are all optional;
+/// this is the explicit "I'm done" action so onboarding never gates on the CI step.
+async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let Some(active) = state.projects.active() else {
+        return Json(serde_json::json!({ "ok": false, "message": "no active project" }));
+    };
+    let repos = active.repos.clone();
+    state.projects.update(&active.id, |p| p.mark_onboarded(&repos));
+    state.draft.clear(&active.id);
+    Json(serde_json::json!({ "ok": true, "onboarded": repos }))
 }
 
 /// Emit the "wire mechanical rules into CI" task as a STORY on the tracker — a GitHub

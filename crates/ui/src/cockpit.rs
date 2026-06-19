@@ -2334,13 +2334,8 @@ fn ProjectGate() -> Element {
 fn CockpitNav(view: Signal<CockpitView>) -> Element {
     let mut view = view;
     let mut screen = use_context::<Signal<CockpitScreen>>();
-    // Onboarding work is client-side and unsaved: leaving the project unmounts it and it's
-    // gone (a fresh return is a clean slate). So if there's a scan in progress/on screen or
-    // an in-flight audit job, warn before navigating away rather than silently dropping it.
-    let onboard_scan = use_context::<Signal<Option<ScanReportView>>>();
-    let active_audit_job = use_context::<Signal<Option<String>>>();
-    let mut confirm_leave = use_signal(|| false);
-    let has_unsaved = move || onboard_scan.read().is_some() || active_audit_job.read().is_some();
+    // Leaving is safe: onboarding state auto-saves per project, so navigating back just
+    // leaves (the resume prompt restores it on return). No "you'll lose your work" warning.
     let cls = |v: CockpitView| {
         if view() == v {
             "cockpit-nav-tab on"
@@ -2349,38 +2344,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
         }
     };
     rsx! {
-        if confirm_leave() {
-            div { class: "rule-modal-overlay", onclick: move |_| confirm_leave.set(false),
-                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
-                    div { class: "rule-modal-head",
-                        span { class: "rule-modal-id", "Leave this project?" }
-                        button { class: "rule-modal-close", onclick: move |_| confirm_leave.set(false), "\u{2715}" }
-                    }
-                    p { class: "rule-modal-detail",
-                        "You'll lose your onboarding work. The scan results, selected repos, and \
-                         any in-progress audit are not saved — leaving now discards them, and \
-                         returning starts from a clean slate."
-                    }
-                    div { class: "onboard-leave-actions",
-                        button { class: "btn-edit-sm", onclick: move |_| confirm_leave.set(false), "Cancel" }
-                        button {
-                            class: "pg-btn-danger",
-                            onclick: move |_| { confirm_leave.set(false); screen.set(CockpitScreen::Projects); },
-                            "Leave anyway"
-                        }
-                    }
-                }
-            }
-        }
         div { class: "cockpit-nav",
             button {
                 class: "cockpit-nav-tab back",
                 onclick: move |_| {
-                    if has_unsaved() {
-                        confirm_leave.set(true);
-                    } else {
-                        screen.set(CockpitScreen::Projects);
-                    }
+                    screen.set(CockpitScreen::Projects);
                 },
                 "← Projects"
             }
@@ -3235,6 +3203,24 @@ async fn clear_onboarding_draft() {
         .post(format!("{}/api/onboard/draft/clear", crate::BFF_URL))
         .send()
         .await;
+}
+
+/// Finish onboarding for the active project: marks its repos onboarded and clears the
+/// draft. The post-scan steps (audit / triage / apply / wire-CI) are all optional, so this
+/// is the explicit "I'm done" action. Returns true on success.
+async fn complete_onboarding() -> bool {
+    let Ok(resp) = reqwest::Client::new()
+        .post(format!("{}/api/onboard/complete", crate::BFF_URL))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
 }
 
 /// A rule the user selected to audit against, carrying its per-repo binding. An empty
@@ -5036,6 +5022,14 @@ fn ScanResults(report: ScanReportView) -> Element {
     // Tech debt. The architect moves findings between them until nothing is Unresolved, then
     // Processes the ignored + tech-debt buckets. State is LOCAL until Process.
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The shared scan state (reset to None to "start over") + screen nav (to finish).
+    let mut onboard_scan = use_context::<Signal<Option<ScanReportView>>>();
+    let mut screen = use_context::<Signal<CockpitScreen>>();
+    // When the draft last auto-saved (shown with a check), the two-click "start over"
+    // arm, and the in-flight "complete onboarding" flag.
+    let mut last_saved = use_signal(|| Option::<String>::None);
+    let mut restart_arm = use_signal(|| false);
+    let mut finishing = use_signal(|| false);
     let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
     let mut processing = use_signal(|| false);
@@ -5094,7 +5088,11 @@ fn ScanResults(report: ScanReportView) -> Element {
                 viewed_repo: vr,
                 triage_view: tv,
             };
-            spawn(async move { save_onboarding_draft(&draft).await });
+            spawn(async move {
+                save_onboarding_draft(&draft).await;
+                // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
+                last_saved.set(Some(chrono::Local::now().format("%-I:%M:%S %p").to_string()));
+            });
         });
     }
 
@@ -5213,6 +5211,48 @@ fn ScanResults(report: ScanReportView) -> Element {
                         span { class: "scan-stat-n", "{report.excluded_mechanical_rules.len()}" }
                         " mechanical rule(s) enforced in CI, not scanned"
                     }
+                }
+            }
+
+            // Onboarding status + lifecycle actions. The post-scan steps (audit, triage,
+            // apply, wire-CI) are all optional, so "Complete onboarding" is available here.
+            div { class: "onboard-actionbar",
+                if let Some(ts) = last_saved() {
+                    span { class: "onboard-saved", "✓ Auto-saved at {ts}" }
+                }
+                div { class: "onboard-actionbar-spacer" }
+                button {
+                    class: "btn-edit-sm pg-btn-danger",
+                    onclick: move |_| {
+                        if restart_arm() {
+                            spawn(async move {
+                                clear_onboarding_draft().await;
+                                restart_arm.set(false);
+                                onboard_scan.set(None);
+                            });
+                        } else {
+                            restart_arm.set(true);
+                        }
+                    },
+                    if restart_arm() { "Confirm: discard & rescan?" } else { "Start over" }
+                }
+                button {
+                    class: "btn-run",
+                    disabled: finishing(),
+                    onclick: move |_| {
+                        finishing.set(true);
+                        spawn(async move {
+                            if complete_onboarding().await {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Onboarding complete — repos marked onboarded.");
+                                onboard_scan.set(None);
+                                screen.set(CockpitScreen::Projects);
+                            } else {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not complete onboarding.");
+                            }
+                            finishing.set(false);
+                        });
+                    },
+                    if finishing() { "Finishing…" } else { "Complete onboarding" }
                 }
             }
 
@@ -5598,17 +5638,16 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
 
-                // ── Final step: apply mechanical rules to CI (#32) ──────────────────
-                // Shown only once every finding is bucketed (nothing Unresolved). Wires the
-                // selected mechanical rules into each repo's EXISTING CI as enforced lint gates
-                // — checks what's already enforced, adds the rest, as a governed dev run. This
-                // is separate from fixing/ticketing the violations above; completing it is the
-                // last action before the repo(s) are considered onboarded (#27).
+                // ── Optional: wire mechanical rules into CI (#32) ──────────────────
+                // Files a STORY (GitHub issue) per repo to add the selected mechanical rules
+                // to that repo's existing CI as enforced lint gates. This is OPTIONAL — it does
+                // NOT gate "onboarded". Use "Complete onboarding" above to finish at any point;
+                // the dev layer picks the CI story up later.
                 if n_unresolved == 0 {
                     div { class: "onboard-final-step",
-                        span { class: "onboard-step-eyebrow", "Final step before onboarded" }
+                        span { class: "onboard-step-eyebrow", "Optional: wire mechanical rules into CI" }
                         CiRulesPanel { repos: report.repos.clone() }
-                        p { class: "section-hint", "Independent of the tech-debt / resolve-now work above. Once the mechanical rules are wired into CI, the repo(s) are considered onboarded." }
+                        p { class: "section-hint", "Optional, and independent of the tech-debt work above. This files a CI-wiring story (a GitHub issue); it is not required to finish onboarding — use \u{201c}Complete onboarding\u{201d} whenever you're ready." }
                     }
                 }
             }

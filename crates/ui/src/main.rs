@@ -34,7 +34,13 @@ fn main() {
     // GitHub token etc. are available to the embedded BFF without exporting them.
     // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.
     let _ = dotenvy::dotenv();
-    dioxus::launch(App);
+    // Set the OS window title (the bare `dioxus::launch` defaults it to "Dioxus App").
+    use dioxus::desktop::{Config, WindowBuilder};
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(
+            Config::new().with_window(WindowBuilder::new().with_title("Camerata Orchestrator")),
+        )
+        .launch(App);
 }
 
 /// Root. Injects the global stylesheet, stands up the embedded BFF once, and shows the

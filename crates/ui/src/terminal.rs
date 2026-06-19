@@ -192,8 +192,8 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     if (fitAddon) {{ try {{ fitAddon.fit(); }} catch (e) {{}} }}
   }});
 
-  // Store references for cleanup when the tab closes.
-  window['__term_{id}'] = {{ term: term, ws: ws, observer: observer }};
+  // Store references for cleanup when the tab closes, and for re-fit/focus on reopen.
+  window['__term_{id}'] = {{ term: term, ws: ws, observer: observer, fitAddon: fitAddon }};
 
   // Re-focus after a tick so the hidden xterm textarea reliably grabs keystrokes
   // (the webview can steal focus during mount).
@@ -217,6 +217,24 @@ fn make_cleanup_script(id: usize) -> String {
   try {{ s.term.dispose(); }} catch(e) {{}}
   delete window['__term_{id}'];
 }})();
+"#,
+        id = id
+    )
+}
+
+/// Re-fit + focus a terminal after the panel is shown again. Closing the panel hides it
+/// (`display:none`), which collapses the xterm box to 0x0; on reopen we must re-fit so it
+/// doesn't render blank/collapsed, then re-focus so keystrokes land. Deferred a tick so it
+/// runs after the panel has been laid out.
+fn make_reveal_script(id: usize) -> String {
+    format!(
+        r#"
+setTimeout(function() {{
+  var s = window['__term_{id}'];
+  if (!s) {{ return; }}
+  try {{ if (s.fitAddon) s.fitAddon.fit(); }} catch (e) {{}}
+  try {{ s.term.focus(); }} catch (e) {{}}
+}}, 40);
 "#,
         id = id
     )
@@ -265,6 +283,13 @@ pub fn TerminalBubble() -> Element {
                         XTERM_LOAD_SCRIPT
                     );
                     let _ = document::eval(&load_script);
+                }
+                if opening && !tabs.read().is_empty() {
+                    // Reopening an existing session: the panel was hidden (display:none),
+                    // which collapsed the terminal to 0x0. Re-fit + focus the active tab so
+                    // it renders and accepts input again. (On the very first open the tab
+                    // isn't initialized yet, so this no-ops and onmounted handles it.)
+                    let _ = document::eval(&make_reveal_script(active_tab()));
                 }
             },
             // Terminal glyph: a simple ">" prompt icon
