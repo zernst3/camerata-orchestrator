@@ -1018,13 +1018,11 @@ html, body {
 .scan-stack-tech { color: var(--ink-soft); }
 .findings-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
 
-/* Critical (security) row marker: a full-height red bar on the left edge of the row's
-   first cell. The chorale <td> is position:relative + overflow:hidden, so this anchors
-   to the cell's left edge and spans its height. */
-.crit-row-stripe {
-  position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-  background: #d4332b; pointer-events: none;
-}
+/* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
+   row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
+   marks the security-floor rows unmistakably; selection background still composes over it. */
+.finding-row-critical > td:first-child { box-shadow: inset 4px 0 0 0 #d4332b; }
+.finding-row-critical > td { background: rgba(212, 51, 43, 0.06); }
 
 /* Key above the findings table: what the stripe means. */
 .findings-key { display: flex; flex-wrap: wrap; gap: 16px; margin: 4px 0 10px; }

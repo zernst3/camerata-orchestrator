@@ -27,7 +27,7 @@ use chorale_core::{
     PaginationMode, RenderKind, RowId, TableState,
 };
 use chorale_dioxus::{
-    use_table, CellRenderer, CellRenderers, RowCellRenderer, RowCellRenderers, Table,
+    use_table, RowCellRenderer, RowCellRenderers, RowClass, Table,
 };
 
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
@@ -3675,13 +3675,12 @@ fn split_needs_review(detail: &str) -> (String, Option<String>) {
 }
 
 fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
-    // Fallback badge map only. The severity column is actually drawn by a custom cell
-    // renderer in FindingsTable (which overrides RenderKind::Badge) so High can be ORANGE,
-    // distinct from Critical's red — chorale's built-in palette has no orange and would
-    // collapse both to red. This map is the safety net if that renderer is ever absent.
+    // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
+    // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
+    // High = orange, Medium = yellow, Low = gray).
     let sev = BadgeVariantMap::new()
         .with("critical", BadgeVariant::new("Critical", "red"))
-        .with("high", BadgeVariant::new("High", "red"))
+        .with("high", BadgeVariant::new("High", "orange"))
         .with("medium", BadgeVariant::new("Medium", "yellow"))
         .with("low", BadgeVariant::new("Low", "gray"));
     let mut cols = vec![
@@ -3723,10 +3722,10 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                // chorale badges support green/yellow/red/gray; blue/purple fell back to a
-                // single default gray, making the two authorities indistinguishable.
+                // chorale 0.2.3 added blue/purple to the palette, so the two authorities
+                // read as distinct colors (no more gray fallback collision).
                 .with("enforced", BadgeVariant::new("Rule · enforced", "green"))
-                .with("advisory", BadgeVariant::new("AI · advisory", "yellow")),
+                .with("advisory", BadgeVariant::new("AI · advisory", "blue")),
         ))
         .initial_width(170.0),
         ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
@@ -3802,7 +3801,7 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
     cols
 }
 
-fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
+fn rule_columns(domains: Vec<String>, repos: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
     let kind = BadgeVariantMap::new()
         .with("mechanical", BadgeVariant::new("Mechanical", "green"))
         .with("review", BadgeVariant::new("Review", "yellow"));
@@ -3853,11 +3852,11 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Badge(scope))
         .initial_width(130.0),
-        // Show EVERY repo this rule applies to (comma-joined), not a "N repos" collapse —
-        // the Text filter matches by substring, so typing one repo surfaces every row that
-        // references it regardless of which OTHER repos share the cell ("contains", not the
-        // exact-combo match a MultiSelect would impose). That's the per-repo "show anywhere
-        // this repo is referenced" behavior the multi-repo case needs.
+        // Show EVERY repo this rule applies to (comma-joined). chorale 0.2.3's
+        // MultiSelectContains is the proper per-value set filter for a list-valued cell:
+        // the architect picks repos from a checkbox list and a row matches if it references
+        // ANY of them — the "show anywhere this repo appears" behavior, without the old
+        // Text-substring stand-in or an exact-combo MultiSelect.
         ColumnDef::new(ColumnId("repos"), "Applies to", |r: &ProposedRuleView| {
             CellValue::Text(if r.repos.is_empty() {
                 "—".to_string()
@@ -3865,7 +3864,7 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
                 r.repos.join(", ")
             })
         })
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelectContains { options: repos, separator: ", ".to_string() })
         .initial_width(180.0),
         ColumnDef::new(ColumnId("placement"), "Gate placement", |r: &ProposedRuleView| {
             CellValue::Text(r.placement.clone())
@@ -3975,84 +3974,13 @@ fn FindingsTable(
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
-    let renderers = {
-        let mut m: std::collections::HashMap<ColumnId, CellRenderer> =
-            std::collections::HashMap::new();
-        // Severity badge with a per-level palette. chorale's badge map only has
-        // green/yellow/red/gray, so Critical AND High both landed on red and looked
-        // identical (the whole reason for the red row-stripe). A custom renderer (which
-        // overrides the column's RenderKind::Badge) gives High its own ORANGE, keeping
-        // Critical the strongest red. Orange routes through a --chorale-badge-orange-*
-        // var with an orange fallback, so it works today and auto-adopts a future
-        // chorale orange (rust-chorale#33).
-        m.insert(
-            ColumnId("severity"),
-            std::sync::Arc::new(move |val: &CellValue| {
-                let sev = match val {
-                    CellValue::Text(s) => s.clone(),
-                    _ => String::new(),
-                };
-                let (label, bg, fg): (&str, &str, &str) = match sev.as_str() {
-                    "critical" => (
-                        "Critical",
-                        "var(--chorale-badge-red-bg, #fee2e2)",
-                        "var(--chorale-badge-red-text, #991b1b)",
-                    ),
-                    "high" => (
-                        "High",
-                        "var(--chorale-badge-orange-bg, #ffedd5)",
-                        "var(--chorale-badge-orange-text, #9a3412)",
-                    ),
-                    "medium" => (
-                        "Medium",
-                        "var(--chorale-badge-yellow-bg, #fef3c7)",
-                        "var(--chorale-badge-yellow-text, #92400e)",
-                    ),
-                    "low" => (
-                        "Low",
-                        "var(--chorale-badge-gray-bg, #f3f4f6)",
-                        "var(--chorale-badge-gray-text, #374151)",
-                    ),
-                    other => (
-                        other,
-                        "var(--chorale-badge-default-bg, #e5e7eb)",
-                        "var(--chorale-badge-default-text, #1f2937)",
-                    ),
-                };
-                let style = format!(
-                    "display:inline-block;padding:0.125rem 0.5rem;border-radius:9999px;\
-                     background:{bg};color:{fg};font-size:0.75rem;font-weight:500;"
-                );
-                rsx! { span { style: "{style}", "{label}" } }
-            }) as CellRenderer,
-        );
-        CellRenderers::new(m)
-    };
 
     // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
-    // bold red full-height stripe on the left of their row, so they're unmistakable beyond
-    // the badge text. A row-aware renderer on the first column ("repo") draws an
-    // absolutely-positioned bar (the chorale <td> is position:relative) for critical rows,
-    // leaving every other cell — including the Severity badge — untouched.
+    // red full-row highlight so they're unmistakable beyond the badge text. This now uses
+    // chorale 0.2.3's `row_class` hook on the Table (below), not a per-cell stripe renderer.
     let row_renderers = {
         let mut m: std::collections::HashMap<ColumnId, RowCellRenderer<FindingView>> =
             std::collections::HashMap::new();
-        m.insert(
-            ColumnId("repo"),
-            std::sync::Arc::new(move |f: &FindingView, val: &CellValue| {
-                let repo = match val {
-                    CellValue::Text(s) => s.clone(),
-                    _ => String::new(),
-                };
-                let is_security = f.severity == "critical";
-                rsx! {
-                    if is_security {
-                        span { class: "crit-row-stripe" }
-                    }
-                    "{repo}"
-                }
-            }) as RowCellRenderer<FindingView>,
-        );
         // "Finding type": the primary rule id, with a hover tooltip of what it enforces, and
         // a "+N" chip when the server merged N other rules at this same location into the row
         // (the also_matches set). Row-aware so it can read both the description map and the
@@ -4117,7 +4045,7 @@ fn FindingsTable(
     };
 
     rsx! {
-        // Key: what the red stripe means. Security (deterministic, Critical) vs the rest.
+        // Key: what the red row highlight means. Security (deterministic, Critical) vs the rest.
         div { class: "findings-key",
             span { class: "findings-key-item",
                 span { class: "findings-key-swatch crit" }
@@ -4286,8 +4214,12 @@ fn FindingsTable(
             // Pin the column header to the top of the table's scroll viewport so it
             // stays visible while scrolling a long findings list.
             sticky_header: true,
-            cell_renderers: renderers,
             row_cell_renderers: row_renderers,
+            // Critical (security-floor) rows get a red full-row highlight via the 0.2.3
+            // conditional row-styling hook — replaces the old per-cell stripe renderer.
+            row_class: RowClass::new(|f: &FindingView| {
+                (f.severity == "critical").then(|| "finding-row-critical".to_string())
+            }),
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(f) = id_map_click.get(&rid) {
                     detail_finding.set(Some(f.clone()));
@@ -4376,8 +4308,19 @@ fn ProposedRulesTable(
     // Distinct domains (sorted, "general" for blank — matches the cell value) for the
     // Domain column's multi-select filter options.
     let domain_options: Vec<String> = domain_rows.keys().cloned().collect();
-    let handle =
-        use_table(move || TableState::new(rows.clone(), rule_columns(domain_options.clone())));
+    // Distinct repos across all proposed rules, for the "Applies to" per-value set filter.
+    let repo_options: Vec<String> = {
+        let mut v: Vec<String> = rows.iter().flat_map(|(_, p)| p.repos.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let handle = use_table(move || {
+        TableState::new(
+            rows.clone(),
+            rule_columns(domain_options.clone(), repo_options.clone()),
+        )
+    });
     // The row-detail modal is hosted by ScanResults (OUTSIDE this table's subtree)
     // via a shared signal: a row click writes the rule here, ScanResults renders the
     // modal. Hosting the full-screen overlay outside the Table avoids a Dioxus-desktop

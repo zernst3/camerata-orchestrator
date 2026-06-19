@@ -33,8 +33,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # data genuinely scales — the brownfield audit-findings + proposed-rules tables —
 # with the small fixed lists riding the same primitive for consistency (see
 # docs/UI_BACKLOG.md for the right-sizing decision).
-chorale-core = "0.2.2"
-chorale-dioxus = "0.2.2"
+chorale-core = "0.2.3"
+chorale-dioxus = "0.2.3"
 
 # The BFF the desktop shell embeds and the cockpit talks to over HTTP.
 camerata-server = { path = "../server" }

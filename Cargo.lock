@@ -825,9 +825,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chorale-core"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9d6e150ded8720e576e11723e0a0ad4ad6d5196592a58b126ca1fc0ffd6985b"
+checksum = "3d52c66a3333aedb268dfd247168a953e6d50f40c4e2ea421ff1a2c8b79c7997"
 dependencies = [
  "chrono",
  "thiserror 2.0.18",
@@ -836,9 +836,9 @@ dependencies = [
 
 [[package]]
 name = "chorale-dioxus"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6dc5e13fe7f66b8b187e7134ee9e551f0923525db8f515d9d5fa2c6dee13d03"
+checksum = "a8913e2e4e1ad5016b84a90a68e8314335bba53e17a049d5e6bd110ca7fd7e67"
 dependencies = [
  "chorale-core",
  "dioxus",
