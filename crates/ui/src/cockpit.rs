@@ -3239,6 +3239,9 @@ struct ScanReportView {
     files_excluded: usize,
     #[serde(default)]
     code_chars: usize,
+    /// Mechanical rule ids dropped from the code-only scan (enforced in CI instead).
+    #[serde(default)]
+    excluded_mechanical_rules: Vec<String>,
     #[serde(default)]
     actual_usage: Option<ActualUsageView>,
     findings: Vec<FindingView>,
@@ -5277,6 +5280,13 @@ fn ScanResults(report: ScanReportView) -> Element {
                     span { class: "scan-stat",
                         span { class: "scan-stat-n", "{report.files_excluded}" }
                         " excluded as noise"
+                    }
+                }
+                if !report.excluded_mechanical_rules.is_empty() {
+                    span { class: "scan-stat",
+                        title: "{report.excluded_mechanical_rules.join(\", \")}",
+                        span { class: "scan-stat-n", "{report.excluded_mechanical_rules.len()}" }
+                        " mechanical rule(s) enforced in CI, not scanned"
                     }
                 }
             }

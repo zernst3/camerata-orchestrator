@@ -157,6 +157,12 @@ pub struct ScanReport {
     /// honest token base before chunk/batch multipliers.
     #[serde(default)]
     pub code_chars: usize,
+    /// Rule ids EXCLUDED from this code-only audit because they're MECHANICAL — enforced in
+    /// CI from build/runtime/DB context (query-plan inspection, migration audit, AST lint),
+    /// not judgeable from a static code digest. They're wired into `.camerata/ci-checks.json`
+    /// instead. Surfaced (like `files_excluded`) so the re-tiering is visible, not silent.
+    #[serde(default)]
+    pub excluded_mechanical_rules: Vec<String>,
     /// Every violation found, across all repos (each tagged with its repo).
     pub findings: Vec<Finding>,
     /// The proposed starter ruleset (aggregated over all repos).
@@ -179,6 +185,7 @@ impl ScanReport {
             stacks: Vec::new(),
             files_scanned: 0,
             files_excluded: 0,
+            excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
             findings: Vec::new(),
             proposed_rules: Vec::new(),
@@ -742,6 +749,7 @@ pub fn build_report(
         stacks,
         files_scanned,
         files_excluded: 0,
+            excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
         findings,
         proposed_rules,

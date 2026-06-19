@@ -852,6 +852,40 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// plus the AI audit parameterized by the chosen rules). Returns the findings report. The
 /// AI activity (prompts and output) registers into the transcript store so the UI can
 /// show, live, that the model is actually working.
+/// Partition selected audit rules into the ones the code-only AI scan should check
+/// (prose / structured) and the MECHANICAL ones it should NOT. Mechanical rules are enforced
+/// in CI from build/runtime/DB context (query-plan, migration audit, AST lint), so scanning
+/// them from a static code digest only yields weak, low-confidence findings (e.g. "an index
+/// probably exists in a migration somewhere"). The corpus is the source of each rule's tier;
+/// a rule absent from the corpus (e.g. a custom rule) defaults to scannable.
+/// Returns `(scannable, excluded_mechanical_ids)`.
+async fn split_scannable_rules(
+    selected: Vec<crate::onboard::SelectedRule>,
+) -> (Vec<crate::onboard::SelectedRule>, Vec<String>) {
+    let corpus_path = camerata_rules::corpus_path();
+    let set = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let is_mechanical = |id: &str| -> bool {
+        set.as_ref()
+            .and_then(|s| s.get_by_id(id))
+            .map(|r| r.enforcement == camerata_rules::EnforcementKind::Mechanical)
+            .unwrap_or(false)
+    };
+    let mut scannable = Vec::new();
+    let mut excluded = Vec::new();
+    for r in selected {
+        if is_mechanical(&r.id) {
+            excluded.push(r.id);
+        } else {
+            scannable.push(r);
+        }
+    }
+    (scannable, excluded)
+}
+
 async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
@@ -879,24 +913,26 @@ async fn onboard_audit(
         .filter(|r| !r.id.trim().is_empty())
         .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
         .collect();
+    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
+    let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
-    Json(
-        crate::onboard::audit_repos(
-            &repos,
-            &selected,
-            &token,
-            model.as_deref(),
-            calibration_model.as_deref(),
-            mode,
-            Some((&state.transcripts, SCAN_AUDIT_KEY)),
-            None,
-        )
-        .await,
+    let mut report = crate::onboard::audit_repos(
+        &repos,
+        &selected,
+        &token,
+        model.as_deref(),
+        calibration_model.as_deref(),
+        mode,
+        Some((&state.transcripts, SCAN_AUDIT_KEY)),
+        None,
     )
+    .await;
+    report.excluded_mechanical_rules = excluded_mechanical;
+    Json(report)
 }
 
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
@@ -918,6 +954,8 @@ async fn onboard_audit_start(
         .filter(|r| !r.id.trim().is_empty())
         .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
         .collect();
+    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
+    let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
@@ -940,7 +978,7 @@ async fn onboard_audit_start(
             jobs.fail(&jid, "No repos to audit.");
             return;
         }
-        let report = crate::onboard::audit_repos(
+        let mut report = crate::onboard::audit_repos(
             &repos,
             &selected,
             &token,
@@ -951,6 +989,7 @@ async fn onboard_audit_start(
             Some((&jobs, &jid)),
         )
         .await;
+        report.excluded_mechanical_rules = excluded_mechanical;
         jobs.finish(&jid, report);
     });
 
