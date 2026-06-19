@@ -4164,22 +4164,6 @@ fn FindingsTable(
 }
 
 
-/// A rule can be armed WITHOUT the architect picking an alternative when it has no options,
-/// or its `default_option` resolves to a non-empty directive. Rules that DON'T satisfy this
-/// ("needs a choice") are never pre-selected: auto-selecting one would block audit/arm out of
-/// the box for a decision the architect never actively made. They still show (highlighted) and
-/// can be selected manually, at which point the gate asks for the choice.
-fn rule_has_usable_default(r: &ProposedRuleView) -> bool {
-    if r.options.is_empty() {
-        return true;
-    }
-    r.default_option
-        .as_ref()
-        .and_then(|o| r.options.iter().find(|x| &x.id == o))
-        .map(|x| !x.directive.is_empty())
-        .unwrap_or(false)
-}
-
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -4243,12 +4227,14 @@ fn ProposedRulesTable(
                 .filter(|(_, p)| ids.contains(&p.id))
                 .map(|(r, _)| *r)
                 .collect(),
-            // First view: pre-select the recommended rules, but NOT ones that still need an
-            // alternative chosen — auto-selecting those would block audit/arm immediately for
-            // a decision the architect never made. They stay visible (highlighted) to opt into.
+            // First view: pre-select all recommended rules — including ones that still need an
+            // alternative chosen. Those load SELECTED + unresolved, so they highlight yellow and
+            // gate audit/arm until the architect picks an alternative (or deselects them). The
+            // per-repo selection model means this no longer causes the old invisible cross-repo
+            // block.
             None => rows
                 .iter()
-                .filter(|(_, p)| p.recommended && rule_has_usable_default(p))
+                .filter(|(_, p)| p.recommended)
                 .map(|(r, _)| *r)
                 .collect(),
         }
@@ -5082,11 +5068,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 let ids: Vec<String> = report
                     .proposed_rules
                     .iter()
-                    .filter(|r| {
-                        r.recommended
-                            && rule_has_usable_default(r)
-                            && r.repos.iter().any(|rp| rp == repo)
-                    })
+                    .filter(|r| r.recommended && r.repos.iter().any(|rp| rp == repo))
                     .map(|r| r.id.clone())
                     .collect();
                 m.insert(repo.clone(), ids);
