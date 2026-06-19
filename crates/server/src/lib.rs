@@ -1255,22 +1255,31 @@ async fn set_repo_path(
 }
 
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.
-async fn onboard_draft_get(State(state): State<AppState>) -> Json<Option<serde_json::Value>> {
-    Json(state.draft.load())
+/// The active project's id, or `""` when none is active (drafts are keyed per project so
+/// opening another project never clobbers this one's in-progress onboarding).
+fn active_project_id(state: &AppState) -> String {
+    state.projects.active().map(|p| p.id).unwrap_or_default()
 }
 
-/// Save/replace the current onboarding draft (opaque blob; the UI owns its shape).
+async fn onboard_draft_get(State(state): State<AppState>) -> Json<Option<serde_json::Value>> {
+    let pid = active_project_id(&state);
+    Json(state.draft.load(&pid))
+}
+
+/// Save/replace the active project's onboarding draft (opaque blob; the UI owns its shape).
 async fn onboard_draft_save(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    state.draft.save(body);
+    let pid = active_project_id(&state);
+    state.draft.save(&pid, body);
     Json(serde_json::json!({ "ok": true }))
 }
 
-/// Drop the onboarding draft (completed, or starting fresh).
+/// Drop the active project's onboarding draft (completed, or starting fresh).
 async fn onboard_draft_clear(State(state): State<AppState>) -> Json<serde_json::Value> {
-    state.draft.clear();
+    let pid = active_project_id(&state);
+    state.draft.clear(&pid);
     Json(serde_json::json!({ "ok": true }))
 }
 

@@ -2086,6 +2086,10 @@ fn ProjectGate() -> Element {
     // An import that hit a name collision: holds (project name, raw JSON payload).
     // While set, a confirm modal is visible.
     let mut pending_import_overwrite = use_signal(|| Option::<(String, String)>::None);
+    // True when the just-opened project has an in-progress onboarding draft: show the
+    // "continue or start over" prompt before entering (the project is already active on
+    // the server, so the draft endpoints are scoped to it).
+    let mut resume_prompt = use_signal(|| false);
     let list = projects.read().clone().flatten().unwrap_or_default();
 
     rsx! {
@@ -2137,6 +2141,44 @@ fn ProjectGate() -> Element {
                                     "Overwrite"
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Resume-onboarding prompt — shown when an opened project has an in-progress draft.
+        if resume_prompt() {
+            div { class: "rule-modal-overlay",
+                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                    div { class: "rule-modal-head",
+                        span { class: "rule-modal-id", "Onboarding in progress" }
+                    }
+                    p { class: "rule-modal-detail",
+                        "This project has an onboarding you didn't finish. Continue where you \
+                         left off, or start over from a fresh scan?"
+                    }
+                    div { class: "onboard-leave-actions",
+                        button {
+                            class: "pg-btn-danger",
+                            onclick: move |_| {
+                                spawn(async move {
+                                    // Discard the saved draft, then enter for a fresh onboarding.
+                                    clear_onboarding_draft().await;
+                                    resume_prompt.set(false);
+                                    screen.set(CockpitScreen::InProject);
+                                });
+                            },
+                            "Start over"
+                        }
+                        button {
+                            class: "btn-run",
+                            onclick: move |_| {
+                                // Keep the draft; OnboardView restores it when opened.
+                                resume_prompt.set(false);
+                                screen.set(CockpitScreen::InProject);
+                            },
+                            "Continue where you left off"
                         }
                     }
                 }
@@ -2218,7 +2260,15 @@ fn ProjectGate() -> Element {
                                                     let id = id_open.clone();
                                                     spawn(async move {
                                                         if set_active_project(&id).await {
-                                                            screen.set(CockpitScreen::InProject);
+                                                            // If this project has an in-progress onboarding
+                                                            // draft (server scopes the draft to the now-active
+                                                            // project), ask before entering instead of silently
+                                                            // resuming. Otherwise go straight in.
+                                                            if load_onboarding_draft().await.is_some() {
+                                                                resume_prompt.set(true);
+                                                            } else {
+                                                                screen.set(CockpitScreen::InProject);
+                                                            }
                                                         }
                                                     });
                                                 },
