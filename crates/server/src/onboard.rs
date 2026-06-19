@@ -559,10 +559,18 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             "Leptos" => {
                 domains.insert("ui");
             }
-            // An ORM/DB layer implies both the ORM-specific rules and the SQL +
-            // migration-hygiene (ci-cd) rules.
-            "SeaORM" | "Diesel" | "sqlx" => {
+            // SeaORM is the only data layer that maps to the SeaORM-specific domain
+            // (`rust:seaorm` holds entity-pattern + SeaORM-raw-SQL rules). sqlx and Diesel
+            // are NOT SeaORM — proposing entity/SeaORM rules for a sqlx repo is a misfire
+            // (#52). They still get the generic SQL + migration-hygiene (ci-cd) rules, which
+            // apply to any SQL data layer (the raw-SQL-concat critical is the deterministic
+            // floor and fires regardless of domain).
+            "SeaORM" => {
                 domains.insert("rust:seaorm");
+                domains.insert("sql");
+                domains.insert("ci-cd");
+            }
+            "Diesel" | "sqlx" => {
                 domains.insert("sql");
                 domains.insert("ci-cd");
             }
@@ -1391,6 +1399,29 @@ mod tests {
         assert_eq!(files.len(), 1, "only the .rs file is auditable: {files:?}");
         assert_eq!(files[0].0, "src/main.rs");
         assert_eq!(files[0].1, "fn main() {}\n");
+    }
+
+    #[test]
+    fn domains_for_stack_does_not_map_sqlx_to_seaorm() {
+        // #52: a sqlx repo must NOT be proposed SeaORM/entity rules — only the generic SQL +
+        // migration-hygiene domains. SeaORM is the only data layer that maps to `rust:seaorm`.
+        let sqlx = RepoStack {
+            repo: "me/budget".into(),
+            languages: vec!["Rust".into()],
+            frameworks: vec!["sqlx".into()],
+        };
+        let d = domains_for_stack(&sqlx);
+        assert!(!d.contains(&"rust:seaorm".to_string()), "sqlx must not get SeaORM rules: {d:?}");
+        assert!(d.contains(&"sql".to_string()), "sqlx still gets generic SQL rules: {d:?}");
+        assert!(d.contains(&"ci-cd".to_string()), "sqlx still gets migration-hygiene rules: {d:?}");
+
+        // SeaORM DOES map to the SeaORM-specific domain.
+        let seaorm = RepoStack {
+            repo: "me/api".into(),
+            languages: vec!["Rust".into()],
+            frameworks: vec!["SeaORM".into()],
+        };
+        assert!(domains_for_stack(&seaorm).contains(&"rust:seaorm".to_string()));
     }
 
     #[test]
