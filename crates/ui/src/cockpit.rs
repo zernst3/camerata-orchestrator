@@ -4498,7 +4498,7 @@ fn ProposedRulesTable(
                         arming.set(false);
                     });
                 },
-                if arming() { "Applying…" } else { "Apply rules → local branch + push" }
+                if arming() { "Applying…" } else { "Add rules to repo(s) (branch + push)" }
             }
             button {
                 class: "btn-run",
@@ -4528,7 +4528,7 @@ fn ProposedRulesTable(
             }
         }
         p { class: "arm-note",
-            "Apply writes the governance files (AGENTS.md / CONVENTIONS.md / CI gate / baseline) onto a "
+            "Add rules to repo(s) writes the governance files (AGENTS.md / CONVENTIONS.md / CI gate / baseline) onto a "
             code { "camerata/onboard-governance" }
             " branch in each repo's local clone AND pushes it to origin — no PR is opened. Edit the working copy as much as you want, then Open governance PR when ready."
         }
@@ -4725,7 +4725,7 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
             ("Scan + propose per-repo rules", "Camerata detects each repo's stack and proposes a starter ruleset per repo — you review, you don't author from scratch."),
             ("Pick rules", "Select rules per repo (project-level rules apply to all). Click a rule to read its options and choose an alternative."),
             ("Audit (optional) + triage", "Optionally scan the code against your selected rules + the security floor, then triage findings (Unresolved / Ignored / Tech debt). Not required to finish onboarding."),
-            ("Apply", "Write the governance files onto a camerata/onboard-governance branch in each local clone and push it — no PR (Open governance PR separately). Applying marks the repo onboarded."),
+            ("Add rules to repo(s)", "Write the governance files onto a camerata/onboard-governance branch in each local clone and push it — no PR (Open governance PR separately). Applying marks the repo onboarded."),
             ("Wire mechanical rules into CI", "The final step: add the selected mechanical rules to each repo's existing CI as enforced lint gates."),
         ],
         OnboardPath::Greenfield => &[
