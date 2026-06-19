@@ -4979,7 +4979,9 @@ enum RepoDetect {
     /// The user cancelled the dialog.
     Cancelled,
     /// Derived `owner/repo` AND the local folder it lives in (recorded as the repo's path).
-    Found { repo: String, path: String },
+    /// `onboarded_in` names the project that already onboarded this repo, if any (#50): onboarding
+    /// is one-time, so the caller blocks a re-onboard and routes the user to the workspace.
+    Found { repo: String, path: String, onboarded_in: Option<String> },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
 }
@@ -5010,7 +5012,14 @@ async fn detect_local_repo() -> RepoDetect {
     };
     if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         match v.get("repo").and_then(|r| r.as_str()) {
-            Some(r) => RepoDetect::Found { repo: r.to_string(), path },
+            Some(r) => RepoDetect::Found {
+                repo: r.to_string(),
+                path,
+                onboarded_in: v
+                    .get("onboarded_project")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string()),
+            },
             None => RepoDetect::Failed("no repo in the response".to_string()),
         }
     } else {
@@ -5153,7 +5162,11 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         spawn(async move {
                             match detect_local_repo().await {
                                 RepoDetect::Cancelled => {}
-                                RepoDetect::Found { repo: found, path: folder } => {
+                                // #50: block re-onboarding a repo that's already onboarded.
+                                RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
+                                }
+                                RepoDetect::Found { repo: found, path: folder, .. } => {
                                     // Record the local path FIRST so the repo is immediately a
                                     // workspace repo (scan/audit/apply read it locally), then add
                                     // it to the list.

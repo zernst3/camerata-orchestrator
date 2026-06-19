@@ -1039,9 +1039,28 @@ struct DetectRepoReq {
 
 /// Derive `owner/repo` from a LOCAL git checkout's origin remote — so the UI can let a
 /// developer navigate to a repo folder instead of typing the identifier.
-async fn detect_repo(Json(req): Json<DetectRepoReq>) -> Json<serde_json::Value> {
+async fn detect_repo(
+    State(state): State<AppState>,
+    Json(req): Json<DetectRepoReq>,
+) -> Json<serde_json::Value> {
     match crate::workspace::detect_remote_repo(std::path::Path::new(&req.path)).await {
-        Ok(repo) => Json(serde_json::json!({ "ok": true, "repo": repo })),
+        Ok(repo) => {
+            // #50: onboarding is one-time per repo. Report whether this repo is ALREADY onboarded
+            // (in any project's onboarded list) so the UI can block a re-onboard and route the
+            // user to the workspace instead of producing a duplicate set of issues + branch.
+            let onboarded_in = state
+                .projects
+                .list()
+                .into_iter()
+                .find(|p| p.onboarded.iter().any(|r| r == &repo))
+                .map(|p| p.name);
+            Json(serde_json::json!({
+                "ok": true,
+                "repo": repo,
+                "onboarded": onboarded_in.is_some(),
+                "onboarded_project": onboarded_in,
+            }))
+        }
         Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
     }
 }
