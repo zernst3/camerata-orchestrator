@@ -258,6 +258,20 @@ rules it has not implemented, and adding enforcement is purely additive.
 
 The brownfield onboarding pipeline lives in two files in `crates/server/src/`:
 
+### File source — local-first (never GitHub)
+
+Onboarding reads code from the repo's **local working tree on disk**, never from GitHub.
+`read_local_repo_files(dir)` (`onboard.rs`) walks the directory, pruning noise dirs during
+descent (`.git`, `node_modules`, `target`, build/cache/generated dirs, lockfiles, minified/codegen
+files) and applying the code-extension filter, per-file size cap, and `HARD_CAP_FILES` safety net —
+returning the same `ExtractedRepo { files, truncated, excluded_noise }` shape the whole pipeline
+consumes. (The old GitHub-tarball reader was removed.) The HTTP handlers resolve each repo's local
+dir with `resolve_local_sources(state, repos)` → `workspace::resolve_repo_dir` (per-repo path
+override, else `<workspace_root>/<owner>/<repo>`); a repo with no local clone surfaces a
+"browse to the repo's folder" note instead of being scanned. `scan_repos` and `audit_repos` take the
+resolved `(spec, dir)` sources and need **no GitHub token** — the token is only used later for
+arm-push and PR.
+
 ### `onboard.rs` — deterministic scan
 
 `audit_files(files, rules)` is the deterministic floor. It runs the gate's own

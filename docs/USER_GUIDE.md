@@ -69,16 +69,25 @@ Open **Onboard repos**. The flow: **scan → pick rules → apply → (optional 
 → onboarded.** Onboarding state **auto-saves** continuously, so you can quit and reopen without
 re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
-1. **Point at the repo(s)** — add them to the project (one `owner/repo` per line, or browse to a
-   local folder).
-2. **Scan + propose per-repo rules** — Camerata downloads each repo and detects its stack: languages
-   from extensions, frameworks from manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi,
-   CloudFormation) and **CI/CD** (GitHub Actions, GitLab CI, CircleCI, Azure Pipelines, Travis,
-   Bitbucket, Drone, Jenkins). It proposes a starter ruleset **per repo**.
+1. **Point at the repo(s)** — **browse to each repo's local folder.** Onboarding is **local-first**:
+   it reads the code on disk, so a repo must already be cloned locally. Camerata derives the
+   `owner/repo` from the folder's git origin (used later only for push / PR) and **records the local
+   path**, which makes it a workspace repo immediately — "add a repo to onboard" and "add a repo to
+   the workspace" are the same act. **No GitHub connection is needed to onboard**; a token is only
+   used later, to push the governance branch and open a PR.
+2. **Scan + propose per-repo rules** — Camerata reads each repo's **local working tree** (it never
+   downloads code from GitHub) and detects its stack: languages from extensions, frameworks from
+   manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and **CI/CD** (GitHub
+   Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone, Jenkins). Build/dependency/
+   generated dirs (`node_modules`, `target`, `.git`, lockfiles, …) are pruned. It proposes a starter
+   ruleset **per repo**.
 3. **Pick rules** — each repo has its **own** recommended-rule table; a repo single-select switches
    which repo you're editing. Selection is **per repo**: a rule ticked for repo A is bound to A only.
    **Project-level rules** apply to every repo. Click any rule to read its decision question, the
-   options, the default, and each option's rationale, and to choose an alternative.
+   options, the default, and each option's rationale, and to choose an alternative. **Option choices
+   are also per repo** — adopting an alternative for a rule while viewing one repo does not change
+   another repo's choice. A recommended rule that still needs an alternative chosen is **highlighted
+   amber and blocks Audit / Add-rules** until you pick one (or deselect it).
 4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
    is scanned only against **its own selected rules** plus the always-on **deterministic security
    floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
@@ -103,11 +112,14 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    **Note:** **mechanical** rules (CI/runtime/DB-context checks like a query-plan/index audit) are NOT
    run by this code scan — they can't be judged from a static digest, so they're enforced in CI instead
    (step 6). The scan header shows how many were excluded for that reason.
-5. **Apply** — writes the governance files onto a `camerata/onboard-governance` branch in each repo's
-   **local clone AND pushes that branch to origin — no pull request is opened.** The files: `AGENTS.md`
-   (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for mechanical rules),
-   and `.camerata/baseline.json` (accepted pre-existing debt). Edit the working copy freely, then click
-   **Open governance PR** (a separate button) when ready. **Applying marks the repo onboarded.**
+5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
+   in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
+   repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
+   files: `AGENTS.md` (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for
+   mechanical rules), and `.camerata/baseline.json` (accepted pre-existing debt). The branch is
+   Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit the working
+   copy freely, then click **Open governance PR** (a separate, optional button) when ready —
+   **Camerata never opens a PR automatically.** **Applying marks the repo onboarded.**
 6. **Wire mechanical rules into CI** — the final step: file a **story (GitHub issue)** per repo to add
    the selected mechanical rules to that repo's existing CI as enforced lint gates (checks what's
    already enforced, adds the rest). Like resolve-now, onboarding *writes the story*; the dev layer
@@ -187,7 +199,9 @@ The floating chat bubble has two modes:
 
 ## The whole loop, in one line
 
-**Connect GitHub + Claude → create/open a project → onboard each repo (scan → pick per-repo rules →
-Apply local branch+push → optionally audit + triage + wire CI) → manage the ruleset in the Rules view →
-adopt stories and run governed work in Governed Development → review → sign off.** Export/import a
-project to move it between machines; resolve local repo paths on the receiving side.
+**Create/open a project → onboard each repo (browse to its local folder → scan the local code → pick
+per-repo rules → Add rules to repo(s): local branch+push → optionally audit + triage + wire CI) →
+manage the ruleset in the Rules view → adopt stories and run governed work in Governed Development →
+review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
+push/PR and the AI audit + governed dev. Export/import a project to move it between machines; resolve
+local repo paths on the receiving side.
