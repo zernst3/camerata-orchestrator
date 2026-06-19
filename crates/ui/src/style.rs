@@ -2055,4 +2055,83 @@ html, body {
   line-height: 1.6 !important;
   border-radius: var(--r-md) !important;
 }
+
+/* ---- escalation (blocked routine) styles --------------------------------- */
+/* Pill that appears on a routine row when the routine has an open escalation.
+   Matches .routine-needs-setup's shape but reads as attention-state rather than
+   a neutral warning: uses the full accent so it stands out in the table. */
+.routine-blocked {
+  display: inline-block;
+  margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 800; letter-spacing: .04em;
+  text-transform: uppercase;
+  background: var(--accent); color: #fff;
+  border: 1px solid var(--accent-ink);
+  cursor: pointer;
+  transition: background .15s var(--ease);
+}
+.routine-blocked:hover { background: var(--accent-ink); }
+
+/* The inline review panel that expands under a blocked routine row.
+   Mirrors .routine-row.editing's accent-wash background so the pattern reads
+   as a consistent "active / expanded" state in the table. */
+.escalation-panel {
+  background: var(--accent-wash);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  padding: 16px 20px 20px;
+  display: flex; flex-direction: column; gap: 12px;
+  animation: slideIn .22s var(--ease) both;
+}
+.escalation-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.escalation-panel-name {
+  font-size: 13.5px; font-weight: 700; color: var(--ink); letter-spacing: -.01em;
+}
+.escalation-panel-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; color: var(--ink-faint);
+}
+.escalation-reason {
+  font-size: 12.5px; color: var(--ink-soft); line-height: 1.5;
+}
+/* The key question the architect needs to answer: deserves visual emphasis. */
+.escalation-stopped-for {
+  font-size: 14px; font-weight: 600; color: var(--ink); line-height: 1.5;
+  background: var(--surface); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  padding: 10px 14px;
+}
+.escalation-suggestions-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 6px;
+}
+.escalation-suggestions { display: flex; flex-direction: column; gap: 6px; }
+/* Each suggestion is a click-to-prefill affordance matching .clarify-suggestion. */
+.escalation-suggestion {
+  text-align: left; border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font-size: 12.5px; line-height: 1.4; padding: 8px 11px; border-radius: 8px; cursor: pointer;
+  transition: border-color .15s var(--ease), background .15s var(--ease);
+}
+.escalation-suggestion:hover { border-color: var(--accent); background: var(--accent-wash); }
+.escalation-answer-row {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.escalation-answer-input {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 11px;
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+  resize: vertical; line-height: 1.5;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+.escalation-answer-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.escalation-submit-row { display: flex; align-items: center; gap: 10px; }
+/* Translated directive shown after a successful submit: calm positive feedback. */
+.escalation-directive {
+  margin-top: 6px; font-size: 12.5px; color: #2f8f5b; font-weight: 600;
+  background: #f0f8f3; border: 1px solid #c5e3ce; border-radius: var(--r-sm);
+  padding: 8px 12px; line-height: 1.5;
+  animation: slideIn .3s var(--ease) both;
+}
 "#;

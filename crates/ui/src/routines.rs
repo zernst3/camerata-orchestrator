@@ -130,11 +130,67 @@ struct RoutineRunSummaryView {
     allows: usize,
 }
 
+/// An escalation as the BFF reports it (`/api/escalations`). The `?`-marked
+/// fields are optional in the JSON and default to `None` so older BFF builds
+/// remain compatible.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub struct EscalationView {
+    pub id: String,
+    pub routine_id: String,
+    pub routine_name: String,
+    /// Why the routine stopped and raised this escalation.
+    pub reason: String,
+    /// The specific decision that is blocking the routine: what the architect
+    /// needs to resolve before the routine can continue.
+    pub stopped_for: String,
+    /// AI-generated answer suggestions the architect can adopt verbatim or
+    /// edit before submitting.
+    #[serde(default)]
+    pub suggestions: Vec<String>,
+    #[serde(default)]
+    pub raw_context: String,
+    /// "open" | "resolved"
+    pub status: String,
+    #[serde(default)]
+    pub human_answer: Option<String>,
+    /// The directive the server translated the human answer into, returned on
+    /// the POST /answer response. Displayed briefly after submit.
+    #[serde(default)]
+    pub translated_directive: Option<String>,
+    pub created: String,
+    #[serde(default)]
+    pub resolved: Option<String>,
+}
+
 async fn fetch_routines() -> Option<Vec<RoutineView>> {
     reqwest::get(format!("{}/api/routines", crate::BFF_URL))
         .await
         .ok()?
         .json::<Vec<RoutineView>>()
+        .await
+        .ok()
+}
+
+/// Fetch all currently-open escalations so the dashboard can mark blocked rows.
+async fn fetch_open_escalations() -> Option<Vec<EscalationView>> {
+    reqwest::get(format!("{}/api/escalations?open=true", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<EscalationView>>()
+        .await
+        .ok()
+}
+
+/// Submit the architect's answer to an escalation. Returns the resolved
+/// escalation (including the server's `translated_directive`) on success.
+async fn answer_escalation(id: &str, answer: &str) -> Option<EscalationView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/escalations/{}/answer", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "answer": answer }))
+        .send()
+        .await
+        .ok()?
+        .json::<EscalationView>()
         .await
         .ok()
 }
@@ -252,6 +308,21 @@ pub fn RoutineDashboard() -> Element {
         let _dep = refresh();
         async move { fetch_routines().await }
     });
+    // Open escalations are fetched on the same `refresh` tick so blocked
+    // badges appear / clear in lockstep with routine state changes.
+    let escalations_res = use_resource(move || {
+        let _dep = refresh();
+        async move { fetch_open_escalations().await }
+    });
+    // Which escalation's review panel is currently expanded (by escalation id).
+    let mut reviewing = use_signal(|| Option::<String>::None);
+    // Per-escalation answer text. Keyed by escalation id; we store a flat
+    // signal and use the reviewing id to associate it. For simplicity a single
+    // signal covers the one expanded panel at a time.
+    let mut answer_draft = use_signal(String::new);
+    // After a successful submit the server returns a translated_directive. We
+    // show it briefly before the panel closes on refresh.
+    let mut last_directive = use_signal(|| Option::<String>::None);
 
     let mut name = use_signal(String::new);
     // Structured schedule builder. These drive a typical frequency picker (one-off /
@@ -278,6 +349,9 @@ pub fn RoutineDashboard() -> Element {
     // genuinely none" — so an empty list shows its own state, not a stuck "Loading…".
     let loading = routines_res.read().is_none();
     let routines = routines_res.read().clone().flatten().unwrap_or_default();
+    // Open escalations: keyed by routine_id for O(1) lookup when rendering rows.
+    let escalations: Vec<EscalationView> =
+        escalations_res.read().clone().flatten().unwrap_or_default();
 
     rsx! {
         div { class: "page page-wide routines-page",
@@ -310,16 +384,51 @@ pub fn RoutineDashboard() -> Element {
                         let last = r.last_run.clone();
                         let is_pending_delete = pending_delete().as_deref() == Some(r.id.as_str());
                         let is_editing_row = editing().as_deref() == Some(r.id.as_str());
+                        // Find the open escalation for this specific routine, if any.
+                        let open_esc: Option<EscalationView> = escalations
+                            .iter()
+                            .find(|e| e.routine_id == r.id && e.status == "open")
+                            .cloned();
+                        let is_blocked = open_esc.is_some();
+                        let is_reviewing_row = open_esc
+                            .as_ref()
+                            .map(|e| reviewing().as_deref() == Some(e.id.as_str()))
+                            .unwrap_or(false);
                         let row_cls = match (enabled, is_editing_row) {
                             (_, true) => "routine-row editing",
                             (true, _) => "routine-row",
                             (false, _) => "routine-row off",
                         };
                         rsx! {
+                            // Row + optional review panel wrapped in a fragment so the
+                            // panel can sit outside the grid as a full-width sibling.
                             div { class: "{row_cls}",
                                 div { class: "routine-name",
                                     span { class: "routine-title", "{r.name}" }
                                     span { class: "routine-prompt", "{r.intent}" }
+                                    // Blocked pill: clicking toggles the inline review panel.
+                                    if is_blocked {
+                                        {
+                                            let esc_id = open_esc.as_ref().map(|e| e.id.clone()).unwrap_or_default();
+                                            let esc_id_click = esc_id.clone();
+                                            rsx! {
+                                                button {
+                                                    class: "routine-blocked",
+                                                    onclick: move |_| {
+                                                        // Toggle the panel for this escalation.
+                                                        if reviewing().as_deref() == Some(esc_id_click.as_str()) {
+                                                            reviewing.set(None);
+                                                        } else {
+                                                            reviewing.set(Some(esc_id_click.clone()));
+                                                            answer_draft.set(String::new());
+                                                            last_directive.set(None);
+                                                        }
+                                                    },
+                                                    "blocked - needs review"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 span { class: "routine-sched",
                                     "{r.schedule}"
@@ -419,6 +528,101 @@ pub fn RoutineDashboard() -> Element {
                                             }
                                         },
                                         if is_pending_delete { "Confirm?" } else { "Delete" }
+                                    }
+                                }
+                            }
+                            // Inline review panel: expands below the row when the
+                            // architect clicks "blocked - needs review". Sits outside the
+                            // grid row so it can span the full table width.
+                            if let Some(esc) = open_esc.clone().filter(|_| is_reviewing_row) {
+                                {
+                                    let esc_id_submit = esc.id.clone();
+                                    let esc_id_close = esc.id.clone();
+                                    rsx! {
+                                        div { class: "escalation-panel",
+                                            div { class: "escalation-panel-head",
+                                                span { class: "escalation-panel-name", "{esc.routine_name}" }
+                                                span { class: "escalation-panel-id", "{esc.id}" }
+                                            }
+                                            // Why the routine stopped.
+                                            p { class: "escalation-reason", "{esc.reason}" }
+                                            // The specific decision needed: most prominent field.
+                                            div { class: "escalation-stopped-for", "{esc.stopped_for}" }
+                                            // AI suggestions: each click prefills the answer textarea.
+                                            if !esc.suggestions.is_empty() {
+                                                div {
+                                                    p { class: "escalation-suggestions-label", "Suggested answers" }
+                                                    div { class: "escalation-suggestions",
+                                                        for suggestion in esc.suggestions.iter() {
+                                                            {
+                                                                let text = suggestion.clone();
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "escalation-suggestion",
+                                                                        onclick: move |_| {
+                                                                            answer_draft.set(text.clone());
+                                                                        },
+                                                                        "{suggestion}"
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Answer composer + submit.
+                                            div { class: "escalation-answer-row",
+                                                textarea {
+                                                    class: "escalation-answer-input",
+                                                    rows: "3",
+                                                    placeholder: "Your answer or directive...",
+                                                    value: "{answer_draft}",
+                                                    oninput: move |e| answer_draft.set(e.value()),
+                                                }
+                                                div { class: "escalation-submit-row",
+                                                    button {
+                                                        class: "btn-run",
+                                                        disabled: answer_draft().trim().is_empty(),
+                                                        onclick: move |_| {
+                                                            let id = esc_id_submit.clone();
+                                                            let text = answer_draft();
+                                                            if text.trim().is_empty() { return; }
+                                                            spawn(async move {
+                                                                if let Some(resolved) = answer_escalation(&id, &text).await {
+                                                                    // Show the translated directive briefly, then
+                                                                    // refresh both routines and escalations so the
+                                                                    // badge clears and the panel closes.
+                                                                    if let Some(directive) = resolved.translated_directive {
+                                                                        last_directive.set(Some(directive));
+                                                                    }
+                                                                    reviewing.set(None);
+                                                                    answer_draft.set(String::new());
+                                                                    refresh += 1;
+                                                                }
+                                                            });
+                                                        },
+                                                        "Submit answer"
+                                                    }
+                                                    button {
+                                                        class: "btn-restart",
+                                                        onclick: move |_| {
+                                                            // Dismiss the panel without answering.
+                                                            if reviewing().as_deref() == Some(esc_id_close.as_str()) {
+                                                                reviewing.set(None);
+                                                                answer_draft.set(String::new());
+                                                                last_directive.set(None);
+                                                            }
+                                                        },
+                                                        "Dismiss"
+                                                    }
+                                                }
+                                                // Show the translated directive returned by the server after
+                                                // the most recent submit (clears on next panel open).
+                                                if let Some(directive) = last_directive() {
+                                                    p { class: "escalation-directive", "Directive: {directive}" }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
