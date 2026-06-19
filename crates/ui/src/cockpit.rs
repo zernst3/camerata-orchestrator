@@ -4164,6 +4164,15 @@ fn FindingsTable(
 }
 
 
+/// Composite key for the per-repo "chosen alternative" map. Option choices are INDEPENDENT
+/// per repo: picking an alternative for a rule while viewing one repo must not change another
+/// repo's choice for the same rule. The NUL byte separates the parts (it can't appear in an
+/// `owner/repo` or a rule id), and the key stays a plain string so the map still serializes to
+/// JSON for the auto-saved draft.
+fn chosen_key(repo: &str, rule_id: &str) -> String {
+    format!("{repo}\u{0}{rule_id}")
+}
+
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -4186,6 +4195,9 @@ fn ProposedRulesTable(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    // The repo whose table is in view — option choices (`chosen`) are keyed per repo, so the
+    // highlight + needs-a-choice check read THIS repo's picks.
+    let viewed_repo = use_context::<Signal<String>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
     // Full cross-repo rule lookup (by rule id) for building audit/arm requests that span
     // every repo's saved selection, not just the one this table is currently showing.
@@ -4323,13 +4335,17 @@ fn ProposedRulesTable(
     // enforced. Recomputed each render (reads `chosen`), so picking an alternative clears it.
     let needs_choice: std::collections::HashSet<String> = {
         let chosen_map = chosen.read();
+        let cur_repo = viewed_repo();
         id_map
             .values()
             .filter(|r| {
                 if r.options.is_empty() {
                     return false;
                 }
-                let oid = chosen_map.get(&r.id).cloned().or_else(|| r.default_option.clone());
+                let oid = chosen_map
+                    .get(&chosen_key(&cur_repo, &r.id))
+                    .cloned()
+                    .or_else(|| r.default_option.clone());
                 oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
                     .filter(|s| !s.is_empty())
                     .is_none()
@@ -4421,11 +4437,12 @@ fn ProposedRulesTable(
                     // covers all repos, each against its own chosen rules. The current repo's
                     // live table selection is authoritative for it (the write-back effect may
                     // not have flushed yet); other repos come from the lifted map.
-                    let resolve_directive = |r: &ProposedRuleView| -> String {
+                    // Resolve a rule's adopted directive for a SPECIFIC repo (choices are per-repo).
+                    let resolve_directive = |repo: &str, r: &ProposedRuleView| -> String {
                         if r.options.is_empty() {
                             r.title.clone()
                         } else {
-                            let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                            let oid = chosen.read().get(&chosen_key(repo, &r.id)).cloned().or_else(|| r.default_option.clone());
                             oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| r.title.clone())
@@ -4437,18 +4454,20 @@ fn ProposedRulesTable(
                         // Single-repo / non-split: audit this table's picks, each carrying
                         // the rule's own repo binding (a rule bound to every repo = project-level).
                         live_ids.iter().filter_map(|id| all_by_id_audit.get(id)).map(|r| {
-                            SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(r), repos: r.repos.clone() }
+                            let repo = r.repos.first().cloned().unwrap_or_default();
+                            SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(&repo, r), repos: r.repos.clone() }
                         }).collect()
                     } else {
                         // Per-repo: each (repo, selected rule) becomes one entry scoped to that
-                        // repo. The backend audits each repo against only the rules bound to it.
+                        // repo, with THAT repo's chosen directive. The backend audits each repo
+                        // against only the rules bound to it.
                         let mut map = repo_selection.peek().clone();
                         map.insert(view_repo_audit.clone(), live_ids);
                         let mut out = Vec::new();
                         for (repo, ids) in &map {
                             for id in ids {
                                 if let Some(r) = all_by_id_audit.get(id) {
-                                    out.push(SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(r), repos: vec![repo.clone()] });
+                                    out.push(SelectedAuditRule { id: r.id.clone(), directive: resolve_directive(repo, r), repos: vec![repo.clone()] });
                                 }
                             }
                         }
@@ -4513,30 +4532,36 @@ fn ProposedRulesTable(
                     let mut unresolved = Vec::new();
                     for (id, selected_repos) in &rule_repos {
                         let Some(r) = all_by_id.get(id) else { continue; };
-                        let (directive, option) = if r.options.is_empty() {
-                            (r.title.clone(), None)
-                        } else {
-                            let oid = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
-                            match oid.clone().and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone())) {
-                                Some(d) if !d.is_empty() => (d, oid),
-                                _ => { unresolved.push(r.id.clone()); continue; }
-                            }
-                        };
                         // Architect's explicit placement override wins; otherwise arm to the
                         // repos that selected this rule. A rule routed to zero repos is skipped.
-                        let repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| selected_repos.clone());
-                        if repos.is_empty() { continue; }
-                        arm_reqs.push(ArmRuleReq {
-                            id: r.id.clone(),
-                            title: r.title.clone(),
-                            directive,
-                            option,
-                            enforcement: r.enforcement.clone(),
-                            scope: r.scope.clone(),
-                            repos,
-                        });
+                        let target_repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| selected_repos.clone());
+                        // One arm request PER REPO, each carrying THAT repo's chosen directive —
+                        // option choices are per-repo, so a rule armed to two repos can adopt a
+                        // different alternative in each.
+                        for repo in &target_repos {
+                            let (directive, option) = if r.options.is_empty() {
+                                (r.title.clone(), None)
+                            } else {
+                                let oid = chosen.read().get(&chosen_key(repo, &r.id)).cloned().or_else(|| r.default_option.clone());
+                                match oid.clone().and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone())) {
+                                    Some(d) if !d.is_empty() => (d, oid),
+                                    _ => { unresolved.push(format!("{} ({repo})", r.id)); continue; }
+                                }
+                            };
+                            arm_reqs.push(ArmRuleReq {
+                                id: r.id.clone(),
+                                title: r.title.clone(),
+                                directive,
+                                option,
+                                enforcement: r.enforcement.clone(),
+                                scope: r.scope.clone(),
+                                repos: vec![repo.clone()],
+                            });
+                        }
                     }
                     if !unresolved.is_empty() {
+                        unresolved.sort();
+                        unresolved.dedup();
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Choose an alternative first for: {}", unresolved.join(", ")));
                         return;
                     }
@@ -4613,6 +4638,8 @@ fn ProposedRulesTable(
 fn RuleDetailModal() -> Element {
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    // The repo whose table is in view — option choices are recorded per repo.
+    let viewed_repo = use_context::<Signal<String>>();
     let Some(r) = detail_rule() else {
         return rsx! {};
     };
@@ -4658,9 +4685,9 @@ fn RuleDetailModal() -> Element {
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {
                                 {
-                                    let rid = r.id.clone();
                                     let oid = o.id.clone();
-                                    let cur = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+                                    let key = chosen_key(&viewed_repo(), &r.id);
+                                    let cur = chosen.read().get(&key).cloned().or_else(|| r.default_option.clone());
                                     let picked = cur.as_deref() == Some(o.id.as_str());
                                     let is_default = r.default_option.as_deref() == Some(o.id.as_str());
                                     let cls = if picked { "rule-opt on" } else { "rule-opt" };
@@ -4669,7 +4696,7 @@ fn RuleDetailModal() -> Element {
                                         button {
                                             key: "{o.id}",
                                             class: "{cls}",
-                                            onclick: move |_| { chosen.write().insert(rid.clone(), oid.clone()); },
+                                            onclick: move |_| { chosen.write().insert(key.clone(), oid.clone()); },
                                             div { class: "rule-opt-head",
                                                 span { class: "rule-opt-label", "{o.label}" }
                                                 if is_default {
@@ -5077,8 +5104,11 @@ fn ScanResults(report: ScanReportView) -> Element {
         m
     };
     let repo_selection = use_signal(|| repo_seed);
-    // Which repo's rule table is in view. Defaults to the first scanned repo.
-    let mut viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
+    // Which repo's rule table is in view. Defaults to the first scanned repo. Provided as
+    // context so the rule-detail modal + the table key the per-repo `chosen` map by it.
+    let viewed_repo = use_signal(|| report.repos.first().cloned().unwrap_or_default());
+    use_context_provider(|| viewed_repo);
+    let mut viewed_repo = viewed_repo;
     let multi_repo = report.repos.len() > 1;
     let audited = audit.read().clone();
     let findings: Vec<FindingView> = audited
@@ -5095,13 +5125,16 @@ fn ScanResults(report: ScanReportView) -> Element {
     let enforced = findings.iter().filter(|f| f.status == "active").count();
     let suppressed = findings.len().saturating_sub(enforced);
 
-    // The architect's per-rule alternative choices (rule id -> option id), seeded
-    // with each rule's default. Shared so the findings hover reads the choice.
+    // The architect's PER-REPO alternative choices, keyed `chosen_key(repo, rule_id)` ->
+    // option id. Per-repo so picking an alternative for a rule in one repo doesn't change
+    // another repo's choice. Seeded with each rule's default for every scanned repo.
     let chosen = use_signal(|| {
         let mut m = std::collections::HashMap::<String, String>::new();
-        for r in &report.proposed_rules {
-            if let Some(d) = &r.default_option {
-                m.insert(r.id.clone(), d.clone());
+        for repo in &report.repos {
+            for r in &report.proposed_rules {
+                if let Some(d) = &r.default_option {
+                    m.insert(chosen_key(repo, &r.id), d.clone());
+                }
             }
         }
         m
@@ -5135,7 +5168,11 @@ fn ScanResults(report: ScanReportView) -> Element {
         .proposed_rules
         .iter()
         .map(|r| {
-            let picked = chosen.read().get(&r.id).cloned().or_else(|| r.default_option.clone());
+            let picked = chosen
+                .read()
+                .get(&chosen_key(&viewed_repo(), &r.id))
+                .cloned()
+                .or_else(|| r.default_option.clone());
             let desc = picked
                 .and_then(|oid| r.options.iter().find(|o| o.id == oid).map(|o| o.directive.clone()))
                 .filter(|s| !s.is_empty())
