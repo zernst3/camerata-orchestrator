@@ -4214,6 +4214,9 @@ fn FindingsTable(
             // Pin the column header to the top of the table's scroll viewport so it
             // stays visible while scrolling a long findings list.
             sticky_header: true,
+            // 0.2.3: an expand-all / collapse-all control in the grouped header (the
+            // findings table groups by rule -> file), so a long audit collapses at once.
+            group_expand_toggle: true,
             row_cell_renderers: row_renderers,
             // Critical (security-floor) rows get a red full-row highlight via the 0.2.3
             // conditional row-styling hook — replaces the old per-cell stripe renderer.
