@@ -247,9 +247,11 @@ pub fn rules_by_repo(rules: &[ArmRule]) -> std::collections::BTreeMap<String, Ve
 /// The branch Camerata opens its governance PR from.
 pub const ARM_BRANCH: &str = "camerata/onboard-governance";
 
-/// Install `files` into `owner/repo` on a governance branch and open a PR. Returns
-/// the PR URL. Needs Contents + PR write on the token. Tolerant of a pre-existing
-/// branch (updates the files) and a pre-existing PR (returns it).
+/// Install `files` into `owner/repo` on the governance branch (creating it from the default
+/// branch if needed) via the GitHub Contents API, and return the BRANCH's web URL. Does NOT
+/// open a PR — Camerata never opens a PR automatically; the architect opens it explicitly with
+/// the "Open governance PR" button. Needs Contents write on the token. Tolerant of a
+/// pre-existing branch (updates the files in place).
 pub async fn arm_repo(
     owner: &str,
     repo: &str,
@@ -323,34 +325,10 @@ pub async fn arm_repo(
         }
     }
 
-    // 4. Open the PR (tolerate "already exists").
-    let pr_body = serde_json::json!({
-        "title": "Camerata: install governance",
-        "head": ARM_BRANCH,
-        "base": base,
-        "body": "Installs the approved Camerata ruleset: AGENTS.md / CONVENTIONS.md \
-                 (the adopted directives) and .camerata/rules.json (the gate config). \
-                 Generated from the brownfield onboarding selection.",
-    });
-    let pr = transport
-        .post(&format!("{api}/repos/{owner}/{repo}/pulls"), &pr_body.to_string())
-        .await?;
-    if (200..300).contains(&pr.status) {
-        let v: serde_json::Value = serde_json::from_str(&pr.body)?;
-        return Ok(v["html_url"].as_str().unwrap_or_default().to_string());
-    }
-    // A PR for this head may already exist — find and return it.
-    if pr.status == 422 {
-        let list = transport
-            .get(&format!("{api}/repos/{owner}/{repo}/pulls?head={owner}:{ARM_BRANCH}&state=open"))
-            .await?;
-        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str(&list.body) {
-            if let Some(first) = arr.first() {
-                return Ok(first["html_url"].as_str().unwrap_or_default().to_string());
-            }
-        }
-    }
-    anyhow::bail!("open PR: HTTP {} {}", pr.status, pr.body)
+    // Camerata NEVER opens a PR automatically (only the explicit "Open governance PR" button
+    // does, via `open_branch_pr`). This path stops at the pushed branch and returns its web URL
+    // so the UI can link to it; the architect decides whether/when to open the PR.
+    Ok(format!("https://github.com/{owner}/{repo}/tree/{ARM_BRANCH}"))
 }
 
 #[cfg(test)]
