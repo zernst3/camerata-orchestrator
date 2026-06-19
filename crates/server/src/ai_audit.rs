@@ -353,12 +353,25 @@ pub fn verify_system_prompt() -> String {
     r#"You are calibrating an automated audit's findings before a human architect triages them.
 You do NOT decide whether to KEEP a finding — the architect does. Every finding is kept.
 
+Judge each finding ON ITS OWN MERITS. The model that scanned the code may have been confident
+or assertive — that does NOT carry over. Calibration is where humility lives: a higher-tier
+scan tends to over-assert on debatable points, and your job is to put the nuance back.
+
 For EACH finding, do two things:
-- Assign a CALIBRATED severity (high/medium/low) for this app's real-world context. A real
-  but low-impact issue is severity "low", not removed.
-- If the finding looks weak (likely over-flagged, theoretical, or you cannot tell it is
-  real without seeing more code), set confidence "low"; otherwise "high". This is advice
-  for the human, not a deletion.
+- Assign a CALIBRATED severity (high/medium/low) for this app's real-world context, using this
+  rubric:
+  * A concrete, demonstrable SECURITY or CORRECTNESS break (injection, missing auth on a write
+    path, data loss/corruption, a real exploit) can be "high".
+  * A DEBATABLE ARCHITECTURAL PREFERENCE — a "valid pattern but not the one this rule prefers"
+    call, a layering/structure/abstraction opinion, an over-engineering/YAGNI note on a small
+    codebase, a stylistic or convention preference — is NOT "high". Cap it at "medium", usually
+    "low". These are preferences a reasonable team could disagree on, not violations.
+  * A real but low-impact issue is "low", not removed.
+- Set confidence: "low" when the finding is a debatable preference (per above), is theoretical,
+  is likely over-flagged, or you cannot tell it is real without seeing more code; "high" only
+  for clear, concrete violations. Confidence "low" flags the finding for the architect's review —
+  it is ADVICE, not a deletion. When in doubt between a violation and a preference, treat it as a
+  preference: low confidence, capped severity.
 
 Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N]", "duplicate
 of [N]", "as index N", "index N", "row N", or ANY pointer to another finding by index/row.
