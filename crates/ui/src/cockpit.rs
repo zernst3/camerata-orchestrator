@@ -3617,6 +3617,23 @@ fn split_needs_review(detail: &str) -> (String, Option<String>) {
     (detail.to_string(), None)
 }
 
+/// The deterministic security-floor rule ids — the gate's content arms. A finding carrying one
+/// of these is ENFORCED: pure regex/logic, repeatable (same code → same id, same line), gateable,
+/// and its id is canonical. EVERYTHING else is ADVISORY — whether an AI-invented `AI-*` id OR the
+/// AI judging code against a corpus rule (e.g. `RUST-DIOXUS-11`). Advisory findings are
+/// model-inferred and their id / severity / very presence can drift run-to-run, so the UI must not
+/// present them as fixed, enforced rules. (Keep in sync with the gate's content arms server-side.)
+const FLOOR_RULE_IDS: &[&str] = &[
+    "SEC-NO-HARDCODED-SECRETS-1",
+    "SEC-NO-RAW-SQL-CONCAT-1",
+    "ARCH-NO-SECRETS-IN-URL-1",
+];
+
+/// True when a finding is from the deterministic floor (enforced/stable) vs the AI audit (advisory).
+fn is_enforced_floor(rule_id: &str) -> bool {
+    FLOOR_RULE_IDS.contains(&rule_id)
+}
+
 fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
     // straight from RenderKind::Badge — no custom cell renderer needed (Critical = red,
@@ -3647,16 +3664,17 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         })
         .render_kind(RenderKind::Badge(sev))
         .initial_width(110.0),
-        // AUTHORITY, not just provenance: a deterministic rule hit is ENFORCED
-        // (high-confidence, gateable, auto-fix-eligible); an AI finding is ADVISORY
-        // (investigative, review-only, never auto-blocks or auto-fixes without a human).
-        // This is the enforcement-vs-convention split rendered as a column. AI findings
-        // carry an `AI-` rule id.
+        // AUTHORITY, not just provenance: a DETERMINISTIC-FLOOR hit is ENFORCED (regex/logic,
+        // repeatable, gateable, stable id); EVERY other finding is ADVISORY (model-inferred,
+        // review-only, id/severity may drift run-to-run, never auto-blocks). This is the
+        // enforcement-vs-convention split rendered as a column. NOTE: advisory covers BOTH
+        // `AI-*` invented ids AND the AI judging code against a corpus rule (e.g. RUST-DIOXUS-11)
+        // — the old `AI-` prefix check mislabeled the latter as enforced. Keyed on the floor set.
         ColumnDef::new(ColumnId("authority"), "Authority", |f: &FindingView| {
-            CellValue::Text(if f.rule_id.starts_with("AI-") {
-                "advisory".to_string()
-            } else {
+            CellValue::Text(if is_enforced_floor(&f.rule_id) {
                 "enforced".to_string()
+            } else {
+                "advisory".to_string()
             })
         })
         .sortable()
@@ -5306,6 +5324,13 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 span { class: "rule-modal-tag", "severity · {f.severity}" }
                                 span { class: "rule-modal-tag", "{f.path}:{f.line}" }
                                 span { class: "rule-modal-tag", "{f.status}" }
+                                // Authority: deterministic floor (stable, gateable) vs AI-advisory
+                                // (model-inferred, id/severity may vary run-to-run).
+                                if is_enforced_floor(&f.rule_id) {
+                                    span { class: "rule-modal-tag", "enforced · deterministic (stable id)" }
+                                } else {
+                                    span { class: "rule-modal-tag", "AI · advisory (id may vary run-to-run)" }
+                                }
                             }
                             if let Some(d) = directive {
                                 p { class: "rule-modal-label", "Rule violated" }
