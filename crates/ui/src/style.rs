@@ -1838,6 +1838,38 @@ html, body {
 .pg-btn-danger:hover { border-color: #c0392b; color: #c0392b; }
 .pg-btn-danger.confirm { background: #c0392b; border-color: #c0392b; color: #fff; }
 .onboard-browse { margin: 8px 0 0; }
+
+/* ── Greenfield scaffold form ──────────────────────────────────────────────── */
+.gf-form { display: flex; flex-direction: column; gap: 18px; margin-bottom: 20px; }
+.gf-field { display: flex; flex-direction: column; gap: 5px; }
+.gf-label { font-size: 12px; font-weight: 600; color: var(--ink); }
+.gf-hint { font-size: 12px; color: var(--ink-soft); line-height: 1.5; margin: 0; }
+.gf-input { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; font-family: inherit; color: var(--ink); background: var(--paper); }
+.gf-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); }
+.gf-dir-row { display: flex; align-items: center; gap: 8px; }
+.gf-dir-path { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gf-dir-empty { color: var(--ink-faint); font-style: italic; }
+.gf-rules-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.gf-rules-group-h { font-size: 11px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.04em; margin: 8px 0 3px; }
+.gf-rules-group-h:first-child { margin-top: 0; }
+.gf-rule-row { display: flex; align-items: baseline; gap: 6px; padding: 4px 2px; cursor: pointer; font-size: 12.5px; border-radius: 5px; transition: background .1s var(--ease); }
+.gf-rule-row:hover { background: var(--surface); }
+.gf-rule-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); font-size: 12px; white-space: nowrap; }
+.gf-rule-title { color: var(--ink); }
+.gf-rule-domain { color: var(--ink-faint); font-size: 11px; }
+/* Greenfield result panel */
+.gf-result { margin-top: 16px; padding: 14px 16px; border-radius: 10px; }
+.gf-result-ok { background: #f0faf3; border: 1px solid #a3d9b1; }
+.gf-result-err { background: #fff5f5; border: 1px solid #f5c0c0; }
+.gf-result-h { font-weight: 700; font-size: 14px; color: var(--ink); margin: 0 0 5px; }
+.gf-result-msg { font-size: 13px; color: var(--ink-soft); margin: 0 0 10px; line-height: 1.5; }
+.gf-result-files { margin: 8px 0; }
+.gf-result-files-h { font-size: 12px; font-weight: 600; color: var(--ink-soft); margin: 0 0 4px; }
+.gf-result-files ul { margin: 0; padding-left: 16px; }
+.gf-result-file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink); }
+.gf-result-sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); margin: 6px 0 0; }
+.gf-result-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); margin: 4px 0 0; }
+.gf-result-next { font-size: 12px; color: var(--ink-soft); margin: 10px 0 0; line-height: 1.5; }
 .scan-domains-note { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin: 0 0 12px; }
 .scan-domains-note b { color: var(--ink); }
 .audit-cta { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-wash); }

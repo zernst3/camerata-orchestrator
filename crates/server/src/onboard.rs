@@ -1306,6 +1306,157 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
     }
 }
 
+// ── Greenfield scaffold ──────────────────────────────────────────────────────
+
+/// The outcome of a greenfield scaffold operation: the local directory created,
+/// the governance files written into it, and the git commit sha of the initial
+/// commit.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GreenfieldResult {
+    /// Absolute path to the newly-created repo directory on disk.
+    pub path: String,
+    /// Governance files written (path -> content), in the order they were written.
+    pub files_written: Vec<String>,
+    /// The sha of the initial commit (shortened), or empty on commit failure.
+    pub commit_sha: String,
+    /// Human-readable summary for the UI.
+    pub message: String,
+}
+
+/// Scaffold a NEW local git repo with governance baked in from commit zero.
+///
+/// Given a target directory (`dest`) that MUST NOT already exist, a list of arm
+/// rules (already resolved by the caller — same shape `arm.rs` emits), and the
+/// project's custom rules, this function:
+///
+/// 1. Creates `dest` and `git init`s it.
+/// 2. Calls [`crate::arm::arm_files_for_repo`] to emit AGENTS.md, CONVENTIONS.md,
+///    `.camerata/rules.json`, and (when mechanical rules are present) the CI
+///    governance workflow — reusing the EXACT same emit path as the brownfield apply
+///    flow so there is no duplicate logic.
+/// 3. Writes every emitted file into the new working tree, creating parent dirs.
+/// 4. Stages all files (`git add -A`) and makes the initial commit.
+/// 5. Returns a [`GreenfieldResult`] describing what was created.
+///
+/// The function is intentionally synchronous-via-blocking (call via
+/// `tokio::task::spawn_blocking`) so the git operations don't block the async runtime.
+pub fn scaffold_greenfield_blocking(
+    dest: &std::path::Path,
+    rules: &[&crate::arm::ArmRule],
+    custom: &[&crate::project::CustomRule],
+    repo_label: &str,
+) -> anyhow::Result<GreenfieldResult> {
+    // Safety: refuse to clobber an existing directory.
+    if dest.exists() {
+        anyhow::bail!(
+            "{} already exists — greenfield scaffold requires a new (non-existent) directory",
+            dest.display()
+        );
+    }
+
+    // 1. Create the root directory (and any parents the caller chose to nest under).
+    std::fs::create_dir_all(dest).map_err(|e| {
+        anyhow::anyhow!("could not create {}: {e}", dest.display())
+    })?;
+
+    // 2. `git init` the new directory.
+    let git_init = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(dest)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git init failed: {e}"))?;
+    if !git_init.status.success() {
+        // Older git versions don't support `-b main`; fall back to plain `init`.
+        let git_init2 = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(dest)
+            .output()
+            .map_err(|e| anyhow::anyhow!("git init failed: {e}"))?;
+        if !git_init2.status.success() {
+            let err = String::from_utf8_lossy(&git_init2.stderr);
+            anyhow::bail!("git init: {err}");
+        }
+    }
+
+    // 3. Emit governance files using the SAME arm_files_for_repo primitive as the
+    //    brownfield apply path — zero code duplication, guaranteed identical output.
+    let emitted = crate::arm::arm_files_for_repo(rules, custom);
+
+    // 4. Write every emitted file into the working tree.
+    let mut files_written = Vec::with_capacity(emitted.len());
+    for (rel, content) in &emitted {
+        let full = dest.join(rel);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("create dir {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&full, content)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
+        files_written.push(rel.clone());
+    }
+
+    // 5. Stage all files.
+    let add = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(dest)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git add: {e}"))?;
+    if !add.status.success() {
+        let err = String::from_utf8_lossy(&add.stderr);
+        anyhow::bail!("git add: {err}");
+    }
+
+    // 6. Initial commit. We need a user identity; use a fallback when the environment
+    //    has no global git config (common in CI/test environments).
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "camerata@example.com"])
+        .current_dir(dest)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Camerata"])
+        .current_dir(dest)
+        .output();
+
+    let commit_msg = format!(
+        "chore(governance): greenfield scaffold for {repo_label}\n\n\
+         Governance baked in from commit zero via Camerata.\n\
+         Rules: AGENTS.md, CONVENTIONS.md, .camerata/rules.json"
+    );
+    let commit = std::process::Command::new("git")
+        .args(["commit", "-m", &commit_msg])
+        .current_dir(dest)
+        .output()
+        .map_err(|e| anyhow::anyhow!("git commit: {e}"))?;
+    if !commit.status.success() {
+        let err = String::from_utf8_lossy(&commit.stderr);
+        anyhow::bail!("git commit: {err}");
+    }
+
+    // 7. Read the short sha of the initial commit.
+    let commit_sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dest)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let n_rules = rules.len();
+    let n_custom = custom.len();
+    let message = format!(
+        "Scaffolded {repo_label} at {} with {n_rules} base rule(s) and {n_custom} custom rule(s). \
+         {n_files} governance file(s) committed as the initial commit ({commit_sha}).",
+        dest.display(),
+        n_files = files_written.len(),
+    );
+
+    Ok(GreenfieldResult {
+        path: dest.to_string_lossy().into_owned(),
+        files_written,
+        commit_sha,
+        message,
+    })
+}
+
 /// Phase 1 — DETECT. Fetch the repos, detect each stack, and PROPOSE a starter ruleset.
 /// It does NOT audit code yet — that's [`audit_repos`], run after the architect picks
 /// which rules to enforce. This is the "scan to determine languages / frameworks /
@@ -2462,5 +2613,152 @@ mod tests {
             body.contains("src/config.rs"),
             "path must appear in csv block: {body}"
         );
+    }
+
+    // ── Greenfield scaffold tests ─────────────────────────────────────────────
+
+    /// Build a minimal ArmRule for test use.
+    fn arm_rule(id: &str, enf: &str) -> crate::arm::ArmRule {
+        crate::arm::ArmRule {
+            id: id.to_string(),
+            title: format!("Title {id}"),
+            directive: format!("Do {id}."),
+            option: None,
+            enforcement: enf.to_string(),
+            scope: "repo-local".to_string(),
+            conformance: None,
+            repos: vec!["me/new-repo".to_string()],
+        }
+    }
+
+    /// A unique temp dir that does NOT yet exist (scaffold must create it).
+    fn scaffold_dest(suffix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "camerata-greenfield-{}-{}-{}",
+            std::process::id(),
+            suffix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn greenfield_scaffold_emits_governance_files_and_initial_commit() {
+        let dest = scaffold_dest("emit");
+        let rules = [
+            arm_rule("SEC-NO-HARDCODED-SECRETS-1", "mechanical"),
+            arm_rule("RUST-DOMAIN-6", "structured"),
+        ];
+        let refs: Vec<&crate::arm::ArmRule> = rules.iter().collect();
+
+        let result = scaffold_greenfield_blocking(&dest, &refs, &[], "me/new-repo")
+            .expect("scaffold must succeed on a fresh directory");
+
+        // The path must exist and be a git repo.
+        assert!(dest.exists(), "dest must exist after scaffold");
+        assert!(dest.join(".git").exists(), "must be a git repo");
+
+        // The governance files must be present on disk.
+        assert!(
+            dest.join("CONVENTIONS.md").exists(),
+            "CONVENTIONS.md must be written"
+        );
+        assert!(
+            dest.join(".camerata").join("rules.json").exists(),
+            ".camerata/rules.json must be written"
+        );
+
+        // The commit sha must be non-empty.
+        assert!(
+            !result.commit_sha.is_empty(),
+            "commit sha must be non-empty"
+        );
+
+        // The files_written list must include what arm emitted.
+        assert!(
+            result.files_written.contains(&"CONVENTIONS.md".to_string()),
+            "CONVENTIONS.md in files_written"
+        );
+        assert!(
+            result.files_written.contains(&".camerata/rules.json".to_string()),
+            ".camerata/rules.json in files_written"
+        );
+
+        // The CI workflow must be emitted for mechanical rules.
+        assert!(
+            result
+                .files_written
+                .iter()
+                .any(|f| f.ends_with("camerata-governance.yml")),
+            "CI workflow must be emitted for mechanical rules"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn greenfield_scaffold_prose_rule_emits_agents_md() {
+        let dest = scaffold_dest("prose");
+        let rules = [arm_rule("SPIRIT-COMMIT-1", "prose")];
+        let refs: Vec<&crate::arm::ArmRule> = rules.iter().collect();
+
+        let result = scaffold_greenfield_blocking(&dest, &refs, &[], "me/prose-repo")
+            .expect("scaffold must succeed");
+
+        assert!(
+            dest.join("AGENTS.md").exists(),
+            "AGENTS.md must be written for prose rules"
+        );
+        assert!(
+            result.files_written.contains(&"AGENTS.md".to_string()),
+            "AGENTS.md in files_written"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn greenfield_scaffold_refuses_existing_directory() {
+        // Create the dir before calling scaffold — it must refuse.
+        let dest = scaffold_dest("collision");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let rules: Vec<&crate::arm::ArmRule> = vec![];
+        let err = scaffold_greenfield_blocking(&dest, &rules, &[], "me/collision-repo")
+            .expect_err("must refuse to clobber an existing directory");
+        assert!(
+            err.to_string().contains("already exists"),
+            "error must mention existing directory: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn greenfield_scaffold_ruleset_is_baked_into_conventions() {
+        let dest = scaffold_dest("ruleset-content");
+        let rules = [arm_rule("ARCH-NO-SECRETS-IN-URL-1", "mechanical")];
+        let refs: Vec<&crate::arm::ArmRule> = rules.iter().collect();
+
+        scaffold_greenfield_blocking(&dest, &refs, &[], "me/ruleset-repo")
+            .expect("scaffold must succeed");
+
+        // The rule id must appear in CONVENTIONS.md (the structured/mechanical file).
+        let conv = std::fs::read_to_string(dest.join("CONVENTIONS.md")).unwrap();
+        assert!(
+            conv.contains("ARCH-NO-SECRETS-IN-URL-1"),
+            "CONVENTIONS.md must contain the rule id"
+        );
+
+        // The rule config must be in .camerata/rules.json.
+        let gate = std::fs::read_to_string(dest.join(".camerata").join("rules.json")).unwrap();
+        assert!(
+            gate.contains("ARCH-NO-SECRETS-IN-URL-1"),
+            ".camerata/rules.json must list the rule id"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }

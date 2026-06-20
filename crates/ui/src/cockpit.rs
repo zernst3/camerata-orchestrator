@@ -6392,6 +6392,72 @@ async fn detect_local_repo() -> RepoDetect {
     }
 }
 
+/// The result of a greenfield scaffold call, as returned by `POST /api/onboard/greenfield`.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct GreenfieldScaffoldResult {
+    ok: bool,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    files_written: Vec<String>,
+    #[serde(default)]
+    commit_sha: String,
+    #[serde(default)]
+    message: String,
+}
+
+/// Resolve the adopted directive for a corpus rule: uses the default option's
+/// directive, falling back to the rule title when options are absent or the default
+/// is unset. Mirrors the resolve logic in the brownfield apply path.
+fn resolve_gf_directive(r: &ProposedRuleView) -> String {
+    if r.options.is_empty() {
+        return r.title.clone();
+    }
+    r.default_option
+        .as_ref()
+        .and_then(|oid| r.options.iter().find(|o| &o.id == oid))
+        .map(|o| o.directive.clone())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| r.title.clone())
+}
+
+/// Call `POST /api/onboard/greenfield` with the given name, local directory path,
+/// and selected arm rules. Resolves each `ProposedRuleView` into an `ArmRuleReq`
+/// (directive resolved from the default option). Returns `None` on network failure.
+async fn scaffold_greenfield_api(
+    name: &str,
+    dest_path: &str,
+    rules: &[ProposedRuleView],
+) -> Option<GreenfieldScaffoldResult> {
+    // Resolve each corpus rule to its ArmRuleReq shape (id + resolved directive).
+    let arm_rules: Vec<ArmRuleReq> = rules
+        .iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .map(|r| ArmRuleReq {
+            id: r.id.clone(),
+            title: r.title.clone(),
+            directive: resolve_gf_directive(r),
+            option: r.default_option.clone(),
+            enforcement: r.enforcement.clone(),
+            scope: "repo-local".to_string(),
+            repos: vec![name.to_string()],
+        })
+        .collect();
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/greenfield", crate::BFF_URL))
+        .json(&serde_json::json!({
+            "name": name,
+            "path": dest_path,
+            "rules": arm_rules,
+        }))
+        .send()
+        .await
+        .ok()?
+        .json::<GreenfieldScaffoldResult>()
+        .await
+        .ok()
+}
+
 #[component]
 fn OnboardView(connection: Option<ProviderView>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -6402,6 +6468,20 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
     let mut scan = use_context::<Signal<Option<ScanReportView>>>();
     let mut scanning = use_signal(|| false);
     let connected = connection.as_ref().map(|c| c.live).unwrap_or(false);
+
+    // Greenfield-specific state: the new repo's name, the local directory to create,
+    // the selected corpus rules to bake in, the in-progress flag, and the scaffold result.
+    // These signals are mutated inside the GreenfieldForm child component — the parent
+    // holds them in scope so they survive path switches.
+    let gf_name = use_signal(String::new);
+    let gf_path = use_signal(String::new);
+    // Set of corpus rule ids the user selected to bake into the new repo.
+    let gf_selected_ids = use_signal(|| std::collections::BTreeSet::<String>::new());
+    let gf_scaffolding = use_signal(|| false);
+    let gf_result = use_signal(|| Option::<GreenfieldScaffoldResult>::None);
+    // Load corpus rules for the greenfield picker (the full library, no scan needed).
+    let corpus_res = use_resource(fetch_corpus_rules);
+    let corpus_rules: Vec<ProposedRuleView> = corpus_res.read().clone().flatten().unwrap_or_default();
 
     // RESTORE a saved onboarding draft on first mount (issue #27): if there's no live scan
     // but a draft exists on disk, bring its scan back so the architect resumes exactly where
@@ -6481,40 +6561,40 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                 }
             }
 
-            // Repo input — a SET of LOCAL repos (a brownfield onboarding spans inter-related
-            // repos). You add a repo by browsing to its local folder; the path is recorded so
-            // the repo is immediately a workspace repo (scan/audit/apply all read it locally).
-            div { class: "onboard-repo-block",
-                label { class: "onboard-repo-label", "Repositories — browse to each repo's local folder (a feature often spans several)" }
-                {
-                    let names: Vec<String> = repo()
-                        .lines()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    rsx! {
-                        if names.is_empty() {
-                            p { class: "onboard-repos-empty", "No repos yet — browse to a local repo folder to add one." }
-                        } else {
-                            div { class: "onboard-repos-list",
-                                for name in names {
-                                    {
-                                        let name_rm = name.clone();
-                                        rsx! {
-                                            div { class: "onboard-repo-chip", key: "{name}",
-                                                span { class: "onboard-repo-chip-name", "{name}" }
-                                                button {
-                                                    class: "onboard-repo-chip-x",
-                                                    title: "Remove",
-                                                    onclick: move |_| {
-                                                        let kept: Vec<String> = repo()
-                                                            .lines()
-                                                            .map(|s| s.trim().to_string())
-                                                            .filter(|s| !s.is_empty() && s != &name_rm)
-                                                            .collect();
-                                                        repo.set(kept.join("\n"));
-                                                    },
-                                                    "\u{2715}"
+            // ── Brownfield path: browse existing repos + scan ─────────────────
+            if path() == OnboardPath::Brownfield {
+                div { class: "onboard-repo-block",
+                    label { class: "onboard-repo-label", "Repositories — browse to each repo's local folder (a feature often spans several)" }
+                    {
+                        let names: Vec<String> = repo()
+                            .lines()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        rsx! {
+                            if names.is_empty() {
+                                p { class: "onboard-repos-empty", "No repos yet — browse to a local repo folder to add one." }
+                            } else {
+                                div { class: "onboard-repos-list",
+                                    for name in names {
+                                        {
+                                            let name_rm = name.clone();
+                                            rsx! {
+                                                div { class: "onboard-repo-chip", key: "{name}",
+                                                    span { class: "onboard-repo-chip-name", "{name}" }
+                                                    button {
+                                                        class: "onboard-repo-chip-x",
+                                                        title: "Remove",
+                                                        onclick: move |_| {
+                                                            let kept: Vec<String> = repo()
+                                                                .lines()
+                                                                .map(|s| s.trim().to_string())
+                                                                .filter(|s| !s.is_empty() && s != &name_rm)
+                                                                .collect();
+                                                            repo.set(kept.join("\n"));
+                                                        },
+                                                        "\u{2715}"
+                                                    }
                                                 }
                                             }
                                         }
@@ -6523,112 +6603,124 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                             }
                         }
                     }
-                }
-                button {
-                    class: "btn-edit-sm onboard-browse",
-                    onclick: move |_| {
-                        spawn(async move {
-                            match detect_local_repo().await {
-                                RepoDetect::Cancelled => {}
-                                // #50: block re-onboarding a repo that's already onboarded.
-                                RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
-                                }
-                                RepoDetect::Found { repo: found, path: folder, .. } => {
-                                    // Record the local path FIRST so the repo is immediately a
-                                    // workspace repo (scan/audit/apply read it locally), then add
-                                    // it to the list.
-                                    let saved = set_repo_path(&found, &folder).await;
-                                    let mut cur = repo();
-                                    let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
-                                    if exists {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{found} is already in the list."));
-                                    } else {
-                                        if !cur.trim().is_empty() && !cur.ends_with('\n') {
-                                            cur.push('\n');
-                                        }
-                                        cur.push_str(&found);
-                                        repo.set(cur);
-                                        if saved {
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                    button {
+                        class: "btn-edit-sm onboard-browse",
+                        onclick: move |_| {
+                            spawn(async move {
+                                match detect_local_repo().await {
+                                    RepoDetect::Cancelled => {}
+                                    // #50: block re-onboarding a repo that's already onboarded.
+                                    RepoDetect::Found { repo: found, onboarded_in: Some(project), .. } => {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{found} is already onboarded (project \u{201c}{project}\u{201d}). Onboarding is one-time — add it to your workspace to work on it, instead of re-onboarding."));
+                                    }
+                                    RepoDetect::Found { repo: found, path: folder, .. } => {
+                                        let saved = set_repo_path(&found, &folder).await;
+                                        let mut cur = repo();
+                                        let exists = cur.split([',', '\n']).any(|s| s.trim() == found);
+                                        if exists {
+                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{found} is already in the list."));
                                         } else {
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
+                                            if !cur.trim().is_empty() && !cur.ends_with('\n') {
+                                                cur.push('\n');
+                                            }
+                                            cur.push_str(&found);
+                                            repo.set(cur);
+                                            if saved {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added {found} ({folder})"));
+                                            } else {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Added {found}, but couldn't record its local path."));
+                                            }
                                         }
                                     }
+                                    RepoDetect::Failed(msg) => {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
+                                    }
                                 }
-                                RepoDetect::Failed(msg) => {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Couldn't read that folder: {msg}. It must be a local git repo with a GitHub origin remote."));
+                            });
+                        },
+                        "Browse for a local repo folder\u{2026}"
+                    }
+                    button {
+                        class: "onboard-cta",
+                        disabled: repo().trim().is_empty() || scanning(),
+                        onclick: move |_| {
+                            let repos: Vec<String> = repo()
+                                .lines()
+                                .flat_map(|l| l.split(','))
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if repos.is_empty() { return; }
+                            scanning.set(true);
+                            spawn(async move {
+                                clear_onboarding_draft().await;
+                                scan.set(scan_repos(&repos).await);
+                                scanning.set(false);
+                            });
+                        },
+                        if scanning() { "Scanning\u{2026}" } else { "Scan repos" }
+                    }
+                }
+            }
+
+            // ── Greenfield path: name + directory + starter ruleset ────────────
+            if path() == OnboardPath::Greenfield {
+                GreenfieldForm {
+                    gf_name,
+                    gf_path,
+                    gf_selected_ids,
+                    gf_scaffolding,
+                    gf_result,
+                    corpus_rules: corpus_rules.clone(),
+                    toasts,
+                }
+            }
+
+            // Brownfield-only: scan results + flow steps.
+            if path() == OnboardPath::Brownfield {
+                // Scan results: the audit findings + proposed-rules tables (chorale).
+                if let Some(report) = scan() {
+                    if report.gated {
+                        div { class: "onboard-gate",
+                            span { class: "onboard-gate-dot" }
+                            div {
+                                p { class: "onboard-gate-h", "Scan not run" }
+                                p { class: "onboard-gate-b", "{report.message.clone().unwrap_or_default()}" }
+                            }
+                        }
+                    } else {
+                        {
+                            // Key by the SCAN's identity (repo set + proposed-rule count) so a
+                            // RE-SCAN remounts ScanResults/ProposedRulesTable with fresh rows and
+                            // a fresh "recommended -> selected" pass.
+                            let scan_key = format!(
+                                "{}|{}",
+                                report.repos.join(","),
+                                report.proposed_rules.len()
+                            );
+                            rsx! { ScanResults { key: "{scan_key}", report } }
+                        }
+                    }
+                }
+
+                // The flow (shown until a scan has run).
+                if scan().is_none() {
+                    div { class: "onboard-steps",
+                        for (i , (h , b)) in steps.iter().enumerate() {
+                            div { class: "onboard-step",
+                                span { class: "onboard-step-n", "{i + 1}" }
+                                div {
+                                    p { class: "onboard-step-h", "{h}" }
+                                    p { class: "onboard-step-b", "{b}" }
                                 }
                             }
-                        });
-                    },
-                    "Browse for a local repo folder\u{2026}"
-                }
-                button {
-                    class: "onboard-cta",
-                    disabled: repo().trim().is_empty() || scanning(),
-                    // Brownfield scans the whole repo SET (audit + propose rules) from each
-                    // repo's LOCAL working tree; greenfield scaffolding is next.
-                    onclick: move |_| {
-                        if path() != OnboardPath::Brownfield { return; }
-                        let repos: Vec<String> = repo()
-                            .lines()
-                            .flat_map(|l| l.split(','))
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        if repos.is_empty() { return; }
-                        scanning.set(true);
-                        spawn(async move {
-                            // A fresh scan starts a new session: clear any prior draft FIRST so
-                            // ScanResults doesn't rehydrate the previous run's audit/dispositions
-                            // onto these results. Awaited before the scan lands.
-                            clear_onboarding_draft().await;
-                            scan.set(scan_repos(&repos).await);
-                            scanning.set(false);
-                        });
-                    },
-                    {
-                        match (path(), scanning()) {
-                            (OnboardPath::Greenfield, _) => "Scaffold repo",
-                            (_, true) => "Scanning…",
-                            (_, false) => "Scan repos",
                         }
                     }
                 }
             }
 
-            // Scan results: the audit findings + proposed-rules tables (chorale).
-            if let Some(report) = scan() {
-                if report.gated {
-                    div { class: "onboard-gate",
-                        span { class: "onboard-gate-dot" }
-                        div {
-                            p { class: "onboard-gate-h", "Scan not run" }
-                            p { class: "onboard-gate-b", "{report.message.clone().unwrap_or_default()}" }
-                        }
-                    }
-                } else {
-                    {
-                        // Key by the SCAN's identity (repo set + proposed-rule count) so a
-                        // RE-SCAN remounts ScanResults/ProposedRulesTable with fresh rows and a
-                        // fresh "recommended -> selected" pass. Without this, the once-per-mount
-                        // suggested-selection (and minted row ids) carried over from the first
-                        // scan, so adding/removing repos never updated which rules were ticked.
-                        // Stable across re-renders of the SAME scan (ticking a rule doesn't
-                        // change onboard_scan), so it never wipes the user's selection mid-edit.
-                        let scan_key = format!(
-                            "{}|{}",
-                            report.repos.join(","),
-                            report.proposed_rules.len()
-                        );
-                        rsx! { ScanResults { key: "{scan_key}", report } }
-                    }
-                }
-            }
-
-            // The flow (shown until a scan has run).
-            if scan().is_none() {
+            // Greenfield: flow steps (shown until scaffolding, handled inside GreenfieldForm).
+            if path() == OnboardPath::Greenfield && gf_result().is_none() && !gf_scaffolding() {
                 div { class: "onboard-steps",
                     for (i , (h , b)) in steps.iter().enumerate() {
                         div { class: "onboard-step",
@@ -6640,6 +6732,234 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Greenfield onboarding form: name the new repo, pick a local directory, select
+/// starter rules from the corpus, and scaffold the repo with governance baked in
+/// from commit zero.
+///
+/// Reuses the same arm emit path as brownfield apply — the governance files emitted
+/// here are identical in structure to what a brownfield onboarding would write.
+#[allow(clippy::too_many_arguments)]
+#[component]
+fn GreenfieldForm(
+    mut gf_name: Signal<String>,
+    mut gf_path: Signal<String>,
+    mut gf_selected_ids: Signal<std::collections::BTreeSet<String>>,
+    mut gf_scaffolding: Signal<bool>,
+    mut gf_result: Signal<Option<GreenfieldScaffoldResult>>,
+    corpus_rules: Vec<ProposedRuleView>,
+    toasts: Signal<Vec<crate::toast::Toast>>,
+) -> Element {
+    let can_scaffold = !gf_name().trim().is_empty() && !gf_path().trim().is_empty();
+    // Split corpus into recommended (suggested for the greenfield starter set) and the rest.
+    let (recommended, available): (Vec<_>, Vec<_>) =
+        corpus_rules.iter().partition(|r| r.recommended);
+
+    rsx! {
+        div { class: "gf-form",
+            // Step 1: name the repo.
+            div { class: "gf-field",
+                label { class: "gf-label", "New repo name" }
+                input {
+                    class: "gf-input",
+                    r#type: "text",
+                    placeholder: "my-project",
+                    value: "{gf_name}",
+                    oninput: move |e| {
+                        gf_name.set(e.value());
+                        // Clear a prior scaffold result when the name changes.
+                        gf_result.set(None);
+                    },
+                }
+                p { class: "gf-hint", "Used as the initial commit label. You can connect a GitHub remote later." }
+            }
+
+            // Step 2: choose the local directory.
+            div { class: "gf-field",
+                label { class: "gf-label", "Local directory" }
+                div { class: "gf-dir-row",
+                    span { class: "gf-dir-path",
+                        if gf_path().is_empty() {
+                            span { class: "gf-dir-empty", "No directory chosen yet" }
+                        } else {
+                            "{gf_path()}"
+                        }
+                    }
+                    button {
+                        class: "btn-edit-sm",
+                        onclick: move |_| {
+                            spawn(async move {
+                                let Some(folder) = rfd::AsyncFileDialog::new()
+                                    .set_title("Choose the PARENT folder — Camerata creates the repo directory inside it")
+                                    .pick_folder()
+                                    .await
+                                else {
+                                    return;
+                                };
+                                let parent = folder.path().to_string_lossy().to_string();
+                                let name = gf_name.peek().trim().to_string();
+                                let dest = if name.is_empty() {
+                                    parent.clone()
+                                } else {
+                                    format!("{}/{}", parent.trim_end_matches('/'), name)
+                                };
+                                gf_path.set(dest);
+                                gf_result.set(None);
+                            });
+                        },
+                        "Choose parent folder\u{2026}"
+                    }
+                }
+                p { class: "gf-hint", "Camerata creates a new directory here for the repo. The directory must not already exist." }
+            }
+
+            // Step 3: starter ruleset picker.
+            div { class: "gf-field",
+                label { class: "gf-label", "Starter ruleset" }
+                p { class: "gf-hint", "Select the rules to bake in from the first commit. Recommended rules are pre-ticked. You can change these after onboarding." }
+                if corpus_rules.is_empty() {
+                    p { class: "gf-hint", "Loading corpus rules\u{2026}" }
+                } else {
+                    div { class: "gf-rules-list",
+                        // Recommended rules first.
+                        if !recommended.is_empty() {
+                            p { class: "gf-rules-group-h", "Recommended" }
+                            for rule in &recommended {
+                                {
+                                    let rid = rule.id.clone();
+                                    let rid2 = rid.clone();
+                                    let checked = gf_selected_ids().contains(&rid);
+                                    rsx! {
+                                        label { class: "gf-rule-row", key: "{rid}",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked,
+                                                onchange: move |_| {
+                                                    let mut ids = gf_selected_ids();
+                                                    if ids.contains(&rid2) { ids.remove(&rid2); } else { ids.insert(rid2.clone()); }
+                                                    gf_selected_ids.set(ids);
+                                                },
+                                            }
+                                            span { class: "gf-rule-id", "{rule.id}" }
+                                            span { class: "gf-rule-title", " \u{2014} {rule.title}" }
+                                            if !rule.domain.is_empty() && rule.domain != "*" {
+                                                span { class: "gf-rule-domain", " [{rule.domain}]" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Available (not pre-ticked) rules.
+                        if !available.is_empty() {
+                            p { class: "gf-rules-group-h", "Available" }
+                            for rule in &available {
+                                {
+                                    let rid = rule.id.clone();
+                                    let rid2 = rid.clone();
+                                    let checked = gf_selected_ids().contains(&rid);
+                                    rsx! {
+                                        label { class: "gf-rule-row", key: "{rid}",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked,
+                                                onchange: move |_| {
+                                                    let mut ids = gf_selected_ids();
+                                                    if ids.contains(&rid2) { ids.remove(&rid2); } else { ids.insert(rid2.clone()); }
+                                                    gf_selected_ids.set(ids);
+                                                },
+                                            }
+                                            span { class: "gf-rule-id", "{rule.id}" }
+                                            span { class: "gf-rule-title", " \u{2014} {rule.title}" }
+                                            if !rule.domain.is_empty() && rule.domain != "*" {
+                                                span { class: "gf-rule-domain", " [{rule.domain}]" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Step 4: scaffold CTA.
+            button {
+                class: "onboard-cta",
+                disabled: !can_scaffold || gf_scaffolding(),
+                onclick: move |_| {
+                    let name = gf_name().trim().to_string();
+                    let dest = gf_path().trim().to_string();
+                    if name.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Enter a name for the new repo.");
+                        return;
+                    }
+                    if dest.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Choose a directory for the new repo.");
+                        return;
+                    }
+                    // Resolve the selected corpus rules from the full list.
+                    let ids = gf_selected_ids();
+                    let selected: Vec<ProposedRuleView> = corpus_rules
+                        .iter()
+                        .filter(|r| ids.contains(&r.id))
+                        .cloned()
+                        .collect();
+                    gf_scaffolding.set(true);
+                    gf_result.set(None);
+                    spawn(async move {
+                        let result = scaffold_greenfield_api(&name, &dest, &selected).await;
+                        gf_scaffolding.set(false);
+                        gf_result.set(result);
+                    });
+                },
+                if gf_scaffolding() { "Scaffolding\u{2026}" } else { "Scaffold repo" }
+            }
+
+            // Step 5: result.
+            if let Some(result) = gf_result() {
+                GreenfieldResultView { result }
+            }
+        }
+    }
+}
+
+/// Displays the outcome of a greenfield scaffold: success with file list and commit
+/// sha, or an error message.
+#[component]
+fn GreenfieldResultView(result: GreenfieldScaffoldResult) -> Element {
+    if result.ok {
+        rsx! {
+            div { class: "gf-result gf-result-ok",
+                p { class: "gf-result-h", "Repo scaffolded" }
+                p { class: "gf-result-msg", "{result.message}" }
+                div { class: "gf-result-files",
+                    p { class: "gf-result-files-h", "Files committed:" }
+                    ul {
+                        for f in &result.files_written {
+                            li { class: "gf-result-file", "{f}" }
+                        }
+                    }
+                }
+                if !result.commit_sha.is_empty() {
+                    p { class: "gf-result-sha", "Initial commit: {result.commit_sha}" }
+                }
+                p { class: "gf-result-path", "Location: {result.path}" }
+                p { class: "gf-result-next",
+                    "The repo is governed from the first commit. Connect it to a remote \
+                     (e.g. create a GitHub repo and add it as origin) whenever you are ready."
+                }
+            }
+        }
+    } else {
+        rsx! {
+            div { class: "gf-result gf-result-err",
+                p { class: "gf-result-h", "Scaffold failed" }
+                p { class: "gf-result-msg", "{result.message}" }
             }
         }
     }
