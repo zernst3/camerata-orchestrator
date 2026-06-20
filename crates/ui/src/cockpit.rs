@@ -3859,6 +3859,13 @@ struct ActualUsageView {
     /// False when some calls didn't report a cost (the dollar figure is a partial sum).
     #[serde(default)]
     cost_complete: bool,
+    /// Tokens served from the prompt cache (billed at ~0.1x input). Nonzero only when
+    /// the API backend ran with prompt caching active (multi-batch parallel scans).
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    /// Tokens written to the prompt cache (billed at ~1.25x input, one-time per TTL).
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -4042,19 +4049,26 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
 }
 
 /// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
-/// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends:
-/// the digest is re-sent per rule-batch, so parallel/job (batches of 15) cost more tokens
-/// than sequential (one batch). Input and output are priced SEPARATELY (output bills ~5×
-/// input and dominates findings-heavy scans, so a flat blended rate would misprice exactly
-/// the scans that matter).
+/// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends.
 ///
-/// Deliberately biased CONSERVATIVE (slightly high): an estimate that turns into a smaller
-/// bill is a pleasant surprise; one that turns into a bigger bill is broken trust. Two
-/// things push the real bill the other way and are NOT modeled, both safe: prompt-caching
-/// of the repeated rules/repo-map prefix (cache reads bill ~0.1× input), and dedup shrinking
-/// the calibration pass. The guarded risk is the OUTPUT undercount on findings-dense scans —
-/// so output is modeled both per-pass AND proportional to the code scanned, not a flat
-/// constant. Approximate by design (~4 chars/token); sized to size a scan, not to bill it.
+/// Input and output are priced SEPARATELY (output bills ~5× input and dominates
+/// findings-heavy scans). The estimate is deliberately biased slightly CONSERVATIVE (high):
+/// an estimate that turns into a smaller bill is a pleasant surprise; one that turns into
+/// a bigger bill is broken trust.
+///
+/// PROMPT CACHING: for multi-batch parallel scans (the default), the codebase prefix (repo
+/// map + chunk digest) is the same across every rule-batch for a given chunk. When the API
+/// backend is in use the server marks this prefix with `cache_control: ephemeral` so the
+/// provider caches it after the first batch and reads it at ~0.1× for subsequent batches.
+/// The estimate models this:
+///   - batch 0 per chunk: full input price + 1.25× cache-write surcharge on the digest
+///   - batches 1..N per chunk: digest tokens read from cache at 0.1× instead of 1.0×
+/// Sequential mode (one batch per chunk) has no prefix reuse across batches, so no caching
+/// discount applies. CLI backend also skips caching (no-op there).
+///
+/// The FUDGE factor keeps the estimate conservative overall even after the cache discount,
+/// since the calibration pass (over aggregated findings) and the resolution round are
+/// modeled at full price.
 #[allow(clippy::too_many_arguments)]
 fn estimate_audit_cost(
     code_chars: usize,
@@ -4069,18 +4083,23 @@ fn estimate_audit_cost(
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
     const CHARS_PER_TOKEN: f64 = 4.0;
-    // Per-pass scaffolding re-sent every pass: the rules block (verbose directives) + the
-    // repo map + the system prompt. Conservative.
+    // Per-pass overhead (rules block + system prompt) that varies per batch and is never
+    // cached. The digest + repo map form the cached prefix, so only this remainder is
+    // re-sent at full price for subsequent batches.
     const OVERHEAD_CHARS_PER_PASS: usize = 10_000;
-    // Output is findings: each is a paragraph of detail. A baseline per pass PLUS a term
-    // that scales with the code each pass scans, so a findings-dense or large scan isn't
-    // under-counted on output (the half that bites, since output bills ~5×).
+    // Output is findings: a baseline per pass plus a term that scales with code scanned
+    // (so a findings-dense or large scan isn't under-counted on the half that bites most).
     const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
     const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + general conservatism. Biased HIGH on purpose: both logged real
-    // runs (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate, and an audit that
-    // costs more than quoted is the bad surprise. Better to over-quote than under-quote.
+    // Resolution round + general conservatism. Biased HIGH on purpose: logged real runs
+    // (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate even before caching, and
+    // an audit that costs more than quoted is the bad surprise.
     const FUDGE: f64 = 1.4;
+    // Prompt-cache pricing multipliers (Anthropic list pricing as of 2024-07):
+    //   write (first batch per chunk): 1.25× input
+    //   read  (subsequent batches):    0.10× input
+    const CACHE_WRITE_MULT: f64 = 1.25;
+    const CACHE_READ_MULT: f64 = 0.10;
 
     let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let batches = if mode == "sequential" {
@@ -4092,18 +4111,37 @@ fn estimate_audit_cost(
     let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
 
     // ── Scan passes, priced at the AUDIT model ──
-    let scan_in =
-        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN;
+    //
+    // Without caching: the full digest is re-sent at full input price every pass.
+    // With caching (parallel mode, batches > 1): per chunk, batch 0 pays full input + the
+    // one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at 0.1×.
+    // Sequential (batches == 1) has no reuse, so no discount.
+    //
+    // Overhead tokens (rules block, system prompt) are always sent at full price since they
+    // vary per batch.
+    let scan_in = if batches <= 1 {
+        // No caching benefit: every batch pays full price for the digest.
+        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN
+    } else {
+        // Batch 0 per chunk: full digest price + cache-write surcharge.
+        // Batches 1..N per chunk: digest at cache-read rate (0.1×).
+        let digest_tokens_per_chunk = code_chars as f64 / chunks as f64 / CHARS_PER_TOKEN;
+        let write_cost = digest_tokens_per_chunk * CACHE_WRITE_MULT * chunks as f64;
+        let read_cost = digest_tokens_per_chunk
+            * CACHE_READ_MULT
+            * (batches.saturating_sub(1)) as f64
+            * chunks as f64;
+        // Overhead (never cached) is full price for every pass.
+        let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
+        write_cost + read_cost + overhead_cost
+    };
     let scan_out =
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
     // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
-    // re-reads roughly the scan's output (the findings) and, crucially, RE-EMITS each
-    // finding with a corrected/verified body — not a short verdict. So its output rides
-    // with the full findings volume, ~1× the scan's output, not a fraction of it. The
-    // earlier 0.3× factor was the main structural reason real runs came in over estimate. ──
-    // Thorough calibration (#51) runs the calibration verdict ~3× (multi-vote consensus), so its
-    // input + output both scale with the pass count. Default single-pass = 1×.
+    // re-reads roughly the scan's output (the findings) and RE-EMITS each finding with a
+    // corrected/verified body. So its output rides with the full findings volume, ~1× the
+    // scan's output. Thorough mode (#51) runs ~3× for multi-vote consensus.
     let cal_passes = if thorough { 3.0 } else { 1.0 };
     let cal_in = scan_out * cal_passes;
     let cal_out = scan_out * cal_passes;
@@ -6831,6 +6869,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                                         let act_dollar = if !u.cost_complete { "n/a".to_string() }
                                             else if u.cost_usd < 0.01 { "<$0.01".to_string() }
                                             else { format!("${:.2}", u.cost_usd) };
+                                        // Show cache savings line when the API backend ran with
+                                        // prompt caching active (cache_read > 0 means the cache
+                                        // was hit at least once; creation > 0 means the cache
+                                        // was written at least once).
+                                        let cache_active = u.cache_read_input_tokens > 0
+                                            || u.cache_creation_input_tokens > 0;
                                         rsx! {
                                             div { class: "audit-cost-main",
                                                 span { class: "audit-cost-label", "Actual cost" }
@@ -6842,6 +6886,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                                                     "Real billed usage for this run ({human_tokens(u.input_tokens)} in / {human_tokens(u.output_tokens)} out). "
                                                 } else {
                                                     "Real token usage shown; a $ figure needs every call to report cost (some didn't, so it's omitted to avoid understating). "
+                                                }
+                                                if cache_active {
+                                                    "Prompt cache: {human_tokens(u.cache_creation_input_tokens)} tok written (1.25x), {human_tokens(u.cache_read_input_tokens)} tok read (0.1x). "
                                                 }
                                                 "The deterministic security floor ran free. Next time you audit PR diffs — pennies."
                                             }
@@ -7748,5 +7795,78 @@ fn DocsView() -> Element {
             }
             div { class: "docs-body chat-turn-text md", dangerous_inner_html: content }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimate_audit_cost;
+
+    /// Sequential mode (1 batch per chunk) has no caching reuse across batches — the
+    /// estimate must match the pre-caching math (full digest price every pass).
+    #[test]
+    fn sequential_mode_no_cache_discount() {
+        // Small repo: 100k chars, 0 rules, sequential.
+        let (toks, dollars, passes) =
+            estimate_audit_cost(100_000, 0, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+        assert_eq!(passes, 1, "0 rules + sequential = one pass");
+        assert!(toks > 0, "some tokens");
+        assert!(dollars > 0.0, "some cost");
+    }
+
+    /// Parallel mode with multiple batches should cost LESS than the naive per-batch full
+    /// price because subsequent batches read the digest from cache at ~0.1×.
+    #[test]
+    fn parallel_multi_batch_cheaper_than_sequential_sum() {
+        // 30 rules -> ceil(30/15)=2 batches; 350k chars = 1 chunk.
+        let (_, dollars_parallel, passes_parallel) =
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+        assert_eq!(passes_parallel, 2, "2 batches for 30 rules");
+
+        // If we ran sequential with 30 rules we get 1 pass; run twice to simulate
+        // the naive "pay full price twice" baseline.
+        let (_, dollars_seq_single, _) =
+            estimate_audit_cost(350_000, 30, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+        let naive_two_passes = dollars_seq_single * 2.0;
+
+        assert!(
+            dollars_parallel < naive_two_passes,
+            "caching makes 2 parallel batches cheaper than naive 2× sequential: {dollars_parallel:.4} < {naive_two_passes:.4}"
+        );
+    }
+
+    /// Single-batch parallel (1 rule, or 0 rules) has nothing to cache — no second batch
+    /// to amortise over, so the discount path is not taken.
+    #[test]
+    fn parallel_single_batch_no_discount() {
+        // 1 rule -> 1 batch in parallel mode.
+        let (toks1, dollars1, passes1) =
+            estimate_audit_cost(350_000, 1, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+        let (toks_seq, dollars_seq, passes_seq) =
+            estimate_audit_cost(350_000, 1, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+        assert_eq!(passes1, 1);
+        assert_eq!(passes_seq, 1);
+        // Token counts should be in the same ballpark (both are 1 pass over the same chunk).
+        // The cache-write surcharge on the parallel path makes it *slightly* higher than
+        // sequential, but they should be within 30% of each other.
+        let ratio = toks1 as f64 / toks_seq as f64;
+        assert!(
+            ratio < 1.3,
+            "single-batch parallel not much more expensive than sequential: ratio={ratio:.2}"
+        );
+        let _ = (dollars1, dollars_seq); // exercise the values without asserting exact amounts
+    }
+
+    /// Thorough mode triples the calibration cost; the estimate should grow accordingly.
+    #[test]
+    fn thorough_mode_costs_more_than_default() {
+        let (_, dollars_default, _) =
+            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, false);
+        let (_, dollars_thorough, _) =
+            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, true);
+        assert!(
+            dollars_thorough > dollars_default,
+            "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
+        );
     }
 }

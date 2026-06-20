@@ -36,6 +36,12 @@ pub struct UsageMeter {
     cost_micro_usd: AtomicU64,
     calls: AtomicU64,
     cost_calls: AtomicU64,
+    /// Tokens served from the prompt cache (billed at ~0.1× input rate). Populated only
+    /// when the API backend is in use with `cache_prefix_len` set on the request.
+    cache_read_input_tokens: AtomicU64,
+    /// Tokens written to the prompt cache (billed at ~1.25× input rate, one-time per TTL).
+    /// Populated only when the API backend is active with prompt caching enabled.
+    cache_creation_input_tokens: AtomicU64,
 }
 
 impl UsageMeter {
@@ -52,6 +58,12 @@ impl UsageMeter {
                 .fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
             self.cost_calls.fetch_add(1, Ordering::Relaxed);
         }
+        // Cache breakdowns are additive across calls (each call contributes its own share
+        // of reads / creations independently).
+        self.cache_read_input_tokens
+            .fetch_add(r.cache_read_input_tokens, Ordering::Relaxed);
+        self.cache_creation_input_tokens
+            .fetch_add(r.cache_creation_input_tokens, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -66,6 +78,10 @@ impl UsageMeter {
             // Every call that ran reported a cost — so the dollar figure is complete, not a
             // partial sum that would understate (some calls' usage may be unreported).
             cost_complete: calls > 0 && cost_calls == calls,
+            cache_read_input_tokens: self.cache_read_input_tokens.load(Ordering::Relaxed),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -80,6 +96,15 @@ pub struct ActualUsage {
     pub calls: u64,
     /// True when every call contributed a cost (the dollar total isn't a partial sum).
     pub cost_complete: bool,
+    /// Tokens served from the prompt cache across all calls in this audit (billed at ~0.1×
+    /// the normal input rate). Zero when the CLI backend is in use or caching is disabled.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Tokens written to the prompt cache across all calls (billed at ~1.25× input rate,
+    /// once per 5-minute TTL window). Zero when the CLI backend is in use or caching is
+    /// disabled.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 /// Per-call safety cap on a single digest's size (chars). A digest is built PER CHUNK
@@ -760,11 +785,18 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// One audit pass: build the request, run it (streaming into the transcript when feedback
 /// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
 /// by the primary chunk loop and the resolution round so neither duplicates the call logic.
+///
+/// `cache_prefix_len` — when `Some(n)`, the first `n` bytes of the prompt (the static
+/// codebase context: repo map + chunk digest) are marked as the cacheable prefix via
+/// [`LlmRequest::with_cache_prefix_len`]. On the API backend this tells the provider to
+/// cache that prefix and re-read it cheaply for every subsequent rule-batch over the same
+/// chunk. The CLI backend ignores this (no-op). Pass `None` to disable caching (default).
 #[allow(clippy::too_many_arguments)]
 async fn audit_pass(
     llm: &Llm,
     audit_model: Option<&str>,
     prompt: String,
+    cache_prefix_len: Option<usize>,
     repo: &str,
     adopted: &std::collections::HashSet<String>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -776,6 +808,9 @@ async fn audit_pass(
         .with_max_tokens(8192);
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
+    }
+    if let Some(prefix_len) = cache_prefix_len {
+        req = req.with_cache_prefix_len(prefix_len);
     }
     let resp = if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
@@ -964,10 +999,17 @@ async fn run_passes(
                 // batch number + the rules) trails, so it never breaks the prefix. The
                 // opening line is deliberately free of the batch number for the same reason.
                 // Bonus: rules landing last = most recent context = strongest rule-following.
-                let prompt = format!(
-                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n{task_line}\n\n{rb}",
+                //
+                // CACHING: the static prefix ends at the double-newline after `digest` and
+                // before `task_line`. We compute its byte length here so `audit_pass` can
+                // mark it for the API backend's cache_control breakpoint. The CLI backend
+                // ignores this field entirely.
+                let static_prefix = format!(
+                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n",
                     ci + 1,
                 );
+                let cache_prefix_len = static_prefix.len();
+                let prompt = format!("{static_prefix}{task_line}\n\n{rb}");
                 let session = format!("{session_prefix}-c{ci}-b{bi}");
                 if let Some((store, key)) = feedback {
                     store.register(
@@ -981,7 +1023,7 @@ async fn run_passes(
                         },
                     );
                 }
-                let r = audit_pass(llm, audit_model, prompt, repo, adopted, feedback, &session, meter).await;
+                let r = audit_pass(llm, audit_model, prompt, Some(cache_prefix_len), repo, adopted, feedback, &session, meter).await;
                 if let Some((store, key)) = feedback {
                     store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
                 }
