@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
     match cmd.as_str() {
         "acceptance" => run_acceptance_cmd().await,
         "gate-probe" => run_gate_probe_cmd().await,
+        "eval" => camerata::eval_cmd::run_eval_cmd(),
         "live-demo" => camerata::live_demo::run_live_demo().await,
         "build-demo" => camerata::build_demo::run_build_demo().await,
         "po-demo" => camerata::po_demo::run_po_demo().await,
@@ -32,6 +33,9 @@ async fn main() -> anyhow::Result<()> {
             );
             println!(
                 "  camerata gate-probe        #14 end-to-end gate-loop GO/NO-GO on a story (both layers, no claude)"
+            );
+            println!(
+                "  camerata eval              #11 precision/recall eval of the deterministic audit floor (no model, no network)"
             );
             println!("  camerata live-demo         spawn a REAL claude -p twice; prove gateway deny + allow live");
             println!("  camerata build-demo        run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");

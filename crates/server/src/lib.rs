@@ -18,6 +18,7 @@ pub mod arm;
 pub mod auto_fire;
 pub mod draft;
 pub mod escalation;
+pub mod eval;
 pub mod uow;
 pub mod clarify;
 pub mod connections;

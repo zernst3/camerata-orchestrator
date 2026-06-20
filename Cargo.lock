@@ -566,6 +566,7 @@ dependencies = [
  "camerata-intake",
  "camerata-maintenance",
  "camerata-rules",
+ "camerata-server",
  "camerata-worktracker",
  "chrono",
  "dotenvy",
@@ -636,6 +637,7 @@ dependencies = [
  "camerata-gateway",
  "camerata-intake",
  "camerata-rules",
+ "serde_json",
  "tokio",
 ]
 

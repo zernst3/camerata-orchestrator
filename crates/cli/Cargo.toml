@@ -25,6 +25,7 @@ camerata-fleet = { path = "../fleet" }
 camerata-worktracker = { path = "../worktracker" }
 camerata-maintenance = { path = "../maintenance" }
 camerata-deploy = { path = "../deploy" }
+camerata-server = { path = "../server" }
 anyhow.workspace = true
 tokio = { workspace = true }
 async-trait = { workspace = true }
