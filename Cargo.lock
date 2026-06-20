@@ -594,6 +594,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -722,6 +724,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "camerata-checks",
  "camerata-core",
  "camerata-fleet",
  "camerata-gateway",

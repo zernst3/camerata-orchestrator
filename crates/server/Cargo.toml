@@ -60,6 +60,8 @@ camerata-intake = { path = "../intake" }
 # The rule corpus: brownfield proposes corpus rules WITH their alternatives, so the
 # architect chooses which alternative per rule to codify.
 camerata-rules = { path = "../rules" }
+# VCS-action gate configuration + bypass types (ProcessRuleConfig, build_rules, etc.).
+camerata-checks = { path = "../checks" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

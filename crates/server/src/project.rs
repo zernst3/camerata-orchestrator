@@ -13,6 +13,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use camerata_checks::vcs_action::ProcessRuleConfig;
+
 use crate::model_tier::TierMap;
 
 /// An architect-authored rule (not from the corpus). Preserved across base-rule
@@ -97,6 +99,17 @@ pub struct Project {
     /// `strongest=claude-opus-4-8`.
     #[serde(default)]
     pub tier_map: TierMap,
+    /// VCS-action gate configuration: per-rule enabled flags and tunables for the
+    /// process rules that govern commit messages, PR titles, and branch names.
+    ///
+    /// Serde default fills in [`ProcessRuleConfig::default()`] for projects persisted
+    /// before this field existed (back-compat, no migration required). The defaults
+    /// match the previous hardcoded behaviour (conventional-commit + commit-doc
+    /// enabled; ADO link + branch-naming opt-in).
+    ///
+    /// See `camerata_checks::vcs_action::{ProcessRuleConfig, build_rules}`.
+    #[serde(default)]
+    pub process_rule_config: ProcessRuleConfig,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -154,6 +167,15 @@ impl Project {
     /// never disable the bounce, only cap how many revise passes a stage may take.
     pub fn set_max_iterations(&mut self, n: usize) {
         self.max_iterations = n.max(1);
+    }
+
+    /// Replace the VCS-gate process-rule configuration for this project.
+    ///
+    /// The new config takes effect on the next VCS action performed under this
+    /// project (i.e., the live [`ProcessRule`] set is rebuilt via
+    /// `camerata_checks::vcs_action::build_rules` on each gate call).
+    pub fn set_process_rule_config(&mut self, config: ProcessRuleConfig) {
+        self.process_rule_config = config;
     }
 
     /// Explicitly remove a custom rule by name (the ONLY way a custom rule leaves
@@ -285,6 +307,7 @@ impl ProjectStore {
                 onboarded: Vec::new(),
                 max_iterations: default_max_iterations(),
                 tier_map: TierMap::default(),
+                process_rule_config: ProcessRuleConfig::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -347,6 +370,7 @@ impl ProjectStore {
                     onboarded,
                     max_iterations: default_max_iterations(),
                     tier_map: TierMap::default(),
+                    process_rule_config: ProcessRuleConfig::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -445,6 +469,7 @@ mod tests {
             onboarded: vec![],
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -482,6 +507,7 @@ mod tests {
             onboarded: vec![],
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -513,6 +539,7 @@ mod tests {
             onboarded: vec![],
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -547,6 +574,7 @@ mod tests {
             onboarded: vec![],
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -593,6 +621,7 @@ mod tests {
             onboarded: vec![],
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
