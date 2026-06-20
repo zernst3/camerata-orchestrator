@@ -233,6 +233,33 @@ fn ci_workflow(mechanical: &[&ArmRule]) -> String {
     )
 }
 
+/// Given a repo's resolved local directory and the list of file paths Camerata is
+/// ABOUT TO WRITE for that repo (the `path` of each `(path, content)` pair the apply
+/// flow produces), return the subset of those paths that ALREADY EXIST on disk and
+/// would therefore be OVERWRITTEN by Apply.
+///
+/// This is intentionally driven by the exact paths the apply flow computed (rather than
+/// a hardcoded list), so it can never warn about a file Camerata is not going to write,
+/// and never miss one it is. Paths are joined onto `dir` and checked against the working
+/// tree (the architect's checked-out clone, which is what Apply mutates).
+///
+/// Returned paths are the repo-relative paths (same strings that were passed in), sorted
+/// and de-duplicated, so the UI can list exactly which files in which repo will be
+/// clobbered. Pure of side effects (only stats the filesystem).
+pub fn existing_governance_files(dir: &std::path::Path, will_write: &[String]) -> Vec<String> {
+    let mut existing: Vec<String> = will_write
+        .iter()
+        .filter(|rel| {
+            let candidate = dir.join(rel.as_str());
+            candidate.exists()
+        })
+        .cloned()
+        .collect();
+    existing.sort();
+    existing.dedup();
+    existing
+}
+
 /// Group resolved rules by the repo they install into.
 pub fn rules_by_repo(rules: &[ArmRule]) -> std::collections::BTreeMap<String, Vec<&ArmRule>> {
     let mut map: std::collections::BTreeMap<String, Vec<&ArmRule>> = std::collections::BTreeMap::new();
@@ -437,6 +464,89 @@ mod tests {
         // ...and in the gate config, so reconcile sees it and an upsert keeps it.
         let gate = &files.iter().find(|(n, _)| n == ".camerata/rules.json").unwrap().1;
         assert!(gate.contains("CUSTOM-house-style"));
+    }
+
+    #[test]
+    fn existing_governance_files_reports_only_present_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-existing-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".camerata")).unwrap();
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+
+        // Create SOME of the files Camerata would write, not all.
+        std::fs::write(dir.join("AGENTS.md"), "hand-written agents").unwrap();
+        std::fs::write(dir.join(".camerata/baseline.json"), "{}").unwrap();
+        std::fs::write(
+            dir.join(".github/workflows/camerata-governance.yml"),
+            "name: x",
+        )
+        .unwrap();
+
+        let will_write = vec![
+            "AGENTS.md".to_string(),
+            "CONVENTIONS.md".to_string(),
+            ".camerata/rules.json".to_string(),
+            ".camerata/baseline.json".to_string(),
+            ".github/workflows/camerata-governance.yml".to_string(),
+        ];
+
+        let existing = existing_governance_files(&dir, &will_write);
+
+        // Exactly the three created files, sorted; not CONVENTIONS.md or rules.json.
+        assert_eq!(
+            existing,
+            vec![
+                ".camerata/baseline.json".to_string(),
+                ".github/workflows/camerata-governance.yml".to_string(),
+                "AGENTS.md".to_string(),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_governance_files_empty_when_nothing_present() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-existing-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let will_write = vec!["AGENTS.md".to_string(), ".camerata/rules.json".to_string()];
+        assert!(existing_governance_files(&dir, &will_write).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn existing_governance_files_ignores_unwritten_paths() {
+        // A repo may have a CONVENTIONS.md that Camerata is NOT going to write this run
+        // (no structured rules selected); it must not be reported.
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-existing-unwritten-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("CONVENTIONS.md"), "hand-written").unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "hand-written").unwrap();
+        // Only AGENTS.md is in this run's write set.
+        let will_write = vec!["AGENTS.md".to_string()];
+        let existing = existing_governance_files(&dir, &will_write);
+        assert_eq!(existing, vec!["AGENTS.md".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

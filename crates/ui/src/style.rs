@@ -1879,6 +1879,14 @@ html, body {
 .arm-note { font-size: 11.5px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0 0; max-width: 90ch; }
 .arm-note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
 
+/* Apply overwrite-confirm modal: per-repo list of governance files that will be clobbered. */
+.apply-overwrite-list { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 8px; max-height: 320px; overflow-y: auto; }
+.apply-overwrite-repo { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface-2, rgba(0,0,0,0.02)); }
+.apply-overwrite-repo-name { display: block; font-weight: 600; font-size: 12.5px; margin-bottom: 6px; }
+.apply-overwrite-files { list-style: disc; margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.apply-overwrite-files li { font-size: 12px; color: var(--ink-soft); }
+.apply-overwrite-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: var(--accent-wash); padding: 1px 5px; border-radius: 5px; }
+
 .triage-switch { display: flex; gap: 6px; margin: 4px 0 12px; flex-wrap: wrap; }
 .triage-tab {
   display: inline-flex; align-items: center; gap: 7px;

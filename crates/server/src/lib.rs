@@ -197,6 +197,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/ticket", post(onboard_ticket))
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/apply", post(onboard_apply))
+        .route("/api/onboard/apply/preflight", post(onboard_apply_preflight))
         .route("/api/onboard/open-pr", post(onboard_open_pr))
         .route("/api/onboard/draft", get(onboard_draft_get).post(onboard_draft_save))
         .route("/api/onboard/draft/clear", post(onboard_draft_clear))
@@ -1227,6 +1228,99 @@ fn baselines_from_findings(
                 .map(|json| (repo, json))
         })
         .collect()
+}
+
+/// Compute the exact set of files Apply will write for each repo, from a resolved
+/// `ArmReq`. This is the SINGLE source of truth for "what files land in each repo",
+/// shared by `onboard_apply` (which then writes them) and `onboard_apply_preflight`
+/// (which checks which already exist). Keeping both paths on this helper guarantees the
+/// overwrite warning lists exactly the files Apply would clobber — no drift.
+///
+/// Returns `repo -> Vec<(repo_relative_path, content)>`. Repos with no rules/custom for
+/// them are omitted (Apply skips them too).
+fn apply_files_per_repo(
+    req: &ArmReq,
+    custom: &[crate::project::CustomRule],
+) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let repo_local: Vec<&crate::arm::ArmRule> = req
+        .rules
+        .iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .collect();
+    let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
+    repos.sort();
+    repos.dedup();
+
+    let baselines = baselines_from_findings(&req.findings, "architect");
+
+    let mut out: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for repo in &repos {
+        let repo_rules: Vec<&crate::arm::ArmRule> = repo_local
+            .iter()
+            .copied()
+            .filter(|r| r.repos.iter().any(|x| x == repo))
+            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> = custom
+            .iter()
+            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .collect();
+        if repo_rules.is_empty() && repo_custom.is_empty() {
+            continue;
+        }
+        let mut files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        if let Some(baseline_json) = baselines.get(repo) {
+            files.push((".camerata/baseline.json".to_string(), baseline_json.clone()));
+        }
+        out.insert(repo.clone(), files);
+    }
+    out
+}
+
+/// Preflight for Apply: for each target repo, resolve its local dir (same resolution Apply
+/// uses) and report which governance files Camerata is about to write ALREADY EXIST on disk
+/// and would be overwritten. The UI calls this BEFORE firing `onboard_apply` so it can warn
+/// the architect and require explicit acknowledgement before clobbering hand-written files.
+///
+/// Returns `{ ok, repos: [{ repo, existing_files: [path...] }, ...] }`. Only repos with at
+/// least one would-be-overwritten file are listed (an empty `repos` means Apply is safe and
+/// the UI should proceed without nagging).
+async fn onboard_apply_preflight(
+    State(state): State<AppState>,
+    Json(req): Json<ArmReq>,
+) -> Json<serde_json::Value> {
+    let workspace_root = state.settings.workspace_root();
+    let custom = state
+        .projects
+        .active()
+        .map(|p| p.ruleset.custom)
+        .unwrap_or_default();
+
+    let files_per_repo = apply_files_per_repo(&req, &custom);
+
+    let mut repos_out = Vec::new();
+    for (repo, files) in &files_per_repo {
+        let override_path = state.settings.repo_path(repo);
+        let Some(dir) = crate::workspace::resolve_repo_dir(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        ) else {
+            // No resolvable local dir → nothing to overwrite (Apply will report the
+            // unresolved repo itself). Skip from the warning list.
+            continue;
+        };
+        let will_write: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+        let existing = crate::arm::existing_governance_files(&dir, &will_write);
+        if !existing.is_empty() {
+            repos_out.push(serde_json::json!({
+                "repo": repo,
+                "existing_files": existing,
+            }));
+        }
+    }
+
+    Json(serde_json::json!({ "ok": true, "repos": repos_out }))
 }
 
 /// Arm: install the approved ruleset into each repo via a governance PR (AGENTS.md
