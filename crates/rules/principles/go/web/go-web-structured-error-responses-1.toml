@@ -1,0 +1,30 @@
+id = "GO-WEB-STRUCTURED-ERROR-RESPONSES-1"
+title = "API errors are returned as a consistent structured format with status code, error code, and message; not as raw strings or status codes alone"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should API errors be formatted in HTTP responses?"
+default = "structured-error-format"
+why = "An error response is metadata for the client: it needs to know whether to retry, whether the user should re-authenticate, whether the request was malformed. A raw HTTP status code alone (404, 500) does not convey enough information for a client to make these decisions consistently. An error response with only a free-form string message makes client error handling impossible (no machine-readable error code to check), logging hard (the message format varies), and internationalization difficult. A structured error response—with a consistent schema (error code, message, status code, optional details)—allows clients to pattern-match on the error code and react appropriately. All errors from all handlers use the same response schema so the client knows how to parse them; a 500 is never confused with a 400 because both have the same structure."
+
+[[option]]
+id = "structured-error-format"
+label = "All errors return a consistent structured format: {code, message, statusCode, ...}"
+directive = "The API defines an error response envelope (e.g., {code: string, message: string, status: int, details?: object}). All handlers, regardless of which error they encounter, format it into this envelope before sending the HTTP response. Status codes (4xx, 5xx) are paired with the structured body; a 400 Bad Request also includes the structured error code and message."
+why = "The adopted default. Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
+
+[[option]]
+id = "status-code-only"
+label = "Errors are returned as HTTP status codes only; no response body"
+directive = "Handlers return only HTTP status codes (400, 500, etc.) without a response body; clients infer the error from the status code and the request context."
+why = "Minimal overhead; trades error information and client-side error handling for simplicity. Works only for the simplest APIs."
+
+[[option]]
+id = "ad-hoc-error-format"
+label = "Each handler defines its own error response format"
+directive = "Handlers return errors in their own format: some as {error: string}, others as {message: string}, others as raw strings, inconsistently."
+why = "Trades client-side consistency and error handling for freedom to tailor each response; creates parsing difficulties and logging inconsistency."

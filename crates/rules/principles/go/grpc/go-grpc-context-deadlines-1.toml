@@ -1,0 +1,30 @@
+id = "GO-GRPC-CONTEXT-DEADLINES-1"
+title = "All RPC implementations respect context deadlines; client deadlines propagate through the call chain and are honored by outbound RPCs"
+tag = "stack"
+domain = "go:grpc"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should context deadlines be handled across gRPC service implementations and calls?"
+default = "propagate-respect-deadlines"
+why = "gRPC services receive a context argument (ctx context.Context) with a deadline set by the client. A service implementation that ignores the deadline, does not pass it to outbound RPCs or database calls, or uses context.Background(), breaks the timeout contract: the client's deadline is silent and the call may hang indefinitely waiting for a downstream service. A service that receives a context with deadline 5 seconds and calls a downstream gRPC service with context.Background() (no deadline) breaks the chain: if the downstream service is slow, the caller hangs, the timeout does not propagate, and resources are wasted. Every gRPC call (to another service, to a database), every blocking operation must use the context the service received; if the deadline is exceeded, operations abort and return a DeadlineExceeded error, signaling to the client that the RPC was cancelled due to timeout."
+
+[[option]]
+id = "propagate-respect-deadlines"
+label = "All implementations respect context deadlines; outbound calls use the same context"
+directive = "Every RPC service method receives (ctx context.Context, req *Request) and uses ctx in all outbound operations: database queries accept ctx, other gRPC calls pass ctx, any blocking I/O is done with ctx as the timeout source. If the context deadline is exceeded, operations fail with deadline-exceeded errors; the implementation does not suppress or mask this signal. Implementations do not call operations with context.Background() or context.TODO(); they propagate the caller's context."
+why = "The adopted default. Deadline propagation is gRPC's built-in timeout mechanism; respecting it ensures timeouts work end-to-end and resources are bounded."
+
+[[option]]
+id = "background-context-in-services"
+label = "Services use context.Background() for downstream calls; deadlines do not propagate"
+directive = "RPC implementations receive the deadline context but use context.Background() or context.TODO() when calling other services or databases, effectively ignoring the client's deadline."
+why = "Trades deadline propagation for service independence; service operations can complete even if the originating request times out. Requires explicit per-service timeout configuration."
+
+[[option]]
+id = "ignore-deadlines"
+label = "Services ignore deadlines; no deadline enforcement"
+directive = "RPC implementations do not use the context deadline or pass context to outbound calls; operations run to completion regardless of the client deadline."
+why = "Simplifies service implementation; high risk of resource exhaustion and timeout-less hangs if any downstream service is slow."

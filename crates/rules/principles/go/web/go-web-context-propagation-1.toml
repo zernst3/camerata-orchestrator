@@ -1,0 +1,30 @@
+id = "GO-WEB-CONTEXT-PROPAGATION-1"
+title = "Context flows through all function calls; request timeouts and cancellation are respected throughout the call stack"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should request scope (deadline, cancellation, user info, tracing IDs) be propagated through the call stack?"
+default = "context-all-calls"
+why = "Go's context.Context is the standard mechanism for propagating request-scoped values and cancellation signals through the call stack. A handler receives a context (from the HTTP request in net/http, or c.Request.Context() in Gin/Echo); every downstream call (database queries, service methods, external API calls) must accept and respect that context. A context with a deadline enforces a timeout: if the client disconnects or the request times out, ctx.Done() closes, and all goroutines and database operations waiting on that context receive the signal and can abort gracefully. A handler that ignores context and spawns goroutines without passing the context, or calls blocking operations with context.Background(), breaks the timeout contract: requests hang even when the client has disconnected, database queries run past the deadline, and resources leak. Passing context is not optional; it is the way Go enforces per-request cleanup and timeout semantics."
+
+[[option]]
+id = "context-all-calls"
+label = "Context is threaded through all function calls; operations respect deadlines and cancellation"
+directive = "Every handler receives the request context from the framework. Service methods, repository methods, external API calls, and any blocking operations accept context as their first argument. Handlers pass the context to all downstream calls. Operations that can be cancelled or timed out (db.QueryContext, http.DoWithContext, etc.) respect the context deadline; a context timeout is not caught and suppressed but is allowed to propagate and terminate the operation."
+why = "The adopted default. Context propagation is Go's built-in request-scoping mechanism; respecting it ensures timeouts work, resources are cleaned up on cancellation, and the system is responsive to client disconnects."
+
+[[option]]
+id = "context-background-in-services"
+label = "Handlers pass context, but services and repositories use context.Background()"
+directive = "Handlers accept the request context, but when calling into services or repositories, services internally use context.Background() or context.TODO() for database queries and external calls, ignoring the request deadline."
+why = "Trades request-level timeout enforcement for service independence; services can complete work even if the originating request times out, useful for fire-and-forget or async workflows. Requires explicit timeout management within each service."
+
+[[option]]
+id = "goroutine-no-context"
+label = "Goroutines spawned without context; no deadline or cancellation propagation"
+directive = "Background goroutines spawned by handlers or services do not receive or respect the request context; they run to completion regardless of request timeout or cancellation."
+why = "Simplifies goroutine management but breaks timeout semantics and resource cleanup; requests can appear to hang and background work is not cancelled on client disconnect."

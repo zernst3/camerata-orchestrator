@@ -1,0 +1,30 @@
+id = "GO-WEB-REQUEST-BINDING-VALIDATION-1"
+title = "Request payloads are bound to typed structs with validation tags; no raw map access or manual parsing"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should incoming request payloads (JSON, form, query params) be parsed into handler arguments?"
+default = "typed-struct-with-validation"
+why = "Go's json and http packages provide low-level unmarshaling that requires explicit error handling and manual validation, and access to unparsed field names makes it easy to silently ignore an invalid field (a query param typed wrong, a required field missing). Web frameworks (Gin, Echo, std net/http with a helper) provide binders that parse into typed structs and validate them using struct tags: the binding tag specifies the source (json, form, query), and the validate tag (via the validate library in Gin/Echo or custom logic) specifies constraints. A handler that receives an already-validated *Request struct with typed fields is type-safe and guaranteed to hold valid data. Handlers that parse raw maps or call json.Unmarshal directly and then validate in ad-hoc code scatter validation logic across handlers and make it easy to miss a case. The type system becomes the validation system: required fields are not-pointer, optional fields are *T, enums are typed strings or ints with an iota list, not raw strings."
+
+[[option]]
+id = "typed-struct-with-validation"
+label = "Typed request structs with framework binding + struct tags for validation"
+directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery, Echo's c.BindJSON / c.QueryParamMap with a bind helper, or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query) specifying its source and a validate tag (required/min/max/email/etc. via the validate library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
+why = "The adopted default. Type-safe, validation-consistent, and leverages the framework's or the language's standard validation tools to catch invalid input before business logic runs."
+
+[[option]]
+id = "raw-map-access"
+label = "Handlers access raw maps or unvalidated json.RawMessage"
+directive = "Handlers receive request payloads as raw map[string]interface{} or json.RawMessage, extract fields manually, and validate them with ad-hoc checks inside the handler or a shared helper."
+why = "Trades type safety and validation consistency for flexibility in handling arbitrary or evolving payloads; requires explicit per-handler validation and error handling."
+
+[[option]]
+id = "string-based-parsing"
+label = "Handlers parse query params and form fields as strings and coerce them in-handler"
+directive = "Handlers access request fields as raw strings (via r.FormValue, c.Query, etc.), coerce them to the required types, and validate them."
+why = "Common for simple query-param handlers; trades type safety and framework validation for simplicity in lightweight scenarios; error handling is diffuse across handlers."

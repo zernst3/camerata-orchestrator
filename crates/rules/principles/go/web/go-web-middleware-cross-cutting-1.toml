@@ -1,0 +1,30 @@
+id = "GO-WEB-MIDDLEWARE-CROSS-CUTTING-1"
+title = "Cross-cutting concerns (logging, auth, timeouts, recovery) are implemented as middleware, not duplicated in handlers"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should cross-cutting concerns like logging, authentication, timeouts, and panic recovery be handled across handlers?"
+default = "middleware-all-concerns"
+why = "Go web frameworks (Gin, Echo, net/http) provide middleware chains as the primary extension point for concerns that span all or many handlers. Implementing these concerns inside individual handlers creates duplication, introduces inconsistency across routes (one handler logs JSON, another logs text), and couples business logic to infrastructure. A handler that implements its own auth check may diverge from a global auth middleware, leaving security gaps. Panic recovery in every handler is both boilerplate and error-prone; a single recovery middleware catches all panics uniformly. Middleware is both the Go idiom and the maintainability win: one place to instrument, update, and audit each concern."
+
+[[option]]
+id = "middleware-all-concerns"
+label = "Cross-cutting concerns implemented as middleware; handlers are concern-agnostic"
+directive = "Logging, authentication, timeout enforcement, panic recovery, CORS, rate limiting, and other concerns that apply across multiple handlers are implemented as middleware in the application's middleware chain. Handlers receive already-authenticated requests, already-bounded by timeout, already-logged, and do not re-implement these concerns. Each middleware applies to all routes it is registered in front of; selective application uses middleware groups or conditional branching inside the middleware, not per-handler duplication."
+why = "The adopted default. Go framework middleware is the idiomatic mechanism for cross-cutting concerns; one implementation per concern, one place to audit and maintain, consistent behavior across routes."
+
+[[option]]
+id = "per-handler-inline"
+label = "Each handler re-implements authentication, logging, recovery inline"
+directive = "Handlers authenticate themselves, perform logging themselves, recover from panics themselves, and manage timeouts themselves via context.WithTimeout."
+why = "Trades maintenance overhead and inconsistency for handler independence and explicit control within each route; the framework's middleware chain is not used for infrastructure concerns."
+
+[[option]]
+id = "decorator-pattern"
+label = "Decorators wrap handlers with cross-cutting concerns"
+directive = "Higher-order functions wrap handlers to add logging, auth, recovery, timeouts; the decorator is registered for each route that needs it."
+why = "Intermediate option between per-handler duplication and a global middleware chain; offers route-level control over which concerns apply without re-implementing inside each handler."

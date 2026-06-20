@@ -1,0 +1,30 @@
+id = "GO-GORM-MIGRATIONS-MANAGED-1"
+title = "Schema changes are managed by migrations; direct SQL ALTER statements or manual schema edits are not used in production"
+tag = "stack"
+domain = "go:gorm"
+layer = "library"
+enforcement = "mechanical"
+default = true
+
+[decision]
+question = "How should schema changes (add column, create table, rename field) be applied to the database?"
+default = "migrations-all-changes"
+why = "A migration is a versioned SQL script or code that transforms the schema from one state to another, and is tracked in version control. Running migrations in order (migration 001, 002, 003) builds the current schema deterministically. A production database that has manual SQL ALTER statements applied outside the migration system becomes impossible to reproduce: deploying the same code to a new database does not result in the same schema, because the manual alters are not in version control. Rollbacks become guesswork. A migration system (e.g., GORM AutoMigration for development, or SQL migrations managed by a tool like golang-migrate for production) ensures the schema is reproducible and versioned. Database-first design (manual DDL in a tool, then code-generation) is an alternative; either way, the schema evolution is tracked and repeatable."
+
+[[option]]
+id = "migrations-all-changes"
+label = "All schema changes go through version-controlled migrations"
+directive = "Schema changes (create table, add column, add index, drop constraint) are written as migrations (GORM's AutoMigration or SQL migration files managed by a tool like golang-migrate). Migrations are committed to version control, reviewed, and applied in order. Production deployments run migrations as part of the deployment process. No manual SQL ALTER statements are executed in production; any schema change not tracked in a migration is a deviation that must be rolled back or documented."
+why = "The adopted default. Migrations are the source of truth for schema evolution; the database is reproducible from migrations."
+
+[[option]]
+id = "manual-sql-alters"
+label = "Schema changes are applied manually via direct SQL ALTER statements"
+directive = "Developers run SQL commands directly in the database to add columns, create indexes, etc., without corresponding migration code."
+why = "Quick for one-off changes; becomes untrackable and unreproducible at scale. New environments diverge; rollbacks are manual and error-prone."
+
+[[option]]
+id = "autoversion-only"
+label = "Only AutoMigration is used; no explicit migration versioning"
+directive = "GORM's AutoMigration(User{}, Profile{}) is called at startup; the schema is derived from Go structs."
+why = "Convenient for rapid development; lacks version history and explicit control. Cannot roll back to a previous schema state if needed."

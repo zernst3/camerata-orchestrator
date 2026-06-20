@@ -1,0 +1,30 @@
+id = "GO-GORM-CONTEXT-QUERIES-1"
+title = "All database queries accept and respect context arguments; timeouts and cancellation propagate from requests to queries"
+tag = "stack"
+domain = "go:gorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should database queries be parameterized with request context and timeouts?"
+default = "context-all-queries"
+why = "GORM accepts a context as the first argument to queries: db.WithContext(ctx).Find(&users). When a context has a deadline, GORM respects it by passing it to the database driver; if the context deadline is exceeded, the query is cancelled by the database and the driver returns a context.DeadlineExceeded error. A query that ignores context and calls db.Find(&users) without a context uses context.Background(), which has no deadline and runs to completion regardless of how long it takes. A request handler that spawns a database query with a 5-second timeout and the query ignores context runs indefinitely if the database is slow, hanging the handler and blocking a goroutine. Passing context is required for timeout enforcement: the handler's context deadline must flow through to the database layer so queries are bounded."
+
+[[option]]
+id = "context-all-queries"
+label = "All queries use db.WithContext(ctx); deadlines and cancellation propagate"
+directive = "Every database query (Find, Create, Update, Delete, Row, Rows) is preceded by WithContext: db.WithContext(ctx).Find(&users), db.WithContext(ctx).Create(&record). The context is passed through the entire call stack, from the handler to the service to the repository. If the context has a deadline, GORM passes it to the database driver and the query is cancelled if the deadline is exceeded."
+why = "The adopted default. Context propagation is Go's idiomatic timeout and cancellation mechanism; queries respect handler deadlines."
+
+[[option]]
+id = "no-context-in-queries"
+label = "Queries do not use context; no deadline enforcement at the database layer"
+directive = "Queries are called without context (db.Find(&users)) or with context.Background()."
+why = "Simpler to code; queries are not bounded by handler deadlines and may hang indefinitely if the database is slow."
+
+[[option]]
+id = "context-sometimes"
+label = "Context is passed to some queries but not others"
+directive = "Some repository methods accept and use context; others ignore it. The pattern is inconsistent."
+why = "Common in transitional codebases; creates gaps in timeout enforcement and makes the codebase unpredictable."
