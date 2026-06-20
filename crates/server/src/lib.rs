@@ -291,6 +291,11 @@ pub fn router(state: AppState) -> Router {
         // Each connection spawns a PTY-backed shell; multiple tabs = multiple ws
         // connections. No AppState needed — the handler is fully self-contained.
         .route("/api/terminal/ws", get(terminal::ws_handler))
+        // ── Project-aware chat grounding (#54) ───────────────────────────────
+        // Supplies the live project state (draft / scan report / ruleset summary)
+        // that the Project mode chat panel injects as a system-prompt grounding
+        // context. Read-only; no model call happens here.
+        .route("/api/projects/active/context", get(active_project_context))
         .with_state(state)
 }
 
@@ -3260,6 +3265,234 @@ async fn uow_append_history(
 ) -> Json<crate::uow::UnitOfWork> {
     state.uow.append_history(&story_id, &req.kind, &req.text);
     Json(state.uow.get_or_create(&story_id))
+}
+
+// ── Project-aware chat grounding (#54) ───────────────────────────────────────
+
+/// The pre-onboard phase: the active project has a saved onboarding draft but has not yet
+/// completed the Apply step for any repo.
+///
+/// The draft is a UI-owned blob; we surface its raw JSON as the grounding text so the
+/// project-aware chat can reference what the architect was doing. Callers should treat the
+/// draft as informational context, not canonical state.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPhase {
+    /// Project has no saved draft and no onboarded repos — truly blank.
+    Blank,
+    /// An onboarding draft exists but Apply has not yet been completed for any repo.
+    PreOnboard,
+    /// At least one repo is onboarded (Apply completed).
+    PostOnboard,
+}
+
+/// The grounding payload the project-aware chat mode uses to build its system prompt.
+///
+/// The UI fetches this once when the Project tab is opened and injects its fields into
+/// the system prompt it sends to `POST /api/chat`. This keeps the LLM call on the
+/// existing `chat` handler — no separate AI endpoint is needed here.
+#[derive(serde::Serialize)]
+pub struct ProjectContextResponse {
+    /// Whether the project exists (false when there is no active project).
+    pub ok: bool,
+    /// Onboarding phase determines which grounding fields are populated.
+    pub phase: ProjectPhase,
+    /// The active project's name (present when `ok=true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    /// The repos in scope for the active project.
+    #[serde(default)]
+    pub repos: Vec<String>,
+    /// The repos that have completed onboarding.
+    #[serde(default)]
+    pub onboarded: Vec<String>,
+    /// A compact, human-readable summary of the project's selected ruleset (post-onboard).
+    /// Each line is `<rule_id>: <scope>` for easy citation in the chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ruleset_summary: Option<String>,
+    /// The number of active findings from the onboarding audit. Populated post-onboard
+    /// when the project has findings recorded in the draft (the draft carries the last audit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_count: Option<usize>,
+    /// A compact listing of the most recent findings (up to 50), suitable for injection
+    /// into a system prompt. Each entry is a compact one-line summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings_summary: Option<String>,
+    /// The raw onboarding draft (pre-onboard: the architect's in-progress session).
+    /// This is the UI-owned JSON blob; it is surfaced as-is for the chat to reference.
+    /// Only populated in the PreOnboard phase so the Post-onboard prompt is not cluttered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_json: Option<serde_json::Value>,
+    /// A human-readable message explaining why the context is limited (e.g., no active
+    /// project, or the project has not been onboarded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Build a compact one-line ruleset summary: `<rule_id>: <scope>` per selected rule.
+/// Cross-repo and process rules are tagged accordingly so the chat can explain the
+/// distinction.
+fn build_ruleset_summary(ruleset: &crate::project::ProjectRuleset) -> String {
+    let mut lines = Vec::new();
+    for sel in &ruleset.selections {
+        let note = if sel.repos.is_empty() {
+            "(all repos)".to_string()
+        } else {
+            format!("({})", sel.repos.join(", "))
+        };
+        lines.push(format!("{}: repo-local {}", sel.rule_id, note));
+    }
+    for sel in &ruleset.cross_repo {
+        lines.push(format!("{}: cross-repo", sel.rule_id));
+    }
+    for sel in &ruleset.process {
+        lines.push(format!("{}: process (VCS workflow)", sel.rule_id));
+    }
+    for c in &ruleset.custom {
+        let dom = if c.domain.is_empty() || c.domain == "*" {
+            "all repos".to_string()
+        } else {
+            c.domain.clone()
+        };
+        lines.push(format!("CUSTOM-{}: custom rule ({})", c.name, dom));
+    }
+    lines.join("\n")
+}
+
+/// Extract a compact findings summary from a draft JSON blob (the UI-owned onboarding draft).
+/// Looks for the `findings` array inside the audit section; returns a one-line-per-finding
+/// compact listing, capped at 50 findings to keep the prompt manageable.
+fn extract_findings_from_draft(
+    draft: &serde_json::Value,
+) -> Option<(usize, String)> {
+    // The draft shape is UI-owned; we look for `audit.findings` or `scan.findings`
+    // (the audit section, which contains the Phase-2 AI audit findings).
+    let findings = draft
+        .get("audit")
+        .and_then(|a| a.get("findings"))
+        .or_else(|| draft.get("scan").and_then(|s| s.get("findings")))
+        .and_then(|f| f.as_array())?;
+
+    if findings.is_empty() {
+        return None;
+    }
+    let total = findings.len();
+    let cap = total.min(50);
+    let mut lines = Vec::with_capacity(cap);
+    for f in findings.iter().take(cap) {
+        let repo = f.get("repo").and_then(|v| v.as_str()).unwrap_or("?");
+        let path = f.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let line = f.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+        let rule_id = f.get("rule_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let severity = f.get("severity").and_then(|v| v.as_str()).unwrap_or("?");
+        let detail = f
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(120)
+            .collect::<String>();
+        lines.push(format!(
+            "[{severity}] {rule_id} in {repo}/{path}:{line} — {detail}"
+        ));
+    }
+    Some((total, lines.join("\n")))
+}
+
+/// `GET /api/projects/active/context` — the grounding payload for the project-aware chat
+/// mode. No AI call; purely a read of the active project's current state (draft + ruleset).
+///
+/// The UI injects the returned fields into the system prompt it sends to `POST /api/chat`.
+/// This keeps the AI call on the existing chat handler and this endpoint purely informational.
+async fn active_project_context(
+    State(state): State<AppState>,
+) -> Json<ProjectContextResponse> {
+    let Some(project) = state.projects.active() else {
+        return Json(ProjectContextResponse {
+            ok: false,
+            phase: ProjectPhase::Blank,
+            project_name: None,
+            repos: Vec::new(),
+            onboarded: Vec::new(),
+            ruleset_summary: None,
+            finding_count: None,
+            findings_summary: None,
+            draft_json: None,
+            message: Some(
+                "No active project — create one to use project-aware chat.".to_string(),
+            ),
+        });
+    };
+
+    let draft = state.draft.load(&project.id);
+
+    if !project.onboarded.is_empty() {
+        // Post-onboard: at least one repo has been fully onboarded. Surface the live ruleset
+        // + any findings captured in the draft (the last audit the architect ran).
+        let ruleset_summary = build_ruleset_summary(&project.ruleset);
+        let ruleset_summary = if ruleset_summary.is_empty() {
+            None
+        } else {
+            Some(ruleset_summary)
+        };
+        let (finding_count, findings_summary) = draft
+            .as_ref()
+            .and_then(|d| extract_findings_from_draft(d))
+            .map(|(n, s)| (Some(n), Some(s)))
+            .unwrap_or((None, None));
+        Json(ProjectContextResponse {
+            ok: true,
+            phase: ProjectPhase::PostOnboard,
+            project_name: Some(project.name.clone()),
+            repos: project.repos.clone(),
+            onboarded: project.onboarded.clone(),
+            ruleset_summary,
+            finding_count,
+            findings_summary,
+            draft_json: None, // Don't inject the full draft post-onboard (noisy).
+            message: None,
+        })
+    } else if draft.is_some() {
+        // Pre-onboard with a saved draft: the architect is mid-onboarding. Surface the draft
+        // as-is so the chat can help interpret the in-progress onboarding state.
+        let (finding_count, findings_summary) = draft
+            .as_ref()
+            .and_then(|d| extract_findings_from_draft(d))
+            .map(|(n, s)| (Some(n), Some(s)))
+            .unwrap_or((None, None));
+        Json(ProjectContextResponse {
+            ok: true,
+            phase: ProjectPhase::PreOnboard,
+            project_name: Some(project.name.clone()),
+            repos: project.repos.clone(),
+            onboarded: Vec::new(),
+            ruleset_summary: None, // No committed ruleset yet.
+            finding_count,
+            findings_summary,
+            draft_json: draft,
+            message: Some(format!(
+                "Project '{}' has an in-progress onboarding (scan/audit) that has not been applied yet.",
+                project.name
+            )),
+        })
+    } else {
+        // Blank: project exists but no draft and no onboarded repos.
+        Json(ProjectContextResponse {
+            ok: true,
+            phase: ProjectPhase::Blank,
+            project_name: Some(project.name.clone()),
+            repos: project.repos.clone(),
+            onboarded: Vec::new(),
+            ruleset_summary: None,
+            finding_count: None,
+            findings_summary: None,
+            draft_json: None,
+            message: Some(format!(
+                "Project '{}' has no scan or onboarding data yet — start an onboarding scan to populate the project context.",
+                project.name
+            )),
+        })
+    }
 }
 
 // ── error type ──────────────────────────────────────────────────────────────
