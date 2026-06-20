@@ -141,9 +141,31 @@ pub struct UnitOfWork {
     /// sign-off survives sessions and is visible alongside the dev status.
     #[serde(default)]
     pub sign_off: Option<SignOff>,
+    /// The SOC-2 evidence record for the most recent completed governed run (issue #53).
+    ///
+    /// Assembled and attached by [`UowStore::attach_evidence`] when a run finishes.
+    /// `None` until a run has completed and evidence was assembled. Additive: if the run
+    /// produced no evidence (e.g. token-free scripted path without a changed-file diff),
+    /// this remains `None` and sign-off is not blocked by the evidence gate. Persisted
+    /// alongside the provenance so the QA reviewer can read the full governance artifact
+    /// without needing the in-memory run.
+    #[serde(default)]
+    pub evidence: Option<crate::evidence::UowEvidenceRecord>,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
+}
+
+impl UnitOfWork {
+    /// `true` when this UoW has an evidence record with a critical scoped-scan finding
+    /// that blocks the `AwaitingQa → SignedOff` transition until an explicit waive-with-
+    /// reason is supplied. `false` when there is no evidence record yet (the gate does not
+    /// block a sign-off without evidence — only an existing critical finding blocks it).
+    pub fn is_sign_off_blocked(&self) -> bool {
+        self.evidence
+            .as_ref()
+            .is_some_and(|e| e.is_sign_off_blocked())
+    }
 }
 
 /// An architect's explicit sign-off on a story's governed run (issue #21). Recorded
@@ -433,6 +455,49 @@ impl UowStore {
         self.apply_transition(story_id, |s| s.finish_development())
     }
 
+    /// Attach the SOC-2 evidence record from a completed governed run onto a story's UoW
+    /// (issue #53). Appends an `evidence` history entry so the act is visible in the
+    /// AI development timeline. Does NOT change the stage.
+    ///
+    /// If the evidence record contains a critical scoped-scan finding, that sets a
+    /// blocking signal on the UoW (readable via [`UnitOfWork::is_sign_off_blocked`]).
+    /// The sign-off handler enforces this block: a Critical finding requires an explicit
+    /// waive-with-reason before the `AwaitingQa → SignedOff` transition is allowed.
+    pub fn attach_evidence(
+        &self,
+        story_id: &str,
+        evidence: crate::evidence::UowEvidenceRecord,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let has_critical = evidence.is_sign_off_blocked();
+        let summary = format!(
+            "SOC-2 evidence record attached for run {}: {} gate event(s), {} scoped finding(s){}.",
+            evidence.run_id,
+            evidence.history.len(),
+            evidence.scoped_scan.as_ref().map(|s| s.total_findings).unwrap_or(0),
+            if has_critical { " — CRITICAL finding blocks sign-off" } else { "" },
+        );
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.evidence = Some(evidence);
+            uow.history.push(HistoryEntry {
+                ts: now.clone(),
+                kind: "evidence".to_string(),
+                text: summary,
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
     /// Stamp the frozen gate provenance from a completed run onto a story's UoW and
     /// append a `provenance` history entry. The durable QA-review record (the in-memory
     /// run may be gone; this survives). Does NOT change the stage — call
@@ -693,5 +758,104 @@ mod tests {
         let uow = store.sign_off("S-6", "zach", "run-1", None);
         assert!(uow.sign_off.is_some());
         assert_eq!(uow.stage, UowStage::Intake);
+    }
+
+    // ── Evidence (issue #53) ────────────────────────────────────────────────────
+
+    fn make_evidence_record(story: &str, run: &str, has_critical: bool) -> crate::evidence::UowEvidenceRecord {
+        let mut record = crate::evidence::UowEvidenceRecord::new(story, run, "2026-06-20T00:00:00Z");
+        record.set_scoped_scan(crate::evidence::ScopedScanSummary {
+            files_scanned: 1,
+            total_findings: if has_critical { 1 } else { 0 },
+            has_critical,
+            findings: Vec::new(),
+        });
+        record.compute_hash();
+        record
+    }
+
+    use crate::evidence::ScopedScanSummary;
+
+    #[test]
+    fn attach_evidence_stores_record_and_appends_history() {
+        let store = UowStore::new();
+        let evidence = make_evidence_record("S-ev-1", "run-1", false);
+        let uow = store.attach_evidence("S-ev-1", evidence.clone());
+
+        // Evidence is stored on the UoW.
+        let stored = uow.evidence.expect("evidence must be stored");
+        assert_eq!(stored.run_id, "run-1");
+        assert_eq!(stored.story_id, "S-ev-1");
+
+        // Appended to history.
+        assert!(uow.history.iter().any(|h| h.kind == "evidence"),
+            "attach_evidence must append a history entry with kind='evidence'");
+    }
+
+    #[test]
+    fn is_sign_off_blocked_false_without_evidence() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("S-ev-2");
+        // No evidence attached yet — never blocks.
+        assert!(!uow.is_sign_off_blocked());
+    }
+
+    #[test]
+    fn is_sign_off_blocked_false_with_non_critical_evidence() {
+        let store = UowStore::new();
+        let evidence = make_evidence_record("S-ev-3", "run-1", false);
+        let uow = store.attach_evidence("S-ev-3", evidence);
+        assert!(!uow.is_sign_off_blocked(), "non-critical evidence must not block sign-off");
+    }
+
+    #[test]
+    fn is_sign_off_blocked_true_with_critical_evidence() {
+        let store = UowStore::new();
+        let evidence = make_evidence_record("S-ev-4", "run-1", true);
+        let uow = store.attach_evidence("S-ev-4", evidence);
+        assert!(uow.is_sign_off_blocked(), "critical evidence must block sign-off");
+    }
+
+    #[test]
+    fn attach_evidence_history_mentions_critical_when_blocked() {
+        let store = UowStore::new();
+        let evidence = make_evidence_record("S-ev-5", "run-42", true);
+        let uow = store.attach_evidence("S-ev-5", evidence);
+        let entry = uow.history.iter()
+            .find(|h| h.kind == "evidence")
+            .expect("evidence history entry");
+        assert!(
+            entry.text.contains("CRITICAL"),
+            "history entry must mention CRITICAL when a critical finding is present: {:?}",
+            entry.text
+        );
+    }
+
+    #[test]
+    fn attach_evidence_does_not_change_stage() {
+        let store = UowStore::new();
+        store.begin_investigation("S-ev-6").unwrap();
+        store.set_decisions("S-ev-6", vec![approved_decision("S-ev-6", "a")]);
+        store.approve_decisions("S-ev-6").unwrap();
+        store.start_development("S-ev-6").unwrap();
+        assert_eq!(store.get_or_create("S-ev-6").stage, UowStage::Development);
+
+        let evidence = make_evidence_record("S-ev-6", "run-1", false);
+        store.attach_evidence("S-ev-6", evidence);
+
+        // Stage must be unchanged by attaching evidence.
+        assert_eq!(store.get_or_create("S-ev-6").stage, UowStage::Development);
+    }
+
+    #[test]
+    fn attach_evidence_persists_across_get_or_create() {
+        let store = UowStore::new();
+        let evidence = make_evidence_record("S-ev-7", "run-99", false);
+        store.attach_evidence("S-ev-7", evidence);
+
+        // A subsequent get must see the same evidence.
+        let uow = store.get_or_create("S-ev-7");
+        assert!(uow.evidence.is_some(), "evidence must survive get_or_create round-trip");
+        assert_eq!(uow.evidence.unwrap().run_id, "run-99");
     }
 }

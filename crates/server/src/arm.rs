@@ -271,6 +271,79 @@ pub fn existing_governance_files(dir: &std::path::Path, will_write: &[String]) -
     existing
 }
 
+/// Post a markdown comment onto a GitHub pull request.
+///
+/// Requires a `CAMERATA_GITHUB_TOKEN` with PR-write (Issues write) scope. Degrades
+/// gracefully: if the token is absent or the GitHub call fails, logs the error and
+/// returns `Ok(None)` so the caller does not fail the sign-off or evidence assembly.
+/// The evidence markdown is stored on the `UowEvidenceRecord` regardless.
+///
+/// # Arguments
+///
+/// - `owner` / `repo`: The GitHub `owner/repo` identifier.
+/// - `pr_number`: The pull-request number to comment on.
+/// - `body`: The markdown body (e.g. from [`crate::evidence::render_pr_markdown`]).
+/// - `token`: A GitHub personal-access token or installation token with Issues-write scope.
+///
+/// # Returns
+///
+/// `Ok(Some(comment_url))` on success; `Ok(None)` on graceful degradation (no token
+/// or network failure); `Err(e)` only on an unambiguous API-level error where retrying
+/// would help (currently unused — all failures degrade gracefully via `Ok(None)`).
+pub async fn post_pr_comment(
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<Option<String>> {
+    use camerata_worktracker::{HttpTransport, ReqwestTransport};
+
+    if token.trim().is_empty() {
+        eprintln!("[evidence] no GitHub token — PR comment skipped for {owner}/{repo}#{pr_number}");
+        return Ok(None);
+    }
+
+    let transport = match ReqwestTransport::new(format!("Bearer {token}")) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[evidence] could not build transport for PR comment: {e}");
+            return Ok(None);
+        }
+    };
+
+    let api = "https://api.github.com";
+    // GitHub Issues API: POST /repos/{owner}/{repo}/issues/{pr_number}/comments
+    // Pull-request comments (issue-level, not review-level) use the Issues endpoint.
+    let url = format!("{api}/repos/{owner}/{repo}/issues/{pr_number}/comments");
+    let payload = serde_json::json!({ "body": body });
+
+    let resp = match transport.post(&url, &payload.to_string()).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[evidence] PR comment POST failed for {owner}/{repo}#{pr_number}: {e}");
+            return Ok(None);
+        }
+    };
+
+    if (200..300).contains(&resp.status) {
+        let comment_url = serde_json::from_str::<serde_json::Value>(&resp.body)
+            .ok()
+            .and_then(|v| v["html_url"].as_str().map(String::from))
+            .unwrap_or_else(|| format!("https://github.com/{owner}/{repo}/pull/{pr_number}"));
+        eprintln!("[evidence] PR comment posted: {comment_url}");
+        Ok(Some(comment_url))
+    } else {
+        eprintln!(
+            "[evidence] PR comment HTTP {} for {owner}/{repo}#{pr_number}: {}",
+            resp.status,
+            resp.body
+        );
+        // Degrade gracefully — a PR comment failure must never block sign-off.
+        Ok(None)
+    }
+}
+
 /// Group resolved rules by the repo they install into.
 pub fn rules_by_repo(rules: &[ArmRule]) -> std::collections::BTreeMap<String, Vec<&ArmRule>> {
     let mut map: std::collections::BTreeMap<String, Vec<&ArmRule>> =
