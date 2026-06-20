@@ -82,6 +82,10 @@ pub struct AppState {
     draft: crate::draft::DraftStore,
     uow: crate::uow::UowStore,
     escalations: crate::escalation::EscalationStore,
+    /// Per-project incremental-scan cache (file fingerprints + last AI findings) so a
+    /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
+    /// means the next scan is a full scan.
+    scan_cache: crate::scan_cache::ScanCacheStore,
 }
 
 impl AppState {
@@ -103,6 +107,7 @@ impl AppState {
             draft: crate::draft::DraftStore::new(),
             uow: crate::uow::UowStore::new(),
             escalations: crate::escalation::EscalationStore::new(),
+            scan_cache: crate::scan_cache::ScanCacheStore::new(),
         }
     }
 
@@ -141,6 +146,10 @@ impl AppState {
             // silently un-blocked by quitting the app.
             state.escalations =
                 crate::escalation::EscalationStore::at(dir.join("escalations.json"));
+            // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
+            // re-scan only re-audits changed files. Survives restarts; safe to delete.
+            state.scan_cache =
+                crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
         }
         state
     }
@@ -881,6 +890,17 @@ struct AuditReq {
     /// a conservative consensus, plus a proportionality signal. Costs more AI; opt-in.
     #[serde(default)]
     thorough: bool,
+    /// Incremental scan: when true (the default), the AI audit only re-scans files whose content
+    /// changed since the last scan of this project, carrying forward cached findings for unchanged
+    /// files. The UI's "Full scan (ignore incremental cache)" checkbox sends `false` to force a
+    /// clean pass over every file. The first scan of a project is always full (no cache yet).
+    #[serde(default = "default_true")]
+    incremental: bool,
+}
+
+/// serde default for an opt-OUT boolean (defaults to `true` when the field is absent).
+fn default_true() -> bool {
+    true
 }
 
 /// The transcript key the scan/audit AI activity registers under (the Agent-activity
@@ -955,7 +975,14 @@ async fn onboard_audit(
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
-    let mut report = crate::onboard::audit_repos(
+    // Incremental scan: load this project's prior manifest unless the user forced a full scan.
+    let project_id = state.projects.active().map(|p| p.id);
+    let prior = if req.incremental {
+        project_id.as_deref().and_then(|id| state.scan_cache.get(id))
+    } else {
+        None
+    };
+    let (mut report, manifest) = crate::onboard::audit_repos(
         &sources,
         &selected,
         notes,
@@ -965,8 +992,14 @@ async fn onboard_audit(
         req.thorough,
         Some((&state.transcripts, SCAN_AUDIT_KEY)),
         None,
+        prior.as_ref(),
     )
     .await;
+    // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
+    // incremental. Only when there's an active project to key it to.
+    if let Some(id) = &project_id {
+        state.scan_cache.put(id, manifest);
+    }
     report.excluded_mechanical_rules = excluded_mechanical;
     Json(report)
 }
@@ -1005,6 +1038,14 @@ async fn onboard_audit_start(
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
+    // Incremental scan: capture the prior manifest + the cache store for the spawned task.
+    let project_id = state.projects.active().map(|p| p.id);
+    let prior = if req.incremental {
+        project_id.as_deref().and_then(|id| state.scan_cache.get(id))
+    } else {
+        None
+    };
+    let scan_cache = state.scan_cache.clone();
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -1013,7 +1054,7 @@ async fn onboard_audit_start(
             );
             return;
         }
-        let mut report = crate::onboard::audit_repos(
+        let (mut report, manifest) = crate::onboard::audit_repos(
             &sources,
             &selected,
             notes,
@@ -1023,8 +1064,13 @@ async fn onboard_audit_start(
             thorough,
             Some((&transcripts, SCAN_AUDIT_KEY)),
             Some((&jobs, &jid)),
+            prior.as_ref(),
         )
         .await;
+        // Persist the fresh manifest so the next scan can be incremental.
+        if let Some(id) = &project_id {
+            scan_cache.put(id, manifest);
+        }
         report.excluded_mechanical_rules = excluded_mechanical;
         jobs.finish(&jid, report);
     });
