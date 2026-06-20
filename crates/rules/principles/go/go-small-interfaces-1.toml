@@ -1,0 +1,25 @@
+id = "GO-SMALL-INTERFACES-1"
+title = "Interfaces are small and cohesive; an interface has one responsibility, not a god-interface with every method a package might need"
+tag = "stack"
+domain = "go"
+layer = "architecture"
+enforcement = "prose"
+default = true
+qualifies = "Small, focused interfaces are easier to implement, mock, and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
+
+[decision]
+question = "How large should interfaces be?"
+default = "small-focused-interfaces"
+why = "Rob Pike's principle: small interfaces are the right size in Go. A callee that asks for io.Reader (one method, Read) is easy for a caller to satisfy; it is easy to mock in tests, and it is easy for the implementation to evolve. A callee that asks for DatabaseConnection (50 methods) forces the caller to implement or mock all 50 even if it only uses 3. Small interfaces also compose: two small interfaces can be embedded into a larger one as needed. The reader-writer pattern (io.Reader, io.Writer, io.ReadWriter) demonstrates the principle: each method signature is a separate interface, and larger behaviors are built by combining them."
+
+[[option]]
+id = "small-focused-interfaces"
+label = "define small, focused interfaces with 1-3 methods"
+directive = "Each interface has a single responsibility and defines the minimal set of methods a caller needs. If a service needs to read JSON and write to a database, it takes (io.Reader, database.Saver), not a large Database interface with every method. Larger interfaces are built by embedding smaller ones."
+why = "The adopted default. Small interfaces are easy to implement, mock, and test; they compose well."
+
+[[option]]
+id = "god-interfaces"
+label = "define large interfaces with many methods"
+directive = "Large interfaces (e.g., Database, Repository, Service) that expose every method a package might need are defined, and callers take the full interface."
+why = "Increases implementation burden and surface area for mocking; couples callers to a large contract."

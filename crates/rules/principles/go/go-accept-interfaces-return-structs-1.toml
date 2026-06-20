@@ -1,0 +1,25 @@
+id = "GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1"
+title = "Functions accept interfaces, return concrete structs; define interfaces at the consumer, not the producer"
+tag = "stack"
+domain = "go"
+layer = "architecture"
+enforcement = "prose"
+default = true
+qualifies = "A function's parameters should use narrow interfaces (e.g., io.Reader, io.Writer) so callers can pass any implementation. Conversely, return types should be concrete structs (e.g., *User, *Order) so the caller holds the full capability and can downcast to other interfaces if needed. Interfaces should be defined by the package that uses them (the consumer), not by the package that implements them (the producer), because only the consumer knows what behavior it needs."
+
+[decision]
+question = "Do functions accept and return interfaces, or concrete types?"
+default = "accept-interfaces-return-structs"
+why = "Defining interfaces at the consumer decouples the implementation from the interface. If a service needs a repository, it defines the interface it wants (GetUser, ListUsers, SaveUser); the repository implementation satisfies it, but the service does not import the repository package and does not care about its concrete type. This allows swapping implementations (in-memory, database, mock) without changing the service. By contrast, if the repository package defines its own large interface and the service takes it as a parameter, the service must import and depend on the repository; that is backwards coupling. Returning structs instead of interfaces gives the caller the most information and allows them to downcast to other interfaces if they need to; the caller can always wrap a concrete value in an interface."
+
+[[option]]
+id = "accept-interfaces-return-structs"
+label = "accept narrow interfaces, return concrete structs, define interfaces at the consumer"
+directive = "Function parameters use narrow interfaces (io.Reader, io.Writer, etc.) so any implementation can be passed. Return types are concrete structs (e.g., *User, *database.Connection) so the caller has full capability. Interfaces are defined in the package that uses them (the consumer), not in the package that implements them (the producer)."
+why = "The adopted default. Accepting interfaces allows callers to pass any implementation; returning structs gives the caller full information; consumer-defined interfaces keep dependencies flowing downhill."
+
+[[option]]
+id = "return-interfaces"
+label = "return interface types instead of concrete structs"
+directive = "Function return types are interfaces (e.g., UserRepository, Logger interface) defined by the producer package."
+why = "Hides the concrete type from the caller and creates backwards coupling: the caller depends on the producer's interface definition."

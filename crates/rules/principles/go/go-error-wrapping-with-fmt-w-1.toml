@@ -1,0 +1,25 @@
+id = "GO-ERROR-WRAPPING-WITH-FMT-W-1"
+title = "Errors are wrapped with %w; error chains remain inspectable via errors.Unwrap and errors.Is"
+tag = "stack"
+domain = "go"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "When an error is returned from a lower layer and needs context, it is wrapped with fmt.Errorf(\"context: %w\", err) not fmt.Errorf(\"context: %v\", err). This preserves the error chain so that callers can inspect the root cause with errors.Unwrap or errors.Is(err, target), keeping debugging chains intact."
+
+[decision]
+question = "How are errors from lower layers augmented with context?"
+default = "wrap-with-fmt-w"
+why = "Go 1.13 added error wrapping via fmt.Errorf(\"...: %w\", err). The %w directive creates an error chain so that errors.Unwrap and errors.Is work correctly: a caller can ask 'is this a timeout?' (errors.Is(err, context.DeadlineExceeded)) even if the error was wrapped multiple times on its way up the stack. When %v is used instead, the error message becomes a flat string and the chain is lost; debugging requires pattern-matching on error text, which is fragile and slow. Wrapping is the standard Go idiom and has zero cost."
+
+[[option]]
+id = "wrap-with-fmt-w"
+label = "wrap errors with fmt.Errorf(\"...: %w\", err)"
+directive = "Whenever an error from a lower layer is augmented with context, fmt.Errorf is used with the %w directive: return fmt.Errorf(\"processing user %d: %w\", userID, err). This preserves the error chain for inspection by errors.Unwrap and errors.Is."
+why = "The adopted default. Error chains remain inspectable; callers can match on root cause with errors.Is."
+
+[[option]]
+id = "stringify-with-fmt-v"
+label = "stringify errors with fmt.Errorf(\"...: %v\", err)"
+directive = "Errors are converted to strings with fmt.Errorf(\"...: %v\", err), flattening the error chain into a single message."
+why = "Creates a flat error message; callers cannot inspect the root cause with errors.Is and must pattern-match on text."

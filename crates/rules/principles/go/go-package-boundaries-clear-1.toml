@@ -1,0 +1,25 @@
+id = "GO-PACKAGE-BOUNDARIES-CLEAR-1"
+title = "Package boundaries are clear; no circular imports; internal packages are used for internal APIs"
+tag = "stack"
+domain = "go"
+layer = "architecture"
+enforcement = "mechanical"
+default = true
+qualifies = "Circular imports are caught at build time and cause compilation failure. The Go convention is to place implementation packages under .../internal/... so that external packages cannot import them; only the public API (exported at the package root) is importable. This enforces a clean layering: a handler package in api/ should not import a handler package from another api/ sibling, and implementation details should not leak into the public API of a package."
+
+[decision]
+question = "How are package dependencies structured?"
+default = "clear-boundaries-internal-packages"
+why = "Go's package system enforces a simple rule: only exported symbols (capitalized names) are importable by other packages. Circular imports are prohibited: if package A imports package B, then B cannot import A. Using the internal/ convention signals that a package is for internal use only and callers should not depend on it. This discipline keeps the codebase's dependency graph a DAG (directed acyclic graph) with one-way flows. Layering is then enforceable: an HTTP handler layer should not import from another handler layer; it should import services. Without clear boundaries, circular dependencies creep in and the codebase becomes tangled."
+
+[[option]]
+id = "clear-boundaries-internal-packages"
+label = "use clear package boundaries and internal/ packages"
+directive = "Circular imports are not allowed (enforced by the compiler). Public APIs are exported at the package root (package main, package http, package service). Implementation details are placed in .../internal/... packages. External packages can only import the public API; the internal/ tree is off-limits. This enforces one-way dependency flows: handlers import services, services import repositories; repositories do not import services or handlers."
+why = "The adopted default. Clear boundaries prevent circular dependencies and keep the dependency graph a DAG."
+
+[[option]]
+id = "minimal-boundary-enforcement"
+label = "rely on naming conventions and code review"
+directive = "Package structure is not enforced; the internal/ convention is optional. Circular imports are avoided only by developer discipline."
+why = "Harder to maintain as the codebase grows; circular imports and tangled dependencies are easier to introduce."

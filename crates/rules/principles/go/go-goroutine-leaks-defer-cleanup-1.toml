@@ -1,0 +1,25 @@
+id = "GO-GOROUTINE-LEAKS-DEFER-CLEANUP-1"
+title = "Resources are cleaned up via defer; goroutines are never left running when a function exits"
+tag = "stack"
+domain = "go"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections, or stuck goroutines; they are difficult to debug once deployed."
+
+[decision]
+question = "How are resources and goroutines cleaned up when a function returns?"
+default = "defer-cleanup-and-context-cancellation"
+why = "Go's defer statement schedules a cleanup function to run when the enclosing function exits, even if it exits via panic or early return. This pattern ensures cleanup happens in all code paths and the code remains readable (acquire-then-defer is local and adjacent). Without defer, cleanup logic is scattered across multiple return points and forgetting one is easy. Similarly, goroutines spawned for a request should be governed by a context that the handler cancels on exit, so goroutines exit gracefully when the handler returns. Goroutines left running accumulate as the process runs, causing memory leaks and stale work."
+
+[[option]]
+id = "defer-cleanup-and-context-cancellation"
+label = "pair every resource acquire with defer; manage goroutines via context"
+directive = "Every resource acquired (file open, database connection begin, listener start, etc.) is immediately followed by a deferred cleanup function (defer f.Close(), defer tx.Rollback(), etc.). Goroutines spawned to handle a request are governed by a context that flows down from the handler; when the handler exits, it cancels that context, signalling all spawned goroutines to exit."
+why = "The adopted default. Defer cleanup ensures every code path cleans up; context cancellation ensures goroutines do not leak and stale work does not accumulate."
+
+[[option]]
+id = "explicit-cleanup-at-end"
+label = "clean up resources via explicit calls at the end of functions"
+directive = "After the main logic, explicit cleanup calls are made before returning (e.g., f.Close(), tx.Rollback() at the end of the function)."
+why = "Relies on developers remembering to add cleanup to every code path, including early returns and panic recovery; goroutines spawned without context linkage can continue running after the function exits."

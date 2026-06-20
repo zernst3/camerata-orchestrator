@@ -1,0 +1,25 @@
+id = "GO-SQL-PARAMETERIZED-1"
+title = "SQL is parameterized via prepared statements or ORM query builders; query strings are never built from interpolated values"
+tag = "stack"
+domain = "go"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a static-analysis gate (Bandit-equivalent or sqlc-integration) that flags string concatenation, fmt.Sprintf, or raw query strings feeding values into db.Query(...), db.Exec(...), rows.Scan(...), or ORM method calls. Conformance holds when the gate runs in CI and an interpolated query fails the build."
+
+[decision]
+question = "How are dynamic values placed into SQL queries?"
+default = "bind-parameters-or-query-builder"
+why = "Building a SQL string by concatenating or sprintf-interpolating a value puts attacker-controlled text directly into the query grammar, which is the canonical SQL-injection vulnerability and the most damaging web flaw. Parameterized queries (prepared statements) send the SQL text and the values separately to the database driver, so a value can never be parsed as SQL no matter what it contains. The database treats it strictly as data. In Go, this means using ? or $N placeholders with db.Query(query, args...) or db.Stmt.Query(args...), or using an ORM query builder that generates parameterized SQL internally. The interpolated form looks convenient but every such site is a latent injection waiting for one unsanitized input; there is no case where concatenation is the right call for a value."
+
+[[option]]
+id = "bind-parameters-or-query-builder"
+label = "always bind values via prepared statements or ORM query builders"
+directive = "Every dynamic value in a SQL query is passed as a bound parameter using ? or $N placeholders with (database/sql).Query(..., args...), (database/sql).Stmt.Query(args...), or an ORM query builder that generates parameterized SQL. String concatenation, fmt.Sprintf, or interpolation to build query strings are forbidden. Static table or column names that must be dynamic come from a fixed allow-list, never from request input."
+why = "The adopted default. Parameterization sends SQL and values separately so a value can never be parsed as SQL, eliminating injection entirely."
+
+[[option]]
+id = "interpolate-with-escaping"
+label = "build query strings with string concatenation and manual escaping"
+directive = "Dynamic values are formatted into the SQL string using concatenation or fmt.Sprintf with manual escaping or quoting rather than bound as parameters."
+why = "Reads naturally but is error-prone and incomplete; every site is a latent injection waiting for one unsanitized input."

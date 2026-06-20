@@ -1,0 +1,25 @@
+id = "GO-LOGGING-STRUCTURED-1"
+title = "Logging is structured using a logger interface (slog, zap); log lines are not built with string concatenation or Printf"
+tag = "stack"
+domain = "go"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Structured logging (JSON or key-value format) is easier to parse, search, and aggregate in log aggregation systems. A logger with Info(msg, keyVals...) or ctx.Log.Info(msg, key, value) produces parseable output; unstructured Printf logs require regex parsing and are fragile."
+
+[decision]
+question = "How are logs written?"
+default = "structured-logging"
+why = "Structured logging produces machine-parseable output (JSON, key-value pairs) that log aggregation systems (ELK, Datadog, Grafana Loki) can ingest and search. An Info(\"user created\", \"user_id\", 123, \"email\", \"foo@bar.com\") call produces a log entry where each field is queryable independently; a Printf(\"user created: id=%d email=%s\", id, email) produces a flat string that requires regex to extract. Structured logging also enforces discipline: the developer explicitly names each piece of context, making logs more consistent and debuggable. Most Go logging packages (log/slog in 1.21+, zap, logrus) support structured logging out of the box."
+
+[[option]]
+id = "structured-logging"
+label = "use structured logging with a logger interface"
+directive = "A logger is passed or injected (e.g., *slog.Logger, *zap.Logger) and used with structured methods: log.Info(\"event\", \"key\", value, \"key2\", value2). Log lines are never built with fmt.Printf or string concatenation."
+why = "The adopted default. Structured logs are machine-parseable and searchable in aggregation systems."
+
+[[option]]
+id = "unstructured-printf-logging"
+label = "use Printf-style logging"
+directive = "Logs are written using fmt.Printf, log.Printf, or Printf methods, building the entire log line as a formatted string."
+why = "Produces flat, unstructured text that requires regex parsing; harder to search and aggregate."

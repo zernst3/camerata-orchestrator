@@ -1,0 +1,25 @@
+id = "GO-ERRORS-MUST-BE-CHECKED-1"
+title = "Errors are always checked; no naked return statements or silently ignored errors"
+tag = "stack"
+domain = "go"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a static-analysis gate (errcheck, golangci-lint errcheck) that flags unhandled error returns and naked assignments that discard errors. Conformance holds when the gate runs in CI and undeclared errors fail the build; it fails when no error-check lint runs."
+
+[decision]
+question = "How are errors from function calls handled?"
+default = "check-every-error"
+why = "A Go function returns an error as a signal that something went wrong and the caller needs to decide what to do about it. Ignoring the error with `_` or omitting the assignment entirely discards that signal and makes bugs silently cascade downstream, causing data loss or corrupted state that is hard to debug. The idiom in Go is to check err != nil on every call that returns error and either handle it (log, wrap, return, panic, retry) or explicitly document why it is safe to ignore. The explicit check is brief and keeps code locally auditable: the reader can see at every callsite what the contract is. Naked returns that discard errors happen when the developer thinks \"I don't expect an error here\"; but expectation is not a guarantee, and the bug manifests when that assumption is violated."
+
+[[option]]
+id = "check-every-error"
+label = "check err != nil on every call that returns error"
+directive = "Every function call that returns an error is followed by an explicit nil check (if err != nil { ... }). Errors are never discarded with blank assignments (_) except for rare exceptions documented inline. Naked return statements do not discard error returns. When an error is explicitly safe to ignore (e.g., a formatting call that panics on garbage input already validated), the blank assignment is paired with a comment explaining why."
+why = "The adopted default. Checking every error keeps the contract visible and prevents silent cascading failures."
+
+[[option]]
+id = "ignore-low-consequence-errors"
+label = "ignore errors from calls deemed low-consequence"
+directive = "Some error-returning calls are assumed to be low-consequence (e.g., closing a file handle, flushing a buffer, or calling Fprintf to log); their errors are discarded with blank assignments to reduce visual noise."
+why = "Reduces error-check clutter for truly safe callsites, but leads to silent bugs when assumptions about consequence are wrong, e.g., a deferred Close() fails because the write buffer never flushed."

@@ -679,6 +679,8 @@ fn domain_to_glob(domain: &str) -> String {
         "ui" => "**/*.{tsx,css}".to_owned(),
         "iac" => "**/*.tf".to_owned(),
         "ci-cd" => "**/.github/**".to_owned(),
+        "go" => "**/*.go".to_owned(),
+        "python" => "**/*.py".to_owned(),
         _ => "**".to_owned(),
     }
 }
@@ -1213,6 +1215,12 @@ mod tests {
 
         let paths = derive_allowed_paths(&["iac"]);
         assert!(paths.contains(&"**/*.tf".to_string()), "{paths:?}");
+
+        let paths = derive_allowed_paths(&["go"]);
+        assert!(paths.contains(&"**/*.go".to_string()), "{paths:?}");
+
+        let paths = derive_allowed_paths(&["python"]);
+        assert!(paths.contains(&"**/*.py".to_string()), "{paths:?}");
     }
 
     #[test]
@@ -1222,6 +1230,7 @@ mod tests {
         assert_eq!(domain_to_glob("rust:dioxus"), "**/*.rs");
         assert_eq!(domain_to_glob("rust:seaorm"), "**/*.rs");
         assert_eq!(domain_to_glob("sql:postgres"), "**/*.sql");
+        assert_eq!(domain_to_glob("go:fiber"), "**/*.go");
     }
 
     #[test]

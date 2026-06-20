@@ -1,0 +1,24 @@
+id = "GO-HANDLER-SERVICE-REPOSITORY-1"
+title = "Business logic is layered: HTTP handlers call services, services call repositories; no business logic in handlers"
+tag = "stack"
+domain = "go"
+layer = "architecture"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does business logic live relative to HTTP handlers and data access?"
+default = "handler-service-repository-layers"
+why = "An HTTP handler exists to translate HTTP into a call and back; when business logic lives inside it, that logic becomes reachable only through the request cycle and cannot be invoked from a background task, a command, or another endpoint without faking a request. It also cannot be unit-tested without the HTTP stack. Pushing logic into a service layer that takes plain arguments (not http.Request) and returns plain values or domain objects makes it callable from anywhere and testable in isolation. The repository layer owns all data access (database queries, caching, external lookups) and abstracts the storage implementation behind an interface, so services are decoupled from database details and can be tested with mock repositories. The handler stays thin: parse input, call service, shape response."
+
+[[option]]
+id = "handler-service-repository-layers"
+label = "use handler, service, and repository layers"
+directive = "HTTP handlers (in a handlers/ or api/ package) parse and validate input, call a service-layer function, and shape the HTTP response. Services (in a services/ package) contain business rules, orchestrate multi-step workflows, and call repository methods; they take plain arguments and return plain domain objects, never http.Request. Repositories (in a repositories/ or persistence/ package) own all data access (SQL queries, caching, external API calls) behind an interface; services call repository interfaces, not concrete implementations."
+why = "The adopted default. A service layer makes business logic reusable and testable in isolation; repositories decouple services from storage implementation."
+
+[[option]]
+id = "logic-in-handlers"
+label = "put business logic and data access directly in handlers"
+directive = "HTTP handlers directly execute business rules, make database queries, and shape the response."
+why = "Ties the logic to the HTTP stack: it cannot be reused outside HTTP or tested without the web framework; rules get duplicated across endpoints."
