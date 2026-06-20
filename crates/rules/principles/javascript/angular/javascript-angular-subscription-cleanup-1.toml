@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-SUBSCRIPTION-CLEANUP-1"
+title = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe?"
+default = "subscriptions-are-cleaned-up-with-takeuntildestroy"
+why = "An Observable subscription that is not cleaned up continues to emit and consume resources even after a component is destroyed, creating memory leaks, duplicate event listeners, and unpredictable behavior. The manual pattern of calling .subscribe() and storing the Subscription in a field, then unsubscribing in ngOnDestroy, is error-prone: the cleanup hook is easy to forget, and the subscription is active for longer than needed. Modern Angular provides two reliable patterns: the takeUntilDestroyed operator (Angular 16+), which automatically terminates the subscription when the component is destroyed; and the async pipe in the template, which subscribes and unsubscribes automatically. Both are implicit, automatic, and guaranteed. The rule is: Observable chains should use takeUntilDestroyed to terminate them automatically, or the subscription should live in a template via the async pipe. Manual .subscribe() calls without cleanup in ngOnDestroy are forbidden."
+
+[[option]]
+id = "subscriptions-are-cleaned-up-with-takeuntildestroy"
+label = "Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe"
+directive = "Observable subscriptions are terminated automatically using one of two patterns: (1) the takeUntilDestroyed() operator, which pipes into an Observable chain and terminates the subscription when the component is destroyed, or (2) the async pipe in the template, which subscribes and unsubscribes automatically. Manual .subscribe() without cleanup in ngOnDestroy is forbidden. If a subscription must be handled manually (rare cases), ngOnDestroy must unsubscribe from every subscription created in the component."
+why = "The adopted default. takeUntilDestroyed and the async pipe guarantee cleanup and prevent memory leaks, dangling listeners, and surprising behavior after component destruction."
+
+[[option]]
+id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
+label = "manual subscribe calls are tracked and unsubscribed …"
+directive = "Observable subscriptions are handled manually using .subscribe() calls, tracked in fields, and cleaned up by calling .unsubscribe() in ngOnDestroy()"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1"
+title = "Services are injected via constructor parameters or the inject() function, never manually instantiated"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Services are injected via constructor parameters or the inject() function, never manually instantiated?"
+default = "services-are-injected-via-constructor-or-inject"
+why = "Angular's dependency injection (DI) container is the authoritative source for service instances. When a component or service requests a dependency via constructor injection or the inject() function, Angular's DI system provides the right instance (singleton, scoped, or factory-created as configured). Manually instantiating a service (new MyService()) bypasses DI entirely: the constructor call runs outside the container, any setup or initialization hooks are skipped, the service is not a singleton (a new instance is created every time), and mocking or swapping the implementation for testing is impossible without changing the source code. The alternative to constructor injection is the inject() function (Angular 14+), which retrieves the instance from the DI container at runtime inside the component's setup phase. Both are valid; the forbidden pattern is manual instantiation. The rule is: dependency injection only. If a service is not available in the DI container, add it to the providers array or the providedIn configuration; do not create a new instance by hand."
+
+[[option]]
+id = "services-are-injected-via-constructor-or-inject"
+label = "Services are injected via constructor parameters or the inject() function, never manually instantiated"
+directive = "All service instances are obtained through Angular's dependency injection: either via a constructor parameter (declare it in the component's constructor, and Angular injects it) or via the inject() function called during component setup. Services are configured via the providers array (in a component's @Component decorator, in an NgModule, or in the providers array of a bootstrapApplication call) or via providedIn: 'root' in the @Injectable decorator. Writing 'new MyService()' to instantiate a service manually is forbidden; the pattern bypasses DI, loses singleton behavior, skips initialization, and makes testing impossible without modifying source code."
+why = "The adopted default. DI injection ensures singleton behavior, initialization, mocking for tests, and the ability to swap implementations without code changes. Manual instantiation bypasses all of these guarantees."
+
+[[option]]
+id = "services-are-manually-instantiated-with-new-where"
+label = "services are manually instantiated with 'new' where …"
+directive = "services are instantiated manually using the 'new' keyword where needed, rather than relying on dependency injection"
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-LAZY-LOADING-ROUTES-1"
+title = "Feature routes are lazy-loaded to reduce the initial bundle"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Feature routes are lazy-loaded to reduce the initial bundle?"
+default = "feature-routes-are-lazy-loaded-to-reduce-the-init"
+why = "Lazy loading defers the bundling and loading of a feature module or route until the user navigates to that route. The initial application bundle includes only the code needed to render the landing page and navigation; when the user clicks to a lazy-loaded feature, the browser downloads and evaluates that feature's code. This dramatically reduces the initial bundle size and improves time-to-interactive. The alternative—bundling all routes into the main bundle—ensures every user pays the cost of every feature, even features they never use. Lazy loading is especially valuable in large applications with many features, and it is practical in any application with more than a single route. The pattern in Angular is to use loadComponent (for standalone components) or loadChildren (for feature modules) in the route configuration, paired with dynamic imports (import('path/to/feature.ts')). The rule is: all routes beyond the main/root route should be lazy-loaded; the root route and authentication routes are eagerly loaded, but feature routes defer their load until navigation."
+
+[[option]]
+id = "feature-routes-are-lazy-loaded-to-reduce-the-init"
+label = "Feature routes are lazy-loaded to reduce the initial bundle"
+directive = "All routes beyond the root and authentication routes use loadComponent or loadChildren with dynamic imports to defer bundling until navigation. The routing configuration uses import('path/to/component/or/module.ts') in a loadComponent or loadChildren property, and Angular automatically chunks that code into a separate bundle. The main bundle includes only the root layout, navigation, and critical routes. Feature modules and routes are split into separate chunks that load on demand."
+why = "The adopted default. Lazy loading reduces the initial bundle and improves time-to-interactive, especially in large applications."
+
+[[option]]
+id = "all-routes-are-eagerly-loaded-in-the-main-bundle"
+label = "all routes are eagerly loaded in the main bundle for …"
+directive = "all routes are imported and bundled with the main application, and lazy loading is not used"
+why = "A defensible alternative the project considered and did not adopt as the default."
