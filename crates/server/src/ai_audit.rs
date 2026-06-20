@@ -523,38 +523,126 @@ pub async fn verify_findings(
     findings: Vec<Finding>,
     calibration_model: Option<&str>,
     meter: Option<&UsageMeter>,
+    thorough: bool,
+    files_count: usize,
 ) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
     }
-    let mut prompt = format!("Repository: {repo}\n\nScrutinize these findings:\n");
+    let mut prompt = format!("Repository: {repo}\n");
+    if thorough {
+        // Proportionality signal (#51): a small/young codebase should not be held to the
+        // architecture of a large one — over-engineering / YAGNI notes auto-hedge.
+        prompt.push_str(&format!(
+            "This repository has {files_count} code files. Judge each finding PROPORTIONALLY to the \
+             codebase's size and maturity: an 'over-engineering'/'missing abstraction'/YAGNI note on \
+             a small codebase is a debatable preference (low confidence, capped severity), not a \
+             violation.\n"
+        ));
+    }
+    prompt.push_str("\nScrutinize these findings:\n");
     for (i, f) in findings.iter().enumerate() {
         prompt.push_str(&format!(
             "[{i}] (severity {}) {}:{} — {} :: {}\n",
             f.severity, f.path, f.line, f.snippet, f.detail
         ));
     }
-    let mut req = LlmRequest::new(prompt)
-        .with_system(verify_system_prompt())
-        // Aggregated findings across all chunks can be many; one verdict each.
-        .with_max_tokens(4096);
-    // Calibration runs on its OWN selected model (the UI exposes it). Previously it silently
-    // used the backend default, so a "Haiku" scan was really Haiku-scan + default-calibrate;
-    // now the model the user picked for calibration is the one that runs.
-    if let Some(m) = calibration_model {
-        req = req.with_model(m.to_string());
-    }
-    // Non-streaming, so use the coarse total backstop; on timeout or error the findings
-    // pass through unchanged (calibration is best-effort, never load-bearing).
-    match tokio::time::timeout(total_backstop(), llm.complete(req)).await {
-        Ok(Ok(resp)) => {
+    // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh request per
+    // pass (LlmRequest is consumed by complete).
+    let system = verify_system_prompt();
+    let build_req = || {
+        let mut req = LlmRequest::new(prompt.clone())
+            .with_system(system.clone())
+            // Aggregated findings across all chunks can be many; one verdict each.
+            .with_max_tokens(4096);
+        if let Some(m) = calibration_model {
+            req = req.with_model(m.to_string());
+        }
+        req
+    };
+
+    // THOROUGH mode (#51): run the calibration verdict MULTIPLE times and take the conservative
+    // consensus, so a single over-confident pass can't push a debatable finding to HIGH. Costs
+    // ~3x the calibration tokens (opt-in). Default mode is a single pass (unchanged behavior).
+    let passes = if thorough { 3 } else { 1 };
+    let mut votes: Vec<String> = Vec::new();
+    for _ in 0..passes {
+        // Non-streaming, so use the coarse total backstop; a failed pass is simply skipped
+        // (calibration is best-effort, never load-bearing).
+        if let Ok(Ok(resp)) = tokio::time::timeout(total_backstop(), llm.complete(build_req())).await {
             if let Some(m) = meter {
                 m.record(&resp);
             }
-            apply_verdicts(&resp.text, findings)
+            votes.push(resp.text);
         }
-        _ => findings,
     }
+    match votes.len() {
+        0 => findings, // every pass failed — pass findings through unchanged
+        1 => apply_verdicts(&votes[0], findings),
+        _ => apply_verdicts(&consensus_verdicts(&votes, findings.len()), findings),
+    }
+}
+
+/// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
+/// mode). For each finding index: severity = the majority vote (ties break to the LOWER severity);
+/// confidence = "high" only when the passes AGREE (all "high" and a single agreed severity) —
+/// any disagreement means uncertainty, which is exactly what the architect should review, so it
+/// becomes "low" (needs review). Returns a `{"verdicts":[…]}` JSON string for `apply_verdicts`.
+fn consensus_verdicts(votes: &[String], n: usize) -> String {
+    use serde_json::Value;
+    // Per index: collected (severity, confidence, reason) across passes.
+    let mut per: Vec<Vec<(String, String, String)>> = vec![Vec::new(); n];
+    for raw in votes {
+        let Some(json) = extract_json_object(raw) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(json) else { continue };
+        let Some(arr) = v["verdicts"].as_array() else { continue };
+        for verdict in arr {
+            let Some(idx) = verdict["index"].as_u64() else { continue };
+            let idx = idx as usize;
+            if idx >= n {
+                continue;
+            }
+            let sev = match verdict["severity"].as_str().unwrap_or("medium") {
+                "high" => "high",
+                "low" => "low",
+                _ => "medium",
+            }
+            .to_string();
+            let conf = if verdict["confidence"].as_str() == Some("low") { "low" } else { "high" }.to_string();
+            let reason = verdict["reason"].as_str().unwrap_or("").trim().to_string();
+            per[idx].push((sev, conf, reason));
+        }
+    }
+    let rank = |s: &str| match s { "high" => 2, "medium" => 1, _ => 0 };
+    let mut verdicts = Vec::new();
+    for (idx, votes_for) in per.iter().enumerate() {
+        if votes_for.is_empty() {
+            continue;
+        }
+        // Majority severity; tie breaks to the lower rank (humble).
+        let mut counts = [0u32; 3]; // [low, medium, high]
+        for (s, _, _) in votes_for {
+            counts[rank(s)] += 1;
+        }
+        let max = *counts.iter().max().unwrap();
+        let sev = if counts[2] == max { "high" } else if counts[1] == max { "medium" } else { "low" };
+        // Disagreement on severity, or any low-confidence vote → low confidence (needs review).
+        let distinct_sevs = counts.iter().filter(|&&c| c > 0).count();
+        let any_low_conf = votes_for.iter().any(|(_, c, _)| c == "low");
+        let agreed_high = sev == "high" && distinct_sevs == 1 && !any_low_conf;
+        let confidence = if agreed_high { "high" } else if distinct_sevs > 1 || any_low_conf { "low" } else { "high" };
+        // First non-empty reason, preferring a low-confidence pass's reason.
+        let reason = votes_for
+            .iter()
+            .find(|(_, c, r)| c == "low" && !r.is_empty())
+            .or_else(|| votes_for.iter().find(|(_, _, r)| !r.is_empty()))
+            .map(|(_, _, r)| r.clone())
+            .unwrap_or_default();
+        verdicts.push(serde_json::json!({
+            "index": idx, "severity": sev, "confidence": confidence, "reason": reason
+        }));
+    }
+    serde_json::json!({ "verdicts": verdicts }).to_string()
 }
 
 /// The ADOPTED-rules header for the audit prompt. Empty when nothing is selected (the
@@ -1040,6 +1128,7 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
 /// single bad pass never discards the others.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &Llm,
     repo: &str,
@@ -1048,6 +1137,7 @@ pub async fn audit_repo(
     model: Option<&str>,
     calibration_model: Option<&str>,
     mode: ScanMode,
+    thorough: bool,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     meter: Option<&UsageMeter>,
@@ -1209,7 +1299,16 @@ pub async fn audit_repo(
                 },
             );
         }
-        let out = verify_findings(llm, repo, all_findings, calib_model.as_deref(), meter).await;
+        let out = verify_findings(
+            llm,
+            repo,
+            all_findings,
+            calib_model.as_deref(),
+            meter,
+            thorough,
+            files.len(),
+        )
+        .await;
         if let Some((store, key)) = feedback {
             store.set_status(key, &session, "done");
         }
@@ -1221,6 +1320,27 @@ pub async fn audit_repo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consensus_is_conservative_on_disagreement() {
+        // Three passes disagree on index 0 (high/low/high) — majority severity is high, but the
+        // disagreement forces confidence "low" (needs review). Index 1 unanimously high+confident.
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""},{"index":1,"severity":"high","confidence":"high","reason":"clear injection"}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"low","confidence":"low","reason":"debatable preference"},{"index":1,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":""},{"index":1,"severity":"high","confidence":"high","reason":""}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v["verdicts"].as_array().unwrap();
+        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(v0["severity"], "high", "majority severity wins");
+        assert_eq!(v0["confidence"], "low", "disagreement -> needs review");
+        assert_eq!(v0["reason"], "debatable preference", "prefers the low-confidence reason");
+        let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
+        assert_eq!(v1["severity"], "high");
+        assert_eq!(v1["confidence"], "high", "unanimous high stays confident");
+    }
 
     #[test]
     fn parse_needs_files_reads_array_and_tolerates_absence() {

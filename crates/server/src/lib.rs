@@ -875,6 +875,10 @@ struct AuditReq {
     /// orthogonal to model + rules.
     #[serde(default)]
     mode: Option<String>,
+    /// Thorough calibration (#51): when true, the calibration pass runs multiple times and takes
+    /// a conservative consensus, plus a proportionality signal. Costs more AI; opt-in.
+    #[serde(default)]
+    thorough: bool,
 }
 
 /// The transcript key the scan/audit AI activity registers under (the Agent-activity
@@ -956,6 +960,7 @@ async fn onboard_audit(
         model.as_deref(),
         calibration_model.as_deref(),
         mode,
+        req.thorough,
         Some((&state.transcripts, SCAN_AUDIT_KEY)),
         None,
     )
@@ -988,6 +993,7 @@ async fn onboard_audit_start(
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
+    let thorough = req.thorough;
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
@@ -1012,6 +1018,7 @@ async fn onboard_audit_start(
             model.as_deref(),
             calibration_model.as_deref(),
             mode,
+            thorough,
             Some((&transcripts, SCAN_AUDIT_KEY)),
             Some((&jobs, &jid)),
         )

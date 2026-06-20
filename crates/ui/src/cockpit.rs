@@ -3333,11 +3333,12 @@ async fn audit_against(
     model: &str,
     calibration_model: &str,
     mode: &str,
+    thorough: bool,
 ) -> Option<ScanReportView> {
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode, "thorough": thorough }))
         .send()
         .await
         .ok()?
@@ -3479,11 +3480,12 @@ async fn audit_job_start(
     model: &str,
     calibration_model: &str,
     exec_mode: &str,
+    thorough: bool,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode, "thorough": thorough }))
         .send()
         .await
         .ok()?
@@ -5311,6 +5313,8 @@ fn ScanResults(report: ScanReportView) -> Element {
     // AUTO-SELECTED by the scan's scale; the user can override.
     let recommended_mode = recommend_scan_mode(&report);
     let mut audit_mode = use_signal(|| recommended_mode.clone());
+    // Thorough calibration (#51): opt-in, costs more AI. Off by default.
+    let mut audit_thorough = use_signal(|| false);
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
@@ -5788,6 +5792,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             let model = audit_model();
                             let calib = calibration_model();
                             let mode = audit_mode();
+                            let thorough = audit_thorough();
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
@@ -5800,7 +5805,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel").await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough).await else {
                                         auditing.set(false);
                                         return;
                                     };
@@ -5810,7 +5815,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode).await);
+                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough).await);
                                     auditing.set(false);
                                 });
                             }
@@ -5873,6 +5878,22 @@ fn ScanResults(report: ScanReportView) -> Element {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
                     span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
+                }
+                // Thorough calibration (#51) — opt-in, costs more AI.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Thorough calibration" }
+                    label { class: "audit-thorough-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: audit_thorough(),
+                            disabled: auditing(),
+                            onchange: move |e| audit_thorough.set(e.checked()),
+                        }
+                        span { "Cross-check the calibration (uses more AI)" }
+                    }
+                    span { class: "audit-model-hint",
+                        "Calibration is the step AFTER the scan that recalibrates each finding's severity and flags debatable ones for review — it never drops a finding. Thorough mode runs that pass ~3× and keeps the conservative consensus (so one over-confident pass can't push a debatable architectural preference to HIGH), and judges findings proportionally to the repo's size. Noticeably more AI calls. Optional — the standard single-pass calibration is on by default."
+                    }
                 }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
                 // model + mode + ticked rules), and — once the audit has run — the ACTUAL

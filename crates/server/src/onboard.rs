@@ -1228,6 +1228,7 @@ pub async fn audit_repos(
     model: Option<&str>,
     calibration_model: Option<&str>,
     mode: crate::ai_audit::ScanMode,
+    thorough: bool,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) -> ScanReport {
@@ -1298,8 +1299,8 @@ pub async fn audit_repos(
                 }
                 // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
                 match crate::ai_audit::audit_repo(
-                    &llm, spec, &files, &semantic, model, calibration_model, mode, feedback, job,
-                    Some(&meter),
+                    &llm, spec, &files, &semantic, model, calibration_model, mode, thorough,
+                    feedback, job, Some(&meter),
                 )
                 .await
                 {

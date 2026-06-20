@@ -1943,6 +1943,9 @@ html, body {
 .audit-model-select:hover:not(:disabled) { border-color: var(--accent); }
 .audit-model-select:disabled { opacity: .55; cursor: default; }
 .audit-model-hint { font-size: 11.5px; color: var(--ink-soft); }
+/* Thorough-calibration checkbox (#51). */
+.audit-thorough-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink); cursor: pointer; }
+.audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 .audit-mode-rec { font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; }
 
 /* Async-job live progress bar (Mode 3). */
