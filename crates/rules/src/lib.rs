@@ -1051,4 +1051,85 @@ mod tests {
             "expected only universal rules when no domains specified"
         );
     }
+
+    // ── domain_to_glob (via derive_allowed_paths) ─────────────────────────────
+
+    #[test]
+    fn derive_allowed_paths_always_appends_star_star_catch_all() {
+        // Even for a known domain, the list must include "**" at the end so the
+        // role is never inadvertently path-restricted to zero files.
+        let paths = derive_allowed_paths(&["rust"]);
+        assert!(
+            paths.contains(&"**".to_string()),
+            "rust domain must still have ** catch-all: {paths:?}"
+        );
+        // For an unknown domain the only entry returned is "**".
+        let unknown = derive_allowed_paths(&["unknown-lang"]);
+        assert!(unknown.contains(&"**".to_string()));
+    }
+
+    #[test]
+    fn derive_allowed_paths_maps_known_domains() {
+        // Spot-check that well-known domains produce their expected glob.
+        let paths = derive_allowed_paths(&["rust"]);
+        assert!(paths.contains(&"**/*.rs".to_string()), "{paths:?}");
+
+        let paths = derive_allowed_paths(&["sql"]);
+        assert!(paths.contains(&"**/*.sql".to_string()), "{paths:?}");
+
+        let paths = derive_allowed_paths(&["javascript"]);
+        assert!(
+            paths.contains(&"**/*.{js,ts,jsx,tsx}".to_string()),
+            "{paths:?}"
+        );
+
+        let paths = derive_allowed_paths(&["iac"]);
+        assert!(paths.contains(&"**/*.tf".to_string()), "{paths:?}");
+    }
+
+    #[test]
+    fn domain_to_glob_subdomain_variant_strips_suffix() {
+        // Sub-domains like "rust:dioxus" must map to the primary component's glob,
+        // not fall through to the "**" catch-all.
+        assert_eq!(domain_to_glob("rust:dioxus"), "**/*.rs");
+        assert_eq!(domain_to_glob("rust:seaorm"), "**/*.rs");
+        assert_eq!(domain_to_glob("sql:postgres"), "**/*.sql");
+    }
+
+    #[test]
+    fn domain_to_glob_unknown_domain_returns_double_star() {
+        assert_eq!(domain_to_glob("my-custom-domain"), "**");
+        assert_eq!(domain_to_glob(""), "**");
+    }
+
+    #[test]
+    fn derive_allowed_paths_does_not_duplicate_star_star() {
+        // When the only domain is "unknown" (which maps to "**"), we should get
+        // exactly one "**", not two.
+        let paths = derive_allowed_paths(&["unknown-lang"]);
+        let count = paths.iter().filter(|p| p.as_str() == "**").count();
+        assert_eq!(count, 1, "should not duplicate the ** catch-all: {paths:?}");
+    }
+
+    #[test]
+    fn derive_allowed_paths_empty_domains_returns_only_catch_all() {
+        let paths = derive_allowed_paths(&[]);
+        assert_eq!(paths, vec!["**".to_string()]);
+    }
+
+    // ── Rule::has_default + id_str convenience methods ───────────────────────
+
+    #[test]
+    fn rule_has_default_reflects_default_option_field() {
+        let mut r = make_rule("R1", "rust", EnforcementKind::Structured);
+        assert!(!r.has_default());
+        r.default_option = Some("opt-a".to_string());
+        assert!(r.has_default());
+    }
+
+    #[test]
+    fn rule_id_str_returns_inner_string() {
+        let r = make_rule("MY-RULE-1", "rust", EnforcementKind::Prose);
+        assert_eq!(r.id_str(), "MY-RULE-1");
+    }
 }

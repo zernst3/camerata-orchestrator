@@ -497,4 +497,156 @@ mod tests {
         assert!(!bl_rec.stale, "baseline entry still covers a live finding");
         assert_eq!(bl_rec.accepted_by.as_deref(), Some("z"));
     }
+
+    // ── baseline_entry builder ──────────────────────────────────────────────────
+
+    #[test]
+    fn baseline_entry_builder_fills_all_fields() {
+        let finding = f("SEC-X", "src/main.rs", 42, "let k = \"secret\";");
+        let entry = baseline_entry(&finding, "alice", "2026-06-19T00:00:00Z", "pre-existing");
+        assert_eq!(entry.rule_id, "SEC-X");
+        assert_eq!(entry.path, "src/main.rs");
+        assert_eq!(entry.accepted_by, "alice");
+        assert_eq!(entry.accepted_at, "2026-06-19T00:00:00Z");
+        assert_eq!(entry.reason, "pre-existing");
+        assert_eq!(entry.kind, "baseline");
+        assert!(entry.ticket.is_none());
+        // The fingerprint must match what fingerprint() would compute independently.
+        assert_eq!(
+            entry.fingerprint,
+            fingerprint("SEC-X", "let k = \"secret\";")
+        );
+    }
+
+    #[test]
+    fn baseline_entry_fingerprint_is_whitespace_insensitive() {
+        let f1 = f("R", "a.rs", 1, "let x  =  1;");
+        let f2 = f("R", "a.rs", 1, "let x = 1;");
+        let e1 = baseline_entry(&f1, "z", "t", "reason");
+        let e2 = baseline_entry(&f2, "z", "t", "reason");
+        assert_eq!(
+            e1.fingerprint, e2.fingerprint,
+            "whitespace collapse means both produce same fingerprint"
+        );
+    }
+
+    // ── fingerprint changes when rule-id changes ─────────────────────────────
+
+    #[test]
+    fn fingerprint_differs_across_rule_ids() {
+        let fp1 = fingerprint("SEC-A", "let k = 1;");
+        let fp2 = fingerprint("SEC-B", "let k = 1;");
+        assert_ne!(
+            fp1, fp2,
+            "same snippet under different rules must produce different fingerprints"
+        );
+    }
+
+    // ── parse_inline_waivers edge cases ─────────────────────────────────────
+
+    #[test]
+    fn parses_multiple_waivers_in_same_file() {
+        let src = "\
+line1; // camerata:allow R1 -- reason one\n\
+line2;\n\
+line3; // camerata:allow R2 -- reason two, GH-7\n";
+        let w = parse_inline_waivers("x.rs", src);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].rule_id, "R1");
+        assert_eq!(w[0].line, 1);
+        assert_eq!(w[1].rule_id, "R2");
+        assert_eq!(w[1].line, 3);
+        // GH-7 matches the ticket pattern (2 uppercase letters + hyphen + digits).
+        assert_eq!(w[1].ticket.as_deref(), Some("GH-7"));
+    }
+
+    #[test]
+    fn parse_inline_waivers_ignores_lines_without_marker() {
+        let src = "// just a normal comment\ncode();\n// TODO: fix this\n";
+        let w = parse_inline_waivers("x.rs", src);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn parse_inline_waivers_marker_embedded_in_code_comment() {
+        // The marker can appear anywhere on the line (typical: end of code line).
+        let src = "foo.bar(); /* camerata:allow SEC-Y -- embedded ok */\n";
+        let w = parse_inline_waivers("y.rs", src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].rule_id, "SEC-Y");
+        assert!(w[0].reason.is_some());
+    }
+
+    #[test]
+    fn parse_inline_waivers_bare_marker_with_no_rule_id_is_skipped() {
+        // A bare `camerata:allow` with nothing after it should produce no entry.
+        let src = "code(); // camerata:allow\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert!(w.is_empty(), "a marker with no rule id must be skipped");
+    }
+
+    // ── ticket extraction with both separators ───────────────────────────────
+
+    #[test]
+    fn ticket_with_hyphen_separator_is_extracted() {
+        // AB-123 uses a hyphen (different from the JIRA-style hash).
+        let src = "code(); // camerata:allow R -- reason, AB-123\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].ticket.as_deref(), Some("AB-123"));
+    }
+
+    #[test]
+    fn ticket_with_hash_separator_is_extracted() {
+        // GH#42 uses a hash (GitHub issue link style).
+        let src = "code(); // camerata:allow R -- see GH#42\n";
+        let w = parse_inline_waivers("a.rs", src);
+        // GH#42: prefix="GH" (uppercase), separator='#', digits="42" -> valid ticket.
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].ticket.as_deref(), Some("GH#42"));
+    }
+
+    // ── classify_one: different path means no suppression ───────────────────
+
+    #[test]
+    fn inline_does_not_suppress_finding_in_different_file() {
+        let waivers = vec![InlineWaiver {
+            rule_id: "R".into(),
+            reason: Some("ok".into()),
+            ticket: None,
+            path: "a.rs".into(),
+            line: 1,
+        }];
+        // Same rule, same line, but DIFFERENT path — must not suppress.
+        let finding = f("R", "b.rs", 1, "x");
+        assert_eq!(
+            classify_one(&finding, &waivers, &Baseline::default()),
+            Status::Active
+        );
+    }
+
+    // ── reasonless_waivers: only returns waivers without a reason ────────────
+
+    #[test]
+    fn reasonless_waivers_does_not_include_reasoned_waivers() {
+        let waivers = vec![
+            InlineWaiver {
+                rule_id: "A".into(),
+                reason: Some("because".into()),
+                ticket: None,
+                path: "a.rs".into(),
+                line: 1,
+            },
+            InlineWaiver {
+                rule_id: "B".into(),
+                reason: None, // reasonless
+                ticket: None,
+                path: "a.rs".into(),
+                line: 2,
+            },
+        ];
+        let bad = reasonless_waivers(&waivers);
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].rule_id, "B");
+    }
 }

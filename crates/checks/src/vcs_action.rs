@@ -468,4 +468,115 @@ mod tests {
         ];
         assert!(gate(&rules, &commit("feat: AB#1234 add export")).is_ok());
     }
+
+    // ── Matcher::requirement descriptions ────────────────────────────────────
+
+    #[test]
+    fn matcher_requirement_descriptions_are_human_readable() {
+        let ticket = Matcher::TicketRef {
+            prefix: "AB".to_string(),
+        };
+        assert!(
+            ticket.requirement().contains("AB#"),
+            "ticket requirement should mention the prefix#number pattern: {}",
+            ticket.requirement()
+        );
+
+        let contains = Matcher::Contains {
+            needle: "APPROVED".to_string(),
+        };
+        assert!(contains.requirement().contains("APPROVED"));
+
+        let starts = Matcher::StartsWithAny {
+            prefixes: vec!["feature/".to_string(), "hotfix/".to_string()],
+        };
+        assert!(starts.requirement().contains("feature/"));
+        assert!(starts.requirement().contains("hotfix/"));
+
+        let cc = Matcher::ConventionalCommit {
+            types: vec!["feat".to_string(), "fix".to_string()],
+        };
+        assert!(cc.requirement().contains("feat"));
+        assert!(cc.requirement().contains("fix"));
+    }
+
+    // ── VcsTarget::extract edge cases ────────────────────────────────────────
+
+    #[test]
+    fn extract_commit_subject_returns_only_first_line() {
+        let action = VcsAction::Commit {
+            message: "feat: summary line\n\nBody paragraph here.".to_string(),
+        };
+        let subject = VcsTarget::CommitSubject.extract(&action);
+        assert_eq!(subject, Some("feat: summary line"));
+    }
+
+    #[test]
+    fn extract_returns_none_when_target_mismatches_action_type() {
+        // PR title target against a Commit action must return None.
+        let action = VcsAction::Commit {
+            message: "any message".to_string(),
+        };
+        assert!(VcsTarget::PrTitle.extract(&action).is_none());
+        assert!(VcsTarget::PrBody.extract(&action).is_none());
+        assert!(VcsTarget::BranchName.extract(&action).is_none());
+
+        // CommitSubject target against a PullRequest action must return None.
+        let pr_action = VcsAction::PullRequest {
+            title: "PR title".to_string(),
+            body: "body".to_string(),
+        };
+        assert!(VcsTarget::CommitSubject.extract(&pr_action).is_none());
+        assert!(VcsTarget::CommitMessage.extract(&pr_action).is_none());
+    }
+
+    #[test]
+    fn extract_pr_body_returns_body_text() {
+        let action = VcsAction::PullRequest {
+            title: "Title".to_string(),
+            body: "Detailed PR body here.".to_string(),
+        };
+        assert_eq!(
+            VcsTarget::PrBody.extract(&action),
+            Some("Detailed PR body here.")
+        );
+    }
+
+    // ── contains_ticket_ref edge cases ───────────────────────────────────────
+
+    #[test]
+    fn ticket_ref_empty_prefix_always_returns_false() {
+        // An empty prefix is pathological; the function must not panic.
+        assert!(!contains_ticket_ref("AB#1234 fix", ""));
+    }
+
+    #[test]
+    fn ticket_ref_scans_past_invalid_occurrences() {
+        // First occurrence has no digits, but the second one does.
+        assert!(contains_ticket_ref("AB#abc and AB#99 done", "AB"));
+    }
+
+    // ── is_conventional_commit edge cases ────────────────────────────────────
+
+    #[test]
+    fn conventional_commit_rejects_unbalanced_scope_parens() {
+        let types = vec!["feat".to_string()];
+        // "(scope" without closing ')' is invalid.
+        assert!(!is_conventional_commit("feat(scope: missing close", &types));
+    }
+
+    #[test]
+    fn conventional_commit_rejects_unknown_type() {
+        let types = vec!["feat".to_string(), "fix".to_string()];
+        assert!(!is_conventional_commit("wip: work in progress", &types));
+    }
+
+    #[test]
+    fn conventional_commit_requires_non_empty_subject() {
+        let types = vec!["feat".to_string()];
+        // "feat:" with nothing after the colon is invalid.
+        assert!(!is_conventional_commit("feat:", &types));
+        // Whitespace-only subject is also invalid.
+        assert!(!is_conventional_commit("feat:   ", &types));
+    }
 }
