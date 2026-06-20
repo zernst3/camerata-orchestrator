@@ -44,6 +44,23 @@ pub mod github;
 /// Issues REST); this is the board-spans-repos source (Phase C).
 pub mod github_projects;
 
+/// Investigation-phase and decision-phase artifacts (issues #17 and #18).
+///
+/// Provides the structured data types produced by the investigation phase
+/// (`InvestigationArtifact`, `DecisionRecord`), the revision-history wrapper
+/// (`Versioned<T>`), the provenance types (`RevisionActor`, `RevisionProvenance`),
+/// the approval state (`DecisionOutcome`), and the gate predicate
+/// (`decisions_approved_for_development`) that blocks development until all
+/// decisions are approved by the architect.
+///
+/// See `docs/decisions/2026-06-19_investigation_and_decision_phases.md` for
+/// the full phase state machine, persistence strategy, and ROUTE-1 items.
+pub mod investigation;
+pub use investigation::{
+    decisions_approved_for_development, DecisionOutcome, DecisionRecord,
+    InvestigationArtifact, RevisionActor, RevisionProvenance, Versioned,
+};
+
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use azure_devops::{

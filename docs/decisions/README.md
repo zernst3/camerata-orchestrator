@@ -6,6 +6,14 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 ## Decision records (newest first)
 
+- **2026-06-19_investigation_and_decision_phases.md** — investigation phase produces a
+  stored, reviewable `InvestigationArtifact` before any code; user decisions are
+  captured as structured `DecisionRecord`s with approval state and full revision
+  provenance; the `decisions_approved_for_development` gate blocks development until
+  all decisions are `Approved`. Phase state machine: `Intake → Investigating →
+  DecisionsApproved → Development`. New types in `crates/worktracker/src/investigation.rs`
+  (additive). Persistence extension (new `ArtifactKind` variants) and server wiring are
+  ROUTE-A/B/C (cross-crate API changes, routed to human).
 - **2026-06-16_two_domain_audit_and_two_phase_flow.md** — after a cold answer-key run:
   TWO DOMAINS mapped to AUTHORITY — enforced (deterministic, gateable, auto-fix-eligible)
   vs advisory (AI investigative, review-only, never auto-blocks/auto-fixes). TWO-PHASE
@@ -180,6 +188,7 @@ written down, so the trail is navigable, not just buried in commit messages.
 
 | Feature | Where the rationale lives |
 |---|---|
+| Investigation phase artifacts + decision records + development gate | ADR `investigation_and_decision_phases`; types in `crates/worktracker/src/investigation.rs` |
 | Refinement session model + lifecycle | ADR `refinement_session_primitive`; flow in `CONSUMER_UX.md` |
 | Open-ended intake / onboarding document | `CONSUMER_UX.md` (Intake section) |
 | Style kit (palettes, button/font, image upload) | `CONSUMER_UX.md` (Intake "What should it look like?"); built in `crates/intake/src/appearance.rs` |
