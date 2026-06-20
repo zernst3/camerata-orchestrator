@@ -34,6 +34,12 @@ pub struct JobState {
     pub report: Option<ScanReport>,
     /// A human note (e.g. the failure reason).
     pub message: Option<String>,
+    /// Batch mode (#61): the Anthropic Message Batch id currently being processed
+    /// (`msgbatch_01...`). Set when the batch scan mode submits a batch; cleared on
+    /// completion. The UI can surface this for status/debugging ("batch in flight:
+    /// msgbatch_01AbCd"). `None` for parallel/sequential mode jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
 }
 
 /// In-memory job store, shared into handlers + the background worker.
@@ -88,11 +94,20 @@ impl JobStore {
         self.with(id, |j| j.findings.extend(findings));
     }
 
+    /// Record the Anthropic Message Batch id on the job. Called by the batch scan mode
+    /// immediately after `Llm::submit_batch` succeeds so the UI can display the batch id
+    /// in the status line. Cleared by `finish` (the batch completed and the id is no
+    /// longer informative).
+    pub fn set_batch_id(&self, id: &str, batch_id: impl Into<String>) {
+        self.with(id, |j| j.batch_id = Some(batch_id.into()));
+    }
+
     /// Finish the job with the authoritative report.
     pub fn finish(&self, id: &str, report: ScanReport) {
         self.with(id, |j| {
             j.status = "done".to_string();
             j.report = Some(report);
+            j.batch_id = None; // batch completed — id no longer informative
         });
     }
 
@@ -163,5 +178,30 @@ mod tests {
         assert_eq!(store.get(&a).unwrap().status, "failed");
         assert_eq!(store.get(&a).unwrap().message.as_deref(), Some("no token"));
         assert!(store.get("job-nope").is_none());
+    }
+
+    /// `set_batch_id` persists the batch id on the job, and `finish` clears it.
+    #[test]
+    fn batch_id_lifecycle() {
+        let store = JobStore::new();
+        let id = store.create();
+
+        // Initially absent.
+        assert!(store.get(&id).unwrap().batch_id.is_none());
+
+        // Set when a batch is submitted.
+        store.set_batch_id(&id, "msgbatch_01AbCd");
+        assert_eq!(
+            store.get(&id).unwrap().batch_id.as_deref(),
+            Some("msgbatch_01AbCd")
+        );
+
+        // Cleared on completion (batch id no longer informative once done).
+        let report = ScanReport::gated(&["me/api".to_string()]);
+        store.finish(&id, report);
+        assert!(
+            store.get(&id).unwrap().batch_id.is_none(),
+            "batch_id cleared on finish"
+        );
     }
 }
