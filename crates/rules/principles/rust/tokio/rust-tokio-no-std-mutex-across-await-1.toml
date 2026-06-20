@@ -1,0 +1,24 @@
+id = "RUST-TOKIO-NO-STD-MUTEX-ACROSS-AWAIT-1"
+title = "Do not hold a std::sync::Mutex lock across await points; use tokio::sync::Mutex"
+tag = "stack"
+domain = "rust:tokio"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Holding locks across await points?"
+default = "use-tokio-mutex-for-async-code"
+why = "std::sync::Mutex is designed for synchronous code. When a task holds a std::sync::Mutex lock and then awaits (waiting for I/O or another task), the lock is held while the Tokio runtime deschedules the task. If another task tries to acquire the same lock, it will block, starving the runtime and potentially causing a deadlock. The lock may be held indefinitely if the task is awaiting a resource. tokio::sync::Mutex is async-aware; it yields the lock when awaited, allowing other tasks to run. When the awaited operation completes and the task is rescheduled, the lock is re-acquired. If std::sync::Mutex is necessary (e.g., for a critical section that must not yield), the lock should be released before any await point. The rule is: if a lock is held and an await follows, use tokio::sync::Mutex instead."
+
+[[option]]
+id = "use-tokio-mutex-for-async-code"
+label = "Use tokio::sync::Mutex in async code"
+directive = "Any lock held across an await point uses tokio::sync::Mutex (or tokio::sync::RwLock), not std::sync::Mutex. std::sync::Mutex is only used in synchronous code that does not await. If a critical section must use std::sync::Mutex, all await points are moved outside the locked region."
+why = "The adopted default. tokio::sync::Mutex prevents lock starvation and deadlocks in async code."
+
+[[option]]
+id = "use-std-mutex-in-async-code"
+label = "Use std::sync::Mutex in async code"
+directive = "std::sync::Mutex is used even if locks may be held across await points, relying on task scheduling and careful programming to avoid deadlocks."
+why = "A defensible alternative the project considered and did not adopt as the default."

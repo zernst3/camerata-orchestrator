@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1"
+title = "Use interceptors for cross-cutting concerns like logging, tracing, and response transformation"
+tag = "stack"
+domain = "javascript:nest"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Interceptors for cross-cutting concerns?"
+default = "interceptors-for-cross-cutting"
+why = "NestJS interceptors are functions that run before and after a controller method. They can log requests and responses, add tracing headers, measure execution time, catch exceptions, transform the response shape, and more. When cross-cutting concerns (logging, tracing, error handling) live inside controllers or services, they are duplicated and inconsistent. Interceptors centralize these concerns and apply them consistently across all routes. An interceptor can measure how long a request takes and log it; this is not specific to any business logic and applies globally. If logging lives in each controller, a developer might forget to add it to a new endpoint or log the wrong format."
+
+[[option]]
+id = "interceptors-for-cross-cutting"
+label = "Use interceptors for cross-cutting concerns"
+directive = "Logging, tracing, response transformation, exception handling, and other concerns that span multiple routes are implemented as NestJS interceptors. Interceptors are applied via @UseInterceptors() decorators or registered globally. Controllers and services do not contain duplicate logging or transformation logic."
+why = "The adopted default. Interceptors centralize cross-cutting logic and ensure consistent application."
+
+[[option]]
+id = "cross-cutting-logic-in-controllers"
+label = "Implement cross-cutting logic in controllers"
+directive = "Each controller method handles logging, tracing, error handling, and response transformation explicitly."
+why = "A defensible alternative the project considered and did not adopt as the default."

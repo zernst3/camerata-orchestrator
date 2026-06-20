@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-VUE-COMPUTED-OVER-METHODS-1"
+title = "Use computed properties for derived state, not methods with side effects"
+tag = "stack"
+domain = "javascript:vue"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Computed properties vs methods?"
+default = "computed-for-derived-state"
+why = "A computed property derives a value from reactive data and caches the result. When the underlying data changes, the computed property recomputes automatically. When data does not change, the computed property returns the cached value without recomputing. A method, by contrast, runs every time it is called, so if you call the same method twice with no data change in between, the computation happens twice. Using a method to derive state (e.g., a method that filters and transforms a list) means the transformation runs on every template render and every method call, even if the input data has not changed. Using a computed property for the same transformation means the result is computed once and cached. Computed properties also signal intent: a computed property is a pure function with no side effects that transforms input data. A method can have side effects (call an API, mutate global state). Using computed for derived state and methods for side-effect-triggering actions keeps the code readable."
+
+[[option]]
+id = "computed-for-derived-state"
+label = "Use computed properties for derived state"
+directive = "Derived values that depend on reactive data are computed properties. A computed property transforms or filters reactive data without side effects and is only recomputed when its dependencies change. Methods are used for event handlers or actions with side effects (API calls, mutations), not for deriving state."
+why = "The adopted default. Computed properties cache derived state and improve performance."
+
+[[option]]
+id = "methods-for-derived-state"
+label = "Use methods for derived state"
+directive = "Derived values are computed using methods. The method is called from the template and recomputes every time it is invoked."
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,24 @@
+id = "RUST-AXUM-MIDDLEWARE-TOWER-1"
+title = "Implement cross-cutting concerns as tower middleware, not inline in handlers"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Cross-cutting concerns in middleware?"
+default = "tower-middleware-for-cross-cutting-concerns"
+why = "Tower middleware wraps request/response processing and runs before and after each handler. Logging, tracing, authentication, rate limiting, CORS, request/response compression, and other concerns that apply to many routes should live as middleware in the tower ecosystem, not duplicated inline in each handler. When a cross-cutting concern lives inline in handlers, three problems follow. First, each handler must remember to implement it; if a new route is added and the developer forgets to add the logging middleware inline, that route becomes invisible to observability. Second, the concern is duplicated across handlers, so a change to the logging format or rate-limit threshold must be made in multiple places. Third, the handler code is cluttered with non-business concerns, making it harder to see the core request/response logic. Tower middleware centralizes the concern, runs in a defined order, and applies consistently to all routes. Routes that need to opt-out can be explicitly configured, and the middleware logic is isolated and reusable."
+
+[[option]]
+id = "tower-middleware-for-cross-cutting-concerns"
+label = "Implement cross-cutting concerns as tower middleware"
+directive = "Logging, tracing, authentication, rate limiting, CORS, compression, and other concerns that span multiple routes are implemented as tower middleware components and registered on the router or on specific routes. Handlers do not contain inline implementations of these concerns. Middleware runs in a defined order, before the handler or after the response is produced."
+why = "The adopted default. Middleware centralizes cross-cutting logic, avoids duplication, and ensures consistent application across all routes."
+
+[[option]]
+id = "cross-cutting-concerns-inline-in-handlers"
+label = "Implement cross-cutting concerns inline in handlers"
+directive = "Each handler is responsible for implementing logging, authentication, rate limiting, and other cross-cutting concerns directly in the handler body or by calling helper functions from the handler."
+why = "A defensible alternative the project considered and did not adopt as the default."

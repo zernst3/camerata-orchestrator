@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-VUE-STORE-PINIA-SHARED-STATE-1"
+title = "Use Pinia stores to manage shared state; avoid component-level prop drilling"
+tag = "stack"
+domain = "javascript:vue"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Shared state management with Pinia?"
+default = "use-pinia-for-shared-state"
+why = "When multiple components need the same state (e.g., the logged-in user, theme preference, filter selections), passing it through props from a common ancestor to each component becomes cumbersome (prop drilling). Pinia is Vue's official state management library. It provides stores that hold shared state, and any component can access a store via useStore() without passing props through intermediate components. Stores are reactive, so all components that use a store automatically update when the store changes. Pinia also makes testing easier because a test can instantiate a store directly without a component tree. The rule is: state needed by multiple components lives in a Pinia store. State needed by only one component or its immediate children lives in the component itself."
+
+[[option]]
+id = "use-pinia-for-shared-state"
+label = "Use Pinia stores for shared state"
+directive = "Shared state that multiple components need is stored in Pinia stores. Components access stores via useStore() (or const userStore = useUserStore(), etc.). Local component state stays in components."
+why = "The adopted default. Pinia stores avoid prop drilling and make shared state reactive across components."
+
+[[option]]
+id = "prop-drilling-for-shared-state"
+label = "Pass shared state through props"
+directive = "Shared state is passed from a parent component to children as props, and children that need to modify it emit events back to the parent. All intermediate components in the tree receive and pass along the props."
+why = "A defensible alternative the project considered and did not adopt as the default."

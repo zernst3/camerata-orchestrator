@@ -1,0 +1,24 @@
+id = "RUST-AXUM-STATE-SHARED-DEPS-1"
+title = "Share application dependencies via Axum State, not global static variables"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Share application dependencies via State?"
+default = "use-state-for-shared-dependencies"
+why = "Axum State is a typed, immutable container for application-wide dependencies (database connection pools, cache clients, configuration, external service clients) that the router passes to every handler. When handlers and services receive State as an extractor argument, they access dependencies through the type system, not by looking up a hidden global or static. If dependencies live in global static variables instead, three problems emerge. First, global state is invisible to the type system and to code readers; a handler that depends on a database pool does not declare this dependency anywhere a linter or reviewer can see. Second, testing becomes complex because tests must somehow initialize and reset the global state without interfering with other tests. Third, the order-of-initialization is fragile; global statics can fail to initialize in the wrong way, and there is no structured way to handle initialization errors. Using State makes dependencies explicit in handler signatures, testable (dependency injection via State), and composable (the router itself constructs and owns the State instance)."
+
+[[option]]
+id = "use-state-for-shared-dependencies"
+label = "Share application dependencies via Axum State"
+directive = "Application-wide dependencies (database pools, caches, config, service clients) are placed into a struct that is wrapped in Axum State and registered on the router. Handlers receive this State as an extractor argument. Global static variables or lazy_static initialization is not used for application dependencies."
+why = "The adopted default. State makes dependencies explicit in handler signatures and simplifies testing via dependency injection."
+
+[[option]]
+id = "use-global-statics-for-dependencies"
+label = "Use global static variables for application dependencies"
+directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-VUE-PROPS-DOWN-EVENTS-UP-1"
+title = "Props flow down; events flow up; avoid direct parent-to-child method calls and shared mutable state"
+tag = "stack"
+domain = "javascript:vue"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Props down, events up data flow?"
+default = "props-down-events-up"
+why = "Vue components are organized in a tree. A parent component should pass data to child components via props (one-way binding) and handle updates via emitted events. This unidirectional flow makes data movement predictable and traceable: any change to a child's state either comes from a prop the parent passed or from the child's own logic. When a parent directly calls child methods (via template refs) or when parent and child share mutable state, the data flow becomes bidirectional and hard to trace. Debugging requires searching for all places that mutate shared state. The rule is: props flow from parent to child, events flow from child to parent, and shared state is managed by a store (Pinia) or passed through context/provide, not mutated directly in components."
+
+[[option]]
+id = "props-down-events-up"
+label = "Props down; events up; no direct method calls or shared mutable state"
+directive = "Parent components pass data to children via props. Children emit events to notify parents of changes. Shared state is managed in a store (Pinia) or passed via provide/inject. Direct parent-to-child method calls (via template refs, .value.$refs, etc.) and co-mutation of state between parent and child are forbidden."
+why = "The adopted default. Unidirectional data flow makes component interactions predictable and debuggable."
+
+[[option]]
+id = "direct-method-calls-and-shared-state"
+label = "Direct method calls and shared mutable state"
+directive = "Parent components call child methods directly via template refs. Parent and child components share and mutate the same state object. Data flow is bidirectional."
+why = "A defensible alternative the project considered and did not adopt as the default."

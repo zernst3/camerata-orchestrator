@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-VUE-COMPOSITION-SCRIPT-SETUP-1"
+title = "Use Composition API with <script setup> for component logic"
+tag = "stack"
+domain = "javascript:vue"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Composition API and <script setup>?"
+default = "composition-api-script-setup"
+why = "Vue 3 introduced the Composition API and <script setup>, which improve component code organization compared to the Options API. The Composition API groups related logic together (a feature's state, computed values, and methods live near each other), making components easier to understand and test. <script setup> is syntactic sugar that removes boilerplate (no need to export an object or use setup() function wrapper), making the code more concise. The Options API spreads related code across data, computed, methods, and hooks sections, which can be hard to follow in large components. When a component's logic is split across multiple options, a reviewer must jump between sections to understand a feature. The Composition API keeps related logic co-located, reducing cognitive load."
+
+[[option]]
+id = "composition-api-script-setup"
+label = "Use Composition API with <script setup>"
+directive = "Component logic uses the Composition API (ref, computed, watch, onMounted, etc.) and is written in a <script setup> block. The Options API (data, computed, methods, mounted, etc.) is not used."
+why = "The adopted default. Composition API with <script setup> improves code organization and reusability."
+
+[[option]]
+id = "options-api"
+label = "Use the Options API"
+directive = "Component logic is organized using the Options API: data(), computed, methods, lifecycle hooks (mounted, created, etc.). Component state, derived values, and handlers are separated into different sections."
+why = "A defensible alternative the project considered and did not adopt as the default."

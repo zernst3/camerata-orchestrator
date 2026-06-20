@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-NEST-DTOS-VALIDATION-PIPE-1"
+title = "Use DTOs with class-validator and ValidationPipe to validate incoming requests"
+tag = "stack"
+domain = "javascript:nest"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: DTOs and validation?"
+default = "dtos-with-validation-pipe"
+why = "NestJS allows defining Data Transfer Objects (DTOs) with validation decorators from class-validator (@IsString, @IsEmail, @Min, etc.). The global ValidationPipe automatically validates incoming payloads against the DTO shape before the controller is invoked. If validation fails, the pipe rejects the request with a 400 error containing validation error details. When DTOs and validation are not used, the controller must manually check the request shape and field types, and duplicate validation logic appears in every controller. DTOs make the expected shape explicit and machine-readable, and ValidationPipe ensures consistency. Controllers receive validated, typed data and can assume the input is correct."
+
+[[option]]
+id = "dtos-with-validation-pipe"
+label = "Use DTOs with ValidationPipe"
+directive = "Request DTOs are defined as classes with validation decorators (@IsString, @Min, etc.). The global ValidationPipe (or route-specific pipes) validates incoming payloads against the DTO. Invalid requests are rejected at the framework boundary before the controller is invoked."
+why = "The adopted default. DTOs and ValidationPipe centralize input validation and ensure consistency."
+
+[[option]]
+id = "manual-validation-in-controllers"
+label = "Manually validate in controllers"
+directive = "Controllers receive raw request data and manually check the shape, types, and constraints before processing."
+why = "A defensible alternative the project considered and did not adopt as the default."

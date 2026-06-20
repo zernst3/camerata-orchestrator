@@ -1,0 +1,24 @@
+id = "RUST-AXUM-TIMEOUT-LIMITS-1"
+title = "Set request timeouts and body size limits to prevent resource exhaustion"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Request timeouts and body size limits?"
+default = "configure-timeouts-and-body-limits"
+why = "Axum allows configuration of request timeouts (how long a handler can run) and body size limits (the maximum size of an incoming request body). Without these limits, a single slow or malicious client can hold connections open indefinitely or send a gigabyte-sized request, exhausting server resources and denying service to other clients. When timeouts and limits are not configured, the application degrades gracefully under load; when they are configured, known bad states are rejected at the framework boundary. Timeouts are especially important for async handlers that may wait on external services; a handler waiting for an API response should not wait forever if the remote service becomes unresponsive."
+
+[[option]]
+id = "configure-timeouts-and-body-limits"
+label = "Configure request timeouts and body size limits"
+directive = "The Axum application configures a request timeout (via middleware or by wrapping handlers in tokio::time::timeout) and a body size limit (via DefaultBodyLimit or custom extractors that reject bodies above a threshold). The timeouts and limits are documented and chosen based on the application's expected use patterns."
+why = "The adopted default. Timeouts and limits protect against resource exhaustion and cascading failures."
+
+[[option]]
+id = "no-timeout-or-limit-configuration"
+label = "No timeout or limit configuration"
+directive = "The application does not configure request timeouts or body size limits, relying on the OS and network layer to eventually close connections."
+why = "A defensible alternative the project considered and did not adopt as the default."

@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1"
+title = "Use NestJS modules and dependency injection to organize and inject services"
+tag = "stack"
+domain = "javascript:nest"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Modules and dependency injection?"
+default = "modules-providers-di"
+why = "NestJS is built on dependency injection (DI). A service is a class decorated with @Injectable(). A module bundles services, controllers, and imports from other modules and declares them as providers. The NestJS DI container instantiates services and injects them into constructors (or via @Inject decorators). When a service depends on another service, you declare the dependency in the constructor, and the DI container wires them together automatically. If services are instantiated manually or created as singletons outside the DI container, the application loses composability and testability. Manual service creation makes it hard to swap implementations for testing (e.g., a real database service in production, a mock service in tests). The rule is: all services are providers in a module, and dependencies are injected via constructor or @Inject. Services are never instantiated manually or assigned to static properties."
+
+[[option]]
+id = "modules-providers-di"
+label = "Use NestJS modules and dependency injection"
+directive = "Services are decorated with @Injectable() and declared as providers in a module. Controllers and services receive dependencies via constructor injection. The NestJS DI container manages instantiation and injection. Testing uses NestJS's Test.createTestingModule() to configure a DI container for the test."
+why = "The adopted default. DI makes services composable, testable, and easy to wire together."
+
+[[option]]
+id = "manual-service-instantiation"
+label = "Instantiate services manually"
+directive = "Services are created manually (new ServiceClass()) or stored in static properties, and dependencies are wired explicitly in the code."
+why = "A defensible alternative the project considered and did not adopt as the default."

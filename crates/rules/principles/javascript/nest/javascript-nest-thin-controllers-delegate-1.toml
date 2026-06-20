@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1"
+title = "Controllers stay thin; business logic and data access live in services"
+tag = "stack"
+domain = "javascript:nest"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Controllers stay thin?"
+default = "thin-controllers-delegate-to-services"
+why = "A controller's job is to handle an HTTP request: extract parameters and body, call a service, and translate the result into a response. When business rules or data access move into the controller itself, the logic becomes reachable only through an HTTP request and cannot be unit-tested or reused by a cron job, a CLI, or another route without spinning up the web layer. The same rule, duplicated into a second controller, drifts out of sync. And the controller mixes transport concerns with domain concerns. Keeping controllers thin and delegating to services makes business logic independently testable, reusable across entry points, and changeable without touching routing. This separation mirrors layering in the REST and GraphQL worlds: the API layer handles protocol, the service and repository layers own the rules and the data."
+
+[[option]]
+id = "thin-controllers-delegate-to-services"
+label = "Controllers stay thin; delegate to services"
+directive = "Controllers are limited to HTTP concerns: extract the request, call a service, and map the result to a response. Business rules, data access (database queries, ORM calls), and external API calls live in services or repositories that the controller calls. A database query, computation, or API call inside a controller is forbidden; it moves behind the service layer."
+why = "The adopted default. Thin controllers keep transport concerns separate from domain logic, enable reuse, and improve testability."
+
+[[option]]
+id = "controllers-contain-business-logic"
+label = "Controllers contain business logic and data access"
+directive = "Controllers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the controller, rather than delegating to a separate service or repository layer."
+why = "A defensible alternative the project considered and did not adopt as the default."
