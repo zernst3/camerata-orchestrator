@@ -34,6 +34,7 @@ pub mod provider;
 pub mod routine;
 pub mod run;
 pub mod scan_cache;
+pub mod scan_routing;
 pub mod schedule;
 pub mod settings;
 pub mod suppression;
