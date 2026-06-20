@@ -56,6 +56,91 @@ pub struct Run {
     pub mode: String,
 }
 
+/// The provenance summary for a run (issue #21): which rules were in force, the
+/// gate deny/allow tallies, and the total bounces (denials). This is the durable
+/// record an architect reads before signing a run off — the honest accounting of
+/// what the gate actually did, derived from the run's REAL verdicts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RunProvenance {
+    /// The run this provenance describes.
+    pub run_id: String,
+    /// The story the run governed.
+    pub story_id: String,
+    /// "scripted" (token-free, real-gate verdicts) or "live".
+    pub mode: String,
+    /// The run's terminal/current status, snake_case.
+    pub status: RunStatus,
+    /// The rule ids that were IN FORCE for the run (the gate's enforced set).
+    pub rules_in_force: Vec<String>,
+    /// How many gate verdicts denied a write.
+    pub deny_count: usize,
+    /// How many gate verdicts allowed a write.
+    pub allow_count: usize,
+    /// Total bounces: the count of denied writes the gate sent back (== `deny_count`,
+    /// surfaced as its own field because "bounces" is the architect-facing vocabulary).
+    pub total_bounces: usize,
+    /// The distinct rule ids that actually FIRED a denial, in first-seen order.
+    pub rules_fired: Vec<String>,
+}
+
+/// Compute the provenance summary for a run. PURE: derived entirely from the run's
+/// recorded verdicts plus the supplied enforced-rule set, so it is unit-testable
+/// without a gate or a clock. `rules_in_force` is passed in (rather than read from
+/// the gateway here) so the caller controls the source of truth and tests stay pure.
+pub fn run_provenance(run: &Run, rules_in_force: &[RuleId]) -> RunProvenance {
+    let deny_count = run.events.iter().filter(|e| e.verdict == "deny").count();
+    let allow_count = run.events.iter().filter(|e| e.verdict == "allow").count();
+
+    // Distinct denying rule ids, in the order the gate first fired them.
+    let mut rules_fired: Vec<String> = Vec::new();
+    for ev in &run.events {
+        if ev.verdict == "deny" {
+            if let Some(rule) = &ev.rule {
+                if !rules_fired.contains(rule) {
+                    rules_fired.push(rule.clone());
+                }
+            }
+        }
+    }
+
+    RunProvenance {
+        run_id: run.id.clone(),
+        story_id: run.story_id.clone(),
+        mode: run.mode.clone(),
+        status: run.status,
+        rules_in_force: rules_in_force.iter().map(|r| r.0.clone()).collect(),
+        deny_count,
+        allow_count,
+        total_bounces: deny_count,
+        rules_fired,
+    }
+}
+
+/// Render a run's provenance as a Markdown block suitable for a PR body. Camerata
+/// never auto-opens PRs; when the architect explicitly opens one, this is folded in
+/// so the PR carries the honest accounting of what the gate enforced and bounced.
+pub fn provenance_markdown(p: &RunProvenance) -> String {
+    let mut out = String::new();
+    out.push_str("## Camerata governance provenance\n\n");
+    out.push_str(&format!("- Run: `{}` (mode: {})\n", p.run_id, p.mode));
+    out.push_str(&format!("- Story: `{}`\n", p.story_id));
+    out.push_str(&format!(
+        "- Gate verdicts: {} allowed, {} denied ({} total bounces)\n",
+        p.allow_count, p.deny_count, p.total_bounces
+    ));
+    if p.rules_fired.is_empty() {
+        out.push_str("- Rules that bounced a write: none\n");
+    } else {
+        out.push_str(&format!("- Rules that bounced a write: {}\n", p.rules_fired.join(", ")));
+    }
+    out.push_str(&format!(
+        "- Rules in force ({}): {}\n",
+        p.rules_in_force.len(),
+        p.rules_in_force.join(", ")
+    ));
+    out
+}
+
 /// Whether the live-fleet run path is enabled (CAMERATA_LIVE_BUILD=1). Off by default,
 /// so a run is the token-free scripted path unless explicitly opted in.
 pub fn live_mode_enabled() -> bool {
@@ -315,6 +400,74 @@ mod tests {
         // The clean write is allowed.
         assert_eq!(events[2].verdict, "allow");
         assert!(events[2].rule.is_none());
+    }
+
+    #[test]
+    fn provenance_summarizes_rules_tallies_and_bounces() {
+        // Build a run whose verdicts are the REAL gate's over the planted script:
+        // two denies (path-escape, hardcoded-secret) and one allow.
+        let store = RunStore::new();
+        let id = store.create("CAM-7", "scripted");
+        for ev in run_event_script() {
+            store.push_event(&id, ev);
+        }
+        store.set_status(&id, RunStatus::AwaitingQa, true);
+        let run = store.get(&id).expect("run exists");
+
+        let rules = enforced_gate_rules();
+        let prov = run_provenance(&run, &rules);
+
+        assert_eq!(prov.run_id, id);
+        assert_eq!(prov.story_id, "CAM-7");
+        assert_eq!(prov.mode, "scripted");
+        assert_eq!(prov.status, RunStatus::AwaitingQa);
+
+        // Tallies: 1 allow, 2 deny; total_bounces mirrors deny_count.
+        assert_eq!(prov.allow_count, 1);
+        assert_eq!(prov.deny_count, 2);
+        assert_eq!(prov.total_bounces, 2);
+
+        // The two distinct rules that bounced a write, in first-seen order.
+        assert_eq!(
+            prov.rules_fired,
+            vec![
+                "SEC-NO-PATH-ESCAPE-1".to_string(),
+                "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+            ]
+        );
+
+        // Rules in force is the full enforced set (non-empty, includes the firers).
+        assert_eq!(prov.rules_in_force.len(), rules.len());
+        assert!(prov.rules_in_force.iter().any(|r| r == "SEC-NO-PATH-ESCAPE-1"));
+
+        // The PR-body markdown carries the honest accounting.
+        let md = provenance_markdown(&prov);
+        assert!(md.contains("2 total bounces"));
+        assert!(md.contains("SEC-NO-PATH-ESCAPE-1"));
+        assert!(md.contains(&id));
+    }
+
+    #[test]
+    fn provenance_with_no_denies_reports_zero_bounces() {
+        let store = RunStore::new();
+        let id = store.create("CAM-8", "scripted");
+        store.push_event(
+            &id,
+            GateEvent {
+                seq: 1,
+                layer: "layer-1".to_string(),
+                verdict: "allow".to_string(),
+                rule: None,
+                detail: "clean write".to_string(),
+            },
+        );
+        let run = store.get(&id).expect("run exists");
+        let prov = run_provenance(&run, &enforced_gate_rules());
+        assert_eq!(prov.allow_count, 1);
+        assert_eq!(prov.deny_count, 0);
+        assert_eq!(prov.total_bounces, 0);
+        assert!(prov.rules_fired.is_empty());
+        assert!(provenance_markdown(&prov).contains("Rules that bounced a write: none"));
     }
 
     #[test]

@@ -63,7 +63,7 @@ use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyRe
 use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
-use crate::run::{execute_run, live_mode_enabled, Run, RunStore};
+use crate::run::{execute_run, live_mode_enabled, run_provenance, Run, RunProvenance, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
 /// in-memory impls used now can be swapped for persistent / cloud impls later
@@ -177,6 +177,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/run", post(start_run))
         .route("/api/runs/:id", get(get_run))
         .route("/api/runs/:id/agents", get(get_run_agents))
+        .route("/api/runs/:id/provenance", get(get_run_provenance))
+        .route("/api/runs/:id/sign-off", post(sign_off_run))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -438,6 +440,54 @@ async fn get_run_agents(
     Path(id): Path<String>,
 ) -> Json<Vec<crate::transcript::AgentTranscript>> {
     Json(state.transcripts.get(&id))
+}
+
+/// The PROVENANCE summary for a run (issue #21): which rules were in force, the gate
+/// deny/allow tallies, and the total bounces — the honest accounting an architect
+/// reads before signing the run off. Derived from the run's REAL recorded verdicts.
+async fn get_run_provenance(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RunProvenance>, AppError> {
+    let run = state
+        .runs
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+    let rules = camerata_gateway::enforced_gate_rules();
+    Ok(Json(run_provenance(&run, &rules)))
+}
+
+#[derive(serde::Deserialize)]
+struct SignOffReq {
+    /// Who is signing off (the architect's handle/name). Defaults to "architect".
+    #[serde(default)]
+    by: Option<String>,
+    /// An optional note attached to the sign-off.
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// SIGN-OFF action for a run (issue #21): the architect explicitly marks a completed
+/// governed run as signed off. Persisted on the story's Unit of Work (which survives
+/// sessions) along with the run id and a history entry. Camerata never signs work off
+/// on its own — this is the deliberate human gate after reviewing the provenance.
+async fn sign_off_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SignOffReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    let run = state
+        .runs
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+    let by = req
+        .by
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "architect".to_string());
+    let uow = state
+        .uow
+        .sign_off(&run.story_id, &by, &run.id, req.note.as_deref());
+    Ok(Json(uow))
 }
 
 /// All OPEN clarifications across every story (the NEEDS YOU queue).
@@ -2715,9 +2765,16 @@ struct ShipReq {
     title: String,
     #[serde(default)]
     body: String,
+    /// An optional governed-run id (issue #21). When set, that run's provenance
+    /// summary is appended to the PR body so the PR carries the honest accounting of
+    /// what the gate enforced and bounced. Opening the PR stays an EXPLICIT action.
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
-/// Ship a repo: push its working branch and open a PR. Returns the PR URL.
+/// Ship a repo: push its working branch and open a PR. Returns the PR URL. This is the
+/// EXPLICIT open-PR action — Camerata never auto-opens PRs. When a `run_id` is supplied,
+/// that run's provenance is folded into the PR body (issue #21).
 async fn ship_repo(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2736,10 +2793,31 @@ async fn ship_repo(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to push"
         )));
     }
+    let body = body_with_provenance(&state, &req.body, req.run_id.as_deref());
     let root = std::path::PathBuf::from(root);
-    let url = crate::workspace::ship(&req.repo, &req.branch, &req.title, &req.body, &root, &token)
+    let url = crate::workspace::ship(&req.repo, &req.branch, &req.title, &body, &root, &token)
         .await?;
     Ok(Json(serde_json::json!({ "pr_url": url })))
+}
+
+/// Append a run's provenance markdown to a PR body when a run id is supplied and the
+/// run exists. Returns the original body unchanged otherwise. Keeps the provenance the
+/// architect reviewed visible in the PR itself (issue #21).
+fn body_with_provenance(state: &AppState, body: &str, run_id: Option<&str>) -> String {
+    let Some(rid) = run_id.filter(|r| !r.trim().is_empty()) else {
+        return body.to_string();
+    };
+    let Some(run) = state.runs.get(rid) else {
+        return body.to_string();
+    };
+    let rules = camerata_gateway::enforced_gate_rules();
+    let prov = run_provenance(&run, &rules);
+    let block = crate::run::provenance_markdown(&prov);
+    if body.trim().is_empty() {
+        block
+    } else {
+        format!("{body}\n\n{block}")
+    }
 }
 
 // ── Local git controls (issue #37) ───────────────────────────────────────────

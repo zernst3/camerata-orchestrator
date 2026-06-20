@@ -1720,6 +1720,52 @@ async fn fetch_run(run_id: &str) -> Option<RunView> {
         .ok()
 }
 
+/// A run's provenance summary as the BFF reports it (`GET /api/runs/:id/provenance`):
+/// the rules in force, the gate deny/allow tallies, and total bounces (issue #21).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct RunProvenanceView {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    story_id: String,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    rules_in_force: Vec<String>,
+    #[serde(default)]
+    deny_count: usize,
+    #[serde(default)]
+    allow_count: usize,
+    #[serde(default)]
+    total_bounces: usize,
+    #[serde(default)]
+    rules_fired: Vec<String>,
+}
+
+/// Fetch the provenance summary for a run.
+async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> {
+    reqwest::get(format!("{}/api/runs/{}/provenance", crate::BFF_URL, run_id))
+        .await
+        .ok()?
+        .json::<RunProvenanceView>()
+        .await
+        .ok()
+}
+
+/// Sign off a run (issue #21). The architect's explicit gate after reviewing the
+/// provenance; persists on the story's UoW. Returns the updated UoW on success.
+async fn sign_off_run(run_id: &str, by: &str, note: Option<&str>) -> Option<UowView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/runs/{}/sign-off", crate::BFF_URL, run_id))
+        .json(&serde_json::json!({ "by": by, "note": note }))
+        .send()
+        .await
+        .ok()?
+        .json::<UowView>()
+        .await
+        .ok()
+}
+
 /// Map a run status string to a label + badge CSS modifier.
 fn run_status_badge(status: &str) -> (&'static str, &'static str) {
     match status {
@@ -1920,6 +1966,16 @@ struct HistoryEntryView {
     text: String,
 }
 
+/// An architect's sign-off on a story's governed run (issue #21).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct SignOffView {
+    ts: String,
+    by: String,
+    run_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
 /// The Unit of Work as returned by `GET /api/uow/:story_id`.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct UowView {
@@ -1930,6 +1986,8 @@ struct UowView {
     dev_status: DevStatus,
     #[serde(default)]
     history: Vec<HistoryEntryView>,
+    #[serde(default)]
+    sign_off: Option<SignOffView>,
     #[serde(default)]
     updated: String,
 }
@@ -3024,7 +3082,7 @@ pub fn CockpitApp() -> Element {
                                 {
                                     match active_run() {
                                         Some(r) if r.story_id == current.id && viewed_stage().is_none() => {
-                                            rsx! { LiveRunPanel { run: r } }
+                                            rsx! { LiveRunPanel { run: r, uow_refresh } }
                                         }
                                         _ => rsx! { StagePanel { story: current.clone(), stage: effective_stage } },
                                     }
@@ -6727,7 +6785,8 @@ fn StagePanel(story: CanonicalStory, stage: usize) -> Element {
 /// The live governed run: the real gate verdicts from the BFF run engine, streamed
 /// in as the run walks to completion.
 #[component]
-fn LiveRunPanel(run: RunView) -> Element {
+#[component]
+fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
     let live = run.mode == "live";
     let mode_label = if live { "live fleet" } else { "scripted · token-free" };
@@ -6770,6 +6829,105 @@ fn LiveRunPanel(run: RunView) -> Element {
                     p { class: "live-events-empty", "Spinning up the fleet…" }
                 }
             }
+
+            // ── Provenance + sign-off (issue #21): the write-back floor ──────────
+            // Once the run reaches its terminal stage, show the provenance summary
+            // (rules in force, deny/allow tallies, bounces) and the EXPLICIT sign-off
+            // action. Camerata never auto-signs-off; this is the human gate.
+            if run.done {
+                RunProvenancePanel { run_id: run.id.clone(), uow_refresh }
+            }
+        }
+    }
+}
+
+/// The provenance summary for a completed run plus the architect's sign-off action
+/// (issue #21). Fetches `GET /api/runs/:id/provenance`; the sign-off button posts to
+/// `POST /api/runs/:id/sign-off` and bumps `uow_refresh` so the UoW panel reflects it.
+#[component]
+fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let rid = run_id.clone();
+    let prov_res = use_resource(move || {
+        let rid = rid.clone();
+        async move { fetch_provenance(&rid).await }
+    });
+    let mut signing = use_signal(|| false);
+    let mut signed = use_signal(|| false);
+
+    let prov = prov_res.read().clone().flatten();
+
+    rsx! {
+        div { class: "run-provenance",
+            p { class: "run-provenance-h", "PROVENANCE" }
+            match prov {
+                Some(p) => rsx! {
+                    div { class: "provenance-tallies",
+                        span { class: "provenance-tally",
+                            span { class: "provenance-num", "{p.allow_count}" }
+                            " allowed"
+                        }
+                        span { class: "provenance-tally deny",
+                            span { class: "provenance-num", "{p.deny_count}" }
+                            " denied"
+                        }
+                        span { class: "provenance-tally bounce",
+                            span { class: "provenance-num", "{p.total_bounces}" }
+                            " total bounces"
+                        }
+                    }
+                    if !p.rules_fired.is_empty() {
+                        p { class: "provenance-fired",
+                            "Rules that bounced a write: {p.rules_fired.join(\", \")}"
+                        }
+                    }
+                    p { class: "provenance-inforce",
+                        "Rules in force ({p.rules_in_force.len()}): {p.rules_in_force.join(\", \")}"
+                    }
+                },
+                None => rsx! {
+                    p { class: "provenance-empty", "Computing provenance…" }
+                },
+            }
+
+            // The explicit sign-off action — never automatic.
+            div { class: "run-signoff-row",
+                if signed() {
+                    span { class: "run-signoff-done", "✓ Signed off" }
+                } else {
+                    button {
+                        class: "btn-run",
+                        disabled: signing(),
+                        onclick: move |_| {
+                            let rid = run_id.clone();
+                            let toasts = toasts;
+                            let mut uow_refresh = uow_refresh;
+                            signing.set(true);
+                            spawn(async move {
+                                let ok = sign_off_run(&rid, "architect", None).await.is_some();
+                                signing.set(false);
+                                if ok {
+                                    signed.set(true);
+                                    uow_refresh += 1;
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        "Run signed off.".to_string(),
+                                    );
+                                } else {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not sign off the run.".to_string(),
+                                    );
+                                }
+                            });
+                        },
+                        if signing() { "Signing off…" } else { "✓ Sign off this run" }
+                    }
+                }
+                span { class: "section-hint", "Camerata never auto-opens a PR or signs off. Review the provenance, then sign off explicitly." }
+            }
         }
     }
 }
@@ -6792,6 +6950,9 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
     let sid = story_id.clone();
     let uow_data = use_resource(move || {
         let sid = sid.clone();
+        // Re-fetch when the shared tick bumps (e.g. after a sign-off) so the panel
+        // reflects the latest sign-off / history without a manual reload.
+        let _dep = uow_refresh();
         async move { fetch_uow(&sid).await }
     });
 
@@ -6799,6 +6960,7 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
     let dev_status = uow.as_ref().map(|u| u.dev_status).unwrap_or_default();
     let branch = uow.as_ref().and_then(|u| u.branch.clone());
     let history = uow.as_ref().map(|u| u.history.clone()).unwrap_or_default();
+    let sign_off = uow.as_ref().and_then(|u| u.sign_off.clone());
 
     // The three status options for the segmented control.
     const STATUS_OPTS: &[DevStatus] = &[DevStatus::New, DevStatus::InProgress, DevStatus::Done];
@@ -6852,6 +7014,16 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
                     span { class: "uow-branch-val", "{b}" }
                 } else {
                     span { class: "uow-branch-none", "not set" }
+                }
+            }
+
+            // ── Sign-off (issue #21): the architect's explicit approval, if any ─
+            div { class: "uow-signoff-row",
+                span { class: "uow-field-label", "Sign-off" }
+                if let Some(ref so) = sign_off {
+                    span { class: "uow-signoff-val", "✓ {so.by} · run {so.run_id} · {so.ts}" }
+                } else {
+                    span { class: "uow-signoff-none", "not signed off" }
                 }
             }
 

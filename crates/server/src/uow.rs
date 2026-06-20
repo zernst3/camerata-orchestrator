@@ -85,9 +85,29 @@ pub struct UnitOfWork {
     /// The ordered AI development history: every governed run, note, and action.
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    /// The architect's sign-off on this story's governed work (issue #21), if any.
+    /// `None` until an architect explicitly signs the run off. Persisted so the
+    /// sign-off survives sessions and is visible alongside the dev status.
+    #[serde(default)]
+    pub sign_off: Option<SignOff>,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
+}
+
+/// An architect's explicit sign-off on a story's governed run (issue #21). Recorded
+/// only by the deliberate sign-off action — Camerata never signs work off on its own.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct SignOff {
+    /// RFC 3339 timestamp of when the sign-off was recorded.
+    pub ts: String,
+    /// Who signed off (the architect's handle/name).
+    pub by: String,
+    /// The run that was signed off (the provenance the architect reviewed).
+    pub run_id: String,
+    /// An optional note the architect attached to the sign-off.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 // ── store ─────────────────────────────────────────────────────────────────────
@@ -193,6 +213,41 @@ impl UowStore {
         drop(map);
         self.flush();
     }
+
+    /// Record an architect's sign-off on a story's governed run (issue #21). Sets the
+    /// `sign_off` and also appends a `sign_off` history entry so the act shows in the
+    /// AI development timeline. Returns the updated UoW. Camerata never calls this on
+    /// its own — it is driven solely by the explicit sign-off action.
+    pub fn sign_off(&self, story_id: &str, by: &str, run_id: &str, note: Option<&str>) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let sign_off = SignOff {
+            ts: now.clone(),
+            by: by.to_string(),
+            run_id: run_id.to_string(),
+            note: note.map(|s| s.to_string()),
+        };
+        let history_text = match note.filter(|n| !n.trim().is_empty()) {
+            Some(n) => format!("Run {run_id} signed off by {by}: {n}"),
+            None => format!("Run {run_id} signed off by {by}"),
+        };
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map.entry(story_id.to_string()).or_insert_with(|| UnitOfWork {
+                story_id: story_id.to_string(),
+                ..Default::default()
+            });
+            uow.sign_off = Some(sign_off);
+            uow.history.push(HistoryEntry {
+                ts: now.clone(),
+                kind: "sign_off".to_string(),
+                text: history_text,
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -245,5 +300,25 @@ mod tests {
         // Clearing the branch.
         store.set_branch("S-99", None);
         assert!(store.get_or_create("S-99").branch.is_none());
+    }
+
+    #[test]
+    fn sign_off_records_and_appends_history() {
+        let store = UowStore::new();
+        // No sign-off until the explicit action.
+        assert!(store.get_or_create("CAM-21").sign_off.is_none());
+
+        let uow = store.sign_off("CAM-21", "zach", "run-3", Some("LGTM, gate held"));
+        let so = uow.sign_off.as_ref().expect("signed off");
+        assert_eq!(so.by, "zach");
+        assert_eq!(so.run_id, "run-3");
+        assert_eq!(so.note.as_deref(), Some("LGTM, gate held"));
+
+        // The sign-off is also recorded in the history timeline.
+        assert!(uow.history.iter().any(|h| h.kind == "sign_off" && h.text.contains("run-3")));
+
+        // Persisted: a fresh get reflects it.
+        let again = store.get_or_create("CAM-21");
+        assert!(again.sign_off.is_some());
     }
 }
