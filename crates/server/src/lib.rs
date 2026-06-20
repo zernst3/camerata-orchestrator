@@ -199,6 +199,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/emit", post(emit_project))
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
+        .route("/api/projects/:id/max-iterations", post(set_max_iterations))
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -409,9 +410,16 @@ async fn start_governed_run(
             Ok(Some(s)) => (s.title, s.description),
             _ => (story_id.to_string(), String::new()),
         };
-        tokio::spawn(
-            async move { live_fleet::execute_live_run(store, rid, title, desc, model).await },
-        );
+        // The active project's loop-guard ceiling (#29) governs how many times a dirty
+        // stage may bounce-and-revise before its residual violations are surfaced.
+        let max_iterations = state
+            .projects
+            .active()
+            .map(|p| p.max_iterations)
+            .unwrap_or(1);
+        tokio::spawn(async move {
+            live_fleet::execute_live_run(store, rid, title, desc, model, max_iterations).await
+        });
     } else {
         // Token-free scripted path: real gate verdicts over planted calls, with the
         // per-agent transcripts (generated prompt + actions + verdicts) populated.
@@ -807,6 +815,30 @@ async fn add_custom_rule(
         },
     };
     match state.projects.update(&id, |p| p.merge_custom(std::slice::from_ref(&rule))) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Update a project's loop-guard ceiling (#29): the max developer→checker
+/// bounce-and-revise iterations a stage may take before the fleet stops and
+/// raises the outstanding violations for human review. Clamped to at least `1`
+/// (a found violation always earns one bounce; the guard caps the loop, it never
+/// disables it).
+#[derive(serde::Deserialize)]
+struct MaxIterationsReq {
+    max_iterations: usize,
+}
+
+async fn set_max_iterations(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<MaxIterationsReq>,
+) -> Json<serde_json::Value> {
+    match state
+        .projects
+        .update(&id, |p| p.set_max_iterations(req.max_iterations))
+    {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }

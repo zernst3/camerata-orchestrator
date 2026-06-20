@@ -77,6 +77,19 @@ pub struct Project {
     /// project's export. A repo NOT in this set is "not yet onboarded".
     #[serde(default)]
     pub onboarded: Vec<String>,
+    /// Max developer→checker bounce-and-revise iterations a stage may take before the
+    /// fleet stops the loop and raises the outstanding violations for human review
+    /// (the loop guard, #29). Defaults to `1` (a dirty stage bounces exactly once),
+    /// which keeps the historical behaviour. Adjustable from the Development Surface.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+}
+
+/// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
+/// matching the original single-bounce behaviour. Also the value `serde` fills in for
+/// projects persisted before this field existed.
+pub fn default_max_iterations() -> usize {
+    1
 }
 
 impl Project {
@@ -121,6 +134,12 @@ impl Project {
                 self.repos.push(r.clone());
             }
         }
+    }
+
+    /// Set the loop-guard ceiling (#29), clamped to at least `1` — a project can
+    /// never disable the bounce, only cap how many revise passes a stage may take.
+    pub fn set_max_iterations(&mut self, n: usize) {
+        self.max_iterations = n.max(1);
     }
 
     /// Explicitly remove a custom rule by name (the ONLY way a custom rule leaves
@@ -247,6 +266,7 @@ impl ProjectStore {
                 repos,
                 ruleset: ProjectRuleset::default(),
                 onboarded: Vec::new(),
+                max_iterations: default_max_iterations(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -299,6 +319,7 @@ impl ProjectStore {
                     repos,
                     ruleset,
                     onboarded,
+                    max_iterations: default_max_iterations(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -395,6 +416,7 @@ mod tests {
             name: "Proj".into(),
             repos: vec!["me/api".into()],
             onboarded: vec![],
+            max_iterations: default_max_iterations(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -430,6 +452,7 @@ mod tests {
             name: "P".into(),
             repos: vec![],
             onboarded: vec![],
+            max_iterations: default_max_iterations(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -451,6 +474,7 @@ mod tests {
             name: "P".into(),
             repos: vec![],
             onboarded: vec![],
+            max_iterations: default_max_iterations(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -464,6 +488,45 @@ mod tests {
         assert!(!p.remove_custom("nope"));
         assert_eq!(p.ruleset.custom.len(), 1);
         assert_eq!(p.ruleset.custom[0].name, "keep");
+    }
+
+    #[test]
+    fn new_projects_default_to_one_iteration() {
+        let store = ProjectStore::new();
+        let p = store.create("A", vec![]).unwrap();
+        assert_eq!(p.max_iterations, 1, "the shipped default is a single bounce");
+    }
+
+    #[test]
+    fn set_max_iterations_clamps_to_at_least_one() {
+        let mut p = Project {
+            id: "p".into(),
+            name: "P".into(),
+            repos: vec![],
+            onboarded: vec![],
+            max_iterations: default_max_iterations(),
+            ruleset: ProjectRuleset::default(),
+        };
+        p.set_max_iterations(5);
+        assert_eq!(p.max_iterations, 5);
+        // 0 must not disable the bounce — clamped up to 1.
+        p.set_max_iterations(0);
+        assert_eq!(p.max_iterations, 1);
+    }
+
+    #[test]
+    fn max_iterations_defaults_when_absent_from_persisted_json() {
+        // A project JSON written before this field existed must deserialize with the
+        // default (serde fills it in), not fail.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(p.max_iterations, 1);
     }
 
     #[test]
@@ -486,6 +549,7 @@ mod tests {
             name: "P".into(),
             repos: vec!["me/api".into()],
             onboarded: vec![],
+            max_iterations: default_max_iterations(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],

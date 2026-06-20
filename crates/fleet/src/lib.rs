@@ -281,20 +281,21 @@ pub struct BuildOutcome {
 /// The crate name used for the generated worktree is `camerata_app`.
 ///
 /// To pin a specific model for every agent in the fleet, use
-/// [`build_from_plan_with_model`] instead. This wrapper passes `None` (CLI
-/// default model).
+/// [`build_from_plan_with_model`]. To raise the bounce-and-revise ceiling, use
+/// [`build_from_plan_with_iterations`]. This wrapper passes `None` (CLI default
+/// model) and a loop-guard ceiling of `1` bounce-and-revise pass per stage.
 pub async fn build_from_plan(
     plan: &Plan,
     root: &Path,
     gateway_bin: &Path,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
-    build_from_plan_with_model(plan, root, gateway_bin, None, on_event).await
+    build_from_plan_with_model_and_iterations(plan, root, gateway_bin, None, 1, on_event).await
 }
 
 /// Run the governed fleet with an explicit `model` id threaded to every
-/// `claude -p` agent. `model = None` means each agent uses the CLI's own
-/// default — identical to [`build_from_plan`].
+/// `claude -p` agent (loop-guard ceiling `1`). `model = None` means each agent
+/// uses the CLI's own default — identical to [`build_from_plan`].
 ///
 /// All agents in the fleet share the same model choice: the fleet is built
 /// around a single operator intent, and mixing model tiers mid-fleet creates
@@ -305,6 +306,35 @@ pub async fn build_from_plan_with_model(
     root: &Path,
     gateway_bin: &Path,
     model: Option<&str>,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_model_and_iterations(plan, root, gateway_bin, model, 1, on_event).await
+}
+
+/// Like [`build_from_plan`], but caps each stage's bounce-and-revise loop at
+/// `max_iterations` passes (the loop guard, #29). `1` reproduces the default
+/// single-bounce behaviour exactly; higher values let a stuck stage retry the
+/// revise pass before its residual violations are surfaced for human review.
+pub async fn build_from_plan_with_iterations(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    max_iterations: usize,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_model_and_iterations(plan, root, gateway_bin, None, max_iterations, on_event)
+        .await
+}
+
+/// The full governed-fleet build: an explicit `model` for every agent AND a
+/// `max_iterations` loop-guard ceiling per stage. The other entry points are thin
+/// wrappers over this. All agents share the one model choice.
+pub async fn build_from_plan_with_model_and_iterations(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    model: Option<&str>,
+    max_iterations: usize,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
@@ -366,7 +396,7 @@ pub async fn build_from_plan_with_model(
     // ── Run the governed fleet with the REAL RustCheckRunner ─────────────────
     let checks = RustCheckRunner::new();
     let fleet = FleetCoordinator::new(&checks, &worktree);
-    let report = fleet.run(&stages).await?;
+    let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
     // ── Emit per-stage finished events ───────────────────────────────────────
     let mut all_agents_ran = true;
