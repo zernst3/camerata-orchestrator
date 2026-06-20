@@ -16,21 +16,20 @@
 pub mod ai_audit;
 pub mod arm;
 pub mod auto_fire;
-pub mod draft;
-pub mod escalation;
-pub mod uow;
 pub mod clarify;
 pub mod connections;
 pub mod decompose;
+pub mod draft;
+pub mod escalation;
 pub mod fix;
 pub mod jobs;
+pub mod live_fleet;
+pub mod llm;
 pub mod notify;
 pub mod onboard;
 pub mod project;
-pub mod reconcile;
-pub mod live_fleet;
-pub mod llm;
 pub mod provider;
+pub mod reconcile;
 pub mod routine;
 pub mod run;
 pub mod schedule;
@@ -38,6 +37,7 @@ pub mod settings;
 pub mod suppression;
 pub mod terminal;
 pub mod transcript;
+pub mod uow;
 pub mod workspace;
 
 use std::sync::Arc;
@@ -52,9 +52,7 @@ use axum::{
 use serde::Serialize;
 
 use camerata_gateway::RULE_REGISTRY;
-use camerata_worktracker::{
-    CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore,
-};
+use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, StoryStore};
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
@@ -169,11 +167,17 @@ pub fn router(state: AppState) -> Router {
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
         )
-        .route("/api/clarifications/:cid/answer", post(answer_clarification))
+        .route(
+            "/api/clarifications/:cid/answer",
+            post(answer_clarification),
+        )
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/import", post(import_project))
-        .route("/api/projects/active", get(active_project).post(set_active_project))
+        .route(
+            "/api/projects/active",
+            get(active_project).post(set_active_project),
+        )
         .route("/api/projects/:id/export", get(export_project))
         .route("/api/projects/:id", axum::routing::delete(delete_project))
         .route(
@@ -198,7 +202,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/arm", post(onboard_arm))
         .route("/api/onboard/apply", post(onboard_apply))
         .route("/api/onboard/open-pr", post(onboard_open_pr))
-        .route("/api/onboard/draft", get(onboard_draft_get).post(onboard_draft_save))
+        .route(
+            "/api/onboard/draft",
+            get(onboard_draft_get).post(onboard_draft_save),
+        )
         .route("/api/onboard/draft/clear", post(onboard_draft_clear))
         .route("/api/projects/:id/repo-health", get(project_repo_health))
         .route("/api/repo-path", post(set_repo_path))
@@ -206,7 +213,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/complete", post(onboard_complete))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/onboard/ignore", post(onboard_ignore))
-        .route("/api/stories/:id/clarify/suggest", post(suggest_clarifications))
+        .route(
+            "/api/stories/:id/clarify/suggest",
+            post(suggest_clarifications),
+        )
         .route("/api/stories/:id/decompose", post(decompose_propose))
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
@@ -220,7 +230,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/routines/:id/provision", post(provision_routine))
         .route("/api/routines/:id/run", post(run_routine_now))
         // Routine escalations: a blocked routine awaiting human review.
-        .route("/api/escalations", get(list_escalations).post(raise_escalation))
+        .route(
+            "/api/escalations",
+            get(list_escalations).post(raise_escalation),
+        )
         .route("/api/escalations/:id/chat", post(chat_escalation))
         .route("/api/escalations/:id/answer", post(answer_escalation))
         // Local workspace: the user picks a visible folder; project repos clone under
@@ -607,10 +620,13 @@ async fn import_project(
     use crate::project::ImportOutcome;
     let name = req.name.clone();
     let imported_routines = req.routines;
-    match state
-        .projects
-        .import_or_overwrite(&req.name, req.repos, req.ruleset, req.onboarded, req.overwrite)
-    {
+    match state.projects.import_or_overwrite(
+        &req.name,
+        req.repos,
+        req.ruleset,
+        req.onboarded,
+        req.overwrite,
+    ) {
         Some(ImportOutcome::Created(p)) => {
             import_project_routines(&state, &p.id, &imported_routines);
             Json(serde_json::json!({ "ok": true, "project": p, "overwritten": false }))
@@ -712,7 +728,10 @@ async fn add_custom_rule(
             req.domain.trim().to_string()
         },
     };
-    match state.projects.update(&id, |p| p.merge_custom(std::slice::from_ref(&rule))) {
+    match state
+        .projects
+        .update(&id, |p| p.merge_custom(std::slice::from_ref(&rule)))
+    {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
@@ -813,7 +832,9 @@ fn resolve_local_sources(
                 "{spec}: {} is not a local git clone — browse to the repo's folder",
                 dir.display()
             )),
-            None => notes.push(format!("{spec}: no local folder set — browse to the repo's folder")),
+            None => notes.push(format!(
+                "{spec}: no local folder set — browse to the repo's folder"
+            )),
         }
     }
     (sources, notes)
@@ -945,7 +966,11 @@ async fn onboard_audit(
         .rules
         .into_iter()
         .filter(|r| !r.id.trim().is_empty())
-        .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
+        .map(|r| crate::onboard::SelectedRule {
+            id: r.id,
+            directive: r.directive,
+            repos: r.repos,
+        })
         .collect();
     // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
     let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
@@ -987,7 +1012,11 @@ async fn onboard_audit_start(
         .rules
         .into_iter()
         .filter(|r| !r.id.trim().is_empty())
-        .map(|r| crate::onboard::SelectedRule { id: r.id, directive: r.directive, repos: r.repos })
+        .map(|r| crate::onboard::SelectedRule {
+            id: r.id,
+            directive: r.directive,
+            repos: r.repos,
+        })
         .collect();
     // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
     let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
@@ -1126,12 +1155,18 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
         .ok()
         .filter(|v| !v.is_empty());
     let Some(token) = token else {
-        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to file a ticket." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Connect GitHub to file a ticket." }),
+        );
     };
     let title = req.title.unwrap_or_else(|| {
-        format!("Tech debt: {} audit finding(s) accepted", req.findings.len())
+        format!(
+            "Tech debt: {} audit finding(s) accepted",
+            req.findings.len()
+        )
     });
-    match crate::onboard::create_tech_debt_ticket(owner, repo, &token, &title, &req.findings).await {
+    match crate::onboard::create_tech_debt_ticket(owner, repo, &token, &title, &req.findings).await
+    {
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
@@ -1190,7 +1225,11 @@ fn baselines_from_findings(
             snippet: f.snippet.clone(),
         };
         let entry = baseline_entry(&fr, accepted_by, &now, "pre-existing at onboarding");
-        by_repo.entry(f.repo.clone()).or_default().entries.push(entry);
+        by_repo
+            .entry(f.repo.clone())
+            .or_default()
+            .entries
+            .push(entry);
     }
     by_repo
         .into_iter()
@@ -1234,7 +1273,11 @@ async fn onboard_arm(
     let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
     repos.sort();
     repos.dedup();
-    let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
+    let custom = state
+        .projects
+        .active()
+        .map(|p| p.ruleset.custom)
+        .unwrap_or_default();
 
     // Snapshot the current violations as the baseline (accepted pre-existing debt), so
     // the team is unblocked at onboarding and the gate enforces only on new code.
@@ -1252,16 +1295,16 @@ async fn onboard_apply(
     State(state): State<AppState>,
     Json(req): Json<ArmReq>,
 ) -> Json<serde_json::Value> {
-    if req.rules.is_empty() {
-        if req.custom.is_empty() {
-            return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
-        }
+    if req.rules.is_empty() && req.custom.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "No rules selected to apply." }));
     }
     let token = std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
         .filter(|v| !v.is_empty());
     let Some(token) = token else {
-        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }),
+        );
     };
     // Apply writes into each repo's LOCAL clone. A repo's local dir is resolved per-repo:
     // a per-repo path override (chosen via repo health) wins; otherwise it's cloned under the
@@ -1285,20 +1328,28 @@ async fn onboard_apply(
     // Fail fast (with the actionable message) only when NOTHING local is available: no
     // workspace folder AND no per-repo override for any target repo. Otherwise apply
     // per-repo, reporting any individually-unresolved repo in its result row.
-    let has_any_local = workspace_root.is_some()
-        || repos.iter().any(|r| state.settings.repo_path(r).is_some());
+    let has_any_local =
+        workspace_root.is_some() || repos.iter().any(|r| state.settings.repo_path(r).is_some());
     if !has_any_local {
-        return Json(serde_json::json!({ "ok": false, "message": "Set a local workspace folder (Settings) or choose each repo's local folder (repo health) — Apply writes into the repo's local clone." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Set a local workspace folder (Settings) or choose each repo's local folder (repo health) — Apply writes into the repo's local clone." }),
+        );
     }
 
-    let custom = state.projects.active().map(|p| p.ruleset.custom).unwrap_or_default();
+    let custom = state
+        .projects
+        .active()
+        .map(|p| p.ruleset.custom)
+        .unwrap_or_default();
     let baselines = baselines_from_findings(&req.findings, "architect");
 
     let mut results = Vec::new();
     let mut applied: Vec<String> = Vec::new();
     for repo in &repos {
-        let repo_rules: Vec<&crate::arm::ArmRule> =
-            repo_local.iter().filter(|r| r.repos.iter().any(|x| x == repo)).collect();
+        let repo_rules: Vec<&crate::arm::ArmRule> = repo_local
+            .iter()
+            .filter(|r| r.repos.iter().any(|x| x == repo))
+            .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
             .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
@@ -1325,7 +1376,10 @@ async fn onboard_apply(
         };
         // Clone into the workspace root only when there's no explicit override (never clone
         // over a folder the architect chose by hand).
-        let clone_root = if override_path.as_deref().map(|p| !p.trim().is_empty()).unwrap_or(false)
+        let clone_root = if override_path
+            .as_deref()
+            .map(|p| !p.trim().is_empty())
+            .unwrap_or(false)
         {
             None
         } else {
@@ -1333,7 +1387,13 @@ async fn onboard_apply(
         };
         let msg = format!("chore(governance): apply Camerata ruleset to {repo}");
         match crate::workspace::apply_local_and_push(
-            &dir, repo, clone_root, crate::arm::ARM_BRANCH, &files, &msg, &token,
+            &dir,
+            repo,
+            clone_root,
+            crate::arm::ARM_BRANCH,
+            &files,
+            &msg,
+            &token,
         )
         .await
         {
@@ -1353,10 +1413,14 @@ async fn onboard_apply(
     // optional violation scan). save_armed_to_project above guarantees an active project.
     if !applied.is_empty() {
         if let Some(active) = state.projects.active() {
-            state.projects.update(&active.id, |p| p.mark_onboarded(&applied));
+            state
+                .projects
+                .update(&active.id, |p| p.mark_onboarded(&applied));
         }
     }
-    Json(serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "onboarded": applied, "results": results }))
+    Json(
+        serde_json::json!({ "ok": true, "branch": crate::arm::ARM_BRANCH, "onboarded": applied, "results": results }),
+    )
 }
 
 /// Per-repo local-path resolution for a project (issue #33): for each repo, is there a local
@@ -1398,7 +1462,11 @@ async fn set_repo_path(
     State(state): State<AppState>,
     Json(req): Json<RepoPathReq>,
 ) -> Json<serde_json::Value> {
-    let path = if req.path.trim().is_empty() { None } else { Some(req.path.clone()) };
+    let path = if req.path.trim().is_empty() {
+        None
+    } else {
+        Some(req.path.clone())
+    };
     state.settings.set_repo_path(&req.repo, path);
     // Re-resolve so the UI gets the post-set status without a second round trip.
     let workspace_root = state.settings.workspace_root();
@@ -1457,9 +1525,15 @@ async fn onboard_open_pr(
         .ok()
         .filter(|v| !v.is_empty());
     let Some(token) = token else {
-        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to open the PR." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Connect GitHub to open the PR." }),
+        );
     };
-    let mut repos: Vec<String> = req.repos.into_iter().filter(|r| !r.trim().is_empty()).collect();
+    let mut repos: Vec<String> = req
+        .repos
+        .into_iter()
+        .filter(|r| !r.trim().is_empty())
+        .collect();
     repos.sort();
     repos.dedup();
     if repos.is_empty() {
@@ -1475,9 +1549,8 @@ async fn onboard_open_pr(
             .await
         {
             Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
-            Err(e) => {
-                results.push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") }))
-            }
+            Err(e) => results
+                .push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") })),
         }
     }
     Json(serde_json::json!({ "ok": true, "results": results }))
@@ -1507,17 +1580,14 @@ struct IgnoreReq {
 
 /// Fetch and parse a repo's committed `.camerata/baseline.json` (default branch), or an
 /// empty baseline if absent.
-async fn fetch_baseline(
-    owner: &str,
-    repo: &str,
-    token: &str,
-) -> crate::suppression::Baseline {
+async fn fetch_baseline(owner: &str, repo: &str, token: &str) -> crate::suppression::Baseline {
     use base64::Engine as _;
     use camerata_worktracker::{HttpTransport, ReqwestTransport};
     let Ok(transport) = ReqwestTransport::new(format!("Bearer {token}")) else {
         return crate::suppression::Baseline::default();
     };
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/contents/.camerata/baseline.json");
+    let url =
+        format!("https://api.github.com/repos/{owner}/{repo}/contents/.camerata/baseline.json");
     let Ok(resp) = transport.get(&url).await else {
         return crate::suppression::Baseline::default();
     };
@@ -1549,7 +1619,9 @@ async fn onboard_ignore(
     }
     let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
     if token.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!("connect GitHub to record an ignore")));
+        return Err(AppError(anyhow::anyhow!(
+            "connect GitHub to record an ignore"
+        )));
     }
     let (owner, name) = req
         .repo
@@ -1565,7 +1637,8 @@ async fn onboard_ignore(
             line: 0,
             snippet: f.snippet.clone(),
         };
-        let mut entry = crate::suppression::baseline_entry(&fr, "architect", &now, req.reason.trim());
+        let mut entry =
+            crate::suppression::baseline_entry(&fr, "architect", &now, req.reason.trim());
         entry.kind = "ignore".to_string();
         entry.ticket = req.ticket.clone();
         baseline.entries.push(entry);
@@ -1579,7 +1652,9 @@ async fn onboard_ignore(
         &[(".camerata/baseline.json".to_string(), json)],
     )
     .await?;
-    Ok(Json(serde_json::json!({ "ok": true, "url": url, "ignored": req.findings.len() })))
+    Ok(Json(
+        serde_json::json!({ "ok": true, "url": url, "ignored": req.findings.len() }),
+    ))
 }
 
 /// The central suppression registry for a project: every inline waiver + baseline
@@ -1653,13 +1728,19 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
                 by_rule.entry(id.clone()).or_default().push(repo.clone());
             }
         }
-        let by_id: std::collections::HashMap<&str, &DraftRule> =
-            d.scan.proposed_rules.iter().map(|r| (r.id.as_str(), r)).collect();
+        let by_id: std::collections::HashMap<&str, &DraftRule> = d
+            .scan
+            .proposed_rules
+            .iter()
+            .map(|r| (r.id.as_str(), r))
+            .collect();
         let (mut selections, mut cross_repo, mut process) = (Vec::new(), Vec::new(), Vec::new());
         for (rule_id, mut repos) in by_rule {
             repos.sort();
             repos.dedup();
-            let Some(pr) = by_id.get(rule_id.as_str()) else { continue };
+            let Some(pr) = by_id.get(rule_id.as_str()) else {
+                continue;
+            };
             let sel = RuleSelection {
                 rule_id: rule_id.clone(),
                 chosen_option: pr.default_option.clone(),
@@ -1673,7 +1754,13 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
         }
         (d.scan.repos, selections, cross_repo, process, d.custom)
     } else {
-        (active.repos.clone(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        (
+            active.repos.clone(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     };
 
     let has_rules = !selections.is_empty() || !cross_repo.is_empty() || !process.is_empty();
@@ -1704,15 +1791,17 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
 /// stories; the dev layer (Pillar 2) picks the issue up and does the work (every write
 /// gated). Arming already emits `.camerata/ci-checks.json` (the declared mechanical rules);
 /// this issue is the development task of turning each declared check into a real CI gate.
-async fn onboard_ci_rules(
-    Json(req): Json<CiRulesReq>,
-) -> Json<serde_json::Value> {
+async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").ok().filter(|v| !v.is_empty());
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
     let Some(token) = token else {
-        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }),
+        );
     };
     let title = format!("Wire mechanical rules into CI — {}", req.repo);
     let body = format!(
@@ -1774,7 +1863,10 @@ fn save_armed_to_project(
     }
     let pid = match state.projects.active() {
         Some(p) => p.id,
-        None => match state.projects.create("My project", all_repos.iter().cloned().collect()) {
+        None => match state
+            .projects
+            .create("My project", all_repos.iter().cloned().collect())
+        {
             Some(p) => p.id,
             None => return,
         },
@@ -1810,11 +1902,15 @@ async fn emit_to_repos(
     let mut results = Vec::new();
     for repo in repos {
         let Some((owner, name)) = repo.split_once('/') else {
-            results.push(serde_json::json!({ "repo": repo, "ok": false, "message": "not owner/repo" }));
+            results.push(
+                serde_json::json!({ "repo": repo, "ok": false, "message": "not owner/repo" }),
+            );
             continue;
         };
-        let repo_rules: Vec<&crate::arm::ArmRule> =
-            rules.iter().filter(|r| r.repos.iter().any(|x| x == repo)).collect();
+        let repo_rules: Vec<&crate::arm::ArmRule> = rules
+            .iter()
+            .filter(|r| r.repos.iter().any(|x| x == repo))
+            .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
             .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
@@ -1830,9 +1926,8 @@ async fn emit_to_repos(
         }
         match crate::arm::arm_repo(owner, name, token, &files).await {
             Ok(url) => results.push(serde_json::json!({ "repo": repo, "ok": true, "url": url })),
-            Err(e) => {
-                results.push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") }))
-            }
+            Err(e) => results
+                .push(serde_json::json!({ "repo": repo, "ok": false, "message": format!("{e}") })),
         }
     }
     results
@@ -1921,12 +2016,20 @@ async fn emit_project(
     };
     let rules = resolve_project_arm_rules(&project).await;
     if rules.is_empty() && project.ruleset.custom.is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }),
+        );
     }
     // Re-emit carries no new baseline (it's a ruleset refresh, not onboarding).
     let no_baselines = std::collections::HashMap::new();
-    let results =
-        emit_to_repos(&project.repos, &rules, &project.ruleset.custom, &no_baselines, &token).await;
+    let results = emit_to_repos(
+        &project.repos,
+        &rules,
+        &project.ruleset.custom,
+        &no_baselines,
+        &token,
+    )
+    .await;
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
@@ -1978,7 +2081,11 @@ async fn adopt_story(
         .ingest_story(&reference)
         .await
         .map_err(AppError)?;
-    state.stories.upsert(story.clone()).await.map_err(AppError)?;
+    state
+        .stories
+        .upsert(story.clone())
+        .await
+        .map_err(AppError)?;
     Ok(Json(story))
 }
 
@@ -1996,8 +2103,7 @@ async fn decompose_propose(
         .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
     let llm = crate::llm::Llm::from_env();
-    let children =
-        crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm).await;
+    let children = crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm).await;
     Ok(Json(children))
 }
 
@@ -2018,7 +2124,10 @@ async fn suggest_clarifications(
         questions you GENUINELY need answered before writing code: ambiguities, missing \
         decisions, edge cases, unstated constraints. Be specific to this story. Return \
         ONLY a JSON array of question strings, e.g. [\"q1\", \"q2\"]. 0-6 questions.";
-    let user = format!("Story: {}\n\nDescription: {}", story.title, story.description);
+    let user = format!(
+        "Story: {}\n\nDescription: {}",
+        story.title, story.description
+    );
     let llm = crate::llm::Llm::from_env();
     let questions = match llm
         .complete(crate::llm::LlmRequest::new(user).with_system(system))
@@ -2059,7 +2168,11 @@ async fn decompose_commit(
     let mut child_ids = Vec::new();
     for pc in &req.children {
         let child = to_story(&story_id, pc);
-        state.stories.upsert(child.clone()).await.map_err(AppError)?;
+        state
+            .stories
+            .upsert(child.clone())
+            .await
+            .map_err(AppError)?;
         child_ids.push(child.id.clone());
         created.push(child);
     }
@@ -2114,7 +2227,11 @@ async fn draft_routine_prompt(
     );
     let llm = crate::llm::Llm::from_env();
     match llm
-        .complete(crate::llm::LlmRequest::new(user).with_model(req.model).with_system(system))
+        .complete(
+            crate::llm::LlmRequest::new(user)
+                .with_model(req.model)
+                .with_system(system),
+        )
         .await
     {
         Ok(resp) if !resp.text.trim().is_empty() => Json(crate::routine::DraftPromptResp {
@@ -2230,7 +2347,11 @@ async fn chat_escalation(
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
     let llm = crate::llm::Llm::from_env();
     let reply = match llm
-        .complete(crate::llm::LlmRequest::new(user).with_model(req.model).with_system(system))
+        .complete(
+            crate::llm::LlmRequest::new(user)
+                .with_model(req.model)
+                .with_system(system),
+        )
         .await
     {
         Ok(r) if !r.text.trim().is_empty() => r.text,
@@ -2418,7 +2539,9 @@ async fn checkout_branch(
     };
     let root = std::path::PathBuf::from(root);
     crate::workspace::create_branch(&root, &req.repo, &req.branch).await?;
-    Ok(Json(crate::workspace::checkout_status(&root, &req.repo).await))
+    Ok(Json(
+        crate::workspace::checkout_status(&root, &req.repo).await,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -2476,20 +2599,19 @@ fn default_log_limit() -> usize {
 }
 
 /// Resolve a repo's local dir from project settings, or return an error response.
-fn resolve_git_dir(state: &AppState, repo: &str) -> Result<std::path::PathBuf, Json<serde_json::Value>> {
+fn resolve_git_dir(
+    state: &AppState,
+    repo: &str,
+) -> Result<std::path::PathBuf, Json<serde_json::Value>> {
     let override_path = state.settings.repo_path(repo);
     let workspace_root = state.settings.workspace_root();
-    crate::workspace::resolve_repo_dir(
-        override_path.as_deref(),
-        workspace_root.as_deref(),
-        repo,
-    )
-    .ok_or_else(|| {
-        Json(serde_json::json!({
-            "ok": false,
-            "message": "repo not resolved locally — set its path in the Rules view"
-        }))
-    })
+    crate::workspace::resolve_repo_dir(override_path.as_deref(), workspace_root.as_deref(), repo)
+        .ok_or_else(|| {
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "repo not resolved locally — set its path in the Rules view"
+            }))
+        })
 }
 
 /// List local branches + the current HEAD branch for a repo.
@@ -2503,7 +2625,9 @@ async fn git_branches(
         Err(e) => return e,
     };
     match crate::workspace::list_branches(&dir).await {
-        Ok(bl) => Json(serde_json::json!({ "ok": true, "current": bl.current, "branches": bl.branches })),
+        Ok(bl) => {
+            Json(serde_json::json!({ "ok": true, "current": bl.current, "branches": bl.branches }))
+        }
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
 }
@@ -2592,7 +2716,9 @@ async fn git_push(
 ) -> Json<serde_json::Value> {
     let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
     if token.trim().is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to push" }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to push" }),
+        );
     }
     let dir = match resolve_git_dir(&state, &req.repo) {
         Ok(d) => d,
@@ -2618,7 +2744,9 @@ async fn git_pull(
 ) -> Json<serde_json::Value> {
     let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
     if token.trim().is_empty() {
-        return Json(serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to pull" }));
+        return Json(
+            serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to pull" }),
+        );
     }
     let dir = match resolve_git_dir(&state, &req.repo) {
         Ok(d) => d,
@@ -2681,8 +2809,12 @@ async fn uow_set_status(
     Path(story_id): Path<String>,
     Json(req): Json<UowStatusReq>,
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
-    let status = crate::uow::DevStatus::from_wire(&req.status)
-        .ok_or_else(|| AppError(anyhow::anyhow!("unknown status {:?}; expected new, in_progress, done", req.status)))?;
+    let status = crate::uow::DevStatus::from_wire(&req.status).ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "unknown status {:?}; expected new, in_progress, done",
+            req.status
+        ))
+    })?;
     state.uow.set_status(&story_id, status);
     Ok(Json(state.uow.get_or_create(&story_id)))
 }
@@ -2783,14 +2915,20 @@ mod tests {
         assert_eq!(p.ruleset.selections[0].rule_id, "REPO-1");
         assert_eq!(p.ruleset.cross_repo.len(), 1, "cross-repo -> cross_repo");
         assert_eq!(p.ruleset.process.len(), 1, "process -> process");
-        assert!(p.repos.contains(&"me/web".to_string()), "repos absorbed into the project");
+        assert!(
+            p.repos.contains(&"me/web".to_string()),
+            "repos absorbed into the project"
+        );
     }
 
     #[test]
     fn re_arm_preserves_custom_in_the_project() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Seed a project with a custom rule.
-        let p = state.projects.create("P", vec!["me/api".to_string()]).unwrap();
+        let p = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
         state.projects.update(&p.id, |pr| {
             pr.merge_custom(&[crate::project::CustomRule {
                 name: "house".into(),
@@ -2799,10 +2937,18 @@ mod tests {
             }]);
         });
         // Arming (saving base rules) must keep the custom rule.
-        save_armed_to_project(&state, &[arm_rule("REPO-1", "repo-local", &["me/api"])], &[]);
+        save_armed_to_project(
+            &state,
+            &[arm_rule("REPO-1", "repo-local", &["me/api"])],
+            &[],
+        );
         let after = state.projects.get(&p.id).unwrap();
         assert_eq!(after.ruleset.selections.len(), 1);
-        assert_eq!(after.ruleset.custom.len(), 1, "custom survived the re-arm upsert");
+        assert_eq!(
+            after.ruleset.custom.len(),
+            1,
+            "custom survived the re-arm upsert"
+        );
     }
 
     #[tokio::test]

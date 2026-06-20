@@ -604,8 +604,14 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("iac");
             }
             // CI/CD platforms → the `ci-cd` corpus domain.
-            "GitHub Actions" | "GitLab CI" | "CircleCI" | "Azure Pipelines" | "Travis CI"
-            | "Bitbucket Pipelines" | "Drone CI" | "Jenkins" => {
+            "GitHub Actions"
+            | "GitLab CI"
+            | "CircleCI"
+            | "Azure Pipelines"
+            | "Travis CI"
+            | "Bitbucket Pipelines"
+            | "Drone CI"
+            | "Jenkins" => {
                 domains.insert("ci-cd");
             }
             _ => {}
@@ -757,7 +763,7 @@ pub fn build_report(
         stacks,
         files_scanned,
         files_excluded: 0,
-            excluded_mechanical_rules: Vec::new(),
+        excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
         findings,
         proposed_rules,
@@ -861,7 +867,10 @@ const CODE_BASENAMES: &[&str] = &["Jenkinsfile"];
 
 fn has_code_ext(path: &str) -> bool {
     let basename = path.rsplit('/').next().unwrap_or(path);
-    if CODE_BASENAMES.iter().any(|b| basename == *b || basename.starts_with(b)) {
+    if CODE_BASENAMES
+        .iter()
+        .any(|b| basename == *b || basename.starts_with(b))
+    {
         return true;
     }
     match path.rsplit_once('.') {
@@ -877,37 +886,100 @@ fn has_code_ext(path: &str) -> bool {
 /// `apps/web/node_modules/...` and `node_modules/...` both prune. Extend per-project via
 /// the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated extra dir names).
 const NOISE_DIRS: &[&str] = &[
-    "node_modules", "bower_components", "jspm_packages", ".yarn", ".pnpm-store",
-    ".git", ".svn", ".hg",
-    "target", "dist", "build", "out", "obj", "bin",
-    ".next", ".nuxt", ".svelte-kit", ".angular", ".expo", ".docusaurus", "storybook-static",
-    ".turbo", ".cache", ".parcel-cache", ".serverless",
-    "coverage", ".nyc_output",
-    "vendor", "Pods", "DerivedData", ".dart_tool",
-    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox",
-    ".gradle", ".terraform", ".terragrunt-cache",
-    ".idea", ".vscode",
+    "node_modules",
+    "bower_components",
+    "jspm_packages",
+    ".yarn",
+    ".pnpm-store",
+    ".git",
+    ".svn",
+    ".hg",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "obj",
+    "bin",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".angular",
+    ".expo",
+    ".docusaurus",
+    "storybook-static",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".serverless",
+    "coverage",
+    ".nyc_output",
+    "vendor",
+    "Pods",
+    "DerivedData",
+    ".dart_tool",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    ".gradle",
+    ".terraform",
+    ".terragrunt-cache",
+    ".idea",
+    ".vscode",
     // Generated-code + test-artifact dirs (codegen output, snapshot fixtures).
-    "generated", "__generated__", "__snapshots__", "node_modules.bin",
+    "generated",
+    "__generated__",
+    "__snapshots__",
+    "node_modules.bin",
 ];
 
 /// Generated / lock / vendored FILE basenames that carry no architectural signal but are
 /// large (lockfiles are often the single biggest text files in a repo).
 const NOISE_FILES: &[&str] = &[
-    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
-    "packages.lock.json", "Cargo.lock", "composer.lock", "Gemfile.lock",
-    "poetry.lock", "Pipfile.lock", "go.sum", "bun.lock", "deno.lock", "flake.lock",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "packages.lock.json",
+    "Cargo.lock",
+    "composer.lock",
+    "Gemfile.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "go.sum",
+    "bun.lock",
+    "deno.lock",
+    "flake.lock",
 ];
 
 /// Generated-file suffixes: minified bundles, source maps, and codegen output. The codegen
 /// patterns (`.gen.ts`, `.pb.go`, protobuf/relay/graphql/openapi output, etc.) are machine-
 /// written from a schema — auditing them is paying to review code no human owns.
 const NOISE_SUFFIXES: &[&str] = &[
-    ".min.js", ".min.css", ".bundle.js", ".map",
-    ".gen.ts", ".gen.tsx", ".gen.js", ".gen.go", ".gen.dart",
-    ".generated.ts", ".generated.tsx", ".generated.js", ".generated.go", ".generated.cs",
-    ".pb.go", ".pb.ts", ".pb.cc", ".pb.h", "_pb2.py", "_pb2.pyi",
-    ".g.dart", ".freezed.dart",
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    ".map",
+    ".gen.ts",
+    ".gen.tsx",
+    ".gen.js",
+    ".gen.go",
+    ".gen.dart",
+    ".generated.ts",
+    ".generated.tsx",
+    ".generated.js",
+    ".generated.go",
+    ".generated.cs",
+    ".pb.go",
+    ".pb.ts",
+    ".pb.cc",
+    ".pb.h",
+    "_pb2.py",
+    "_pb2.pyi",
+    ".g.dart",
+    ".freezed.dart",
 ];
 
 /// True when a path should be pruned BEFORE scanning: it lives under a build/dep/cache
@@ -922,9 +994,7 @@ fn is_noise_path(path: &str, extra_dirs: &[String]) -> bool {
     if NOISE_SUFFIXES.iter().any(|s| basename.ends_with(s)) {
         return true;
     }
-    segments.any(|seg| {
-        NOISE_DIRS.contains(&seg) || extra_dirs.iter().any(|d| d == seg)
-    })
+    segments.any(|seg| NOISE_DIRS.contains(&seg) || extra_dirs.iter().any(|d| d == seg))
 }
 
 /// Parse the `CAMERATA_SCAN_EXCLUDE_DIRS` env (comma-separated) into extra dir names.
@@ -971,7 +1041,9 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
             let p = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             // Path relative to the repo root, forward-slashed (matches tarball paths).
-            let Ok(rel) = p.strip_prefix(root) else { continue };
+            let Ok(rel) = p.strip_prefix(root) else {
+                continue;
+            };
             let rel = rel.to_string_lossy().replace('\\', "/");
             if rel.is_empty() {
                 continue;
@@ -995,7 +1067,12 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
             if noise || !code {
                 continue;
             }
-            if entry.metadata().map(|m| m.len() as usize).unwrap_or(usize::MAX) > MAX_FILE_BYTES {
+            if entry
+                .metadata()
+                .map(|m| m.len() as usize)
+                .unwrap_or(usize::MAX)
+                > MAX_FILE_BYTES
+            {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&p) else {
@@ -1148,7 +1225,11 @@ pub async fn scan_repos(
         let dir = dir.clone();
         match tokio::task::spawn_blocking(move || read_local_repo_files(&dir)).await {
             Ok(Ok(extracted)) => {
-                let ExtractedRepo { files, truncated, excluded_noise } = extracted;
+                let ExtractedRepo {
+                    files,
+                    truncated,
+                    excluded_noise,
+                } = extracted;
                 files_total += files.len();
                 files_excluded += excluded_noise;
                 code_chars += files.iter().map(|(_, c)| c.len()).sum::<usize>();
@@ -1286,7 +1367,11 @@ pub async fn audit_repos(
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("scan task failed: {e}")))
         {
-            Ok(ExtractedRepo { files, truncated, excluded_noise: _ }) => {
+            Ok(ExtractedRepo {
+                files,
+                truncated,
+                excluded_noise: _,
+            }) => {
                 files_total += files.len();
                 stacks.push(detect_stack(spec, &files));
                 // Deterministic security floor (always-on, every repo): ENFORCED findings.
@@ -1299,8 +1384,17 @@ pub async fn audit_repos(
                 }
                 // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
                 match crate::ai_audit::audit_repo(
-                    &llm, spec, &files, &semantic, model, calibration_model, mode, thorough,
-                    feedback, job, Some(&meter),
+                    &llm,
+                    spec,
+                    &files,
+                    &semantic,
+                    model,
+                    calibration_model,
+                    mode,
+                    thorough,
+                    feedback,
+                    job,
+                    Some(&meter),
                 )
                 .await
                 {
@@ -1358,8 +1452,8 @@ mod tests {
     fn per_repo_semantic_set_is_union_of_project_level_and_repo_rules() {
         // Mirrors the per-repo filter inside `audit_repos`: each repo sees project-level
         // rules (empty `repos`) plus the rules bound to it, and nothing bound to a sibling.
-        let selected = vec![
-            sel("ARCH-1", &[]),               // project-level → both repos
+        let selected = [
+            sel("ARCH-1", &[]),                 // project-level → both repos
             sel("RUST-DIOXUS-2", &["acme/ui"]), // ui only
             sel("SQL-1", &["acme/api"]),        // api only
         ];
@@ -1412,9 +1506,18 @@ mod tests {
             frameworks: vec!["sqlx".into()],
         };
         let d = domains_for_stack(&sqlx);
-        assert!(!d.contains(&"rust:seaorm".to_string()), "sqlx must not get SeaORM rules: {d:?}");
-        assert!(d.contains(&"sql".to_string()), "sqlx still gets generic SQL rules: {d:?}");
-        assert!(d.contains(&"ci-cd".to_string()), "sqlx still gets migration-hygiene rules: {d:?}");
+        assert!(
+            !d.contains(&"rust:seaorm".to_string()),
+            "sqlx must not get SeaORM rules: {d:?}"
+        );
+        assert!(
+            d.contains(&"sql".to_string()),
+            "sqlx still gets generic SQL rules: {d:?}"
+        );
+        assert!(
+            d.contains(&"ci-cd".to_string()),
+            "sqlx still gets migration-hygiene rules: {d:?}"
+        );
 
         // SeaORM DOES map to the SeaORM-specific domain.
         let seaorm = RepoStack {
@@ -1514,7 +1617,10 @@ mod tests {
         assert_eq!(f.repo, "me/api", "finding tagged with its repo");
         assert_eq!(f.line, 2, "finding on the right line");
         assert_eq!(f.rule_id, "SEC-NO-HARDCODED-SECRETS-1");
-        assert_eq!(f.severity, "critical", "exploitable security defects rank critical");
+        assert_eq!(
+            f.severity, "critical",
+            "exploitable security defects rank critical"
+        );
         assert!(f.path == "src/config.rs");
     }
 
@@ -1538,7 +1644,11 @@ mod tests {
         assert_eq!(secrets.finding_count, findings.len());
         assert_eq!(secrets.scope, "repo-local");
         assert_eq!(secrets.enforcement_point, "content");
-        assert_eq!(secrets.repos, vec!["me/api".to_string()], "universal -> all scanned repos");
+        assert_eq!(
+            secrets.repos,
+            vec!["me/api".to_string()],
+            "universal -> all scanned repos"
+        );
         assert!(secrets.placement.contains("every repo"));
         assert!(single.iter().any(|r| r.scope == "process"));
         assert!(
@@ -1568,7 +1678,10 @@ mod tests {
         );
         findings.extend(audit_files(
             "me/web",
-            &[("b.tsx".to_string(), "export const ok = () => 1;".to_string())],
+            &[(
+                "b.tsx".to_string(),
+                "export const ok = () => 1;".to_string(),
+            )],
         ));
         let report = build_report(
             vec!["me/api".to_string(), "me/web".to_string()],
@@ -1611,7 +1724,10 @@ mod tests {
     #[test]
     fn detect_stack_finds_terraform_and_github_actions() {
         let files = vec![
-            ("infra/main.tf".to_string(), "resource \"aws_s3_bucket\" \"b\" {}".to_string()),
+            (
+                "infra/main.tf".to_string(),
+                "resource \"aws_s3_bucket\" \"b\" {}".to_string(),
+            ),
             (
                 ".github/workflows/ci.yml".to_string(),
                 "name: CI\non: [push]\njobs: {}".to_string(),
@@ -1634,23 +1750,45 @@ mod tests {
             (".circleci/config.yml", "version: 2.1", "CircleCI"),
             ("azure-pipelines.yml", "trigger: [main]", "Azure Pipelines"),
             ("Jenkinsfile", "pipeline { agent any }", "Jenkins"),
-            ("infra/main.bicep", "resource sa 'Microsoft.Storage'", "Bicep"),
-            ("live/terragrunt.hcl", "include { path = \"x\" }", "Terragrunt"),
-            ("infra/Pulumi.yaml", "name: my-stack\nruntime: nodejs", "Pulumi"),
-            ("cfn/stack.yaml", "AWSTemplateFormatVersion: '2010-09-09'", "CloudFormation"),
+            (
+                "infra/main.bicep",
+                "resource sa 'Microsoft.Storage'",
+                "Bicep",
+            ),
+            (
+                "live/terragrunt.hcl",
+                "include { path = \"x\" }",
+                "Terragrunt",
+            ),
+            (
+                "infra/Pulumi.yaml",
+                "name: my-stack\nruntime: nodejs",
+                "Pulumi",
+            ),
+            (
+                "cfn/stack.yaml",
+                "AWSTemplateFormatVersion: '2010-09-09'",
+                "CloudFormation",
+            ),
         ];
         for (path, content, fw) in cases {
             // has_code_ext must keep the file so detection can see it.
             assert!(has_code_ext(path), "{path} should be extracted");
             let stack = detect_stack("acme/infra", &[(path.to_string(), content.to_string())]);
-            assert!(stack.frameworks.contains(&fw.to_string()), "{path} -> {fw}: {stack:?}");
+            assert!(
+                stack.frameworks.contains(&fw.to_string()),
+                "{path} -> {fw}: {stack:?}"
+            );
             let domains = domains_for_stack(&stack);
             let expect = if ["Jenkins", "GitLab CI", "CircleCI", "Azure Pipelines"].contains(fw) {
                 "ci-cd"
             } else {
                 "iac"
             };
-            assert!(domains.contains(&expect.to_string()), "{path} -> {expect}: {domains:?}");
+            assert!(
+                domains.contains(&expect.to_string()),
+                "{path} -> {expect}: {domains:?}"
+            );
         }
     }
 
@@ -1665,21 +1803,27 @@ mod tests {
             \x20            user_id = user_id.value(),\n        );";
         let sql_findings = audit_content("me/api", "transactions.rs", sql);
         assert!(
-            sql_findings.iter().any(|f| f.rule_id == "SEC-NO-RAW-SQL-CONCAT-1"),
+            sql_findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-RAW-SQL-CONCAT-1"),
             "multi-line named-arg SQL format! must be caught"
         );
 
         let key = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
         let key_findings = audit_content("me/api", "finnhub.rs", key);
         assert!(
-            key_findings.iter().any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            key_findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
             "bare provider-agnostic key on a *_KEY const must be caught"
         );
 
         let url = "        format!(\"{base}?symbol={symbol}&token={token}\")";
         let url_findings = audit_content("me/api", "finnhub.rs", url);
         assert!(
-            url_findings.iter().any(|f| f.rule_id == "ARCH-NO-SECRETS-IN-URL-1"),
+            url_findings
+                .iter()
+                .any(|f| f.rule_id == "ARCH-NO-SECRETS-IN-URL-1"),
             "templated URL with a token param must be caught"
         );
     }

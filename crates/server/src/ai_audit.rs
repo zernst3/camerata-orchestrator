@@ -311,15 +311,16 @@ pub fn parse_ai_findings(
             let mechanical = r["enforcement"].as_str() == Some("mechanical");
             let title = r["title"].as_str().unwrap_or(name).trim().to_string();
             // How many AI findings this rule's name accounts for.
-            let finding_count = findings
-                .iter()
-                .filter(|f| f.rule_id == id)
-                .count();
+            let finding_count = findings.iter().filter(|f| f.rule_id == id).count();
             proposed.push(ProposedRule {
                 id,
                 title,
                 // AI-discovered architectural rules are human-judged, not auto-mechanical.
-                kind: if mechanical { "mechanical".to_string() } else { "review".to_string() },
+                kind: if mechanical {
+                    "mechanical".to_string()
+                } else {
+                    "review".to_string()
+                },
                 // Architectural guidance partitions to CONVENTIONS.md (structured).
                 enforcement: "structured".to_string(),
                 options: Vec::new(),
@@ -463,9 +464,7 @@ fn strip_dedup_pointers(reason: &str) -> String {
     let tidied = keep.replace("  ", " ");
     tidied
         .trim()
-        .trim_matches(|c: char| {
-            matches!(c, ';' | ',' | '.' | '-' | ':') || c.is_whitespace()
-        })
+        .trim_matches(|c: char| matches!(c, ';' | ',' | '.' | '-' | ':') || c.is_whitespace())
         .to_string()
 }
 
@@ -501,7 +500,11 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
             let reason = strip_dedup_pointers(verdict["reason"].as_str().unwrap_or("").trim());
             let reason = reason.trim();
             if low_conf || !reason.is_empty() {
-                let tag = if low_conf { "needs review" } else { "calibrated" };
+                let tag = if low_conf {
+                    "needs review"
+                } else {
+                    "calibrated"
+                };
                 f.detail = if reason.is_empty() {
                     format!("{} [{tag}]", f.detail)
                 } else {
@@ -569,7 +572,9 @@ pub async fn verify_findings(
     for _ in 0..passes {
         // Non-streaming, so use the coarse total backstop; a failed pass is simply skipped
         // (calibration is best-effort, never load-bearing).
-        if let Ok(Ok(resp)) = tokio::time::timeout(total_backstop(), llm.complete(build_req())).await {
+        if let Ok(Ok(resp)) =
+            tokio::time::timeout(total_backstop(), llm.complete(build_req())).await
+        {
             if let Some(m) = meter {
                 m.record(&resp);
             }
@@ -593,11 +598,19 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
     // Per index: collected (severity, confidence, reason) across passes.
     let mut per: Vec<Vec<(String, String, String)>> = vec![Vec::new(); n];
     for raw in votes {
-        let Some(json) = extract_json_object(raw) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(json) else { continue };
-        let Some(arr) = v["verdicts"].as_array() else { continue };
+        let Some(json) = extract_json_object(raw) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(json) else {
+            continue;
+        };
+        let Some(arr) = v["verdicts"].as_array() else {
+            continue;
+        };
         for verdict in arr {
-            let Some(idx) = verdict["index"].as_u64() else { continue };
+            let Some(idx) = verdict["index"].as_u64() else {
+                continue;
+            };
             let idx = idx as usize;
             if idx >= n {
                 continue;
@@ -608,12 +621,21 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
                 _ => "medium",
             }
             .to_string();
-            let conf = if verdict["confidence"].as_str() == Some("low") { "low" } else { "high" }.to_string();
+            let conf = if verdict["confidence"].as_str() == Some("low") {
+                "low"
+            } else {
+                "high"
+            }
+            .to_string();
             let reason = verdict["reason"].as_str().unwrap_or("").trim().to_string();
             per[idx].push((sev, conf, reason));
         }
     }
-    let rank = |s: &str| match s { "high" => 2, "medium" => 1, _ => 0 };
+    let rank = |s: &str| match s {
+        "high" => 2,
+        "medium" => 1,
+        _ => 0,
+    };
     let mut verdicts = Vec::new();
     for (idx, votes_for) in per.iter().enumerate() {
         if votes_for.is_empty() {
@@ -624,13 +646,25 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         for (s, _, _) in votes_for {
             counts[rank(s)] += 1;
         }
-        let max = *counts.iter().max().unwrap();
-        let sev = if counts[2] == max { "high" } else if counts[1] == max { "medium" } else { "low" };
+        let max = *counts.iter().max().expect("counts array is non-empty");
+        let sev = if counts[2] == max {
+            "high"
+        } else if counts[1] == max {
+            "medium"
+        } else {
+            "low"
+        };
         // Disagreement on severity, or any low-confidence vote → low confidence (needs review).
         let distinct_sevs = counts.iter().filter(|&&c| c > 0).count();
         let any_low_conf = votes_for.iter().any(|(_, c, _)| c == "low");
         let agreed_high = sev == "high" && distinct_sevs == 1 && !any_low_conf;
-        let confidence = if agreed_high { "high" } else if distinct_sevs > 1 || any_low_conf { "low" } else { "high" };
+        let confidence = if agreed_high {
+            "high"
+        } else if distinct_sevs > 1 || any_low_conf {
+            "low"
+        } else {
+            "high"
+        };
         // First non-empty reason, preferring a low-confidence pass's reason.
         let reason = votes_for
             .iter()
@@ -1042,8 +1076,10 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
 /// proximity to the model's estimate. Snippet not found (paraphrase, or a description rather
 /// than code) → the model's line is kept as the fallback. The model says WHAT; code says WHERE.
 fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
-    let by_path: std::collections::HashMap<&str, &str> =
-        files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let by_path: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
     for f in findings.iter_mut() {
         let needle = f.snippet.trim();
         // Too short to locate reliably (single token / punctuation) — keep the model's line.
@@ -1061,7 +1097,11 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
             .collect();
         // Pick the occurrence nearest the model's (approximate) line so a snippet that appears
         // more than once resolves to the intended site. No match → leave the model's line.
-        if let Some(best) = matches.iter().copied().min_by_key(|&ln| ln.abs_diff(f.line)) {
+        if let Some(best) = matches
+            .iter()
+            .copied()
+            .min_by_key(|&ln| ln.abs_diff(f.line))
+        {
             f.line = best;
         }
     }
@@ -1076,8 +1116,10 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
 /// passed through untouched (the exact `(path, line, rule_id)` dedup upstream already
 /// removed byte-identical line-0 repeats).
 fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
-    let by_path: std::collections::HashMap<&str, &str> =
-        files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    let by_path: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
     // `disambiguator` is 0 for co-located findings (so all hits at one real code line group
     // together) and a unique counter for everything kept SOLO (line 0, or a finding whose
     // snippet isn't actually in the file).
@@ -1096,7 +1138,9 @@ fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<
         // (the SECURITY-HEADERS-tagged-with-API-VERSIONING bug). Such findings are kept SOLO.
         let located = f.line != 0
             && snippet.len() >= MIN_MERGE_SNIPPET
-            && by_path.get(f.path.as_str()).is_some_and(|c| c.contains(snippet));
+            && by_path
+                .get(f.path.as_str())
+                .is_some_and(|c| c.contains(snippet));
         let key = if located {
             (f.path.clone(), f.line, 0)
         } else {
@@ -1128,7 +1172,6 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// aggregated. A model/transport failure on a chunk is noted and the audit continues, so a
 /// single bad pass never discards the others.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
     llm: &Llm,
     repo: &str,
@@ -1149,8 +1192,10 @@ pub async fn audit_repo(
     let repo_map = build_repo_map(files);
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
-    let adopted: std::collections::HashSet<String> =
-        selected.iter().map(|(id, _)| id.to_ascii_uppercase()).collect();
+    let adopted: std::collections::HashSet<String> = selected
+        .iter()
+        .map(|(id, _)| id.to_ascii_uppercase())
+        .collect();
     // Model selection: the USER's per-audit choice wins; else CAMERATA_AUDIT_MODEL; else default.
     let audit_model = model.map(str::to_string).or_else(|| {
         std::env::var("CAMERATA_AUDIT_MODEL")
@@ -1336,7 +1381,10 @@ mod tests {
         let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
         assert_eq!(v0["severity"], "high", "majority severity wins");
         assert_eq!(v0["confidence"], "low", "disagreement -> needs review");
-        assert_eq!(v0["reason"], "debatable preference", "prefers the low-confidence reason");
+        assert_eq!(
+            v0["reason"], "debatable preference",
+            "prefers the low-confidence reason"
+        );
         let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
         assert_eq!(v1["severity"], "high");
         assert_eq!(v1["confidence"], "high", "unanimous high stays confident");
@@ -1344,7 +1392,8 @@ mod tests {
 
     #[test]
     fn parse_needs_files_reads_array_and_tolerates_absence() {
-        let with = r#"{"findings":[],"proposed_rules":[],"needs_files":["a/repo.rs"," ","b/svc.rs"]}"#;
+        let with =
+            r#"{"findings":[],"proposed_rules":[],"needs_files":["a/repo.rs"," ","b/svc.rs"]}"#;
         let n = parse_needs_files(with);
         assert_eq!(n, vec!["a/repo.rs".to_string(), "b/svc.rs".to_string()]);
         // Absent / garbage -> empty, never errors.
@@ -1388,7 +1437,10 @@ mod tests {
             strip_dedup_pointers("maintainability concern; see index 9"),
             "maintainability concern"
         );
-        assert_eq!(strip_dedup_pointers("same root cause, row 3"), "same root cause");
+        assert_eq!(
+            strip_dedup_pointers("same root cause, row 3"),
+            "same root cause"
+        );
         // Legit prose that merely contains the word "index" (no pointer number) survives.
         assert_eq!(
             strip_dedup_pointers("add a composite index on (user_id, created_at)"),
@@ -1415,13 +1467,23 @@ mod tests {
             site_finding("AI-HANDLER-BYPASSES-REPO", "h.rs", 12, "low", code),
         ];
         let merged = merge_by_location(findings, &files);
-        assert_eq!(merged.len(), 1, "three labels at one location collapse to one row");
+        assert_eq!(
+            merged.len(),
+            1,
+            "three labels at one location collapse to one row"
+        );
         // Adopted id wins as primary; highest severity kept; others demoted to also_matches.
         assert_eq!(merged[0].rule_id, "ARCH-STRICT-LAYERING-1");
         assert_eq!(merged[0].severity, "high");
-        assert!(merged[0].also_matches.contains(&"AI-CONTROLLER-DIRECT-DB".to_string()));
-        assert!(merged[0].also_matches.contains(&"AI-HANDLER-BYPASSES-REPO".to_string()));
-        assert!(!merged[0].also_matches.contains(&"ARCH-STRICT-LAYERING-1".to_string()));
+        assert!(merged[0]
+            .also_matches
+            .contains(&"AI-CONTROLLER-DIRECT-DB".to_string()));
+        assert!(merged[0]
+            .also_matches
+            .contains(&"AI-HANDLER-BYPASSES-REPO".to_string()));
+        assert!(!merged[0]
+            .also_matches
+            .contains(&"ARCH-STRICT-LAYERING-1".to_string()));
     }
 
     #[test]
@@ -1437,7 +1499,11 @@ mod tests {
         ];
         let merged = merge_by_location(findings, &files);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].also_matches.len(), 2, "two non-primary rules demoted");
+        assert_eq!(
+            merged[0].also_matches.len(),
+            2,
+            "two non-primary rules demoted"
+        );
     }
 
     #[test]
@@ -1445,7 +1511,13 @@ mod tests {
         // Line 0 (file-level / uncited) must NOT location-merge — unrelated file-level
         // issues legitimately share line 0.
         let findings = vec![
-            site_finding("AI-NO-MAPPERS-CRATE", "lib.rs", 0, "low", "no mappers crate"),
+            site_finding(
+                "AI-NO-MAPPERS-CRATE",
+                "lib.rs",
+                0,
+                "low",
+                "no mappers crate",
+            ),
             site_finding("AI-NO-TESTS", "lib.rs", 0, "low", "no tests"),
         ];
         let merged = merge_by_location(findings, &[]);
@@ -1464,12 +1536,31 @@ mod tests {
             "const app = express();\napp.use(express.json());\napp.listen(3000);".to_string(),
         )];
         let findings = vec![
-            site_finding("ARCH-CENTRAL-ERROR-HANDLER-1", "app.ts", 2, "high", "no central error handler is registered"),
-            site_finding("ARCH-API-VERSIONING-1", "app.ts", 2, "medium", "routes are not version-prefixed"),
+            site_finding(
+                "ARCH-CENTRAL-ERROR-HANDLER-1",
+                "app.ts",
+                2,
+                "high",
+                "no central error handler is registered",
+            ),
+            site_finding(
+                "ARCH-API-VERSIONING-1",
+                "app.ts",
+                2,
+                "medium",
+                "routes are not version-prefixed",
+            ),
         ];
         let merged = merge_by_location(findings, &files);
-        assert_eq!(merged.len(), 2, "unrelated absence findings at one line stay separate");
-        assert!(merged.iter().all(|f| f.also_matches.is_empty()), "no spurious also_matches");
+        assert_eq!(
+            merged.len(),
+            2,
+            "unrelated absence findings at one line stay separate"
+        );
+        assert!(
+            merged.iter().all(|f| f.also_matches.is_empty()),
+            "no spurious also_matches"
+        );
     }
 
     #[test]
@@ -1482,8 +1573,20 @@ mod tests {
             "const q = `SELECT * FROM t WHERE name ILIKE '%${name}%'`;".to_string(),
         )];
         let findings = vec![
-            site_finding("SEC-NO-RAW-SQL-CONCAT-1", "u.ts", 1, "critical", "ILIKE '%${name}%'"),
-            site_finding("AI-SQL-INJECTION", "u.ts", 1, "high", "SELECT * FROM t WHERE name ILIKE"),
+            site_finding(
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                "u.ts",
+                1,
+                "critical",
+                "ILIKE '%${name}%'",
+            ),
+            site_finding(
+                "AI-SQL-INJECTION",
+                "u.ts",
+                1,
+                "high",
+                "SELECT * FROM t WHERE name ILIKE",
+            ),
         ];
         let merged = merge_by_location(findings, &files);
         assert_eq!(merged.len(), 1, "co-located real-code findings still merge");
@@ -1491,10 +1594,12 @@ mod tests {
 
     #[test]
     fn canonicalize_maps_invented_names_only_when_adopted() {
-        let adopted: std::collections::HashSet<String> =
-            ["ARCH-STRUCTURED-ERRORS-1".to_string(), "ARCH-STRICT-LAYERING-1".to_string()]
-                .into_iter()
-                .collect();
+        let adopted: std::collections::HashSet<String> = [
+            "ARCH-STRUCTURED-ERRORS-1".to_string(),
+            "ARCH-STRICT-LAYERING-1".to_string(),
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(
             canonical_adopted_rule("HANDLER-PANICS-ON-DB-ERROR", &adopted).as_deref(),
             Some("ARCH-STRUCTURED-ERRORS-1")
@@ -1628,8 +1733,14 @@ mod tests {
         let none = std::collections::HashSet::new();
         let (f, _) = parse_ai_findings("r/r", raw, &none);
         assert_eq!(f.len(), 1);
-        assert_eq!(f[0].snippet, "let q = format!(\"SELECT ...\");", "snippet is the verbatim code");
-        assert!(f[0].detail.starts_with("raw SQL built by format!"), "title leads the detail");
+        assert_eq!(
+            f[0].snippet, "let q = format!(\"SELECT ...\");",
+            "snippet is the verbatim code"
+        );
+        assert!(
+            f[0].detail.starts_with("raw SQL built by format!"),
+            "title leads the detail"
+        );
         assert!(f[0].detail.contains("use a query builder"));
     }
 
@@ -1638,9 +1749,18 @@ mod tests {
         let content = "fn a() {}\nlet x = 1;\nthe offending CALL here\nlet y = 2;\n";
         let files = vec![("src/lib.rs".to_string(), content.to_string())];
         // Model guessed line 1, snippet is on line 3.
-        let mut findings = vec![site_finding("AI-X", "src/lib.rs", 1, "high", "the offending CALL here")];
+        let mut findings = vec![site_finding(
+            "AI-X",
+            "src/lib.rs",
+            1,
+            "high",
+            "the offending CALL here",
+        )];
         resolve_finding_lines(&mut findings, &files);
-        assert_eq!(findings[0].line, 3, "line resolved from the verbatim snippet");
+        assert_eq!(
+            findings[0].line, 3,
+            "line resolved from the verbatim snippet"
+        );
 
         // Duplicate snippet → nearest occurrence to the model's estimate wins.
         let dup = "data_tr(a)\nx\ndata_tr(a)\n";
@@ -1650,7 +1770,13 @@ mod tests {
         assert_eq!(f2[0].line, 3, "duplicate resolves to the nearest match");
 
         // Paraphrase not present → keep the model's line.
-        let mut f3 = vec![site_finding("AI-Z", "src/lib.rs", 2, "high", "paraphrase not in the file")];
+        let mut f3 = vec![site_finding(
+            "AI-Z",
+            "src/lib.rs",
+            2,
+            "high",
+            "paraphrase not in the file",
+        )];
         resolve_finding_lines(&mut f3, &files);
         assert_eq!(f3[0].line, 2, "no match keeps the model's line");
     }
@@ -1685,7 +1811,10 @@ mod tests {
         // The calibration pass NEVER drops — every finding reaches the architect.
         assert_eq!(out.len(), 3, "no finding is dropped");
         let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
-        assert!(timing.detail.contains("[needs review"), "low-confidence flagged");
+        assert!(
+            timing.detail.contains("[needs review"),
+            "low-confidence flagged"
+        );
         let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
         assert_eq!(authz.severity, "low", "recalibrated down");
     }
@@ -1727,7 +1856,8 @@ mod tests {
     #[test]
     fn empty_findings_object_is_clean() {
         let none = std::collections::HashSet::new();
-        let (f, r) = parse_ai_findings("me/api", r#"{"findings": [], "proposed_rules": []}"#, &none);
+        let (f, r) =
+            parse_ai_findings("me/api", r#"{"findings": [], "proposed_rules": []}"#, &none);
         assert!(f.is_empty());
         assert!(r.is_empty());
     }
