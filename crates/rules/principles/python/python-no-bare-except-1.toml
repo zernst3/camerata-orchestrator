@@ -1,0 +1,25 @@
+id = "PYTHON-NO-BARE-EXCEPT-1"
+title = "Exception handlers catch specific types; bare except is forbidden"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a linter rule (Ruff E722 / flake8 bare-except, plus BLE001 for blind `except Exception`) at error severity. Conformance holds when the rule runs in CI and a `except:` or unjustified `except Exception:` fails the build; it fails when the rule is absent or only warns."
+
+[decision]
+question = "What may an exception handler catch?"
+default = "catch-specific"
+why = "A bare `except:` catches everything, including KeyboardInterrupt and SystemExit, which means it swallows the signals that are supposed to stop the program and turns a Ctrl-C or a shutdown into a silently ignored event. It also masks the exact failure the author never anticipated, so a typo-induced NameError or a genuine bug gets caught, logged as a generic error or silently dropped, and the real cause is lost. Catching the specific exception types a block can actually recover from keeps every other failure propagating to where it can be seen and fixed. A blind `except Exception` is narrower than bare except but still hides the distinction between the one error you planned for and every bug you did not, so it is allowed only at a top-level boundary that re-raises or logs with the full traceback."
+
+[[option]]
+id = "catch-specific"
+label = "catch specific exception types only"
+directive = "Exception handlers name the specific exception type(s) they can recover from. Bare `except:` is forbidden everywhere. A blind `except Exception:` is permitted only at a process or request top-level boundary that logs the full traceback and re-raises or converts the error into a structured response; it must never silently swallow. Every handler either handles, re-raises, or chains with `raise ... from`."
+why = "The adopted default. Specific handlers recover from what they planned for and let every unanticipated failure surface where it can be diagnosed."
+
+[[option]]
+id = "allow-broad-catch"
+label = "allow bare except / blind except Exception anywhere"
+directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
+why = "Maximizes apparent robustness but swallows interrupts and masks real bugs, so failures vanish instead of surfacing."

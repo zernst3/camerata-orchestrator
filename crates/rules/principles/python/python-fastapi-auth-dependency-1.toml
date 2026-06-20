@@ -1,0 +1,24 @@
+id = "PYTHON-FASTAPI-AUTH-DEPENDENCY-1"
+title = "Authenticated and write endpoints declare an auth dependency, not in-handler checks"
+tag = "stack"
+domain = "python:fastapi"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is authentication and authorization enforced on protected and write endpoints?"
+default = "auth-dependency"
+why = "Putting the auth check in the handler body makes protection opt-in per handler: the gate exists only where someone remembered to write it, so the failure mode is a new write endpoint that ships with no check at all and no signal that anything is missing. Expressing auth as a `Depends` dependency (or a router-level dependency applied to a whole group of routes) inverts that. The current principal is resolved and authorized before the handler runs, the dependency raises a 401/403 itself, and the protection is visible in the signature and the OpenAPI schema. A missing dependency on a route that should have one becomes a reviewable, even lint-checkable, omission rather than an invisible gap. Mutating endpoints (POST/PUT/PATCH/DELETE) are the highest-risk surface, so they must carry the auth dependency by default; only explicitly public routes opt out."
+
+[[option]]
+id = "auth-dependency"
+label = "enforce auth via a Depends dependency"
+directive = "Authentication and authorization are enforced through a `Depends` dependency that resolves the current principal and raises 401/403 before the handler runs, applied at the route or router level. Every mutating endpoint (POST/PUT/PATCH/DELETE) carries an auth dependency by default; a route is unauthenticated only by an explicit, reviewed opt-out. Handlers do not perform ad hoc auth checks in their bodies."
+why = "The adopted default. A declared dependency makes protection visible and a missing one a reviewable omission, instead of an invisible gap on a new write route."
+
+[[option]]
+id = "in-handler-auth-check"
+label = "perform auth checks inside each handler body"
+directive = "Each protected handler performs its own authentication and authorization check at the top of the function body."
+why = "Makes protection opt-in per handler, so a new write endpoint can ship with no check and no signal that one is missing."

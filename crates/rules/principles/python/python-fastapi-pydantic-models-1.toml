@@ -1,0 +1,24 @@
+id = "PYTHON-FASTAPI-PYDANTIC-MODELS-1"
+title = "Request and response bodies use explicit Pydantic models, not dict or ORM objects"
+tag = "stack"
+domain = "python:fastapi"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What types define a FastAPI endpoint's request and response bodies?"
+default = "explicit-pydantic-schemas"
+why = "Typing a request body as a Pydantic model gives FastAPI a validated boundary: the framework parses, coerces, and validates the incoming JSON against the schema and returns a structured 422 on mismatch before any handler code runs, so the handler only ever sees well-formed data. Declaring a `response_model` does the inverse, filtering the output to exactly the declared fields. Accepting a raw `dict` or untyped body throws that away: the handler must validate by hand, every field access is an unchecked `KeyError` risk, and bad input reaches business logic. Returning an ORM model directly is the more dangerous failure, because it serializes whatever attributes the object has, so a password hash or an internal field silently leaks into the API response the moment someone adds a column. Separate request and response schemas keep the wire contract decoupled from the persistence model."
+
+[[option]]
+id = "explicit-pydantic-schemas"
+label = "use explicit Pydantic request and response models"
+directive = "Every endpoint that accepts a body types it as a Pydantic model so FastAPI validates and coerces input at the boundary, and every endpoint that returns data declares a `response_model` Pydantic schema that filters the output to exactly the intended fields. ORM objects and raw dicts are never accepted as request bodies or returned directly; they are mapped to and from dedicated request/response schemas distinct from the persistence model."
+why = "The adopted default. Pydantic schemas validate input at the boundary and filter output, preventing both malformed input and accidental field leakage."
+
+[[option]]
+id = "raw-dict-bodies"
+label = "accept raw dicts and return ORM objects directly"
+directive = "Endpoints accept untyped `dict` request bodies and return ORM model instances directly, validating and shaping data by hand where needed."
+why = "Discards FastAPI's boundary validation, risks unchecked KeyErrors, and leaks internal ORM fields (e.g. password hashes) into responses."
