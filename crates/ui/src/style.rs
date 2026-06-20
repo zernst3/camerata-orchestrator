@@ -2318,4 +2318,42 @@ html, body {
 .loop-guard-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .loop-guard-input { width: 64px; text-align: center; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 13px; }
 .loop-guard-save { margin-left: 4px; }
+
+/* ── Governed-development lifecycle strip (Pillar 2) ─────────────────────── */
+.uow-lifecycle {
+  display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--line);
+}
+.uow-lifecycle-strip {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+}
+/* Each stage pip: dim until reached, accented when reached, ringed when current. */
+.uow-stage-pip {
+  font-size: 10.5px; font-weight: 600; line-height: 1; white-space: nowrap;
+  padding: 5px 9px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--paper); color: var(--ink-faint);
+}
+.uow-stage-pip.reached {
+  color: var(--ink); border-color: var(--accent); background: var(--surface);
+}
+.uow-stage-pip.current {
+  color: #fff; background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.uow-lifecycle-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.uow-stage-btn {
+  font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  cursor: pointer;
+}
+.uow-stage-btn:hover:not(:disabled) { border-color: var(--accent); }
+.uow-stage-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Frozen gate provenance read-out on the UoW panel. */
+.uow-provenance {
+  display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px;
+}
+.uow-provenance-val { font-size: 12px; color: var(--ink); }
+.uow-provenance-rules { font-size: 11px; color: var(--ink-soft); }
+.uow-signoff-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 "#;
