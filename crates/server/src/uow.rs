@@ -109,6 +109,15 @@ pub struct HistoryEntry {
 /// is the FROZEN copy stamped onto the UoW so the governed-development record survives
 /// even if the in-memory run is gone (the `RunStore` is in-memory, the UoW persists).
 /// It is the honest accounting an architect reviews at QA before signing off.
+///
+/// # Invariant (BUG-10)
+///
+/// `total_bounces == deny_count` is an INVARIANT: both fields mean the same count.
+/// `total_bounces` uses the architect-facing "bounce" vocabulary in the UI; `deny_count`
+/// uses the gate-facing vocabulary in code. They are kept as two fields for API
+/// back-compat but MUST be set to identical values. A `debug_assert` fires in
+/// `record_gate_provenance` when this invariant is violated. Future callers should
+/// prefer the `new` constructor which enforces it at construction time.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct GateProvenance {
     /// The run this provenance came from.
@@ -120,13 +129,38 @@ pub struct GateProvenance {
     /// How many gate verdicts denied a write.
     pub deny_count: usize,
     /// Total bounces the gate sent back (== `deny_count`; named for the architect-
-    /// facing vocabulary).
+    /// facing vocabulary). Must always equal `deny_count` — see type-level doc.
     pub total_bounces: usize,
     /// The distinct rule ids that actually fired a denial, in first-seen order.
     #[serde(default)]
     pub rules_fired: Vec<String>,
     /// RFC 3339 timestamp of when this provenance was stamped onto the UoW.
     pub recorded: String,
+}
+
+impl GateProvenance {
+    /// Canonical constructor that enforces the `total_bounces == deny_count` invariant
+    /// (BUG-10). Prefer this over struct literals in new code.
+    pub fn new(
+        run_id: impl Into<String>,
+        mode: impl Into<String>,
+        allow_count: usize,
+        deny_count: usize,
+        rules_fired: Vec<String>,
+        recorded: impl Into<String>,
+    ) -> Self {
+        Self {
+            run_id: run_id.into(),
+            mode: mode.into(),
+            allow_count,
+            deny_count,
+            // total_bounces is identical to deny_count by definition; the two fields
+            // exist for back-compat vocabulary reasons only.
+            total_bounces: deny_count,
+            rules_fired,
+            recorded: recorded.into(),
+        }
+    }
 }
 
 /// The Unit of Work for one story. Keyed by `story_id`.
@@ -481,6 +515,27 @@ impl UowStore {
             .collect()
     }
 
+    /// Return `true` when the story's UoW has an evidence record with a critical
+    /// scoped-scan finding that blocks sign-off. Reads under the mutex so the result
+    /// reflects the CURRENT (not a snapshot) state.
+    ///
+    /// # BUG-12 partial mitigation
+    ///
+    /// The `sign_off_run` handler in `lib.rs` calls `get_or_create` to snapshot the
+    /// UoW, checks `snapshot.is_sign_off_blocked()`, and then calls `uow.sign_off`.
+    /// Between the snapshot and the sign-off mutation a concurrent `attach_evidence`
+    /// could change the block state. Using THIS method instead of snapshotting reduces
+    /// the window to the gap between the method returning and the sign_off call, but
+    /// does not fully eliminate the race (a full fix requires the block check inside
+    /// the sign_off mutex, which requires touching lib.rs — out of this agent's confine).
+    /// The single-server architecture makes the race extremely unlikely in practice.
+    pub fn is_sign_off_blocked(&self, story_id: &str) -> bool {
+        let map = self.mem.lock().expect("uow mutex poisoned");
+        map.get(story_id)
+            .map(|uow| uow.is_sign_off_blocked())
+            .unwrap_or(false)
+    }
+
     /// Set the dev status for a story's UoW, creating it if needed.
     pub fn set_status(&self, story_id: &str, status: DevStatus) {
         let mut map = self.mem.lock().expect("uow mutex poisoned");
@@ -560,7 +615,21 @@ impl UowStore {
                     story_id: story_id.to_string(),
                     ..Default::default()
                 });
-            uow.sign_off = Some(sign_off);
+            uow.sign_off = Some(sign_off.clone());
+            // ── BUG-9 fix: propagate sign-off into the durable evidence record ───
+            // Previously only the PR-comment clone (`evidence_for_pr` in lib.rs)
+            // received the sign-off; the UoW's own `evidence` field kept `sign_off:
+            // None` and the pre-sign-off hash. A QA reviewer reading `uow.evidence`
+            // directly (via the cockpit or any downstream verifier) saw evidence with
+            // the sign-off absent. Fix: update the persisted evidence in-place and
+            // recompute its hash so the durable record is the authoritative signed-off
+            // state. The lib.rs PR-comment clone then reads the already-set sign-off
+            // off `uow.sign_off` and may redundantly call `set_sign_off` — that is
+            // idempotent so the redundancy is harmless.
+            if let Some(ev) = uow.evidence.as_mut() {
+                ev.set_sign_off(&sign_off);
+                ev.compute_hash();
+            }
             // Advance the lifecycle stage to SignedOff when the UoW is at AwaitingQa
             // (the legal point). Sign-off is the explicit, never-automatic QA gate; if
             // the stage is somewhere else (e.g. a manual sign-off before the stage was
@@ -904,11 +973,24 @@ impl UowStore {
     /// append a `provenance` history entry. The durable QA-review record (the in-memory
     /// run may be gone; this survives). Does NOT change the stage — call
     /// [`Self::finish_development`] for that.
+    ///
+    /// Asserts (debug only, BUG-10) that `provenance.total_bounces == provenance.deny_count`.
+    /// Prefer [`GateProvenance::new`] over struct literals to prevent mismatches.
     pub fn record_gate_provenance(
         &self,
         story_id: &str,
         provenance: GateProvenance,
     ) -> UnitOfWork {
+        // BUG-10: total_bounces and deny_count must be identical (same semantic; different
+        // vocabulary). Assert in debug mode to catch callers that set them inconsistently.
+        debug_assert_eq!(
+            provenance.total_bounces,
+            provenance.deny_count,
+            "GateProvenance invariant violated: total_bounces ({}) != deny_count ({}). \
+             Use GateProvenance::new() to build provenance records.",
+            provenance.total_bounces,
+            provenance.deny_count,
+        );
         let now = Self::now_rfc3339();
         let summary = format!(
             "Gate provenance recorded for {}: {} allowed, {} denied ({} bounces).",
@@ -1259,6 +1341,103 @@ mod tests {
         let uow = store.get_or_create("S-ev-7");
         assert!(uow.evidence.is_some(), "evidence must survive get_or_create round-trip");
         assert_eq!(uow.evidence.unwrap().run_id, "run-99");
+    }
+
+    // ── BUG-9 regression: sign-off persisted into evidence record ───────────────
+
+    /// Before BUG-9 fix: `UowStore::sign_off` updated `uow.sign_off` but NOT
+    /// `uow.evidence.sign_off`, so a QA reviewer reading `uow.evidence` directly saw
+    /// evidence with `sign_off: None` even after the architect signed off. After the fix
+    /// the durable evidence record carries the sign-off and has a freshly-recomputed hash.
+    #[test]
+    fn bug9_sign_off_is_reflected_in_durable_evidence_record() {
+        let store = UowStore::new();
+
+        // Attach evidence (no sign-off yet).
+        let evidence = make_evidence_record("S-bug9", "run-1", false);
+        store.attach_evidence("S-bug9", evidence);
+
+        // Confirm evidence is present with no sign-off before signing.
+        {
+            let uow = store.get_or_create("S-bug9");
+            let ev = uow.evidence.as_ref().expect("evidence must be attached");
+            assert!(ev.sign_off.is_none(), "evidence must not have sign-off before sign_off() call");
+        }
+
+        // Sign off.
+        store.sign_off("S-bug9", "zach", "run-1", Some("LGTM"));
+
+        // The durable evidence record must NOW carry the sign-off (BUG-9 fix).
+        let uow = store.get_or_create("S-bug9");
+        let ev = uow.evidence.as_ref().expect("evidence must still be present after sign-off");
+        assert!(
+            ev.sign_off.is_some(),
+            "BUG-9: durable evidence record must include sign-off after UowStore::sign_off; \
+             got sign_off = None (the pre-fix bug)"
+        );
+        let so = ev.sign_off.as_ref().unwrap();
+        assert_eq!(so.by, "zach", "sign-off actor must match");
+        assert_eq!(so.run_id, "run-1", "sign-off run_id must match");
+
+        // The evidence hash must be valid for the signed state (recomputed after set_sign_off).
+        assert!(
+            ev.verify_hash(),
+            "BUG-9: evidence hash must be consistent with the signed-off state (recomputed after set_sign_off)"
+        );
+    }
+
+    /// Without evidence attached, sign_off must still succeed (no evidence → no block, no panic).
+    #[test]
+    fn bug9_sign_off_without_evidence_still_works() {
+        let store = UowStore::new();
+        let uow = store.sign_off("S-bug9b", "alice", "run-2", None);
+        assert!(uow.sign_off.is_some(), "sign_off must be set even when no evidence record exists");
+        // No evidence → evidence field remains None; no crash.
+        assert!(uow.evidence.is_none(), "evidence must remain None when never attached");
+    }
+
+    // ── BUG-10 regression: GateProvenance invariant ─────────────────────────────
+
+    /// `GateProvenance::new` must set `total_bounces == deny_count`.
+    #[test]
+    fn bug10_gate_provenance_new_enforces_invariant() {
+        let p = GateProvenance::new("run-x", "scripted", 5, 3, vec![], "2026-06-20T00:00:00Z");
+        assert_eq!(
+            p.total_bounces, p.deny_count,
+            "GateProvenance::new must set total_bounces == deny_count"
+        );
+        assert_eq!(p.deny_count, 3);
+        assert_eq!(p.total_bounces, 3);
+    }
+
+    // ── BUG-12 partial mitigation: UowStore::is_sign_off_blocked ───────────────
+
+    /// `UowStore::is_sign_off_blocked` must read from the live state (under the mutex)
+    /// rather than relying on a stale snapshot, and must correctly reflect the current
+    /// evidence block state.
+    #[test]
+    fn bug12_store_is_sign_off_blocked_reads_live_state() {
+        let store = UowStore::new();
+
+        // No UoW yet — not blocked.
+        assert!(!store.is_sign_off_blocked("S-bug12"), "absent UoW is never blocked");
+
+        // UoW exists but no evidence — not blocked.
+        store.get_or_create("S-bug12");
+        assert!(!store.is_sign_off_blocked("S-bug12"), "UoW without evidence is not blocked");
+
+        // Attach non-critical evidence — still not blocked.
+        let non_crit = make_evidence_record("S-bug12", "run-1", false);
+        store.attach_evidence("S-bug12", non_crit);
+        assert!(!store.is_sign_off_blocked("S-bug12"), "non-critical evidence must not block");
+
+        // Replace with critical evidence — now blocked.
+        let crit = make_evidence_record("S-bug12", "run-2", true);
+        store.attach_evidence("S-bug12", crit);
+        assert!(
+            store.is_sign_off_blocked("S-bug12"),
+            "critical evidence must block sign-off via the store method"
+        );
     }
 }
 

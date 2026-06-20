@@ -264,35 +264,55 @@ impl ScanCacheStore {
             .cloned()
     }
 
-    /// Replace a project's manifest and persist.
+    /// Replace a project's manifest and persist atomically.
+    ///
+    /// The mutex is held for the ENTIRE operation — insert + write — so no concurrent
+    /// `put` can interleave between the in-memory update and the file write (BUG-11).
     pub fn put(&self, project_id: &str, manifest: ScanManifest) {
         if let Ok(mut s) = self.inner.lock() {
             s.by_project.insert(project_id.to_string(), manifest);
+            // Save while the lock is still held to prevent TOCTOU / lost-update races.
+            self.save_locked(&s);
         }
-        self.save();
     }
 
     /// Drop a project's manifest (e.g. on a forced full scan the next run rebuilds it anyway,
-    /// but an explicit clear is available) and persist.
+    /// but an explicit clear is available) and persist atomically (BUG-11: lock held through
+    /// save, same as `put`).
     pub fn clear(&self, project_id: &str) {
         if let Ok(mut s) = self.inner.lock() {
             s.by_project.remove(project_id);
+            self.save_locked(&s);
         }
-        self.save();
     }
 
-    fn save(&self) {
+    /// Write `state` to disk while the caller already holds the mutex guard.
+    ///
+    /// Separated from `save` so `put` / `clear` can call it while they own the lock,
+    /// avoiding the TOCTOU window that arose when the lock was released before the write
+    /// (BUG-11: concurrent `put` could write a stale snapshot if the first thread's write
+    /// completed after the second thread's combined write).
+    fn save_locked(&self, state: &CacheState) {
         let Some(path) = &self.path else {
             return;
         };
-        let Ok(state) = self.inner.lock() else {
-            return;
-        };
-        if let Ok(json) = serde_json::to_string_pretty(&*state) {
+        if let Ok(json) = serde_json::to_string_pretty(state) {
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
             let _ = std::fs::write(path.as_path(), json);
+        }
+    }
+
+    /// Flush in-memory state to disk by re-acquiring the lock.
+    ///
+    /// This is intentionally dead-code in production (all mutations go through
+    /// `put`/`clear` which call `save_locked`). Retained so tests can call it
+    /// directly if needed.
+    #[allow(dead_code)]
+    fn save(&self) {
+        if let Ok(state) = self.inner.lock() {
+            self.save_locked(&state);
         }
     }
 }
@@ -688,5 +708,63 @@ mod tests {
         assert_eq!(p.changed.len(), 1, "stale version forces full scan");
         assert_eq!(p.unchanged_count, 0);
         assert!(p.carried.is_empty());
+    }
+
+    // ── BUG-11 regression: ScanCacheStore::put atomicity ────────────────────────
+
+    /// Before BUG-11 fix, `put` released the mutex BEFORE calling `save`, so a concurrent
+    /// thread could insert a second manifest, save the combined state, and then the first
+    /// thread's `save` would overwrite with just the first manifest.
+    ///
+    /// The regression test verifies that PUT then GET round-trips correctly within the same
+    /// thread (the race is not directly observable without real concurrency, but the structural
+    /// fix — save_locked called while the guard is held — is what prevents it). We also verify
+    /// that `save_locked` is reachable (no dead-code panic) and that `clear` is similarly atomic.
+    #[test]
+    fn bug11_put_is_atomic_in_memory() {
+        let store = ScanCacheStore::new();
+
+        // Two sequential puts must both be visible and not overwrite each other.
+        let mut b1 = ManifestBuilder::new();
+        b1.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        store.put("proj-alpha", b1.finish());
+
+        let mut b2 = ManifestBuilder::new();
+        b2.record_repo("me/web", &[file("b.ts", "y")], &[finding("me/web", "b.ts", "R2")]);
+        store.put("proj-beta", b2.finish());
+
+        // Both projects must be present after the two puts.
+        let alpha = store.get("proj-alpha").expect("proj-alpha must be present after put");
+        assert!(alpha.files.contains_key("me/api"), "proj-alpha must have me/api fingerprints");
+        assert_eq!(alpha.findings.len(), 1);
+        assert_eq!(alpha.findings[0].rule_id, "R1");
+
+        let beta = store.get("proj-beta").expect("proj-beta must be present after put");
+        assert!(beta.files.contains_key("me/web"), "proj-beta must have me/web fingerprints");
+        assert_eq!(beta.findings.len(), 1);
+        assert_eq!(beta.findings[0].rule_id, "R2");
+
+        // After clear, the cleared project is gone but the other survives.
+        store.clear("proj-alpha");
+        assert!(store.get("proj-alpha").is_none(), "proj-alpha must be absent after clear");
+        assert!(store.get("proj-beta").is_some(), "proj-beta must survive clear of proj-alpha");
+    }
+
+    /// Verify that `put` after `clear` restores the manifest without any stale state.
+    #[test]
+    fn bug11_put_after_clear_restores_cleanly() {
+        let store = ScanCacheStore::new();
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        store.put("proj-x", b.finish());
+        store.clear("proj-x");
+        assert!(store.get("proj-x").is_none(), "clear must remove the manifest");
+
+        // Re-put must work correctly after a clear.
+        let mut b2 = ManifestBuilder::new();
+        b2.record_repo("me/api", &[file("a.rs", "x2")], &[finding("me/api", "a.rs", "R2")]);
+        store.put("proj-x", b2.finish());
+        let got = store.get("proj-x").expect("re-put must restore manifest");
+        assert_eq!(got.findings[0].rule_id, "R2", "re-put must store the new manifest, not the cleared one");
     }
 }

@@ -111,7 +111,14 @@ pub struct ActualUsage {
 /// (see `chunk_files`), so this only bounds one chunk's line-numbered text; it sits above
 /// the raw chunk-packing target so a normal chunk is never re-truncated here. Only a
 /// single pathological file larger than this would clip.
-const MAX_DIGEST_CHARS: usize = 600_000;
+pub(crate) const MAX_DIGEST_CHARS: usize = 600_000;
+
+/// Minimum number of chars that must have been dropped from the digest cap before the
+/// `[digest truncated …]` notice is appended (BUG-8). Below this threshold the drop
+/// is cosmetically trivial (e.g. the last closing brace of the last file) and the
+/// notice would mislead the model into thinking significant content was omitted.
+/// Chosen as ≈ 5 lines × 80 chars/line.
+pub(crate) const TRUNCATION_NOTICE_MIN_DROP: usize = 400;
 
 /// Raw-bytes target when packing files into chunks. Each chunk is audited in its own model
 /// call, so the WHOLE repo is covered no matter its size — a single context can't hold a
@@ -134,9 +141,20 @@ fn number_lines(content: &str) -> String {
 
 /// Build a single code digest from the repo's files, capped at [`MAX_DIGEST_CHARS`].
 /// Each file is delimited and LINE-NUMBERED so the model can cite exact paths + lines.
+///
+/// # Truncation notice (BUG-8)
+///
+/// The notice `[digest truncated …]` is only appended when a NON-TRIVIAL amount of
+/// content was dropped. If the partial slice captures all but a single short line
+/// (specifically, `dropped < TRUNCATION_NOTICE_MIN_DROP` chars), the model already
+/// has effectively all the code and the truncation warning would be misleading ("did
+/// I miss something?"). The minimum drop threshold is intentionally conservative:
+/// dropping even one method body is significant; dropping only the closing brace of
+/// the last function is not.
 pub fn build_digest(files: &[(String, String)]) -> String {
     let mut out = String::new();
     let mut truncated = false;
+    let mut significant_truncation = false;
     for (path, content) in files {
         let header = format!("// ===== FILE: {path} =====\n");
         let numbered = number_lines(content);
@@ -148,6 +166,15 @@ pub fn build_digest(files: &[(String, String)]) -> String {
                 let slice: String = numbered.chars().take(remaining).collect();
                 out.push_str(&slice);
                 out.push('\n');
+                // BUG-8: only warn when we actually dropped a meaningful chunk of
+                // content. A trivially small drop (e.g. the last closing brace of
+                // the last file) does not warrant a notice that may mislead the model
+                // into thinking significant context is missing.
+                let dropped = numbered.len().saturating_sub(remaining);
+                significant_truncation = dropped >= TRUNCATION_NOTICE_MIN_DROP;
+            } else {
+                // Didn't add a partial slice at all — the whole file was dropped.
+                significant_truncation = true;
             }
             truncated = true;
             break;
@@ -156,7 +183,7 @@ pub fn build_digest(files: &[(String, String)]) -> String {
         out.push_str(&numbered);
         out.push('\n');
     }
-    if truncated {
+    if truncated && significant_truncation {
         out.push_str("\n// [digest truncated at the size cap — audit the largest files first]\n");
     }
     out
@@ -909,6 +936,20 @@ fn build_repo_map(files: &[(String, String)]) -> String {
 const PARALLEL_CONCURRENCY: usize = 6;
 const RULE_BATCH_SIZE: usize = 15;
 
+/// Rules-per-batch for `ScanMode::Batch`.
+///
+/// The Batch path compiles ALL (chunk × rule-batch) pairs into a SINGLE Anthropic
+/// Message Batch and lets the API schedule them — there is no per-item concurrency
+/// cost for splitting into finer batches. Using `RULE_BATCH_SIZE` (15) from the
+/// parallel path was a design mismatch (BUG-6): smaller batches add BatchItems but
+/// don't reduce latency; a LARGER batch keeps more adopted rules visible together in
+/// one prompt context, which improves coherence and reduces cross-batch re-flagging.
+///
+/// Set to `usize::MAX` so each chunk becomes a SINGLE BatchItem containing all rules.
+/// This can be overridden at runtime via the `CAMERATA_BATCH_RULE_BATCH_SIZE` env var
+/// (parsed as `usize`; falls back to this constant when absent or unparseable).
+const BATCH_RULE_BATCH_SIZE: usize = usize::MAX;
+
 /// How the semantic (LLM) audit executes — the SPEED/SCALE knob, orthogonal to model tier
 /// (quality) and rule selection (coverage). The free deterministic floor is unaffected; it
 /// runs the same in every mode.
@@ -934,13 +975,30 @@ pub enum ScanMode {
 }
 
 impl ScanMode {
-    /// `(max concurrent calls, rules per batch)` for the REAL-TIME modes. Not used by the
-    /// Batch path (it submits everything at once and lets the API schedule). Sequential =
-    /// one call, all rules together; Parallel = batched + concurrent.
+    /// Returns `(max_concurrent_calls, rules_per_batch)`.
+    ///
+    /// For real-time modes (`Sequential`, `Parallel`) this controls actual API
+    /// parallelism. For `Batch` mode the concurrency value is unused (all items are
+    /// submitted in one Anthropic Message Batch); only `rules_per_batch` matters and
+    /// it should be LARGE so each BatchItem includes all adopted rules for maximum
+    /// coherence (BUG-6: using `RULE_BATCH_SIZE = 15` was a design mismatch — it
+    /// fragmented Batch items without any latency benefit).
+    ///
+    /// `CAMERATA_BATCH_RULE_BATCH_SIZE` overrides the Batch rule batch size at runtime.
     fn tuning(self) -> (usize, usize) {
         match self {
             ScanMode::Sequential => (1, usize::MAX),
-            ScanMode::Parallel | ScanMode::Batch => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
+            ScanMode::Parallel => (PARALLEL_CONCURRENCY, RULE_BATCH_SIZE),
+            ScanMode::Batch => {
+                // Batch mode: all rules in one item per chunk is the efficient default;
+                // the env var allows the operator to cap it (e.g. for very large rule sets
+                // where a single prompt would exceed the model's context window).
+                let batch_rule_size = std::env::var("CAMERATA_BATCH_RULE_BATCH_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(BATCH_RULE_BATCH_SIZE);
+                (PARALLEL_CONCURRENCY, batch_rule_size)
+            }
         }
     }
     /// Parse the wire value; unknown / empty → Parallel (the efficient default floor).
@@ -1331,11 +1389,21 @@ fn severity_rank(s: &str) -> u8 {
 fn merge_location_group(group: Vec<Finding>) -> Finding {
     // Index of the primary: adopted (non-AI-) beats invented; then higher severity; then
     // earliest appearance (so the order is deterministic, not HashMap-dependent).
+    //
+    // BUG-7 (readability): `group.len() - i` is a DECREASING function of `i`, so
+    // `max_by_key` with this key prefers lower `i` (earlier findings) — which is exactly
+    // the "earliest appearance wins on a tie" intent. The idiom is intentionally preserved
+    // because changing it to `min_by_key` with `i` would require reversing the other key
+    // components and complicates the tuple; a comment is cheaper and equally clear.
+    // Equivalent but explicit alternative: `.min_by_key(|(i, f)| (adopted_inverted, severity_inverted, i))`.
     let primary_idx = group
         .iter()
         .enumerate()
         .max_by_key(|(i, f)| {
             let adopted = u8::from(!f.rule_id.starts_with("AI-"));
+            // Tiebreaker: group.len() - i is larger for earlier findings (lower i),
+            // so max_by_key resolves ties toward the EARLIEST appearance. This is
+            // equivalent to min_by_key(|(i, _)| i) for the tiebreak component only.
             (adopted, severity_rank(&f.severity), group.len() - i)
         })
         .map(|(i, _)| i)
@@ -3539,6 +3607,137 @@ mod tests {
         assert!(
             ScanMode::Sequential != ScanMode::Batch,
             "in Sequential mode the guard evaluates to true → add_total is called"
+        );
+    }
+
+    // ── BUG-6 regression: ScanMode::Batch uses larger rule batch size ─────────────
+
+    /// Before BUG-6 fix: `ScanMode::Batch` returned `RULE_BATCH_SIZE` (15) from
+    /// `tuning()`, fragmenting Batch items unnecessarily (the Batch path submits all
+    /// items at once — there is no latency benefit to smaller rule batches). After the
+    /// fix, `ScanMode::Batch` returns `BATCH_RULE_BATCH_SIZE` (usize::MAX by default),
+    /// so each chunk becomes a single BatchItem with all adopted rules in one context.
+    #[test]
+    fn bug6_batch_mode_uses_larger_rule_batch_size_than_parallel() {
+        let (_, parallel_batch_size) = ScanMode::Parallel.tuning();
+        let (_, batch_batch_size) = ScanMode::Batch.tuning();
+
+        // The Batch rule batch size must be LARGER than the Parallel one (BUG-6 fix).
+        // PARALLEL = 15; BATCH = usize::MAX (or the env-var override, but the env var
+        // is not set in the test environment so the constant applies).
+        assert!(
+            batch_batch_size > parallel_batch_size,
+            "ScanMode::Batch rule batch size ({batch_batch_size}) must be larger than \
+             ScanMode::Parallel ({parallel_batch_size}) — BUG-6: batching all rules per \
+             chunk improves coherence in async Batch mode where concurrency is irrelevant"
+        );
+    }
+
+    /// Sequential mode must keep its existing tuning (1 concurrent call, all rules at once).
+    #[test]
+    fn bug6_sequential_mode_tuning_unchanged() {
+        let (concurrency, batch_size) = ScanMode::Sequential.tuning();
+        assert_eq!(concurrency, 1, "sequential must be single-threaded");
+        assert_eq!(batch_size, usize::MAX, "sequential must include all rules in one pass");
+    }
+
+    // ── BUG-7 regression: merge_location_group tiebreaker comment ────────────────
+
+    /// Verify that `merge_location_group` correctly selects the EARLIEST finding when
+    /// all other keys are equal (adopted-flag and severity tied). This is the tiebreaker
+    /// documented by the `group.len() - i` idiom (BUG-7: correctness confirmed, only
+    /// readability was noted).
+    #[test]
+    fn bug7_merge_location_group_earliest_appearance_wins_on_tie() {
+        let make = |rule: &str, sev: &str, snippet: &str| Finding {
+            repo: "r/r".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: 1,
+            rule_id: rule.to_string(),
+            severity: sev.to_string(),
+            snippet: snippet.to_string(),
+            detail: "d".to_string(),
+            status: "active".to_string(),
+            also_matches: Vec::new(),
+        };
+        // Three AI- findings with equal severity — earliest (index 0) must win.
+        let group = vec![
+            make("AI-FIRST", "medium", "first snippet"),
+            make("AI-SECOND", "medium", "second snippet"),
+            make("AI-THIRD", "medium", "third snippet"),
+        ];
+        let merged = merge_location_group(group);
+        assert_eq!(
+            merged.rule_id, "AI-FIRST",
+            "earliest finding must win the tiebreak when adopted-flag and severity are equal"
+        );
+        // The other rule ids must appear in also_matches, in first-seen order.
+        assert_eq!(merged.also_matches, vec!["AI-SECOND", "AI-THIRD"]);
+    }
+
+    // ── BUG-8 regression: build_digest truncation notice threshold ────────────────
+
+    /// A near-full file (only a tiny amount dropped) must NOT emit the truncation
+    /// notice. Before BUG-8 fix the notice was always emitted on ANY truncation.
+    ///
+    /// Test: build a multi-file digest where the SECOND file barely doesn't fit —
+    /// only a very small number of chars are dropped (< TRUNCATION_NOTICE_MIN_DROP).
+    #[test]
+    fn bug8_trivial_truncation_does_not_emit_notice() {
+        use super::{MAX_DIGEST_CHARS, TRUNCATION_NOTICE_MIN_DROP};
+        // Strategy: fill the budget almost completely with file-1, then add a file-2
+        // that overflows by just `TRUNCATION_NOTICE_MIN_DROP - 1` chars. The partial
+        // slice of file-2 captures all but that tiny tail → no notice.
+        let small_drop = TRUNCATION_NOTICE_MIN_DROP - 1;
+
+        // Build file-1 content sized to leave exactly `small_drop + budget_for_header_2`
+        // chars remaining in the budget.
+        // Header for file-2: "// ===== FILE: src/f2.rs =====\n" ≈ 32 chars.
+        let header2_len = "// ===== FILE: src/f2.rs =====\n".len();
+        let file1_budget = MAX_DIGEST_CHARS
+            .saturating_sub(header2_len)
+            .saturating_sub(small_drop + 500); // 500-char "remaining" slice of file-2
+        let file1_content = "a".repeat(file1_budget);
+
+        // File-2: exactly `small_drop + 500` chars of numbered content so that
+        // `remaining` captures the first 500 chars (> 200, partial slice is added)
+        // and drops `small_drop` chars.
+        let file2_raw_len = small_drop + 500;
+        let file2_content = "b".repeat(file2_raw_len);
+
+        let files = vec![
+            ("src/f1.rs".to_string(), file1_content),
+            ("src/f2.rs".to_string(), file2_content),
+        ];
+        let digest = build_digest(&files);
+
+        // The truncation was trivial (< TRUNCATION_NOTICE_MIN_DROP bytes dropped) →
+        // notice must NOT appear (BUG-8 fix).
+        assert!(
+            !digest.contains("[digest truncated"),
+            "BUG-8: a trivially small truncation (< {TRUNCATION_NOTICE_MIN_DROP} chars dropped) \
+             must NOT emit the truncation notice — it would mislead the model"
+        );
+    }
+
+    /// When a significant amount of content is dropped, the truncation notice IS emitted.
+    #[test]
+    fn bug8_significant_truncation_emits_notice() {
+        use super::MAX_DIGEST_CHARS;
+        // First file: small (easily fits).
+        // Second file: very large (mostly dropped — well over the threshold).
+        let small = "fn a() {}".to_string();
+        // Second file: > MAX_DIGEST_CHARS so it's almost entirely truncated.
+        let large = "fn b() { let x = 1; } // comment\n".repeat(MAX_DIGEST_CHARS / 10);
+        let files = vec![
+            ("src/small.rs".to_string(), small),
+            ("src/large.rs".to_string(), large),
+        ];
+        let digest = build_digest(&files);
+        // The large file drops a significant fraction → notice must appear.
+        assert!(
+            digest.contains("[digest truncated"),
+            "a significant truncation (large portion of a file dropped) must emit the notice"
         );
     }
 }
