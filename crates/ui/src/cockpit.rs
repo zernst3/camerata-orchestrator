@@ -3700,6 +3700,41 @@ async fn apply_rules(rules: &[ArmRuleReq], custom: &[CustomRuleView], findings: 
     Some((ok, message, results))
 }
 
+/// One repo's set of governance files that ALREADY EXIST and would be OVERWRITTEN by Apply.
+#[derive(Clone, serde::Deserialize)]
+struct ApplyPreflightRepo {
+    repo: String,
+    #[serde(default)]
+    existing_files: Vec<String>,
+}
+
+/// Preflight for Apply: ask the server which governance files Camerata is about to write
+/// ALREADY EXIST in each repo's local clone (and would be clobbered). Returns the per-repo
+/// list (empty when Apply is safe). `None` only on a transport/parse failure — the caller
+/// treats that as "could not check" and falls through to the normal apply path rather than
+/// blocking the architect on a preflight outage.
+async fn preflight_apply(
+    rules: &[ArmRuleReq],
+    custom: &[CustomRuleView],
+    findings: &[FindingView],
+) -> Option<Vec<ApplyPreflightRepo>> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/apply/preflight", crate::BFF_URL))
+        .json(&serde_json::json!({ "rules": rules, "custom": custom, "findings": findings }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    v.get("repos")
+        .cloned()
+        .and_then(|r| serde_json::from_value(r).ok())
+}
+
 /// Open the governance PR for each repo from the already-applied branch (separate step).
 async fn open_governance_pr(repos: &[String]) -> Option<Vec<ArmResultView>> {
     let v: serde_json::Value = reqwest::Client::new()
@@ -4483,9 +4518,52 @@ fn ProposedRulesTable(
     });
     let mut arming = use_signal(|| false);
     let mut opening_pr = use_signal(|| false);
+    // Apply-overwrite confirm gate: when the pre-apply preflight finds hand-written governance
+    // files that Apply would clobber, we stash the conflict list + the resolved apply payload
+    // here and show a confirm modal. The architect must explicitly acknowledge before we
+    // overwrite. `None` = no pending confirm (Apply either ran or hasn't been requested).
+    #[allow(clippy::type_complexity)]
+    let mut pending_apply_overwrite: Signal<
+        Option<(
+            Vec<ApplyPreflightRepo>,
+            Vec<ArmRuleReq>,
+            Vec<CustomRuleView>,
+            Vec<FindingView>,
+        )>,
+    > = use_signal(|| None);
     // Repos that the Apply step wrote a governance branch into (local + pushed). The "Open
     // governance PR" button targets exactly these, and is disabled until something is applied.
     let mut applied_repos = use_signal(Vec::<String>::new);
+    // Fire the actual Apply with a resolved payload and surface the per-repo results. Shared by
+    // the Apply button's "no conflicts → go straight through" path and the overwrite-confirm
+    // modal's "Overwrite & apply" button, so both run identical result handling.
+    let run_apply = use_callback(move |(arm_reqs, custom_reqs, findings): (Vec<ArmRuleReq>, Vec<CustomRuleView>, Vec<FindingView>)| {
+        arming.set(true);
+        spawn(async move {
+            match apply_rules(&arm_reqs, &custom_reqs, &findings).await {
+                Some((ok, message, results)) => {
+                    if !ok && results.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, if message.is_empty() { "Apply failed.".to_string() } else { message });
+                    } else {
+                        let mut done = Vec::new();
+                        for r in results {
+                            if r.ok {
+                                let branch = r.branch.unwrap_or_default();
+                                let path = r.path.unwrap_or_default();
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: applied to branch '{branch}' (local + pushed, no PR) — {path}", r.repo));
+                                done.push(r.repo);
+                            } else {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
+                            }
+                        }
+                        if !done.is_empty() { applied_repos.set(done); }
+                    }
+                }
+                None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Apply failed — set a workspace folder + connect GitHub (Contents write)."),
+            }
+            arming.set(false);
+        });
+    });
     let arm_findings = findings;
     // Export the FULL cross-repo rule set (every repo's proposed rules), not just the
     // currently-viewed repo's subset, so the CSV stays lossless for a multi-repo scan.
@@ -4747,31 +4825,23 @@ fn ProposedRulesTable(
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, format!("Choose an alternative first for: {}", unresolved.join(", ")));
                         return;
                     }
-                    arming.set(true);
+                    // Preflight FIRST: detect any hand-written governance files Apply would
+                    // overwrite, and require explicit acknowledgement before clobbering them. If
+                    // nothing would be overwritten (or the preflight can't run), apply directly —
+                    // no nagging on the safe path.
                     let findings = arm_findings.clone();
+                    arming.set(true);
                     spawn(async move {
-                        match apply_rules(&arm_reqs, &custom_reqs, &findings).await {
-                            Some((ok, message, results)) => {
-                                if !ok && results.is_empty() {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, if message.is_empty() { "Apply failed.".to_string() } else { message });
-                                } else {
-                                    let mut done = Vec::new();
-                                    for r in results {
-                                        if r.ok {
-                                            let branch = r.branch.unwrap_or_default();
-                                            let path = r.path.unwrap_or_default();
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: applied to branch '{branch}' (local + pushed, no PR) — {path}", r.repo));
-                                            done.push(r.repo);
-                                        } else {
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
-                                        }
-                                    }
-                                    if !done.is_empty() { applied_repos.set(done); }
-                                }
-                            }
-                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Apply failed — set a workspace folder + connect GitHub (Contents write)."),
-                        }
+                        let conflicts = preflight_apply(&arm_reqs, &custom_reqs, &findings).await;
                         arming.set(false);
+                        match conflicts {
+                            Some(repos) if !repos.is_empty() => {
+                                // Stash the conflicts + the resolved payload; the modal confirms.
+                                pending_apply_overwrite.set(Some((repos, arm_reqs, custom_reqs, findings)));
+                            }
+                            // No conflicts, or preflight unavailable: proceed straight to Apply.
+                            _ => run_apply.call((arm_reqs, custom_reqs, findings)),
+                        }
                     });
                 },
                 if arming() { "Applying…" } else { "Add rules to repo(s) (branch + push)" }
@@ -4807,6 +4877,60 @@ fn ProposedRulesTable(
             "Add rules to repo(s) writes the governance files (AGENTS.md / CONVENTIONS.md / CI gate / baseline) onto a "
             code { "camerata/onboard-governance" }
             " branch in each repo's local clone AND pushes it to origin — no PR is opened. Edit the working copy as much as you want, then Open governance PR when ready."
+        }
+
+        // Overwrite-confirm modal — shown when the pre-apply preflight finds hand-written
+        // governance files that Apply would clobber. Lists EXACTLY which files in which repos
+        // will be overwritten; the architect must explicitly confirm before we proceed.
+        if let Some((conflicts, _, _, _)) = pending_apply_overwrite() {
+            div { class: "rule-modal-overlay", onclick: move |_| pending_apply_overwrite.set(None),
+                div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                    div { class: "rule-modal-head",
+                        span { class: "rule-modal-id", "Overwrite existing files?" }
+                        button {
+                            class: "rule-modal-close",
+                            onclick: move |_| pending_apply_overwrite.set(None),
+                            "\u{2715}"
+                        }
+                    }
+                    p { class: "rule-modal-detail",
+                        "Some of these repos already have governance files that Apply will "
+                        strong { "overwrite" }
+                        " on the "
+                        code { "camerata/onboard-governance" }
+                        " branch. Review what will be replaced, then confirm to proceed."
+                    }
+                    div { class: "apply-overwrite-list",
+                        for repo in conflicts.iter() {
+                            div { class: "apply-overwrite-repo", key: "{repo.repo}",
+                                span { class: "apply-overwrite-repo-name", "{repo.repo}" }
+                                ul { class: "apply-overwrite-files",
+                                    for f in repo.existing_files.iter() {
+                                        li { key: "{f}", code { "{f}" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "onboard-leave-actions",
+                        button {
+                            class: "btn-edit-sm",
+                            onclick: move |_| pending_apply_overwrite.set(None),
+                            "Cancel"
+                        }
+                        button {
+                            class: "btn-edit-sm pg-btn-danger",
+                            onclick: move |_| {
+                                // Take the stashed payload and run the actual Apply.
+                                if let Some((_, arm_reqs, custom_reqs, findings)) = pending_apply_overwrite.take() {
+                                    run_apply.call((arm_reqs, custom_reqs, findings));
+                                }
+                            },
+                            "Overwrite & apply"
+                        }
+                    }
+                }
+            }
         }
     }
 }
