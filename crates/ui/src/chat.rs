@@ -120,7 +120,7 @@ enum ChatMode {
 
 /// Build the Technical-mode system prompt. Grounded exclusively in the canonical
 /// TECHNICAL.md so answers reflect actual code, not improvised architecture.
-fn technical_system_prompt() -> String {
+pub(crate) fn technical_system_prompt() -> String {
     format!(
         "You are Camerata's in-app technical assistant. Answer questions about HOW \
          Camerata works under the hood using ONLY the technical reference below. \
@@ -147,18 +147,33 @@ async fn send_chat(prompt: &str, model: &str, system: Option<&str>) -> Option<Ch
         .ok()
 }
 
+/// The explicit "not covered" phrase the Guide assistant must use when a question falls
+/// outside the user guide. Hard-coded here so tests can assert it appears in the prompt —
+/// a change to the wording requires updating both the prompt and the tests together.
+pub(crate) const GUIDE_NOT_COVERED_PHRASE: &str =
+    "That isn't covered in the Camerata user guide.";
+
 /// Build the Guide-mode system prompt at call time (avoids a large const). Grounded in the
 /// canonical user guide PLUS the live rules catalog, so the assistant can both explain flows and
 /// name/describe actual governance rules. Both are real, maintained sources — it must not
 /// improvise features or rules that aren't in them.
-fn guide_system_prompt(rules_catalog: &str) -> String {
+///
+/// The "not covered" guardrail is explicit: if a question falls outside the grounding
+/// materials the assistant must say [`GUIDE_NOT_COVERED_PHRASE`] rather than guessing.
+/// This is intentionally stronger than a soft "say so" — the exact phrase anchors the
+/// response so users get a clear signal rather than a confident hallucination.
+pub(crate) fn guide_system_prompt(rules_catalog: &str) -> String {
+    let not_covered = GUIDE_NOT_COVERED_PHRASE;
     let mut p = format!(
         "You are Camerata's in-app assistant. Answer the user's question about Camerata using \
          ONLY the materials below: the USER GUIDE for how-to and flows, and the RULES CATALOG for \
          specific governance rules. When asked for examples of rules (e.g. a repo-local rule), \
          cite REAL rule ids + titles from the catalog (scope=repo-local are repo-level; \
-         cross-repo/process are project-level; the security floor is always-on). If something \
-         isn't in these materials, say so briefly rather than guessing. Be concise and concrete.\
+         cross-repo/process are project-level; the security floor is always-on). \
+         CRITICAL: if the user asks about anything not described in these materials, respond with \
+         exactly \"{not_covered}\" followed by a brief explanation of what IS covered. \
+         Never invent features, steps, or rules that do not appear in the materials. \
+         Be concise and concrete.\
          \n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
     );
     if !rules_catalog.trim().is_empty() {
@@ -362,5 +377,207 @@ pub fn ChatBubble() -> Element {
                 }
             }
         }
+    }
+}
+
+// ── unit tests — prompt assembly + grounding ─────────────────────────────────
+//
+// These tests cover the STATIC side of Guide mode (prompt text construction) and
+// do NOT make live model calls. A compile-time `include_str!` bakes the guide into
+// the binary, so these tests also serve as a guard that the guide file is present
+// and non-empty at build time.
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        guide_system_prompt, technical_system_prompt, GUIDE_NOT_COVERED_PHRASE, TECHNICAL_DOC,
+        USER_GUIDE,
+    };
+
+    // ── USER_GUIDE grounding ─────────────────────────────────────────────────
+
+    /// The user guide constant is baked in at compile time (include_str!). This test
+    /// confirms it is non-empty and contains identifiable content from the real file,
+    /// so a stale path or an accidentally-empty file is caught at test time.
+    #[test]
+    fn user_guide_constant_is_non_empty_and_contains_known_content() {
+        assert!(
+            !USER_GUIDE.is_empty(),
+            "USER_GUIDE is empty — include_str! path likely broken"
+        );
+        // The header of docs/USER_GUIDE.md has been stable; assert a landmark.
+        assert!(
+            USER_GUIDE.contains("Camerata"),
+            "USER_GUIDE does not mention 'Camerata' — file may be wrong"
+        );
+    }
+
+    // ── TECHNICAL_DOC grounding ──────────────────────────────────────────────
+
+    /// Symmetric check for TECHNICAL.md — confirms the const is wired to a real file.
+    #[test]
+    fn technical_doc_constant_is_non_empty_and_contains_known_content() {
+        assert!(
+            !TECHNICAL_DOC.is_empty(),
+            "TECHNICAL_DOC is empty — include_str! path likely broken"
+        );
+        assert!(
+            TECHNICAL_DOC.contains("camerata"),
+            "TECHNICAL_DOC does not mention 'camerata' — file may be wrong"
+        );
+    }
+
+    // ── guide_system_prompt — grounding injection ────────────────────────────
+
+    /// The guide prompt must embed the full USER_GUIDE text so the model can answer
+    /// from it. Check that a distinctive landmark from the guide appears verbatim.
+    #[test]
+    fn guide_prompt_contains_user_guide_content() {
+        let prompt = guide_system_prompt("");
+        // The guide's section heading is a stable landmark.
+        assert!(
+            prompt.contains("=== CAMERATA USER GUIDE ==="),
+            "Guide prompt is missing the USER GUIDE section header"
+        );
+        // The guide body itself must be present.
+        assert!(
+            prompt.contains(USER_GUIDE),
+            "Guide prompt does not contain the full USER_GUIDE content"
+        );
+    }
+
+    /// Rules catalog is appended when non-empty, with the catalog section header.
+    #[test]
+    fn guide_prompt_appends_rules_catalog_when_present() {
+        let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
+        let prompt = guide_system_prompt(catalog);
+        assert!(
+            prompt.contains("=== CAMERATA RULES CATALOG"),
+            "Guide prompt is missing the RULES CATALOG section header"
+        );
+        assert!(
+            prompt.contains(catalog),
+            "Guide prompt does not contain the supplied rules catalog"
+        );
+    }
+
+    /// When the rules catalog is empty (network unavailable or no corpus yet), the
+    /// guide prompt must still assemble without the catalog section — the guide alone
+    /// is sufficient grounding for how-to questions.
+    #[test]
+    fn guide_prompt_omits_catalog_section_when_empty() {
+        let prompt = guide_system_prompt("");
+        assert!(
+            !prompt.contains("=== CAMERATA RULES CATALOG"),
+            "Guide prompt should not include the catalog section when the catalog is empty"
+        );
+    }
+
+    /// A whitespace-only catalog is treated the same as empty (trim check).
+    #[test]
+    fn guide_prompt_omits_catalog_for_whitespace_only_input() {
+        let prompt = guide_system_prompt("   \n\t  ");
+        assert!(
+            !prompt.contains("=== CAMERATA RULES CATALOG"),
+            "Guide prompt should not include the catalog section for whitespace-only input"
+        );
+    }
+
+    // ── "not covered" guardrail ──────────────────────────────────────────────
+
+    /// The canonical not-covered phrase must appear verbatim in the guide prompt so
+    /// the model has a concrete, testable response to copy when a question falls outside
+    /// the grounding materials. A vague "say so" is not enough.
+    #[test]
+    fn guide_prompt_contains_not_covered_phrase() {
+        let prompt = guide_system_prompt("");
+        assert!(
+            prompt.contains(GUIDE_NOT_COVERED_PHRASE),
+            "Guide prompt is missing the not-covered phrase: {:?}",
+            GUIDE_NOT_COVERED_PHRASE
+        );
+    }
+
+    /// The guardrail must also appear when the catalog is present — the combined prompt
+    /// must not accidentally drop the phrase through string concatenation.
+    #[test]
+    fn guide_prompt_not_covered_phrase_survives_catalog_append() {
+        let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
+        let prompt = guide_system_prompt(catalog);
+        assert!(
+            prompt.contains(GUIDE_NOT_COVERED_PHRASE),
+            "Guide prompt is missing the not-covered phrase after appending catalog"
+        );
+    }
+
+    /// The guardrail is marked CRITICAL in the prompt so the model treats it as a
+    /// hard constraint, not a soft preference.
+    #[test]
+    fn guide_prompt_not_covered_guardrail_is_marked_critical() {
+        let prompt = guide_system_prompt("");
+        assert!(
+            prompt.contains("CRITICAL"),
+            "Guide prompt should mark the not-covered guardrail as CRITICAL"
+        );
+    }
+
+    /// The guardrail must appear BEFORE the guide content, not after — the model reads
+    /// the system prompt top-to-bottom and should encounter the constraint early.
+    #[test]
+    fn guide_prompt_not_covered_phrase_appears_before_guide_content() {
+        let prompt = guide_system_prompt("");
+        let phrase_pos = prompt.find(GUIDE_NOT_COVERED_PHRASE).expect(
+            "GUIDE_NOT_COVERED_PHRASE not found in prompt",
+        );
+        let guide_pos = prompt
+            .find("=== CAMERATA USER GUIDE ===")
+            .expect("USER GUIDE section header not found in prompt");
+        assert!(
+            phrase_pos < guide_pos,
+            "not-covered phrase should appear before the guide content (phrase at {phrase_pos}, \
+             guide section at {guide_pos})"
+        );
+    }
+
+    // ── technical_system_prompt ──────────────────────────────────────────────
+
+    /// The technical prompt must embed TECHNICAL.md and cite the right constraint.
+    #[test]
+    fn technical_prompt_contains_technical_doc_and_constraint() {
+        let prompt = technical_system_prompt();
+        assert!(
+            prompt.contains("=== CAMERATA TECHNICAL REFERENCE ==="),
+            "Technical prompt is missing the TECHNICAL REFERENCE section header"
+        );
+        assert!(
+            prompt.contains(TECHNICAL_DOC),
+            "Technical prompt does not contain the full TECHNICAL_DOC content"
+        );
+        // The technical prompt must also have a "not covered" guardrail.
+        assert!(
+            prompt.contains("not covered"),
+            "Technical prompt should say when something is not covered in the reference"
+        );
+    }
+
+    // ── GUIDE_NOT_COVERED_PHRASE constant ───────────────────────────────────
+
+    /// The constant itself must be non-empty and end without a leading space — a
+    /// trivially wrong value would break the "appears before guide" ordering test.
+    #[test]
+    fn guide_not_covered_phrase_is_well_formed() {
+        assert!(
+            !GUIDE_NOT_COVERED_PHRASE.is_empty(),
+            "GUIDE_NOT_COVERED_PHRASE should not be empty"
+        );
+        assert!(
+            !GUIDE_NOT_COVERED_PHRASE.starts_with(' '),
+            "GUIDE_NOT_COVERED_PHRASE should not start with a space"
+        );
+        // Must be human-readable (contains at least one letter).
+        assert!(
+            GUIDE_NOT_COVERED_PHRASE.chars().any(|c| c.is_alphabetic()),
+            "GUIDE_NOT_COVERED_PHRASE should contain at least one letter"
+        );
     }
 }
