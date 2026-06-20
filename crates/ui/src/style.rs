@@ -2555,4 +2555,175 @@ html, body {
   max-height: 200px;
   overflow-y: auto;
 }
+
+/* ── Deep compliance & security tier (#55) ────────────────────────────── */
+.deep-tier-warning {
+  color: #b45309;
+  font-weight: 500;
+}
+.deep-tier-panel {
+  margin-top: 20px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.deep-tier-heading {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+.deep-tier-disclaimer {
+  font-size: 12px;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  margin: 0;
+  line-height: 1.55;
+}
+.deep-lens {
+  padding: 14px 16px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.deep-lens-heading {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+.deep-lens-desc {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 0;
+}
+.deep-lens-disclaimer {
+  font-size: 12px;
+  color: #b45309;
+  margin: 0;
+  font-style: italic;
+}
+.deep-lens-summary {
+  font-size: 13px;
+  color: var(--ink);
+  margin: 0;
+  white-space: pre-wrap;
+}
+.deep-lens-detail {
+  font-size: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+
+/* SOC-2 gap table (inside deep-security lens) */
+.soc2-gap-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+.soc2-gap-row {
+  display: grid;
+  grid-template-columns: 80px 160px 72px 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  align-items: start;
+}
+.soc2-gap-row.header {
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.soc2-gap-row.soc2-status-gap { background: #fef2f2; }
+.soc2-gap-row.soc2-status-partial { background: #fffbeb; }
+.soc2-gap-row.soc2-status-met { background: #f0fdf4; }
+.soc2-badge-gap { color: #b91c1c; font-weight: 600; }
+.soc2-badge-partial { color: #b45309; font-weight: 600; }
+.soc2-badge-met { color: #15803d; font-weight: 600; }
+.soc2-badge-unknown { color: var(--ink-2); font-style: italic; }
+.soc2-col-ctrl { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+.soc2-col-gap { color: #b91c1c; }
+
+/* ── Model tier-map editor (#63) ──────────────────────────────────────── */
+.tier-map-editor {
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tier-map-heading {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--ink);
+}
+.tier-map-hint {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 0;
+}
+.tier-map-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tier-map-row {
+  display: grid;
+  grid-template-columns: 90px 200px 1fr;
+  gap: 10px;
+  align-items: center;
+}
+.tier-map-band-label {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  text-align: center;
+}
+.tier-map-fast { background: #ecfdf5; color: #065f46; }
+.tier-map-balanced { background: #eff6ff; color: #1d4ed8; }
+.tier-map-strongest { background: #faf5ff; color: #6b21a8; }
+.tier-map-band-desc {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.tier-map-input {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ── Rules-window SETTINGS section label ─────────────────────────────── */
+.settings-label {
+  margin-top: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: #b45309;
+  border-left: 3px solid #b45309;
+  padding-left: 8px;
+}
 "#;

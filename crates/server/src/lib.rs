@@ -230,6 +230,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
+        // Model-tiering: read/write the project's fast/balanced/strongest model bindings (#63).
+        .route("/api/projects/:id/tier-map", post(set_tier_map))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
@@ -1314,6 +1316,49 @@ async fn delete_custom_rule(
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
         p.remove_custom(&req.name);
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── Model-tiering tier-map endpoint (#63) ─────────────────────────────────────
+
+/// Body for `POST /api/projects/:id/tier-map`. Mirrors [`crate::model_tier::TierMap`]
+/// with all three fields optional so callers can patch just the tiers they want.
+#[derive(serde::Deserialize)]
+struct SetTierMapReq {
+    /// Model id for fast (throughput) tasks.
+    #[serde(default)]
+    fast: Option<String>,
+    /// Model id for balanced (mid-tier) tasks.
+    #[serde(default)]
+    balanced: Option<String>,
+    /// Model id for strongest (frontier-class) tasks.
+    #[serde(default)]
+    strongest: Option<String>,
+}
+
+/// `POST /api/projects/:id/tier-map` — update the project's model-tier map.
+///
+/// Applies only the fields present in the request body (patch semantics): fields
+/// absent or `null` leave the existing binding unchanged, so a caller that only
+/// wants to update `fast` does not need to repeat the others.
+async fn set_tier_map(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetTierMapReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        if let Some(fast) = req.fast.filter(|s| !s.trim().is_empty()) {
+            p.tier_map.fast = fast;
+        }
+        if let Some(balanced) = req.balanced.filter(|s| !s.trim().is_empty()) {
+            p.tier_map.balanced = balanced;
+        }
+        if let Some(strongest) = req.strongest.filter(|s| !s.trim().is_empty()) {
+            p.tier_map.strongest = strongest;
+        }
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
