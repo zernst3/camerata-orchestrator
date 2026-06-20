@@ -1,0 +1,31 @@
+id = "JAVA-RESOURCE-MANAGEMENT-1"
+title = "Resources (connections, streams, readers) are closed via try-with-resources or finally; never left to garbage collection"
+tag = "stack"
+domain = "java"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, IntelliJ inspections) that flag unmanaged closeable resources and recommend try-with-resources. Conformance holds when every resource implementing AutoCloseable (Connection, Statement, Stream, Reader, Writer, etc.) is guarded by try-with-resources or an explicit finally close."
+
+[decision]
+question = "How are resources (connections, streams, readers) guaranteed to be closed?"
+default = "try-with-resources-or-finally"
+why = "Database connections, file handles, and streams consume finite OS resources. If a resource is not closed, it leaks, and the OS runs out of file descriptors or connection limits, causing subsequent operations to fail mysteriously. Relying on garbage collection and finalize() is unreliable (finalize() is not guaranteed to run promptly or at all) and leaves the program vulnerable to resource starvation. Try-with-resources (Java 7+) is syntactic sugar that guarantees close() is called even if an exception is thrown; it is the most concise and reliable form. Manual finally blocks are acceptable but more verbose and error-prone."
+
+[[option]]
+id = "try-with-resources-or-finally"
+label = "close resources via try-with-resources or explicit finally block"
+directive = "Every resource that implements AutoCloseable (java.sql.Connection, java.nio.file.Files, java.io.Reader, etc.) is instantiated inside a try-with-resources statement or explicitly closed in a finally block. Code in a try block is guaranteed to have the resource closed if an exception is thrown. For resources that must outlive the try block, they are explicitly closed in a finally block or wrapped in a lifecycle manager."
+why = "The adopted default. Try-with-resources is concise, reliable, and guarantees cleanup even if an exception is thrown."
+
+[[option]]
+id = "explicit-close-method-calls"
+label = "explicitly call close() at the end of the method"
+directive = "Resources are closed by explicit close() calls at the end of the method or in a cleanup phase, without a try-with-resources or finally block."
+why = "Works if the method completes normally and always reaches the close statement, but if an exception is thrown before the close, the resource leaks. Error-prone and defeats the purpose of managed resources."
+
+[[option]]
+id = "garbage-collection-finalize"
+label = "rely on garbage collection and finalize() to close resources"
+directive = "Resources are not explicitly closed; they are left for the garbage collector and optional finalize() methods to handle."
+why = "Unreliable; finalize() is not guaranteed to run promptly or at all, and resources may leak before garbage collection occurs. Deprecated practice."

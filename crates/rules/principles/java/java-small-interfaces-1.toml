@@ -1,0 +1,31 @@
+id = "JAVA-SMALL-INTERFACES-1"
+title = "Interfaces are small and focused; each interface has a single responsibility and 1-3 methods, not a god-interface"
+tag = "stack"
+domain = "java"
+layer = "architecture"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by code review and architectural guidelines. Small interfaces are easier to implement, test, and mock. Static analysis can flag interfaces with >5 methods and recommend splitting."
+
+[decision]
+question = "How large should interfaces be?"
+default = "small-focused-interfaces"
+why = "A small, focused interface is easier to implement, mock, and reason about. An interface that defines many methods (e.g., DatabaseService with 50 methods, or UserService with every operation a user might need) forces implementers to implement all 50 even if they only use 5, creates excessive surface area for testing and mocking, and couples callers to a large, brittle contract. Small interfaces also compose: two focused interfaces can be used together or embedded into a larger one as needed. The Interface Segregation Principle (SOLID) teaches that clients should not depend on interfaces they do not use. Splitting a large interface into small ones also makes partial implementations easier (some clients implement Readable but not Writable)."
+
+[[option]]
+id = "small-focused-interfaces"
+label = "define small, focused interfaces with 1-3 methods"
+directive = "Each interface has a single responsibility and the minimal set of methods a caller needs. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory (each 1-3 methods)."
+why = "The adopted default. Small interfaces are easy to implement, test, and mock; they compose well and follow the Interface Segregation Principle."
+
+[[option]]
+id = "god-interfaces"
+label = "define large interfaces with many methods"
+directive = "Large interfaces (e.g., Database, UserService, Repository) that expose every method a package might need are defined, and callers take the full interface."
+why = "Increases implementation burden and testing complexity; couples callers to a large contract. Partial implementations are forced to stub out unused methods."
+
+[[option]]
+id = "no-interfaces"
+label = "use concrete classes directly instead of interfaces"
+directive = "Callers depend on concrete classes rather than abstract interfaces."
+why = "Tightly couples code to specific implementations; makes testing difficult (cannot mock) and makes swapping implementations impossible."

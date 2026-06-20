@@ -1,0 +1,31 @@
+id = "JAVA-IMMUTABILITY-FINAL-1"
+title = "Classes and fields are marked final by default; mutability is explicit and intentional"
+tag = "stack"
+domain = "java"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by Checkstyle rules that recommend final on classes (unless explicitly designed for subclassing) and fields (unless explicitly mutable). Code review verifies that mutability is intentional and documented."
+
+[decision]
+question = "Should classes and fields be mutable or immutable by default?"
+default = "final-by-default"
+why = "Mutable shared state is a source of subtle bugs, race conditions, and makes reasoning about code harder. Immutable objects are thread-safe by default (no synchronization needed), are easier to reason about (state does not change), can be safely shared, and are easier to test. Java's final modifier signals to readers that a class or field is not intended to be changed; it is a form of documentation. A class marked final cannot be unexpectedly subclassed (which might break invariants). Fields marked final must be initialized in the constructor or at declaration and cannot be reassigned, making the object's state stable. In rare cases where mutability is needed, it should be explicit (not final) and documented. Collections should be immutable by default (Collections.unmodifiableList(...) or Guava's ImmutableList), and defensive copies should be made when necessary."
+
+[[option]]
+id = "final-by-default"
+label = "mark classes and fields final unless mutability is required"
+directive = "Classes are marked final unless explicitly designed as base classes for extension. Fields are marked final unless they must be reassigned. Collections are immutable (unmodifiableList, ImmutableList) by default. Mutable fields are clearly documented with a reason (e.g., /* mutable because concurrent updates are required */)."
+why = "The adopted default. Immutable-by-default prevents bugs, is thread-safe, and makes code easier to reason about."
+
+[[option]]
+id = "mutable-by-default"
+label = "classes and fields are mutable; mark final only when immutability is required"
+directive = "Classes are designed to be subclassed unless otherwise specified. Fields are mutable and can be reassigned. Immutability is added only when needed."
+why = "More flexibility, but allows accidental mutability and race conditions. Requires more vigilance in testing and reasoning."
+
+[[option]]
+id = "sealed-classes"
+label = "use sealed classes (Java 17+) to restrict subclassing"
+directive = "Classes are marked sealed to allow only specified subclasses, providing a middle ground between final (no subclassing) and open (unrestricted subclassing)."
+why = "Appropriate for frameworks or domain models where controlled inheritance is needed. Requires Java 17+."

@@ -1,0 +1,31 @@
+id = "JAVA-CONSTRUCTOR-INJECTION-1"
+title = "Dependency injection is via constructor parameters, not @Autowired field injection; dependencies are final and immutable"
+tag = "stack"
+domain = "java:spring"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Checkstyle or Semgrep rules that flag @Autowired fields and recommend constructor injection. Conformance holds when dependencies are declared as constructor parameters and marked final, never as @Autowired instance fields."
+
+[decision]
+question = "How are dependencies injected into Spring beans?"
+default = "constructor-injection"
+why = "Constructor injection makes dependencies explicit (visible in the method signature), enforces immutability (fields can be final), and makes testing trivial (pass mock objects to the constructor without reflection). Field injection via @Autowired hides dependencies (they are invisible until runtime introspection), requires reflection and mutable fields, makes testing awkward (requires mocking the container or using reflection), and can lead to NullPointerException if the container fails to inject. Constructor injection also makes circular dependencies obvious (they cause constructor errors) rather than hidden (they appear only at runtime). Spring 5.1+ considers field injection a code smell and recommends constructor injection as best practice."
+
+[[option]]
+id = "constructor-injection"
+label = "inject dependencies via constructor parameters, marked final"
+directive = "All dependencies are declared as constructor parameters and assigned to final instance fields. The constructor is explicitly defined (not relying on implicit injection). For Spring Framework, @Autowired is omitted from the constructor (Spring auto-wires single constructors). Each dependency is final so it cannot be reassigned. No @Autowired fields."
+why = "The adopted default. Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
+
+[[option]]
+id = "field-injection"
+label = "inject dependencies via @Autowired instance fields"
+directive = "Dependencies are declared as mutable instance fields annotated with @Autowired. The container uses reflection to inject values at runtime."
+why = "Hides dependencies (invisible until runtime), requires reflection, makes testing awkward (must mock the container), and allows reassignment. Deprecated pattern; Spring officially recommends against it."
+
+[[option]]
+id = "setter-injection"
+label = "inject dependencies via setter methods annotated with @Autowired"
+directive = "Dependencies are exposed as public setter methods, and the container injects them via reflection after instantiation."
+why = "Makes dependencies optional (setters may not be called), allows reassignment, and is less explicit than constructor injection."

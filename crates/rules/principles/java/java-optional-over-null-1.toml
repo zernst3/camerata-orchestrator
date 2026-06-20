@@ -1,0 +1,31 @@
+id = "JAVA-OPTIONAL-OVER-NULL-1"
+title = "Methods return Optional<T> instead of null; null is used only for legacy compatibility or internal state"
+tag = "stack"
+domain = "java"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by code review and Checkstyle/SpotBugs rules that flag @Nullable return types and recommend Optional. IDEs can also hint that methods should return Optional instead of null."
+
+[decision]
+question = "How are missing or absent values represented in method return types?"
+default = "optional-return-types"
+why = "Returning null is a contract violation; callers must remember to check for null before using the return value, or face NullPointerException at runtime. This is the 'Billion Dollar Mistake' (Tony Hoare's term). Optional<T> makes the absence of a value explicit in the type signature, so the compiler and caller know that a value might not be present. Using Optional forces callers to explicitly handle the absent case (using ifPresent(), orElse(), orElseThrow(), etc.), making the code safer and more readable. Optional also chains well (Optional.map(), Optional.flatMap()) for functional operations. Null can still be used for internal state or legacy compatibility, but public API return types should use Optional to signal the possibility of absence."
+
+[[option]]
+id = "optional-return-types"
+label = "return Optional<T> instead of null"
+directive = "Methods that might not have a value to return use Optional<T> as the return type (e.g., Optional<User> findById(int id)). Callers explicitly handle the absence with ifPresent(), orElse(), orElseThrow(), or other Optional methods. Null is used only for internal fields that are immediately assigned in initialization or legacy APIs that cannot be changed."
+why = "The adopted default. Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
+
+[[option]]
+id = "return-null"
+label = "return null to indicate absence"
+directive = "Methods return null to indicate a missing or absent value. Callers must explicitly check for null before using the return value."
+why = "Common but error-prone; callers can forget null checks, leading to NullPointerException. The contract of 'might be null' is not enforced by the type system."
+
+[[option]]
+id = "throw-exception"
+label = "throw an exception if a value cannot be found"
+directive = "Methods throw NoSuchElementException or a custom exception instead of returning null or Optional."
+why = "Appropriate for cases where absence is an exceptional error condition, not an expected outcome. For expected absence (e.g., an optional query result), Optional is more idiomatic."

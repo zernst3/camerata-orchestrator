@@ -1,0 +1,31 @@
+id = "JAVA-PACKAGE-BY-FEATURE-1"
+title = "Packages are organized by feature (domain) not by layer; each feature contains controller, service, and repository classes"
+tag = "stack"
+domain = "java"
+layer = "architecture"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by package structure conventions and code review. The directory structure reflects feature boundaries (users, organizations, projects) not horizontal layers."
+
+[decision]
+question = "Should packages be organized by layer or by feature?"
+default = "package-by-feature"
+why = "Organizing by layer (com.example.controllers.*, com.example.services.*, com.example.repositories.*) spreads a single feature's code across many packages, making it hard to locate and understand the feature as a unit. It also encourages tight coupling across layers (controllers and services in the same layer often have implicit dependencies). Organizing by feature (com.example.users.*, com.example.organizations.*, com.example.projects.*) groups all code for a feature together, makes dependencies between features explicit (imports across packages), and makes it easier to understand a feature in isolation. Each feature package contains its own controller, service, repository, and domain model; this is sometimes called 'vertical slicing' or 'package-by-feature.' Dependencies flow between features (users depend on organizations) not within layers. It also makes it easier to extract a feature into a separate microservice later."
+
+[[option]]
+id = "package-by-feature"
+label = "organize packages by feature (domain); each feature contains its own layers"
+directive = "Packages are named by domain or feature (com.example.users, com.example.organizations, com.example.reports). Each feature package contains its own controller, service, repository, and domain model classes. Dependencies flow between features explicitly (com.example.users depends on com.example.organizations, not the reverse). Common/shared code lives in a separate package (com.example.common or com.example.shared)."
+why = "The adopted default. Feature-based packages group related code, make dependencies explicit, and are easier to refactor or extract."
+
+[[option]]
+id = "package-by-layer"
+label = "organize packages by layer (presentation, business, data)"
+directive = "Packages are named by layer (com.example.controllers, com.example.services, com.example.repositories). Each controller, service, or repository class is placed in its corresponding layer package."
+why = "Separates technical concerns, but spreads a single feature across many packages. Makes feature-level dependencies harder to see and encourages tight coupling within layers."
+
+[[option]]
+id = "no-hierarchy"
+label = "all classes in a single package or a flat namespace"
+directive = "Classes are not organized by package; they are all in com.example or com.example.* with no clear structure."
+why = "Simple for tiny projects but quickly becomes difficult to navigate as the codebase grows. Hard to identify feature boundaries."

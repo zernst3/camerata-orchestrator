@@ -1,0 +1,31 @@
+id = "JAVA-EXCEPTION-HANDLING-1"
+title = "Exceptions are never silently swallowed; every catch block either re-throws, logs, or transforms the exception with context"
+tag = "stack"
+domain = "java"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, Semgrep) that flags empty catch blocks, catch-and-return patterns without logging, or catch blocks with only a comment. A conforming catch block must contain a log statement, a re-throw, or a throw with the original exception as the cause."
+
+[decision]
+question = "What should happen when an exception is caught?"
+default = "log-or-rethrow-with-context"
+why = "Silently swallowing an exception hides failures, makes debugging impossible, and allows the program to continue in an inconsistent state that later manifests as cryptic downstream errors. The original error context is lost, breaking the causal chain. Every catch block should either log the exception with context (so operations teams can diagnose failures), re-throw it (so a higher layer handles it), or transform it into a domain exception while preserving the cause. Empty catch blocks are the most common form of this anti-pattern and the hardest to debug in production."
+
+[[option]]
+id = "log-or-rethrow-with-context"
+label = "log with context or re-throw (preserving cause)"
+directive = "Every catch block contains exactly one of: (1) a log statement (error, warn, or debug level) with the exception and relevant context variables, (2) a re-throw of the original or transformed exception, or (3) a throw of a new exception with the original as the cause (.initCause(...) or new Exception(..., cause)). Empty catch blocks are forbidden. Catch blocks that return a default value must still log the exception first."
+why = "The adopted default. Logging or re-throwing preserves diagnostic information and ensures failures are visible to operators and developers."
+
+[[option]]
+id = "silent-catch-and-continue"
+label = "catch and silently continue without logging or re-throwing"
+directive = "Exceptions are caught and the block continues or returns without logging, re-throwing, or preserving the cause."
+why = "Hides failures and breaks the causal chain; debugging is impossible when the error context is lost. Later failures appear unrelated to the original root cause."
+
+[[option]]
+id = "catch-and-return-sentinel"
+label = "catch and return a sentinel value (null, -1, empty) without logging"
+directive = "Exceptions are caught and the block returns a default value without any diagnostic action."
+why = "Equivalent to silently continuing; the caller cannot distinguish a sentinel value from a legitimate result, and the error is invisible."
