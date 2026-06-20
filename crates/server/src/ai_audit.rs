@@ -1414,6 +1414,699 @@ pub async fn audit_repo(
     Ok((verified, all_proposed))
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// DEEP COMPLIANCE & SECURITY TIER (#55, in-MVP per #62)
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// An ADDITIVE, OPT-IN tier that layers three analysis LENSES on top of the always-on
+// deterministic floor + the standard AI architectural audit. It changes NOTHING about the
+// default scan — it only runs when the audit request sets `deep`. The three lenses are:
+//
+//   1. SOC-2 readiness / GAP ANALYSIS — maps the repo's detectable practices + the
+//      standard findings onto SOC-2 Trust-Services / Common-Criteria controls and reports
+//      the GAPS. It is a GAP ANALYSIS, never a "report": no agent can produce a SOC-2
+//      report (a CPA firm attests to an ORGANIZATION's controls over 6–12 months). The
+//      product must never call this output a "SOC-2 report" — that is a liability line (#55).
+//
+//   2. DEEP SECURITY AUDIT — a deeper-than-floor security pass (authorization on write
+//      paths, sensitive-data handling, secret/credential flow) that goes beyond the
+//      mechanical floor's line-level secret/SQL/path checks.
+//
+//   3. THREAT MODEL — derives a structured threat model from the repo map: entry points,
+//      trust boundaries, sensitive-data paths, and the threats against them.
+//
+// HONESTY GUARDRAILS (load-bearing, from #62):
+//   - Every output is ADVISORY and MODEL-INFERRED, NOT externally validated. External
+//     validation against comparator tools + ground truth is #56 Phase 2 (deferred). Each
+//     lens result carries [`DeepLensResult::advisory`] = true and an explicit disclaimer
+//     so the UI can label it honestly.
+//   - The SOC-2 lens is labeled a "gap analysis" everywhere; it never claims certification.
+//   - These lenses read STATIC code. They are NOT a penetration test — a true pen test
+//     needs a running deployment (post-deploy, out of scope here, also per #55).
+//
+// COST: the deep tier reuses the same per-call LLM machinery and the same [`UsageMeter`],
+// so its spend folds into the report's actual-vs-estimated readout. It is the MOST
+// EXPENSIVE pass (three extra whole-repo lenses on top of the standard audit) and is why
+// it is strictly opt-in. The UI's `estimate_audit_cost` already prices the standard audit
+// from `code_chars`; the deep tier adds (roughly) three more whole-repo passes on the
+// selected/Opus model, which the cost readout should surface as the priciest option.
+
+/// The disclaimer string attached to every deep-tier lens result. Centralized so the wording
+/// stays consistent and the honesty guardrail (#62) is impossible to drop by accident.
+pub const DEEP_ADVISORY_DISCLAIMER: &str =
+    "Advisory and model-inferred — NOT externally validated (external validation against \
+     comparator tools and ground-truth corpora is a separate, deferred capability). Review \
+     every item before acting on it. This is a static-code analysis, not a penetration test.";
+
+/// Which deep-tier lens produced a result. Stable wire strings (`soc2-gap`, `deep-security`,
+/// `threat-model`) so the UI can route/group lens output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepLens {
+    /// SOC-2 readiness / gap analysis.
+    Soc2Gap,
+    /// Deep security audit (beyond the deterministic floor).
+    DeepSecurity,
+    /// Threat model derived from the repo map.
+    ThreatModel,
+}
+
+impl DeepLens {
+    /// Stable wire id for this lens (serialized into the result; used as the transcript label).
+    pub fn id(self) -> &'static str {
+        match self {
+            DeepLens::Soc2Gap => "soc2-gap",
+            DeepLens::DeepSecurity => "deep-security",
+            DeepLens::ThreatModel => "threat-model",
+        }
+    }
+    /// Human-facing title — note the SOC-2 lens is a "Gap Analysis", never a "report".
+    pub fn title(self) -> &'static str {
+        match self {
+            DeepLens::Soc2Gap => "SOC-2 Readiness Gap Analysis",
+            DeepLens::DeepSecurity => "Deep Security Audit",
+            DeepLens::ThreatModel => "Threat Model",
+        }
+    }
+}
+
+/// One mapped SOC-2 control and the gap (if any) the lens found against it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Soc2Gap {
+    /// The control reference, e.g. `CC6.1` (Common Criteria) or a Trust-Services criterion.
+    pub control: String,
+    /// Short control name/expectation, e.g. "Logical access controls".
+    pub title: String,
+    /// `met` | `partial` | `gap` | `unknown` — the readiness status the model inferred.
+    pub status: String,
+    /// What the model OBSERVED in the repo that informed the status (evidence or its absence).
+    pub observed: String,
+    /// The concrete gap + remediation direction, when status is `partial` / `gap`.
+    pub gap: String,
+}
+
+/// One element of the derived threat model.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Threat {
+    /// The entry point / asset / trust boundary this threat is against (e.g.
+    /// "POST /api/orders handler", "Postgres connection", "uploaded-file path").
+    pub component: String,
+    /// `entry-point` | `trust-boundary` | `data-store` | `dependency` | `other` — the kind
+    /// of element, so the UI can group the model by surface.
+    pub kind: String,
+    /// The threat itself (what could go wrong).
+    pub threat: String,
+    /// STRIDE-ish category when the model offers one (`spoofing`, `tampering`, `repudiation`,
+    /// `info-disclosure`, `dos`, `elevation`), else free text.
+    pub category: String,
+    /// The suggested mitigation direction.
+    pub mitigation: String,
+    /// `high` | `medium` | `low` — model-inferred severity.
+    pub severity: String,
+}
+
+/// The structured result of ONE deep-tier lens. Each lens carries its own payload (only one
+/// of the vectors is populated per lens) plus the advisory flag + disclaimer so the honesty
+/// guardrail travels with the data.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeepLensResult {
+    /// Stable lens id (`soc2-gap` | `deep-security` | `threat-model`).
+    pub lens: String,
+    /// Human-facing lens title.
+    pub title: String,
+    /// Always true — every deep-tier output is advisory + model-inferred (#62).
+    pub advisory: bool,
+    /// The honesty disclaimer ([`DEEP_ADVISORY_DISCLAIMER`]).
+    pub disclaimer: String,
+    /// SOC-2 lens payload (empty for the other lenses).
+    #[serde(default)]
+    pub soc2_gaps: Vec<Soc2Gap>,
+    /// Deep-security lens payload: reuses the standard [`Finding`] shape (empty for others).
+    #[serde(default)]
+    pub security_findings: Vec<Finding>,
+    /// Threat-model lens payload (empty for the other lenses).
+    #[serde(default)]
+    pub threats: Vec<Threat>,
+    /// A one-paragraph narrative summary the model wrote for this lens (optional).
+    #[serde(default)]
+    pub summary: String,
+    /// Set when the lens failed (model/transport error) so the UI shows it ran-but-errored
+    /// rather than silently producing an empty result.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl DeepLensResult {
+    /// A public empty-but-honest result for a lens, carrying the advisory flag + disclaimer.
+    /// Used when aggregating per-repo lens results into one tier-level result.
+    pub fn merged_empty(lens: DeepLens) -> Self {
+        Self::empty(lens)
+    }
+
+    /// An empty-but-honest result for a lens, carrying the advisory flag + disclaimer.
+    fn empty(lens: DeepLens) -> Self {
+        Self {
+            lens: lens.id().to_string(),
+            title: lens.title().to_string(),
+            advisory: true,
+            disclaimer: DEEP_ADVISORY_DISCLAIMER.to_string(),
+            soc2_gaps: Vec::new(),
+            security_findings: Vec::new(),
+            threats: Vec::new(),
+            summary: String::new(),
+            error: None,
+        }
+    }
+}
+
+/// The aggregate deep-tier output across all three lenses for one repo set. Attached to the
+/// scan report under [`crate::onboard::ScanReport::deep`] when the deep tier ran.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeepReport {
+    /// The three lens results, in a stable order (gap analysis, security, threat model).
+    pub lenses: Vec<DeepLensResult>,
+    /// Always true — the whole tier is advisory (#62). Mirrors each lens's flag at the top
+    /// level so a consumer can gate on one field.
+    pub advisory: bool,
+    /// The honesty disclaimer for the tier as a whole.
+    pub disclaimer: String,
+}
+
+/// SYSTEM PROMPT — SOC-2 readiness / gap analysis lens.
+///
+/// Maps the repo's detectable practices onto SOC-2 Common-Criteria controls and reports
+/// GAPS. The prompt is explicit that this is a GAP ANALYSIS, not a SOC-2 report, and that no
+/// certification is implied — the same honesty guardrail the product UI enforces (#55/#62).
+pub fn soc2_gap_system_prompt() -> String {
+    r#"You are a security/compliance engineer performing a SOC-2 READINESS GAP ANALYSIS of a codebase for Camerata.
+
+IMPORTANT — what this is and is NOT:
+- This is a GAP ANALYSIS: you map what the code + repo evidently DO against SOC-2 control expectations and report where they fall short. Call it a "gap analysis".
+- This is NOT a "SOC-2 report". A SOC-2 report is a CPA firm's attestation about an organization's controls operating over months. You produce neither an attestation nor a certification. Never imply the project IS or WILL BE certified.
+- You see STATIC CODE only — not the running system, not the org's policies/HR/vendor processes. For controls that depend on organizational evidence you cannot see, say so (status "unknown"), do not guess "met".
+
+Map against the SOC-2 Common Criteria (Security) — at minimum consider:
+- CC6.1 Logical access controls (authn/authz on sensitive operations)
+- CC6.6 Boundary protection / network access
+- CC6.7 Data-in-transit and at-rest protection (encryption, secret handling)
+- CC6.8 Malicious-code / dependency controls
+- CC7.2 Security monitoring / logging / audit trail
+- CC7.3 / CC7.4 Incident handling hooks
+- CC8.1 Change management (review, CI gates, migrations)
+- CC1/CC2 Control environment & communication (only what code/config can evidence)
+
+For EACH control you assess, emit one entry with:
+- "control": the criterion id (e.g. "CC6.1").
+- "title": a short name for the control.
+- "status": one of "met" | "partial" | "gap" | "unknown" (use "unknown" when it needs org evidence you can't see).
+- "observed": what in the repo informed the status (a file/pattern you saw, or that you saw nothing).
+- "gap": for "partial"/"gap", the concrete shortfall and the remediation direction; empty for "met"/"unknown".
+
+Report GAPS generously — recall over precision; a human reviews everything. Do not invent evidence. Do not claim certification.
+
+Return ONLY a JSON object, no prose, no markdown fences:
+{
+  "summary": "one short paragraph on overall readiness, explicitly framed as a gap analysis",
+  "gaps": [
+    {"control":"CC6.1","title":"Logical access controls","status":"gap","observed":"…","gap":"…"}
+  ]
+}
+If you genuinely cannot assess anything, return {"summary":"…","gaps":[]}."#
+        .to_string()
+}
+
+/// SYSTEM PROMPT — deep security audit lens.
+///
+/// A deeper-than-floor security read (authorization on write paths, sensitive-data handling,
+/// secret/credential flow). Emits the SAME `findings` JSON shape the standard audit uses, so
+/// [`parse_ai_findings`] parses it directly and the UI renders security findings in the
+/// familiar table. Deterministic-floor concerns are excluded (they are already covered).
+pub fn deep_security_system_prompt() -> String {
+    r#"You are a senior application-security engineer performing a DEEP SECURITY AUDIT of a codebase for Camerata.
+
+This is DEEPER than the always-on deterministic floor (which already finds hardcoded secrets, raw SQL string concatenation, secrets-in-URLs, and path-escape writes — DO NOT re-report those). Go beyond line-level lint and reason about:
+- AUTHORIZATION: write/mutation/delete paths with no authz check; horizontal/vertical privilege gaps; missing ownership checks on resources; admin actions reachable without role checks.
+- AUTHENTICATION & SESSION: weak/missing auth on sensitive endpoints; token/session handling flaws.
+- SENSITIVE-DATA HANDLING: PII/credentials/financial data logged, returned in responses, or stored unencrypted; over-broad serialization that leaks fields.
+- SECRET / CREDENTIAL FLOW: credentials read from insecure sources, passed through untrusted paths, or exposed to clients (beyond the floor's hardcoded-literal check).
+- INJECTION beyond raw-SQL-concat: command/template/path/deserialization injection; SSRF; unsafe redirects.
+- INPUT VALIDATION & TRUST BOUNDARIES: unvalidated external input reaching a sensitive sink.
+
+You have the REPO MAP (every file + its public symbols) and SOME file bodies. When judging a rule needs the BODY of a file not included, list it in `needs_files` rather than guessing.
+
+RECALL OVER PRECISION — a human triages every finding; report borderline issues at severity "low". Cite the exact offending line in `code` (copied verbatim) and `line` (the NNNN| number). For `rule`, use a short kebab security name (e.g. "missing-authz-on-write", "pii-in-logs", "ssrf-on-fetch").
+
+Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
+{
+  "findings": [
+    {"path":"…","line":0,"severity":"high|medium|low","rule":"short-kebab-security-name","title":"…","code":"the exact offending line","detail":"why it's exploitable and the fix direction"}
+  ],
+  "proposed_rules": [],
+  "needs_files": []
+}
+If the code is genuinely clean, return {"findings":[],"proposed_rules":[],"needs_files":[]}."#
+        .to_string()
+}
+
+/// SYSTEM PROMPT — threat-model lens.
+///
+/// Derives a structured threat model from the repo: entry points, trust boundaries,
+/// sensitive-data paths, and the threats against them (STRIDE-flavored) with mitigations.
+pub fn threat_model_system_prompt() -> String {
+    r#"You are a security architect deriving a THREAT MODEL for a codebase from its structure.
+
+Using the repo map and the file bodies provided, identify:
+- ENTRY POINTS: HTTP routes/handlers, CLI commands, queue/event consumers, scheduled jobs, public APIs.
+- TRUST BOUNDARIES: where untrusted input crosses into trusted code (network edge, deserialization, IPC, third-party calls).
+- DATA STORES & SENSITIVE-DATA PATHS: databases, caches, file storage, secrets, and the flow of PII/credentials/financial data through them.
+- DEPENDENCIES that widen the attack surface (where evident from manifests/imports).
+
+For EACH notable element, enumerate the threats against it. Prefer STRIDE categories where they fit (spoofing, tampering, repudiation, info-disclosure, dos, elevation). Give a concrete mitigation direction and a model-inferred severity.
+
+This is model-inferred and advisory — recall over precision; a human reviews it.
+
+Return ONLY a JSON object, no prose, no markdown fences:
+{
+  "summary": "one short paragraph describing the system's attack surface",
+  "threats": [
+    {"component":"POST /api/orders handler","kind":"entry-point","threat":"unauthenticated order creation","category":"elevation","mitigation":"require auth + ownership check","severity":"high"}
+  ]
+}
+`kind` is one of: "entry-point" | "trust-boundary" | "data-store" | "dependency" | "other".
+If you genuinely cannot derive a model, return {"summary":"…","threats":[]}."#
+        .to_string()
+}
+
+/// Parse the SOC-2 gap-analysis lens response into `(summary, gaps)`. Robust: malformed
+/// output yields an empty result rather than erroring the tier. Statuses are normalized to
+/// the closed set (`met`/`partial`/`gap`/`unknown`); an unrecognized status becomes
+/// `unknown` (the honest default — we did not get a clear signal).
+pub fn parse_soc2_gaps(raw: &str) -> (String, Vec<Soc2Gap>) {
+    let Some(json) = extract_json_object(raw) else {
+        return (String::new(), Vec::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return (String::new(), Vec::new());
+    };
+    let summary = v["summary"].as_str().unwrap_or("").trim().to_string();
+    let mut gaps = Vec::new();
+    if let Some(arr) = v["gaps"].as_array() {
+        for g in arr {
+            let control = g["control"].as_str().unwrap_or("").trim().to_string();
+            let title = g["title"].as_str().unwrap_or("").trim().to_string();
+            // Drop entirely-empty rows (no control and no title — nothing to show).
+            if control.is_empty() && title.is_empty() {
+                continue;
+            }
+            let status = match g["status"].as_str().unwrap_or("unknown").trim() {
+                "met" => "met",
+                "partial" => "partial",
+                "gap" => "gap",
+                _ => "unknown",
+            }
+            .to_string();
+            gaps.push(Soc2Gap {
+                control,
+                title,
+                status,
+                observed: g["observed"].as_str().unwrap_or("").trim().to_string(),
+                gap: g["gap"].as_str().unwrap_or("").trim().to_string(),
+            });
+        }
+    }
+    (summary, gaps)
+}
+
+/// Parse the threat-model lens response into `(summary, threats)`. Robust to malformed
+/// output. `kind`, `category`, and `severity` are normalized to their closed sets so the UI
+/// can group on them; an unrecognized value falls back to the safest/most-generic bucket.
+pub fn parse_threats(raw: &str) -> (String, Vec<Threat>) {
+    let Some(json) = extract_json_object(raw) else {
+        return (String::new(), Vec::new());
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return (String::new(), Vec::new());
+    };
+    let summary = v["summary"].as_str().unwrap_or("").trim().to_string();
+    let mut threats = Vec::new();
+    if let Some(arr) = v["threats"].as_array() {
+        for t in arr {
+            let component = t["component"].as_str().unwrap_or("").trim().to_string();
+            let threat = t["threat"].as_str().unwrap_or("").trim().to_string();
+            // Need at least a component or a threat statement to be a real row.
+            if component.is_empty() && threat.is_empty() {
+                continue;
+            }
+            let kind = match t["kind"].as_str().unwrap_or("other").trim() {
+                "entry-point" => "entry-point",
+                "trust-boundary" => "trust-boundary",
+                "data-store" => "data-store",
+                "dependency" => "dependency",
+                _ => "other",
+            }
+            .to_string();
+            let severity = match t["severity"].as_str().unwrap_or("medium").trim() {
+                "high" => "high",
+                "low" => "low",
+                _ => "medium",
+            }
+            .to_string();
+            threats.push(Threat {
+                component,
+                kind,
+                threat,
+                // Category is free-ish text; keep it verbatim (trimmed) so a STRIDE label or a
+                // custom phrase both survive.
+                category: t["category"].as_str().unwrap_or("").trim().to_string(),
+                mitigation: t["mitigation"].as_str().unwrap_or("").trim().to_string(),
+                severity,
+            });
+        }
+    }
+    (summary, threats)
+}
+
+/// Run ONE prose-style deep lens (SOC-2 gap or threat model) over the whole repo digest.
+/// These two lenses are single whole-repo passes (their value is the cross-cutting view, not
+/// per-chunk recall), so we build one digest, run one call, and parse the structured result.
+/// Streaming into the transcript when feedback is present, so the cockpit shows the lens work
+/// live. Graceful: on any model failure the lens result carries the error, never panics.
+#[allow(clippy::too_many_arguments)]
+async fn run_prose_lens(
+    llm: &Llm,
+    lens: DeepLens,
+    repo: &str,
+    repo_map: &str,
+    digest: &str,
+    system: String,
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> DeepLensResult {
+    let prompt = format!(
+        "Repository: {repo}\n\n{repo_map}{digest}\n\n── {} for the code above. Return the JSON described in the system prompt. ──",
+        lens.title()
+    );
+    let session = format!("deep-{}-{repo}", lens.id());
+    if let Some((store, key)) = feedback {
+        store.register(
+            key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!("{} — {repo}", lens.title()),
+                prompt: prompt.clone(),
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+    }
+    let mut req = LlmRequest::new(prompt)
+        .with_system(system)
+        // Whole-repo structured output can be sizable (many controls / many threats).
+        .with_max_tokens(8192);
+    if let Some(m) = audit_model {
+        req = req.with_model(m.to_string());
+    }
+    let resp = if let Some((store, key)) = feedback {
+        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+        llm.complete_streaming(req, &mut on_delta).await
+    } else {
+        let cap = total_backstop();
+        match tokio::time::timeout(cap, llm.complete(req)).await {
+            Ok(inner) => inner,
+            Err(_) => Err(anyhow::anyhow!(
+                "lens exceeded the {}s backstop",
+                cap.as_secs()
+            )),
+        }
+    };
+    let mut result = DeepLensResult::empty(lens);
+    match resp {
+        Ok(r) => {
+            if let Some(m) = meter {
+                m.record(&r);
+            }
+            match lens {
+                DeepLens::Soc2Gap => {
+                    let (summary, gaps) = parse_soc2_gaps(&r.text);
+                    result.summary = summary;
+                    result.soc2_gaps = gaps;
+                }
+                DeepLens::ThreatModel => {
+                    let (summary, threats) = parse_threats(&r.text);
+                    result.summary = summary;
+                    result.threats = threats;
+                }
+                // Security uses the chunked path, not this prose lens.
+                DeepLens::DeepSecurity => {}
+            }
+            if let Some((store, key)) = feedback {
+                store.set_status(key, &session, "done");
+            }
+        }
+        Err(e) => {
+            result.error = Some(format!("{e}"));
+            if let Some((store, key)) = feedback {
+                store.set_status(key, &session, "blocked");
+            }
+        }
+    }
+    result
+}
+
+/// Run the deep SECURITY lens. It reuses the full chunked audit engine ([`run_passes`]) so a
+/// large repo is covered chunk-by-chunk (the same reason the standard audit chunks), with the
+/// security-focused system prompt swapped in via a single-batch free-form pass. The result is
+/// the standard `Finding` shape, deduped + location-merged like the standard audit. Findings
+/// are tagged `AI-`-prefixed by the parser (no adopted rules here), keeping their advisory
+/// provenance honest.
+#[allow(clippy::too_many_arguments)]
+async fn run_security_lens(
+    llm: &Llm,
+    repo: &str,
+    files: &[(String, String)],
+    repo_map: &str,
+    audit_model: Option<&str>,
+    mode: ScanMode,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> DeepLensResult {
+    let mut result = DeepLensResult::empty(DeepLens::DeepSecurity);
+    if files.is_empty() {
+        return result;
+    }
+    // The security lens has no adopted-rule corpus — it is a free-form security read — so it
+    // runs as a single empty batch per chunk (one pass each), like the no-rules audit path.
+    let (concurrency, _batch_size) = mode.tuning();
+    let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+    let empty_batch: &[(String, String)] = &[];
+    let batches: Vec<&[(String, String)]> = vec![empty_batch];
+    let adopted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (findings, _proposed, _requested, _ok, _err) = run_security_passes(
+        llm,
+        repo,
+        repo_map,
+        &adopted,
+        audit_model,
+        feedback,
+        &chunks,
+        &batches,
+        concurrency,
+        meter,
+    )
+    .await;
+    // Dedup byte-identical repeats then location-merge — same reduce the standard audit uses,
+    // so one smell reported under several names at one line is ONE row.
+    let mut findings = findings;
+    resolve_finding_lines(&mut findings, files);
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+    let findings = merge_by_location(findings, files);
+    result.security_findings = findings;
+    result
+}
+
+/// Like [`run_passes`] but with the DEEP-SECURITY system prompt instead of the standard
+/// architectural one. Kept as its own small function so the deep tier never disturbs the
+/// standard audit's pass machinery, and so the security prompt is the only thing that
+/// differs. Single-batch (free-form security read), so there is no rule-batch dimension.
+#[allow(clippy::too_many_arguments)]
+async fn run_security_passes(
+    llm: &Llm,
+    repo: &str,
+    repo_map: &str,
+    adopted: &std::collections::HashSet<String>,
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    chunks: &[&[(String, String)]],
+    batches: &[&[(String, String)]],
+    concurrency: usize,
+    meter: Option<&UsageMeter>,
+) -> (
+    Vec<Finding>,
+    Vec<ProposedRule>,
+    std::collections::HashSet<String>,
+    usize,
+    Option<anyhow::Error>,
+) {
+    use futures::stream::StreamExt;
+    let digests: Vec<String> = chunks.iter().map(|c| build_digest(c)).collect();
+    let n_c = chunks.len();
+    let n_b = batches.len().max(1);
+    let work: Vec<usize> = (0..n_c).collect();
+    type PassOut = (
+        usize,
+        anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)>,
+    );
+    let results: Vec<PassOut> = futures::stream::iter(work)
+        .map(|ci| {
+            let digest = &digests[ci];
+            async move {
+                let prompt = format!(
+                    "Repository: {repo} (security pass {}/{n_c})\n\n{repo_map}{digest}\n\n── Perform a DEEP SECURITY AUDIT of the code above. Use the REPO MAP for cross-file context. Return the JSON described in the system prompt. ──",
+                    ci + 1,
+                );
+                let session = format!("deep-security-{repo}-c{ci}");
+                if let Some((store, key)) = feedback {
+                    store.register(
+                        key,
+                        crate::transcript::AgentTranscript {
+                            session_id: session.clone(),
+                            role: format!("Deep Security Audit {}/{n_c} — {repo}", ci + 1),
+                            prompt: prompt.clone(),
+                            output: String::new(),
+                            status: "running".to_string(),
+                        },
+                    );
+                }
+                // The security lens swaps in its own system prompt; everything else mirrors
+                // `audit_pass` (streaming + meter + robust parse).
+                let mut req = LlmRequest::new(prompt)
+                    .with_system(deep_security_system_prompt())
+                    .with_max_tokens(8192);
+                if let Some(m) = audit_model {
+                    req = req.with_model(m.to_string());
+                }
+                let r: anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<String>)> = async {
+                    let resp = if let Some((store, key)) = feedback {
+                        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+                        llm.complete_streaming(req, &mut on_delta).await?
+                    } else {
+                        let cap = total_backstop();
+                        tokio::time::timeout(cap, llm.complete(req))
+                            .await
+                            .map_err(|_| anyhow::anyhow!("security pass exceeded the {}s backstop", cap.as_secs()))??
+                    };
+                    if let Some(m) = meter {
+                        m.record(&resp);
+                    }
+                    let (f, p) = parse_ai_findings(repo, &resp.text, adopted);
+                    let needs = parse_needs_files(&resp.text);
+                    Ok((f, p, needs))
+                }
+                .await;
+                if let Some((store, key)) = feedback {
+                    store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
+                }
+                (ci, r)
+            }
+        })
+        .buffer_unordered(concurrency.max(1))
+        .collect()
+        .await;
+
+    let mut findings = Vec::new();
+    let mut proposed = Vec::new();
+    let mut requested = std::collections::HashSet::new();
+    let mut ok = 0usize;
+    let mut last_err = None;
+    for (_ci, r) in results {
+        match r {
+            Ok((f, p, needs)) => {
+                findings.extend(f);
+                proposed.extend(p);
+                requested.extend(needs);
+                ok += 1;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let _ = n_b; // single batch; kept for parity/readability with run_passes.
+    (findings, proposed, requested, ok, last_err)
+}
+
+/// Run the full DEEP COMPLIANCE & SECURITY tier (#55) over one repo's files: the three lenses
+/// (SOC-2 gap analysis, deep security audit, threat model), each on the selected/Opus model.
+/// ADDITIVE and OPT-IN — only called when the audit request set `deep`; the standard scan is
+/// untouched. Every lens is best-effort: a failure attaches an `error` to that lens's result
+/// and the others still run. Spend folds into the shared [`UsageMeter`].
+///
+/// `mode` controls the security lens's chunk concurrency (the prose lenses are single passes).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_deep_tier(
+    llm: &Llm,
+    repo: &str,
+    files: &[(String, String)],
+    audit_model: Option<&str>,
+    mode: ScanMode,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> DeepReport {
+    let repo_map = build_repo_map(files);
+    // One whole-repo digest for the two single-pass prose lenses (capped at MAX_DIGEST_CHARS).
+    let digest = build_digest(files);
+
+    // Resolve the model the same way the standard audit does: explicit pick wins, else
+    // CAMERATA_AUDIT_MODEL, else provider default. The deep tier is meant to run on the strong
+    // (Opus) model; the caller passes that through `audit_model`.
+    let model = audit_model.map(str::to_string).or_else(|| {
+        std::env::var("CAMERATA_AUDIT_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    });
+
+    // Run the three lenses concurrently — they are independent reads of the same repo.
+    let soc2 = run_prose_lens(
+        llm,
+        DeepLens::Soc2Gap,
+        repo,
+        &repo_map,
+        &digest,
+        soc2_gap_system_prompt(),
+        model.as_deref(),
+        feedback,
+        meter,
+    );
+    let threat = run_prose_lens(
+        llm,
+        DeepLens::ThreatModel,
+        repo,
+        &repo_map,
+        &digest,
+        threat_model_system_prompt(),
+        model.as_deref(),
+        feedback,
+        meter,
+    );
+    let security = run_security_lens(
+        llm,
+        repo,
+        files,
+        &repo_map,
+        model.as_deref(),
+        mode,
+        feedback,
+        meter,
+    );
+    let (soc2, security, threat) = tokio::join!(soc2, security, threat);
+
+    DeepReport {
+        // Stable order: gap analysis, security, threat model.
+        lenses: vec![soc2, security, threat],
+        advisory: true,
+        disclaimer: DEEP_ADVISORY_DISCLAIMER.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1912,5 +2605,129 @@ mod tests {
             parse_ai_findings("me/api", r#"{"findings": [], "proposed_rules": []}"#, &none);
         assert!(f.is_empty());
         assert!(r.is_empty());
+    }
+
+    // ── Deep compliance & security tier (#55) ──────────────────────────────────────
+
+    #[test]
+    fn parse_soc2_gaps_reads_controls_and_normalizes_status() {
+        let raw = r#"Here is the gap analysis:
+        {
+          "summary": "Partial readiness; access controls are the main gap.",
+          "gaps": [
+            {"control":"CC6.1","title":"Logical access controls","status":"gap","observed":"no authz middleware","gap":"add authz on write paths"},
+            {"control":"CC7.2","title":"Logging","status":"partial","observed":"some logging","gap":"no audit trail"},
+            {"control":"CC1.1","title":"Control environment","status":"weird","observed":"n/a","gap":""}
+          ]
+        }"#;
+        let (summary, gaps) = parse_soc2_gaps(raw);
+        assert!(summary.contains("Partial readiness"));
+        assert_eq!(gaps.len(), 3);
+        assert_eq!(gaps[0].control, "CC6.1");
+        assert_eq!(gaps[0].status, "gap");
+        assert_eq!(gaps[1].status, "partial");
+        // An unrecognized status normalizes to the honest default.
+        assert_eq!(gaps[2].status, "unknown");
+    }
+
+    #[test]
+    fn parse_soc2_gaps_drops_empty_rows_and_tolerates_garbage() {
+        // A row with no control AND no title is dropped.
+        let raw = r#"{"summary":"","gaps":[{"control":"","title":"","status":"gap"}]}"#;
+        let (_s, gaps) = parse_soc2_gaps(raw);
+        assert!(gaps.is_empty(), "empty rows dropped");
+        // Non-JSON yields an empty result, never an error.
+        let (s2, g2) = parse_soc2_gaps("the model declined");
+        assert!(s2.is_empty());
+        assert!(g2.is_empty());
+    }
+
+    #[test]
+    fn parse_threats_reads_and_normalizes_kind_and_severity() {
+        let raw = r#"{
+          "summary": "Public API with several entry points.",
+          "threats": [
+            {"component":"POST /api/orders","kind":"entry-point","threat":"unauth order creation","category":"elevation","mitigation":"require auth","severity":"high"},
+            {"component":"Postgres","kind":"weird-kind","threat":"data exfil","category":"info-disclosure","mitigation":"encrypt at rest","severity":"sky-high"}
+          ]
+        }"#;
+        let (summary, threats) = parse_threats(raw);
+        assert!(summary.contains("Public API"));
+        assert_eq!(threats.len(), 2);
+        assert_eq!(threats[0].kind, "entry-point");
+        assert_eq!(threats[0].severity, "high");
+        // Unknown kind -> "other"; unknown severity -> "medium".
+        assert_eq!(threats[1].kind, "other");
+        assert_eq!(threats[1].severity, "medium");
+        // Category is preserved verbatim (free text / STRIDE label both survive).
+        assert_eq!(threats[1].category, "info-disclosure");
+    }
+
+    #[test]
+    fn parse_threats_drops_empty_rows_and_tolerates_garbage() {
+        let raw = r#"{"summary":"x","threats":[{"component":"","threat":"","kind":"entry-point"}]}"#;
+        let (_s, threats) = parse_threats(raw);
+        assert!(threats.is_empty(), "row with no component and no threat dropped");
+        let (s2, t2) = parse_threats("{ not json ]");
+        assert!(s2.is_empty());
+        assert!(t2.is_empty());
+    }
+
+    #[test]
+    fn deep_security_prompt_excludes_floor_concerns() {
+        // The deep-security lens must NOT re-report the deterministic floor's concerns.
+        let p = deep_security_system_prompt();
+        assert!(p.contains("DO NOT re-report"));
+        assert!(p.contains("authorization") || p.contains("AUTHORIZATION"));
+    }
+
+    #[test]
+    fn soc2_prompt_is_a_gap_analysis_never_a_report() {
+        // Honesty guardrail (#55/#62): the SOC-2 prompt must frame itself as a gap analysis
+        // and explicitly deny producing a SOC-2 report / certification.
+        let p = soc2_gap_system_prompt();
+        assert!(p.contains("GAP ANALYSIS"));
+        assert!(p.to_lowercase().contains("not a \"soc-2 report\"")
+            || p.contains("NOT a \"SOC-2 report\""));
+    }
+
+    #[test]
+    fn deep_lens_metadata_is_stable() {
+        assert_eq!(DeepLens::Soc2Gap.id(), "soc2-gap");
+        assert_eq!(DeepLens::DeepSecurity.id(), "deep-security");
+        assert_eq!(DeepLens::ThreatModel.id(), "threat-model");
+        // The SOC-2 lens title is a "Gap Analysis", never a "report".
+        assert!(DeepLens::Soc2Gap.title().contains("Gap Analysis"));
+        assert!(!DeepLens::Soc2Gap.title().to_lowercase().contains("report"));
+    }
+
+    #[test]
+    fn deep_lens_result_empty_carries_advisory_flag_and_disclaimer() {
+        let r = DeepLensResult::empty(DeepLens::ThreatModel);
+        assert!(r.advisory, "every deep result is advisory (#62)");
+        assert_eq!(r.disclaimer, DEEP_ADVISORY_DISCLAIMER);
+        assert!(r.error.is_none());
+        assert!(r.threats.is_empty());
+        // The disclaimer states it is not externally validated and not a pen test.
+        assert!(DEEP_ADVISORY_DISCLAIMER.contains("NOT externally validated"));
+        assert!(DEEP_ADVISORY_DISCLAIMER.contains("not a penetration test"));
+    }
+
+    #[test]
+    fn deep_report_serializes_with_advisory_envelope() {
+        let report = DeepReport {
+            lenses: vec![
+                DeepLensResult::empty(DeepLens::Soc2Gap),
+                DeepLensResult::empty(DeepLens::DeepSecurity),
+                DeepLensResult::empty(DeepLens::ThreatModel),
+            ],
+            advisory: true,
+            disclaimer: DEEP_ADVISORY_DISCLAIMER.to_string(),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["advisory"], true);
+        assert_eq!(json["lenses"].as_array().unwrap().len(), 3);
+        assert_eq!(json["lenses"][0]["lens"], "soc2-gap");
+        assert_eq!(json["lenses"][0]["advisory"], true);
     }
 }

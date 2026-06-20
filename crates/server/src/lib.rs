@@ -1190,6 +1190,15 @@ struct AuditReq {
     /// clean pass over every file. The first scan of a project is always full (no cache yet).
     #[serde(default = "default_true")]
     incremental: bool,
+    /// OPT-IN deep compliance & security tier (#55, in-MVP per #62). When true, AFTER the
+    /// standard audit Camerata runs the three deep lenses — SOC-2 readiness gap analysis, a
+    /// deep security audit (beyond the deterministic floor), and a threat model — over each
+    /// repo on the selected model, and attaches the result to the report's `deep` field.
+    /// Defaults to FALSE: it is the MOST EXPENSIVE tier (three extra whole-repo passes) and
+    /// must never run by default. Its output is ADVISORY + model-inferred (#62), not a SOC-2
+    /// report and not a penetration test.
+    #[serde(default)]
+    deep: bool,
 }
 
 /// serde default for an opt-OUT boolean (defaults to `true` when the field is absent).
@@ -1294,6 +1303,7 @@ async fn onboard_audit(
         Some((&state.transcripts, SCAN_AUDIT_KEY)),
         None,
         prior.as_ref(),
+        req.deep,
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -1334,6 +1344,7 @@ async fn onboard_audit_start(
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     let thorough = req.thorough;
+    let deep = req.deep;
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
@@ -1372,6 +1383,7 @@ async fn onboard_audit_start(
             Some((&transcripts, SCAN_AUDIT_KEY)),
             Some((&jobs, &jid)),
             prior.as_ref(),
+            deep,
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
