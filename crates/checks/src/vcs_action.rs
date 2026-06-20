@@ -52,6 +52,12 @@ pub enum VcsTarget {
     CommitMessage,
     /// Only the first line (subject) of the commit message.
     CommitSubject,
+    /// Everything after the first line of the commit message (the body).
+    ///
+    /// For a message with only a subject and no blank line + body, this target
+    /// yields an empty string (not `None`) so that body-presence rules fire
+    /// rather than silently skip.
+    CommitBody,
     /// The pull-request title.
     PrTitle,
     /// The pull-request body.
@@ -69,6 +75,16 @@ impl VcsTarget {
             (VcsTarget::CommitSubject, VcsAction::Commit { message }) => {
                 Some(message.lines().next().unwrap_or(""))
             }
+            (VcsTarget::CommitBody, VcsAction::Commit { message }) => {
+                // Body = everything after the first newline.  When there is no
+                // newline the body is empty (""), not absent (None), so
+                // body-presence rules fire on subject-only commits.
+                let body = match message.find('\n') {
+                    Some(pos) => &message[pos + 1..],
+                    None => "",
+                };
+                Some(body)
+            }
             (VcsTarget::PrTitle, VcsAction::PullRequest { title, .. }) => Some(title),
             (VcsTarget::PrBody, VcsAction::PullRequest { body, .. }) => Some(body),
             (VcsTarget::BranchName, VcsAction::Branch { name }) => Some(name),
@@ -81,6 +97,7 @@ impl VcsTarget {
         match self {
             VcsTarget::CommitMessage => "commit message",
             VcsTarget::CommitSubject => "commit subject (first line)",
+            VcsTarget::CommitBody => "commit body (lines after subject)",
             VcsTarget::PrTitle => "PR title",
             VcsTarget::PrBody => "PR body",
             VcsTarget::BranchName => "branch name",
@@ -118,6 +135,27 @@ pub enum Matcher {
         /// Allowed commit types (e.g. `feat`, `fix`, `chore`).
         types: Vec<String>,
     },
+    /// The text must be substantive (at least `min_non_blank_chars` non-whitespace
+    /// characters across at least one non-blank line) AND must contain a story-id
+    /// reference matching the given prefix pattern.
+    ///
+    /// The story-id pattern follows the same `PREFIX#<digits>` convention as
+    /// [`Matcher::TicketRef`] when `story_id_prefix` ends without `#` (e.g.
+    /// `"#"` for a bare `#42`, `"AB"` for `AB#42`), or matches `PREFIX-<digits>`
+    /// when `story_id_separator` is set to `'-'`.  The defaults (prefix `"#"`,
+    /// separator `'#'`, no further constraints) accept a bare `#42` reference in
+    /// the body.
+    ///
+    /// This is the compound check for PROCESS-COMMIT-DOC-1.
+    SubstantiveWithStoryId {
+        /// Minimum number of non-whitespace characters the body must contain.
+        min_non_blank_chars: usize,
+        /// The prefix before the separator + digits (e.g. `"#"` for `#42`,
+        /// `"AB"` for `AB#42`, or `"STORY"` for `STORY-42`).
+        story_id_prefix: String,
+        /// The character separating the prefix from the digits (`'#'` or `'-'`).
+        story_id_separator: char,
+    },
 }
 
 impl Matcher {
@@ -131,6 +169,14 @@ impl Matcher {
                 prefixes.iter().any(|p| t.starts_with(p.as_str()))
             }
             Matcher::ConventionalCommit { types } => is_conventional_commit(text, types),
+            Matcher::SubstantiveWithStoryId {
+                min_non_blank_chars,
+                story_id_prefix,
+                story_id_separator,
+            } => {
+                is_substantive(text, *min_non_blank_chars)
+                    && contains_story_id(text, story_id_prefix, *story_id_separator)
+            }
         }
     }
 
@@ -145,6 +191,13 @@ impl Matcher {
             Matcher::ConventionalCommit { types } => {
                 format!("a conventional-commit type of [{}]", types.join(", "))
             }
+            Matcher::SubstantiveWithStoryId {
+                min_non_blank_chars,
+                story_id_prefix,
+                story_id_separator,
+            } => format!(
+                "at least {min_non_blank_chars} non-blank characters and a `{story_id_prefix}{story_id_separator}<number>` story-id reference"
+            ),
         }
     }
 }
@@ -193,6 +246,58 @@ fn is_conventional_commit(text: &str, types: &[String]) -> bool {
         None => head,
     };
     types.iter().any(|t| t == type_part)
+}
+
+/// True when `text` has at least `min_non_blank_chars` non-whitespace characters
+/// across one or more non-blank lines. An empty string or whitespace-only string
+/// never satisfies a non-zero minimum.
+fn is_substantive(text: &str, min_non_blank_chars: usize) -> bool {
+    if min_non_blank_chars == 0 {
+        // A zero-minimum is vacuously true.
+        return true;
+    }
+    let count: usize = text.lines().map(|l| l.chars().filter(|c| !c.is_whitespace()).count()).sum();
+    count >= min_non_blank_chars
+}
+
+/// True when `text` contains `prefix` immediately followed by `separator` and one
+/// or more ASCII digits (e.g. prefix `"#"`, separator `'#'` matches `#42`; prefix
+/// `"AB"`, separator `'#'` matches `AB#42`; prefix `"STORY"`, separator `'-'`
+/// matches `STORY-42`).
+///
+/// Scans every occurrence of `prefix + separator` so a non-digit occurrence does
+/// not mask a valid reference elsewhere.
+fn contains_story_id(text: &str, prefix: &str, separator: char) -> bool {
+    // Build the token we search for: e.g. "#" + '#' = "##" (for bare #42), or
+    // "AB" + '#' = "AB#", or "STORY" + '-' = "STORY-".
+    let mut token = prefix.to_owned();
+    token.push(separator);
+
+    // Special-case: prefix "#" with separator '#' means we want bare `#42`.
+    // The token would be "##" which won't match "#42".  Handle this by treating
+    // an empty prefix specially — if prefix starts with the separator char we
+    // use just the separator as the token.
+    // Actually, a cleaner design: if prefix is empty, token is just the separator.
+    // The caller's contract: prefix="" + separator='#' means "a bare #<num>".
+    let token = if prefix.is_empty() {
+        separator.to_string()
+    } else {
+        token
+    };
+
+    let mut search_from = 0;
+    while let Some(rel) = text[search_from..].find(&token) {
+        let after = search_from + rel + token.len();
+        if text[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+        search_from = after;
+    }
+    false
 }
 
 // ── Process rule + evaluation ──────────────────────────────────────────────────
@@ -260,6 +365,56 @@ impl ProcessRule {
             applies_to: vec![VcsTarget::BranchName],
             matcher: Matcher::StartsWithAny {
                 prefixes: prefixes.iter().map(|s| s.to_string()).collect(),
+            },
+        }
+    }
+
+    /// Documentation gate (PROCESS-COMMIT-DOC-1): the commit body AND the PR body
+    /// must each be substantive (at least `min_non_blank_chars` non-whitespace
+    /// characters) AND must contain a story-id reference of the form
+    /// `<story_id_prefix><story_id_separator><digits>`.
+    ///
+    /// # Rationale
+    ///
+    /// A commit/PR record is the durable in-repo history for every governed
+    /// change.  A subject-only commit is too thin: it tells reviewers *what*
+    /// was done but not *why*, *which story* motivated it, or *what was
+    /// decided*.  This gate ensures a minimum prose body is always present and
+    /// is keyed to the governing story so readers can navigate to the full
+    /// context.
+    ///
+    /// # Defaults
+    ///
+    /// - `min_non_blank_chars = 20` — long enough to rule out a one-word
+    ///   placeholder, short enough not to block valid one-liners.
+    /// - `story_id_prefix = ""`, `story_id_separator = '#'` — accepts a bare
+    ///   `#<num>` GitHub-style story reference.
+    ///
+    /// Callers can pass custom values to adapt the rule to their tracker
+    /// (e.g. `"AB"` + `'#'` for Azure Boards `AB#42`, or `"STORY"` + `'-'`
+    /// for a Jira-style `STORY-42`).
+    ///
+    /// # Applies to
+    ///
+    /// [`VcsTarget::CommitBody`] for commits and [`VcsTarget::PrBody`] for PRs.
+    /// A branch action is not gated by this rule (the target is absent).
+    pub fn commit_documentation(
+        min_non_blank_chars: usize,
+        story_id_prefix: &str,
+        story_id_separator: char,
+    ) -> Self {
+        Self {
+            id: "PROCESS-COMMIT-DOC-1".to_string(),
+            description: format!(
+                "Commit body and PR body must contain at least {min_non_blank_chars} non-blank \
+                 characters and a story-id reference \
+                 ({story_id_prefix}{story_id_separator}<number>)."
+            ),
+            applies_to: vec![VcsTarget::CommitBody, VcsTarget::PrBody],
+            matcher: Matcher::SubstantiveWithStoryId {
+                min_non_blank_chars,
+                story_id_prefix: story_id_prefix.to_string(),
+                story_id_separator,
             },
         }
     }
@@ -498,6 +653,204 @@ mod tests {
         };
         assert!(cc.requirement().contains("feat"));
         assert!(cc.requirement().contains("fix"));
+
+        let substantive = Matcher::SubstantiveWithStoryId {
+            min_non_blank_chars: 20,
+            story_id_prefix: "AB".to_string(),
+            story_id_separator: '#',
+        };
+        let req = substantive.requirement();
+        assert!(req.contains("20"), "should mention the min char count");
+        assert!(req.contains("AB"), "should mention the prefix");
+        assert!(req.contains('#'.to_string().as_str()), "should mention the separator");
+    }
+
+    // ── PROCESS-COMMIT-DOC-1 ────────────────────────────────────────────────────
+
+    /// Build a standard PROCESS-COMMIT-DOC-1 rule: 20 non-blank chars, bare `#<num>`.
+    fn doc_rule() -> ProcessRule {
+        ProcessRule::commit_documentation(20, "", '#')
+    }
+
+    #[test]
+    fn doc_rule_passes_commit_with_substantive_body_and_story_id() {
+        let rules = [doc_rule()];
+        // Subject + blank line + body with story id.
+        let action = VcsAction::Commit {
+            message: "feat: add export endpoint\n\nImplements the export flow. Refs #42."
+                .to_string(),
+        };
+        assert!(gate(&rules, &action).is_ok(), "body is substantive and has story id");
+    }
+
+    #[test]
+    fn doc_rule_fails_commit_with_subject_only() {
+        let rules = [doc_rule()];
+        let action = VcsAction::Commit {
+            message: "feat: add export endpoint".to_string(),
+        };
+        let err = gate(&rules, &action).expect_err("subject-only commit must be refused");
+        assert!(
+            err.iter().any(|v| v.rule_id == "PROCESS-COMMIT-DOC-1"),
+            "PROCESS-COMMIT-DOC-1 must fire: {err:?}"
+        );
+        assert!(
+            err.iter().any(|v| v.target == VcsTarget::CommitBody),
+            "CommitBody target must be in violation: {err:?}"
+        );
+    }
+
+    #[test]
+    fn doc_rule_fails_commit_body_without_story_id() {
+        let rules = [doc_rule()];
+        // Body is long enough but lacks the story reference.
+        let action = VcsAction::Commit {
+            message: "feat: add export endpoint\n\nAdds the new export flow for CSV downloads."
+                .to_string(),
+        };
+        let err = gate(&rules, &action).expect_err("missing story id must be refused");
+        assert!(
+            err.iter().any(|v| v.rule_id == "PROCESS-COMMIT-DOC-1"),
+            "PROCESS-COMMIT-DOC-1 must fire: {err:?}"
+        );
+    }
+
+    #[test]
+    fn doc_rule_fails_commit_body_too_short_even_with_story_id() {
+        let rules = [doc_rule()];
+        // Body has the story ref but is below the 20-char minimum.
+        let action = VcsAction::Commit {
+            message: "feat: export\n\n#42".to_string(),
+        };
+        let err = gate(&rules, &action).expect_err("short body must be refused");
+        assert!(
+            err.iter().any(|v| v.rule_id == "PROCESS-COMMIT-DOC-1"),
+            "PROCESS-COMMIT-DOC-1 must fire: {err:?}"
+        );
+    }
+
+    #[test]
+    fn doc_rule_passes_pr_with_substantive_body_and_story_id() {
+        let rules = [doc_rule()];
+        let action = VcsAction::PullRequest {
+            title: "Add export endpoint".to_string(),
+            body: "Implements the CSV export feature. Closes #99.".to_string(),
+        };
+        assert!(gate(&rules, &action).is_ok(), "PR with body + story id should pass");
+    }
+
+    #[test]
+    fn doc_rule_fails_pr_with_empty_body() {
+        let rules = [doc_rule()];
+        let action = VcsAction::PullRequest {
+            title: "Add export endpoint".to_string(),
+            body: String::new(),
+        };
+        let err = gate(&rules, &action).expect_err("empty PR body must be refused");
+        assert!(
+            err.iter().any(|v| v.target == VcsTarget::PrBody),
+            "PrBody target must fire: {err:?}"
+        );
+    }
+
+    #[test]
+    fn doc_rule_branch_action_not_gated() {
+        // The documentation rule does not apply to branch actions.
+        let rules = [doc_rule()];
+        let action = VcsAction::Branch {
+            name: "feature/export".to_string(),
+        };
+        assert!(
+            gate(&rules, &action).is_ok(),
+            "branch action is not in scope for PROCESS-COMMIT-DOC-1"
+        );
+    }
+
+    #[test]
+    fn doc_rule_custom_prefix_and_separator_ado_style() {
+        // Custom: AB#42 Azure-Boards-style story reference.
+        let rule = ProcessRule::commit_documentation(10, "AB", '#');
+        let rules = [rule];
+
+        let passing = VcsAction::Commit {
+            message: "fix: null check\n\nFixes null ptr. AB#1234 tracked.".to_string(),
+        };
+        assert!(gate(&rules, &passing).is_ok());
+
+        // A bare #42 must NOT satisfy an AB# rule.
+        let failing = VcsAction::Commit {
+            message: "fix: null check\n\nFixes null pointer in handler. #42 tracked.".to_string(),
+        };
+        assert!(
+            gate(&rules, &failing).is_err(),
+            "bare #42 does not satisfy AB# prefix rule"
+        );
+    }
+
+    #[test]
+    fn doc_rule_custom_prefix_and_separator_jira_style() {
+        // Custom: PROJ-42 Jira-style story reference.
+        let rule = ProcessRule::commit_documentation(10, "PROJ", '-');
+        let rules = [rule];
+
+        let passing = VcsAction::Commit {
+            message: "feat: new widget\n\nAdds the widget. PROJ-42 tracked.".to_string(),
+        };
+        assert!(gate(&rules, &passing).is_ok());
+    }
+
+    // ── is_substantive helper ────────────────────────────────────────────────
+
+    #[test]
+    fn is_substantive_counts_non_whitespace_chars() {
+        assert!(is_substantive("hello world", 10), "11 non-blank chars");
+        assert!(!is_substantive("hello", 10), "only 5 non-blank chars");
+        assert!(is_substantive("   lots   of   spaces   here   ", 4));
+        assert!(!is_substantive("   ", 1), "whitespace only fails any positive min");
+        assert!(is_substantive("", 0), "zero-min is always satisfied");
+        assert!(!is_substantive("", 1), "empty string has zero non-blank chars");
+    }
+
+    // ── contains_story_id helper ─────────────────────────────────────────────
+
+    #[test]
+    fn contains_story_id_bare_hash_reference() {
+        assert!(contains_story_id("Closes #42.", "", '#'));
+        assert!(contains_story_id("#1 is the first issue", "", '#'));
+        assert!(!contains_story_id("no reference here", "", '#'));
+    }
+
+    #[test]
+    fn contains_story_id_ado_style() {
+        assert!(contains_story_id("AB#1234 fix done", "AB", '#'));
+        assert!(!contains_story_id("#1234 bare ref not AB", "AB", '#'));
+    }
+
+    #[test]
+    fn contains_story_id_jira_style() {
+        assert!(contains_story_id("PROJ-42 done", "PROJ", '-'));
+        assert!(!contains_story_id("PROJ- no number", "PROJ", '-'));
+        assert!(!contains_story_id("OTHER-42 wrong prefix", "PROJ", '-'));
+    }
+
+    // ── VcsTarget::CommitBody extract ─────────────────────────────────────────
+
+    #[test]
+    fn extract_commit_body_returns_text_after_first_newline() {
+        let action = VcsAction::Commit {
+            message: "feat: subject\n\nBody paragraph here.".to_string(),
+        };
+        let body = VcsTarget::CommitBody.extract(&action).unwrap();
+        assert_eq!(body, "\nBody paragraph here.");
+    }
+
+    #[test]
+    fn extract_commit_body_returns_empty_string_for_subject_only() {
+        let action = VcsAction::Commit {
+            message: "feat: subject only".to_string(),
+        };
+        let body = VcsTarget::CommitBody.extract(&action).unwrap();
+        assert_eq!(body, "", "subject-only commit has an empty body, not None");
     }
 
     // ── VcsTarget::extract edge cases ────────────────────────────────────────
@@ -521,13 +874,14 @@ mod tests {
         assert!(VcsTarget::PrBody.extract(&action).is_none());
         assert!(VcsTarget::BranchName.extract(&action).is_none());
 
-        // CommitSubject target against a PullRequest action must return None.
+        // CommitSubject / CommitBody targets against a PullRequest action must return None.
         let pr_action = VcsAction::PullRequest {
             title: "PR title".to_string(),
             body: "body".to_string(),
         };
         assert!(VcsTarget::CommitSubject.extract(&pr_action).is_none());
         assert!(VcsTarget::CommitMessage.extract(&pr_action).is_none());
+        assert!(VcsTarget::CommitBody.extract(&pr_action).is_none());
     }
 
     #[test]
