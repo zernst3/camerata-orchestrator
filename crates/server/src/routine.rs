@@ -6,6 +6,13 @@
 //! verdicts are genuine, token-free). The auto-fire scheduler (an engine-owned timer)
 //! is the remaining wiring; this turn ships the model, the store, and run-now so the
 //! dashboard can list, toggle, and run routines.
+//!
+//! Routine templates (feature #59) provide a data-driven way to instantiate preset
+//! routines: a template defines a name, description, default cadence, model tier,
+//! operational prompt, and governance scope. The pure `instantiate_from_template`
+//! function creates a fully-editable routine from a template without mutating it.
+//! The template is a data shape (loaded at startup), not UI; templates are extensible
+//! and portable across projects.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -212,6 +219,136 @@ pub fn scaffold_prompt(intent: &str, scope: &str) -> String {
 #[derive(Deserialize)]
 pub struct SetEnabledReq {
     pub enabled: bool,
+}
+
+/// A preset routine template. Templates are data-driven (loaded at startup) and
+/// define sensible defaults for common automated patterns. Each template is pure
+/// data — instantiation never mutates the template.
+///
+/// The template is instantiable into a fully-editable Routine via
+/// [`instantiate_from_template`]. An architect can use the resulting routine as-is
+/// or edit any field before saving.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct RoutineTemplate {
+    /// A stable identifier for the template (e.g., "bug-triage", "security-scan").
+    /// Used for lookups and UI references.
+    pub id: String,
+    /// Display name for the template (e.g., "Bug Triage Dashboard").
+    pub name: String,
+    /// Short description of what the template does (one sentence, shown in template picker).
+    pub description: String,
+    /// Default schedule for this template (e.g., "daily 04:00", "weekly Mon 09:00").
+    /// Defaults to "daily 09:00" if not specified.
+    #[serde(default = "default_template_schedule")]
+    pub schedule: String,
+    /// Default permission/rule scope (e.g., "read-only", "write (gated)").
+    /// Defaults to "read-only" if not specified.
+    #[serde(default = "default_template_scope")]
+    pub scope: String,
+    /// The operational prompt the routine will run (fully authored, governance-framed).
+    /// Never the user's raw description; always a structured directive ready for execution.
+    pub prompt: String,
+    /// The default model tier for this template's agent (an id from the `/api/models` catalog).
+    /// Defaults to the server default if not specified.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_template_schedule() -> String {
+    "daily 09:00".to_string()
+}
+
+fn default_template_scope() -> String {
+    "read-only".to_string()
+}
+
+/// Instantiate a routine from a template. This creates a fresh Routine prefilled
+/// with the template's defaults, ready for the architect to review and customize.
+/// The template itself is never mutated.
+///
+/// The instantiated routine:
+/// - Uses the template's name as its own name (the architect can edit it).
+/// - Receives the template's schedule, scope, prompt, and model.
+/// - Is NOT created in the store; the caller decides whether to persist it.
+/// - Can be passed to `RoutineStore::create` to be finalized.
+pub fn instantiate_from_template(template: &RoutineTemplate) -> Routine {
+    let model = template
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_model);
+
+    Routine {
+        id: String::new(), // Will be assigned on actual creation
+        name: template.name.clone(),
+        schedule: template.schedule.clone(),
+        intent: String::new(), // Architect fills in their own intent
+        prompt: template.prompt.clone(),
+        scope: template.scope.clone(),
+        enabled: false, // Templates start disabled; architect enables after review
+        last_run: None,
+        provisioned: false, // Not yet created in the store
+        last_fired: None,
+        project_id: None, // Architect assigns to a project if desired
+        model,
+        status: RoutineStatus::Idle,
+    }
+}
+
+/// Load the built-in routine templates. This is a starter set embedded in the binary.
+/// Future enhancement: could load from a config file or database.
+pub fn builtin_templates() -> Vec<RoutineTemplate> {
+    vec![
+        RoutineTemplate {
+            id: "bug-triage".to_string(),
+            name: "Bug Triage Dashboard".to_string(),
+            description: "Summarize open bugs and flag stale/duplicate issues for review."
+                .to_string(),
+            schedule: "daily 09:00".to_string(),
+            scope: "read-only".to_string(),
+            prompt: r#"Objective:
+Audit the project's bug tracker. Summarize open bugs by status / age, flag any that
+have been sitting for 30+ days without activity, and surface likely duplicates for
+deduplication review.
+
+Operating constraints:
+- Scope / rules: read-only (inspect + report, no changes)
+- Be directive and concrete: link to specific issues, quantify findings.
+- Report what you discovered, prioritize by staleness, and suggest next steps.
+- Model tiering: use a compact model for the systematic pass (pull issues, age them),
+  escalate to reasoning if detecting subtle duplicate patterns.
+
+The architect will review your report and file any blocking issues."#
+                .to_string(),
+            model: None,
+        },
+        RoutineTemplate {
+            id: "security-scan".to_string(),
+            name: "Security Scan & Patch".to_string(),
+            description: "Scan dependencies for known vulnerabilities and propose patches."
+                .to_string(),
+            schedule: "daily 04:00".to_string(),
+            scope: "write (gated)".to_string(),
+            prompt: r#"Objective:
+Perform a nightly security audit. Scan all direct and transitive dependencies for
+known CVEs and security advisories, then author governed PRs to patch safe upgrades.
+
+Operating constraints:
+- Scope / rules: write (gated) — open branches with edits, no push until approved.
+- Every file write passes the governance gate (deny-before-execute).
+- Only propose upgrades with high confidence (no security downgrade, no API breakage).
+- Link each PR to the advisory it addresses (e.g., https://nvd.nist.gov/...).
+- Be directive: exact versions, exact commit history, exact test commands.
+- Model tiering: compact model for systematic scanning; escalate reasoning for
+  complex dependency graphs or version conflicts.
+
+The architect will review each proposed PR and merge or close as needed."#
+                .to_string(),
+            model: None,
+        },
+    ]
 }
 
 /// Routine store. In-memory by default ([`new`]/[`seeded`]); [`at`] additionally
@@ -820,5 +957,97 @@ mod tests {
         // Deleting a missing id is a no-op false.
         assert!(!store.delete("rt-2"));
         assert!(!store.delete("nope"));
+    }
+
+    #[test]
+    fn builtin_templates_exist_and_are_valid() {
+        let templates = builtin_templates();
+        // At least the two starter templates exist.
+        assert!(templates.len() >= 2);
+        // Each has a unique id.
+        let ids: Vec<_> = templates.iter().map(|t| &t.id).collect();
+        assert_eq!(ids.len(), ids.iter().collect::<std::collections::HashSet<_>>().len());
+        // Each has required fields non-empty.
+        for t in templates {
+            assert!(!t.id.is_empty());
+            assert!(!t.name.is_empty());
+            assert!(!t.description.is_empty());
+            assert!(!t.prompt.is_empty());
+            assert!(!t.schedule.is_empty());
+            assert!(!t.scope.is_empty());
+        }
+    }
+
+    #[test]
+    fn instantiate_from_template_yields_valid_editable_routine() {
+        let templates = builtin_templates();
+        let template = &templates[0]; // Bug triage template
+
+        let routine = instantiate_from_template(template);
+
+        // Basic structure is valid.
+        assert!(routine.id.is_empty(), "instantiation doesn't assign an id yet");
+        assert_eq!(routine.name, template.name, "name matches template");
+        assert_eq!(routine.schedule, template.schedule);
+        assert_eq!(routine.scope, template.scope);
+        assert_eq!(routine.prompt, template.prompt);
+        // Sensible defaults for a new routine.
+        assert!(!routine.enabled, "templates start disabled");
+        assert!(!routine.provisioned, "templates start unprovisioned");
+        assert!(routine.intent.is_empty(), "intent left for architect to fill");
+        assert!(routine.project_id.is_none(), "no project assigned");
+        assert!(routine.last_run.is_none(), "never been run");
+        assert_eq!(routine.status, RoutineStatus::Idle);
+    }
+
+    #[test]
+    fn instantiate_from_template_resolves_model_like_create() {
+        let templates = builtin_templates();
+        let template = &templates[0];
+
+        let routine = instantiate_from_template(template);
+        // Model defaults to server default when not specified in template.
+        assert!(!routine.model.is_empty(), "model is resolved to default");
+        assert_eq!(routine.model, default_model());
+    }
+
+    #[test]
+    fn instantiate_from_template_with_explicit_model() {
+        let mut template = builtin_templates()[0].clone();
+        template.model = Some("claude-opus".to_string());
+
+        let routine = instantiate_from_template(&template);
+        assert_eq!(routine.model, "claude-opus");
+    }
+
+    #[test]
+    fn instantiate_from_template_is_indistinguishable_from_hand_built() {
+        // A routine built from a template should be indistinguishable from one
+        // that was hand-authored to the same shape. This test verifies they
+        // serialize identically (modulo id, which is assigned on store creation).
+        let template = builtin_templates()[0].clone();
+        let from_template = instantiate_from_template(&template);
+
+        let hand_built = Routine {
+            id: String::new(),
+            name: template.name.clone(),
+            schedule: template.schedule.clone(),
+            intent: String::new(),
+            prompt: template.prompt.clone(),
+            scope: template.scope.clone(),
+            enabled: false,
+            last_run: None,
+            provisioned: false,
+            last_fired: None,
+            project_id: None,
+            model: default_model(),
+            status: RoutineStatus::Idle,
+        };
+
+        // Serialize both and verify they match (id is already empty, so this is direct).
+        let tmpl_json =
+            serde_json::to_string(&from_template).expect("from_template serializes");
+        let hand_json = serde_json::to_string(&hand_built).expect("hand_built serializes");
+        assert_eq!(tmpl_json, hand_json, "instantiated and hand-built routines serialize identically");
     }
 }

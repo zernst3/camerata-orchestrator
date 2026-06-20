@@ -244,6 +244,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories/:id/decompose/commit", post(decompose_commit))
         .route("/api/stories/:id/children", get(list_children))
         .route("/api/routines", get(list_routines).post(create_routine))
+        .route("/api/routines/templates", get(list_routine_templates))
+        .route("/api/routines/templates/:id/instantiate", post(instantiate_routine_from_template))
         .route("/api/routines/draft-prompt", post(draft_routine_prompt))
         .route(
             "/api/routines/:id",
@@ -2596,6 +2598,26 @@ async fn draft_routine_prompt(
             authored_by: "scaffold".to_string(),
         }),
     }
+}
+
+/// List available routine templates (preset configurations for common automation patterns).
+async fn list_routine_templates() -> Json<Vec<crate::routine::RoutineTemplate>> {
+    Json(crate::routine::builtin_templates())
+}
+
+/// Instantiate a routine from a template: given a template id, return a fresh Routine
+/// prefilled with the template's defaults, ready for the architect to review and customize.
+/// The routine is NOT yet persisted; the caller (UI form) passes it to the normal create
+/// flow if the architect approves.
+async fn instantiate_routine_from_template(
+    Path(template_id): Path<String>,
+) -> Result<Json<crate::routine::Routine>, AppError> {
+    let templates = crate::routine::builtin_templates();
+    let template = templates
+        .iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("template not found: {template_id}")))?;
+    Ok(Json(crate::routine::instantiate_from_template(template)))
 }
 
 /// Enable or disable a routine.

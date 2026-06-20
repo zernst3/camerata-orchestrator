@@ -195,6 +195,49 @@ async fn fetch_projects() -> Option<Vec<ProjectView>> {
         .ok()
 }
 
+/// A routine template: a preset configuration for common automation patterns.
+/// (Mirrors the server-side RoutineTemplate shape.)
+#[derive(Clone, PartialEq, serde::Deserialize, Debug)]
+struct RoutineTemplate {
+    id: String,
+    name: String,
+    description: String,
+    #[serde(default)]
+    schedule: String,
+    #[serde(default)]
+    scope: String,
+    prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Fetch available routine templates (preset configurations).
+async fn fetch_routine_templates() -> Option<Vec<RoutineTemplate>> {
+    reqwest::get(format!("{}/api/routines/templates", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<Vec<RoutineTemplate>>()
+        .await
+        .ok()
+}
+
+/// Instantiate a routine from a template. Returns the routine prefilled with the
+/// template's defaults, ready for the architect to review and customize before saving.
+async fn instantiate_from_template(template_id: &str) -> Option<RoutineView> {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/routines/templates/{}/instantiate",
+            crate::BFF_URL,
+            template_id
+        ))
+        .send()
+        .await
+        .ok()?
+        .json::<RoutineView>()
+        .await
+        .ok()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -436,6 +479,10 @@ pub fn RoutineDashboard() -> Element {
     // Model catalog, for the form's model picker (every AI-agent surface lets the user
     // pick the model). Fetched once; doesn't depend on refresh.
     let models_res = use_resource(fetch_models);
+    // Routine templates (preset configurations). Fetched once; doesn't depend on refresh.
+    let templates_res = use_resource(fetch_routine_templates);
+    // Whether the template picker is shown (hidden by default).
+    let mut showing_templates = use_signal(|| false);
     // Which escalation's review panel is currently expanded (by escalation id).
     let mut reviewing = use_signal(|| Option::<String>::None);
     // Per-escalation answer text. Keyed by escalation id; we store a flat
@@ -503,6 +550,13 @@ pub fn RoutineDashboard() -> Element {
     if esc_model().is_empty() && !model_default.is_empty() {
         esc_model.set(model_default.clone());
     }
+
+    // Load routine templates (preset configurations).
+    let templates: Vec<RoutineTemplate> = templates_res
+        .read()
+        .clone()
+        .flatten()
+        .unwrap_or_default();
 
     // Group routines by project for display: each row carries an optional header that is
     // shown on the FIRST routine of each group. Routines run globally regardless of
@@ -908,6 +962,59 @@ pub fn RoutineDashboard() -> Element {
                     if editing().is_some() { "Edit routine" } else { "Add a routine" }
                 }
                 p { class: "section-hint", "Describe what you want the routine to do. Camerata's lead engineer drafts the operational prompt (model tiering, directives, scope) from it — you review and edit before it runs." }
+                // Template picker (feature #59): expand when user clicks to browse presets.
+                if !templates.is_empty() && editing().is_none() {
+                    div { class: "routine-template-picker",
+                        button {
+                            class: "btn-restart",
+                            onclick: move |_| showing_templates.set(!showing_templates()),
+                            if showing_templates() { "Hide template gallery" } else { "Start from a template" }
+                        }
+                        if showing_templates() {
+                            div { class: "routine-templates-list",
+                                for tmpl in templates.iter() {
+                                    {
+                                        let tmpl_id = tmpl.id.clone();
+                                        let tmpl_name = tmpl.name.clone();
+                                        let tmpl_desc = tmpl.description.clone();
+                                        rsx! {
+                                            div { class: "routine-template-card",
+                                                div { class: "template-title", "{tmpl_name}" }
+                                                p { class: "template-description", "{tmpl_desc}" }
+                                                button {
+                                                    class: "btn-edit-sm",
+                                                    onclick: move |_| {
+                                                        let id = tmpl_id.clone();
+                                                        spawn(async move {
+                                                            if let Some(rt) = instantiate_from_template(&id).await {
+                                                                name.set(rt.name.clone());
+                                                                intent.set(rt.intent.clone());
+                                                                prompt.set(rt.prompt.clone());
+                                                                scope.set(rt.scope.clone());
+                                                                routine_model.set(rt.model.clone());
+                                                                routine_project.set(rt.project_id.clone());
+                                                                authored_by.set(String::new());
+                                                                // Parse schedule into structured form
+                                                                let (f, t, d, wd, md) = parse_schedule(&rt.schedule);
+                                                                freq.set(f);
+                                                                sched_time.set(t);
+                                                                sched_date.set(d);
+                                                                weekdays.set(wd);
+                                                                monthday.set(md);
+                                                                showing_templates.set(false);
+                                                            }
+                                                        });
+                                                    },
+                                                    "Use this template"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 div { class: "routine-create-row",
                     input { class: "addressee-input", placeholder: "name", value: "{name}", oninput: move |e| name.set(e.value()) }
                     label { class: "sched-field sched-scope-field",
