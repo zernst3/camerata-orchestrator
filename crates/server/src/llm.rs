@@ -180,6 +180,17 @@ pub struct LlmRequest {
     pub prompt: String,
     /// Token ceiling for the response (API path; the CLI manages its own).
     pub max_tokens: u32,
+    /// Prompt-caching breakpoint for the API path: number of BYTES (UTF-8) at the START of
+    /// `prompt` that form the STATIC cacheable prefix. When set, `complete_api` splits the
+    /// user message into two content blocks —
+    ///   `[{text: prefix, cache_control: {type: ephemeral}}, {text: suffix}]`
+    /// — so the provider caches the prefix once and re-reads it cheaply on every subsequent
+    /// call that shares the same prefix (same chunk digest + repo map across rule-batches).
+    /// Ignored by the CLI path (the CLI handles its own context management) and by
+    /// non-Anthropic vendors (no-op until their caching protocol is wired).
+    /// Min cacheable prefix: 2048 tokens (Sonnet) / 4096 tokens (Opus/Haiku). Our digests
+    /// far exceed this, so a valid `cache_prefix_len` always meets the floor.
+    pub cache_prefix_len: Option<usize>,
 }
 
 impl LlmRequest {
@@ -190,6 +201,7 @@ impl LlmRequest {
             system: None,
             prompt: prompt.into(),
             max_tokens: 4096,
+            cache_prefix_len: None,
         }
     }
 
@@ -205,6 +217,17 @@ impl LlmRequest {
 
     pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = n;
+        self
+    }
+
+    /// Mark the first `prefix_len` bytes of the prompt as the cacheable prefix (API path
+    /// only). The prefix must end on a valid UTF-8 character boundary; the builder clamps
+    /// it to the prompt length automatically so the caller can pass an oversized value safely.
+    /// Setting `prefix_len = 0` is a no-op (leaves caching disabled).
+    pub fn with_cache_prefix_len(mut self, prefix_len: usize) -> Self {
+        if prefix_len > 0 {
+            self.cache_prefix_len = Some(prefix_len.min(self.prompt.len()));
+        }
         self
     }
 }
@@ -226,18 +249,29 @@ pub struct LlmResponse {
     /// Real billed output tokens, when reported.
     #[serde(default)]
     pub output_tokens: Option<u64>,
+    /// Tokens read FROM the prompt cache on this call (billed at ~0.1× the normal input
+    /// rate). Populated only by the API path when prompt caching is active; zero otherwise.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Tokens WRITTEN TO the prompt cache on this call (billed at ~1.25× the normal input
+    /// rate, one-time cost to seed the 5-min TTL cache). Populated only by the API path
+    /// when prompt caching is active; zero otherwise.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
-/// Pull (input, output) token counts from a Claude `usage` object (CLI JSON or API
-/// response). Input folds in cache read + cache creation so it reflects all input-side
-/// billing; absent fields are treated as zero only when `input_tokens` itself is present.
-fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>) {
+/// Pull the full token accounting from a Claude `usage` object (CLI JSON or API response).
+/// Returns `(input, output, cache_read, cache_creation)`. `input` folds in both cache
+/// fields so it reflects all input-side billing; absent fields are treated as zero only
+/// when `input_tokens` itself is present. `cache_read` and `cache_creation` are always
+/// returned separately so the meter can track savings independently.
+fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u64) {
     let base = usage["input_tokens"].as_u64();
     let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
     let cache_create = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
     let input = base.map(|i| i + cache_read + cache_create);
     let output = usage["output_tokens"].as_u64();
-    (input, output)
+    (input, output, cache_read, cache_create)
 }
 
 /// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
@@ -396,7 +430,7 @@ impl Llm {
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
-        let (input_tokens, output_tokens) = usage_tokens(&v["usage"]);
+        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         Ok(LlmResponse {
             text: v["result"].as_str().unwrap_or_default().to_string(),
             model: model.to_string(),
@@ -404,6 +438,8 @@ impl Llm {
             cost_usd: v["total_cost_usd"].as_f64(),
             input_tokens,
             output_tokens,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
         })
     }
 
@@ -484,6 +520,8 @@ impl Llm {
         let mut cost = None;
         let mut usage_in = None;
         let mut usage_out = None;
+        let mut usage_cache_read = 0u64;
+        let mut usage_cache_creation = 0u64;
         let mut deadline = tokio::time::Instant::now() + idle;
         loop {
             let now = tokio::time::Instant::now();
@@ -544,9 +582,13 @@ impl Llm {
                                 }
                             }
                             cost = v["total_cost_usd"].as_f64();
-                            let (i, o) = usage_tokens(&v["usage"]);
+                            let (i, o, cr, cc) = usage_tokens(&v["usage"]);
                             usage_in = i.or(usage_in);
                             usage_out = o.or(usage_out);
+                            // Accumulate cache token breakdowns (they may appear in multiple
+                            // stream events; take the max to avoid double-counting).
+                            usage_cache_read = usage_cache_read.max(cr);
+                            usage_cache_creation = usage_cache_creation.max(cc);
                         }
                         _ => {}
                     }
@@ -579,27 +621,80 @@ impl Llm {
             cost_usd: cost,
             input_tokens: usage_in,
             output_tokens: usage_out,
+            cache_read_input_tokens: usage_cache_read,
+            cache_creation_input_tokens: usage_cache_creation,
         })
     }
 
     /// API path: POST the Anthropic Messages API with the key.
+    ///
+    /// Prompt caching: when `req.cache_prefix_len` is set, the user message is sent as a
+    /// TWO-BLOCK content array instead of a plain string:
+    ///   1. `{type: "text", text: <prefix>, cache_control: {type: "ephemeral"}}` — the stable
+    ///      codebase context (repo map + chunk digest) that the provider caches for 5 minutes.
+    ///   2. `{type: "text", text: <suffix>}` — the per-batch varying directive (task line +
+    ///      rules block) that differs across rule-batches and must never be part of the prefix.
+    ///
+    /// The `anthropic-beta: prompt-caching-2024-07-31` header enables the feature. Without a
+    /// `cache_prefix_len` the request falls through to the plain-string path (no beta header,
+    /// no structural change) so non-caching callers are unaffected.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
         })?;
+
+        // Build the user content: a plain string when caching is not requested; a two-block
+        // array when it is (prefix block with cache_control, suffix block without).
+        let (user_content, use_caching) = match req.cache_prefix_len {
+            Some(split_at) if split_at < req.prompt.len() => {
+                // Split on the byte boundary; clamp to a valid UTF-8 char boundary so we never
+                // slice a multi-byte sequence in half (the min clamp is the builder's job, but
+                // be defensive here too).
+                let safe_split = req.prompt
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i <= split_at)
+                    .last()
+                    .unwrap_or(split_at)
+                    .min(req.prompt.len());
+                let prefix = &req.prompt[..safe_split];
+                let suffix = &req.prompt[safe_split..];
+                let content = serde_json::json!([
+                    {
+                        "type": "text",
+                        "text": prefix,
+                        "cache_control": {"type": "ephemeral"}
+                    },
+                    {
+                        "type": "text",
+                        "text": suffix
+                    }
+                ]);
+                (content, true)
+            }
+            _ => (serde_json::json!(req.prompt), false),
+        };
+
         let mut body = serde_json::json!({
             "model": model,
             "max_tokens": req.max_tokens,
-            "messages": [{ "role": "user", "content": req.prompt }],
+            "messages": [{ "role": "user", "content": user_content }],
         });
         if let Some(system) = &req.system {
             body["system"] = serde_json::json!(system);
         }
-        let resp = reqwest::Client::new()
+
+        let mut builder = reqwest::Client::new()
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        // The prompt-caching beta header is only sent when caching is active, so the
+        // non-caching path is byte-identical to the pre-caching implementation.
+        if use_caching {
+            builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+        let resp = builder
             .json(&body)
             .send()
             .await
@@ -622,8 +717,11 @@ impl Llm {
                     .join("")
             })
             .unwrap_or_default();
-        let (input_tokens, output_tokens) = usage_tokens(&v["usage"]);
+        let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         // The API doesn't bill back a dollar figure, so compute it from usage × list price.
+        // When caching is active the billed input already incorporates cache pricing (the API
+        // returns the correctly-billed totals in the usage object) so no adjustment is needed
+        // here — just sum as usual.
         let cost_usd =
             price_for(model).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
                 (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
@@ -636,6 +734,8 @@ impl Llm {
             cost_usd,
             input_tokens,
             output_tokens,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
         })
     }
 }
@@ -686,6 +786,56 @@ mod tests {
         assert_eq!(r.system.as_deref(), Some("be terse"));
         assert_eq!(r.model, "claude-opus-4-8");
         assert_eq!(r.max_tokens, 100);
+        assert_eq!(r.cache_prefix_len, None, "caching off by default");
+    }
+
+    #[test]
+    fn cache_prefix_len_builder() {
+        // Normal case: prefix len < prompt len -> stored as-is (clamped to prompt len).
+        let r = LlmRequest::new("hello world").with_cache_prefix_len(5);
+        assert_eq!(r.cache_prefix_len, Some(5));
+
+        // Oversized: clamped to the prompt length, not panicking.
+        let r2 = LlmRequest::new("hi").with_cache_prefix_len(999);
+        assert_eq!(r2.cache_prefix_len, Some(2), "clamped to prompt length");
+
+        // Zero is a no-op: caching stays disabled.
+        let r3 = LlmRequest::new("hi").with_cache_prefix_len(0);
+        assert_eq!(r3.cache_prefix_len, None, "zero prefix = no caching");
+
+        // Prefix == prompt length: stored as-is (whole prompt is the prefix, no suffix).
+        let r4 = LlmRequest::new("exact").with_cache_prefix_len(5);
+        assert_eq!(r4.cache_prefix_len, Some(5));
+    }
+
+    #[test]
+    fn usage_tokens_parses_cache_fields() {
+        // Full usage object including both cache fields.
+        let usage = serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 30
+        });
+        let (inp, out, cr, cc) = usage_tokens(&usage);
+        // input = base + cache_read + cache_creation = 100 + 200 + 30 = 330
+        assert_eq!(inp, Some(330), "input folds in cache fields");
+        assert_eq!(out, Some(50));
+        assert_eq!(cr, 200, "cache_read surfaced separately");
+        assert_eq!(cc, 30, "cache_creation surfaced separately");
+
+        // Missing cache fields -> defaults to zero (no panic).
+        let usage2 = serde_json::json!({"input_tokens": 10, "output_tokens": 5});
+        let (inp2, out2, cr2, cc2) = usage_tokens(&usage2);
+        assert_eq!(inp2, Some(10));
+        assert_eq!(out2, Some(5));
+        assert_eq!(cr2, 0);
+        assert_eq!(cc2, 0);
+
+        // Absent input_tokens -> None (not zero).
+        let usage3 = serde_json::json!({"output_tokens": 5});
+        let (inp3, _out3, _cr3, _cc3) = usage_tokens(&usage3);
+        assert_eq!(inp3, None, "missing input_tokens stays None");
     }
 
     #[test]
