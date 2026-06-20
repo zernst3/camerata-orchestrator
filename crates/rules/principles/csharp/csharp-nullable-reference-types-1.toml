@@ -1,0 +1,31 @@
+id = "CSHARP-NULLABLE-REFERENCE-TYPES-1"
+title = "Nullable Reference Types are enabled in all projects; null-unsafe patterns are enforced at compile time"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the C# compiler when <Nullable>enable</Nullable> is set in the project file (.csproj). Conformance holds when nullable reference types are enabled globally (not just in files via #nullable) and the build treats warnings as errors."
+
+[decision]
+question = "How are null references handled?"
+default = "nullable-ref-types-enabled"
+why = "Before C# 8.0, all reference types were implicitly nullable, and the compiler provided no warnings for null dereferences. A variable declared as `string name;` could be null, but the compiler would not warn if the code tried to call `name.Length` without a null check. NullReferenceException is the infamous \"billion-dollar mistake\" that causes crashes and data loss. Nullable Reference Types (NRT) flip the default: `string` means \"never null,\" and `string?` means \"possibly null.\" The compiler then warns at any dereference of nullable types without explicit null checks. This shifts null safety from runtime to compile time, preventing an entire class of bugs before the code ships. The feature is opt-in per project (via <Nullable>enable</Nullable> in the .csproj) and must be enabled globally, not just in individual files, to be effective across the codebase."
+
+[[option]]
+id = "nullable-ref-types-enabled"
+label = "enable Nullable Reference Types globally; treat warnings as errors"
+directive = "<Nullable>enable</Nullable> is set in the project file (.csproj). All reference types default to non-null; nullable types are marked with ?. The compiler warns on: (1) dereferencing nullable types without null checks, (2) assigning possibly-null values to non-nullable variables, (3) failing to initialize non-nullable fields. Warnings are treated as errors in the build (via <WarningLevel>4</WarningLevel> and <TreatWarningsAsErrors>true</TreatWarningsAsErrors>) so that null-unsafe code cannot compile."
+why = "The adopted default. Nullable reference types catch null-reference bugs at compile time, eliminating an entire class of runtime crashes."
+
+[[option]]
+id = "nullable-ref-types-disabled"
+label = "do not enable Nullable Reference Types; rely on runtime null checks"
+directive = "The project file does not set <Nullable>enable</Nullable>. Nullable reference types are disabled. The code uses the pre-C# 8.0 model where all reference types are implicitly nullable and null checks are manual and runtime."
+why = "Forgoes compile-time null safety; NullReferenceException bugs can only be caught at runtime, after deployment."
+
+[[option]]
+id = "partial-nrt"
+label = "enable NRT in some files or use #nullable directives but not globally"
+directive = "#nullable enable/disable directives are used on a per-file basis, or NRT is enabled in only some projects in a multi-project solution."
+why = "Inconsistent null safety; some code is checked, some is not. Mixing both styles increases cognitive load and is likely to introduce null-reference bugs at boundaries where nullable and non-nullable code interact."

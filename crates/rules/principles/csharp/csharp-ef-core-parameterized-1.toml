@@ -1,0 +1,31 @@
+id = "CSHARP-EF-CORE-PARAMETERIZED-1"
+title = "Entity Framework queries use parameterized LINQ syntax; no raw SQL string concatenation; FromSqlRaw is forbidden"
+tag = "stack"
+domain = "csharp:aspnet"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and static analysis (Semgrep, custom Roslyn analyzers) that flag FromSqlRaw() or interpolated strings in raw SQL. Conformance holds when all database queries use parameterized LINQ or FromSqlInterpolated with proper parameter expressions."
+
+[decision]
+question = "How are dynamic values passed to Entity Framework queries?"
+default = "parameterized-linq"
+why = "Entity Framework's LINQ syntax automatically parameterizes queries and sends SQL and values to the database separately. Raw SQL queries (context.Database.ExecuteSqlRaw or FromSqlRaw) are vulnerable to SQL injection if values are concatenated. Even with string interpolation in FromSqlRaw, the interpolated values are treated as raw SQL strings rather than safe parameters. FromSqlInterpolated (C# 2.1+) is parameterized but still requires explicit parameter extraction. LINQ is the safe default because it forces parameterization through the ORM layer; the query planner also benefits from prepared statements and can cache execution plans. Raw SQL is necessary only for queries beyond LINQ's expressive range, and such queries must use FromSqlInterpolated with explicit parameter markers."
+
+[[option]]
+id = "parameterized-linq"
+label = "use parameterized LINQ queries exclusively"
+directive = "All queries use LINQ syntax (Where, Select, Join, GroupBy, etc.), which automatically parameterizes values. No raw SQL. If a query is too complex for LINQ (e.g., complex aggregations, vendor-specific syntax), use a stored procedure called via FromSqlInterpolated with parameterized invocation, or refactor the query to simpler LINQ. String concatenation or string interpolation in SQL queries is forbidden."
+why = "The adopted default. LINQ parameterization is automatic and prevents SQL injection entirely."
+
+[[option]]
+id = "raw-sql-interpolated"
+label = "use FromSqlRaw with explicit string interpolation and parameter binding"
+directive = "Raw SQL queries are written with FromSqlInterpolated where parameterized markers are extracted from interpolated expressions. Example: `context.Database.SqlQuery<Order>($\"SELECT * FROM Orders WHERE Id = {orderId}\").`  Parameter values are passed separately and the driver replaces them with ? placeholders. FromSqlRaw with concatenation is forbidden."
+why = "Acceptable only when LINQ is insufficient. FromSqlInterpolated enforces parameter passing and prevents naive concatenation vulnerabilities."
+
+[[option]]
+id = "raw-sql-concatenated"
+label = "build raw SQL by string concatenation with manual escaping"
+directive = "Raw SQL is constructed by concatenating or interpolating user input directly into the query string, with optional manual escaping or quoting logic."
+why = "Canonical SQL-injection vulnerability; every site is a latent injection waiting for unsanitized input."

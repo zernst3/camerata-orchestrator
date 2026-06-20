@@ -1,0 +1,31 @@
+id = "CSHARP-NO-SWALLOWED-EXCEPTIONS-1"
+title = "Exceptions are never silently swallowed; catch blocks log, rethrow, or transform exceptions; no empty catch bodies"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Roslyn analyzers (CA1031, CA1068) that flag empty catch bodies and catch-all blocks that do not log or rethrow. Conformance holds when the rule runs in CI and swallowed exceptions fail the build."
+
+[decision]
+question = "What must every catch block do?"
+default = "catch-specific-log-or-rethrow"
+why = "Catching an exception without logging it, rethrowing it, or transforming it into a more specific exception silently masks the error, making bugs invisible and debugging impossible. The original failure is hidden, and the application continues in an undefined state, potentially losing data or corrupting state. A catch block that does nothing (empty body) is a code smell indicating the developer caught an exception but did not decide what to do about it. The only legitimate reasons to catch an exception are: (1) to log it with full context and rethrow, (2) to recover locally and let the calling code proceed, (3) to transform it into a domain-specific exception that callers expect, or (4) to clean up resources (via finally or using). Catching a broad exception type (Exception) without immediate logging or transformation is a common bug vector."
+
+[[option]]
+id = "catch-specific-log-or-rethrow"
+label = "catch specific exceptions only; every handler logs or rethrows"
+directive = "Exception handlers catch the most specific exception type they can recover from. Every catch block either: (1) logs the full exception (including stack trace) via the application's structured logger, (2) rethrows the exception or a wrapped version via throw or throw new WrappedException(..., ex), or (3) recovers locally with a documented rationale (e.g., \"retrying on transient database timeout\"). Empty catch bodies are forbidden. Catch-all blocks (Exception) are allowed only at top-level application boundaries (request handlers, Main entry point) where they log and transform the error into a structured response."
+why = "The adopted default. Every exception surfaces either as a log entry or is propagated to the caller; bugs never silently vanish."
+
+[[option]]
+id = "swallow-broad-exceptions"
+label = "catch Exception and ignore or log conditionally"
+directive = "Broad exception handlers catch Exception and may silently ignore, conditionally log, or suppress the error without rethrowing."
+why = "Hides bugs and makes debugging impossible; failures disappear into logs or are silently dropped."
+
+[[option]]
+id = "catch-all-ignore"
+label = "use catch blocks with empty bodies to prevent crashes"
+directive = "Exceptions are caught but not handled, logged, or rethrown; the catch body is empty or only contains a comment."
+why = "Silently masks all errors, leading to undefined state and invisible failures."

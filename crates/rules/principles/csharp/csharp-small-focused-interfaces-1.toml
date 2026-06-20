@@ -1,0 +1,31 @@
+id = "CSHARP-SMALL-FOCUSED-INTERFACES-1"
+title = "Interfaces are narrow and focused on a single responsibility; fat interfaces with many unrelated methods are split"
+tag = "stack"
+domain = "csharp"
+layer = "architecture"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and optional Roslyn analyzers that flag interfaces with >5-7 methods or unrelated responsibilities. Conformance holds when each interface defines a cohesive set of methods and implementations do not use default methods to stub unneeded operations."
+
+[decision]
+question = "How large and how cohesive are interfaces?"
+default = "small-focused-interfaces"
+why = "A large interface with many unrelated methods (a \"fat\" interface) forces implementations to provide all methods even if only a subset is relevant. This violates the Interface Segregation Principle (ISP): clients should depend on abstractions specific to their use case, not on generic catch-alls. A class implementing a fat interface is tightly coupled to more behavior than it needs, making it harder to mock in tests (the test must set up all methods even if only one is used), harder to document (the interface contract is vague), and harder to refactor (changing the interface breaks all implementations). Small, focused interfaces are easier to understand, test, and reuse across multiple contexts. A class can implement multiple small interfaces to express its full capabilities."
+
+[[option]]
+id = "small-focused-interfaces"
+label = "design interfaces with 1-5 related methods; split unrelated concerns"
+directive = "Each interface represents a single capability or role. Methods are cohesive and all related to that capability. Example: IRepository<T> has Get, Add, Update, Delete; ILogger has Log; IEmailService has Send. If a class needs multiple roles, it implements multiple interfaces. Default methods are not used to stub out unrelated functionality. When a fat interface is discovered, it is split into multiple focused interfaces and existing implementations are updated to implement only the interfaces they need."
+why = "The adopted default. Small interfaces are easier to understand, mock, and reuse."
+
+[[option]]
+id = "fat-interfaces"
+label = "use large interfaces with many unrelated methods"
+directive = "A single interface defines all operations a complex domain object might need. Example: IOrderService has PlaceOrder, CancelOrder, GetOrder, SendInvoice, RecalculateTax, UpdateShipping. Implementations provide all methods, even if some are not used by all clients."
+why = "Forces unnecessary coupling; clients depend on methods they do not use; tests must mock all methods even if only one is relevant."
+
+[[option]]
+id = "default-method-stubs"
+label = "use default interface methods to provide no-op implementations"
+directive = "A fat interface defines many methods, but implementations use C# 8.0 default methods to stub out unrelated operations with no-op or throw implementations."
+why = "Masks the ISP violation but does not solve it. Clients still depend on unrelated methods, and the interface contract is still vague."

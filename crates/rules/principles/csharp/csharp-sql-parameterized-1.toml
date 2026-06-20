@@ -1,0 +1,25 @@
+id = "CSHARP-SQL-PARAMETERIZED-1"
+title = "SQL queries use parameterized queries via SqlParameter or Entity Framework parameters; string concatenation is forbidden"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by static analysis (Roslyn analyzers, Semgrep) that detect string concatenation or string interpolation in SQL queries flowing to execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
+
+[decision]
+question = "How are dynamic values incorporated into SQL queries?"
+default = "parameterized-queries"
+why = "Concatenating or interpolating user input directly into a SQL string is the canonical SQL-injection vulnerability. Parameterized queries send the SQL text and values to the database as separate entities via SqlParameter objects or Entity Framework query parameters, so a value can never be parsed as SQL grammar regardless of its content. This prevents the entire class of SQL-injection bugs with zero performance cost. String concatenation or string interpolation ($ strings) flowing into SqlCommand.ExecuteReader or LINQ query context are the failure modes to detect."
+
+[[option]]
+id = "parameterized-queries"
+label = "use SqlParameter or Entity Framework parameter syntax"
+directive = "Every dynamic value in a SQL statement is passed as a SqlParameter (using SqlCommand.Parameters.Add()) or as a parameter in a parameterized LINQ/EF query (Where(x => x.Id == paramValue)). String concatenation, string interpolation, or string.Format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
+why = "The adopted default. Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
+
+[[option]]
+id = "string-concatenation-with-escaping"
+label = "build query strings by concatenating with manual escaping"
+directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
+why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."

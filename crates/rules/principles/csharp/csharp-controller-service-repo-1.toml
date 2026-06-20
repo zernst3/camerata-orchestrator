@@ -1,0 +1,31 @@
+id = "CSHARP-CONTROLLER-SERVICE-REPO-1"
+title = "Three-layer architecture: controllers handle HTTP only, services contain business logic, repositories own data access"
+tag = "stack"
+domain = "csharp:aspnet"
+layer = "architecture"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and optional Roslyn analyzers that flag database calls in controllers, business logic in repositories, or mixed concerns. Conformance holds when controllers delegate to services, services orchestrate repositories, and repositories only perform CRUD operations."
+
+[decision]
+question = "How are concerns separated between controllers, services, and repositories?"
+default = "layered-architecture"
+why = "Separating concerns makes code testable, maintainable, and reusable. Controllers handle HTTP concerns only (request parsing, status codes, response formatting); services contain business logic (validation, orchestration, domain rules, calculations); repositories own all data-access patterns (queries, inserts, updates, deletes). Controllers call services, services call repositories. When concerns are mixed (e.g., SQL in controllers, business logic in repositories), the code becomes brittle, hard to test, and couples the API layer to the database layer. Repositories become stateful and domain-aware instead of mechanical data accessors. Services grow into god objects with mixed concerns. Testing requires a database mock rather than just mocking the service or repository interface. Layered architecture also allows repositories to be swapped (e.g., from SQL to NoSQL) without changing service or controller logic."
+
+[[option]]
+id = "layered-architecture"
+label = "separate controllers, services, and repositories by concern"
+directive = "Controllers (endpoints, routes) handle HTTP only: parse requests, invoke services, format responses, return appropriate status codes. Controllers never query the database directly. Services contain business logic: validation, authorization, orchestration, domain rules, calculations. Services depend on repositories and other services via constructor injection. Services are stateless and reentrant. Repositories own all data-access patterns: queries (fetching), inserts, updates, deletes, transactions. Repositories implement a repository interface that services depend on. Repositories are mechanical and domain-unaware. Testing: controllers are tested by mocking services; services are tested by mocking repositories; repositories are tested with a real or in-memory database."
+why = "The adopted default. Clear separation makes code testable, reusable, and maintainable."
+
+[[option]]
+id = "mixed-concerns"
+label = "place business logic in controllers or repositories; query database directly in controllers"
+directive = "Controllers contain business logic (validation, calculations, authorization checks) alongside HTTP handling. Controllers query the database directly via Entity Framework or SQL. Services and repositories are optional or minimal. Code is organized by HTTP endpoint rather than by concern."
+why = "Tightly couples API layer to database layer, makes code hard to test (requires database mocks), and prevents reuse of business logic across multiple controllers or APIs."
+
+[[option]]
+id = "god-services"
+label = "create large service classes that mix multiple concerns"
+directive = "Services contain multiple unrelated business domains or responsibilities. A single service handles user management, order processing, and reporting. Controllers call monolithic services without clear boundaries."
+why = "Services become impossible to test and reuse; adding a new API endpoint often requires duplicating logic in a new service."

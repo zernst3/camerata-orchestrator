@@ -1,0 +1,31 @@
+id = "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1"
+title = "Dependencies are injected via constructor parameters, not [Inject] attributes or property injection; dependencies are private readonly"
+tag = "stack"
+domain = "csharp:aspnet"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and optional Roslyn analyzers that flag [Inject] attributes and recommend constructor injection. Conformance holds when all dependencies are constructor parameters and marked private readonly."
+
+[decision]
+question = "How are dependencies injected into classes?"
+default = "constructor-injection"
+why = "Constructor injection makes dependencies explicit in the type's public contract (visible in the constructor signature), enforces immutability (fields are private readonly and cannot be reassigned), and makes testing trivial (pass mock objects to the constructor without reflection). Property injection via [Inject] or [Service] attributes hides dependencies (they are invisible until runtime reflection), allows reassignment, and can lead to NullReferenceException if the container fails to inject. Constructor injection also makes circular dependencies obvious at compile time (circular constructor parameters cause compiler errors) rather than hidden at runtime. ASP.NET Core's IServiceProvider uses constructor injection by default and automatically wires all registered dependencies to the single public constructor."
+
+[[option]]
+id = "constructor-injection"
+label = "inject dependencies via constructor parameters, marked private readonly"
+directive = "All dependencies are declared as constructor parameters and assigned to private readonly instance fields. The constructor is explicitly defined (not implicitly generated). For ASP.NET Core, the container automatically wires all registered service dependencies to the constructor. Dependencies are private readonly so they cannot be reassigned or accidentally modified. No [Inject] or [Service] attributes on properties or fields."
+why = "The adopted default. Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
+
+[[option]]
+id = "property-injection"
+label = "inject dependencies via [Inject] attributes on properties"
+directive = "Dependencies are declared as public properties annotated with [Inject] or [Service]. The container uses reflection to set values at runtime after instantiation."
+why = "Hides dependencies (invisible until runtime), allows reassignment, makes testing awkward (must mock the container), and can lead to NullReferenceException if the container fails to inject. Deprecated pattern in ASP.NET Core."
+
+[[option]]
+id = "service-locator"
+label = "use a service locator or manual resolution from IServiceProvider"
+directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
+why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."

@@ -1,0 +1,31 @@
+id = "CSHARP-IENUMERABLE-COLLECTIONS-1"
+title = "Methods return IEnumerable<T> or ICollection<T> instead of arrays or List<T>; callers should not couple to concrete collection types"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and optional Roslyn analyzers that flag public methods returning concrete collection types (List<T>, T[], HashSet<T>) and recommend IEnumerable<T> or ICollection<T>. Conformance holds when all public methods return abstract collection interfaces."
+
+[decision]
+question = "What types do public methods return when returning collections?"
+default = "return-abstract-collections"
+why = "Returning a concrete collection type (List<T>, T[], HashSet<T>) tightly couples callers to an implementation detail that is internal to the method. The caller might resize, modify, or iterate the returned collection in ways that break internal invariants. Example: if a method returns a List<T> that is actually the internal backing store, a caller could modify it and corrupt the data. Returning an interface (IEnumerable<T>, ICollection<T>, IReadOnlyList<T>) hides the implementation; callers depend only on the behavior defined by the interface. IEnumerable<T> is read-only and lazy (suitable for streaming results or LINQ), while ICollection<T> allows counting and membership checks but not random access or modification (unless the caller explicitly casts, which is their choice). For query results, stored collections, or derived data, returning IEnumerable<T> or IReadOnlyList<T> is the safe default. Returning a concrete type is acceptable only when the concrete semantics (e.g., \"this is a Dictionary for fast lookups\") are part of the contract and callers are expected to exploit those semantics."
+
+[[option]]
+id = "return-abstract-collections"
+label = "return IEnumerable<T>, ICollection<T>, or IReadOnlyList<T> from public methods"
+directive = "Public methods that return collections use abstract types: IEnumerable<T> for lazy or streaming results; ICollection<T> for counted collections with membership checks; IReadOnlyList<T> for indexed access without modification. Callers cannot modify or invalidate internal state. Internal implementations may return any concrete type (List<T>, HashSet<T>, etc.); the caller sees only the interface."
+why = "The adopted default. Abstract types hide implementation details and prevent accidental corruption of internal state."
+
+[[option]]
+id = "return-list-array"
+label = "return List<T> or T[] from public methods"
+directive = "Public methods return concrete collection types like List<T> or arrays. Callers have full access to the collection's API."
+why = "Tightly couples callers to an implementation detail; callers might accidentally modify the internal collection or bypass intended constraints."
+
+[[option]]
+id = "return-concrete-with-defensive-copy"
+label = "return a new List<T> copy of the internal collection"
+directive = "Public methods return a new List<T> or array copy of the internal collection, protecting the original from modification."
+why = "Safe but inefficient; every call allocates a new collection. Acceptable for small collections or when safety outweighs performance; use IEnumerable<T> for better efficiency and the same safety guarantee."

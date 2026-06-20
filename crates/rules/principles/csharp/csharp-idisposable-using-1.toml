@@ -1,0 +1,31 @@
+id = "CSHARP-IDISPOSABLE-USING-1"
+title = "Resources implementing IDisposable are managed via using statements or using declarations; no manual Dispose() calls or naked instantiation"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Roslyn analyzer rules (CA1001, CA1816, IDE0090) that flag IDisposable objects created without using and missing explicit Dispose calls. Conformance holds when the rule runs in CI and resources not wrapped in using fail the build."
+
+[decision]
+question = "How are IDisposable resources managed?"
+default = "using-declarations"
+why = "Objects implementing IDisposable hold unmanaged resources (database connections, file handles, streams, network sockets) that must be released to prevent resource leaks, handle exhaustion, and cascading failures. The using statement or using declaration guarantees that Dispose() is called exactly once, even if an exception is thrown, by ensuring cleanup runs in a finally block. Manual try-finally with explicit Dispose() is verbose and error-prone; using is the language-level guarantee. C# 8.0+ using declarations are preferred as they are syntactically cleaner and scope cleanup to the variable's lexical block."
+
+[[option]]
+id = "using-declarations"
+label = "use using declarations (C# 8.0+) for automatic cleanup"
+directive = "IDisposable resources are declared with the `using` keyword at the top of a method or block: `using var conn = new SqlConnection(...);`. The resource's Dispose() method is called automatically when the block exits. This is preferred over using statements for brevity and clarity. No manual Dispose() calls; no try-finally blocks."
+why = "The adopted default. Using declarations are the most concise and guarantee cleanup on any code path (exception or return)."
+
+[[option]]
+id = "using-statements"
+label = "use using statements (C# 7.0 compatible) with braces"
+directive = "IDisposable resources are wrapped in using statements: `using (var conn = new SqlConnection(...)) { ... }`. Dispose() is called when the block exits. This is acceptable for older C# codebases that cannot use C# 8.0 declarations."
+why = "Functionally identical to using declarations but more verbose. Explicit braces can improve readability in complex scenarios."
+
+[[option]]
+id = "manual-dispose"
+label = "manage Dispose manually via try-finally"
+directive = "IDisposable objects are created and then released in an explicit try-finally block: `try { ... } finally { resource?.Dispose(); }`."
+why = "Verbose and error-prone; easy to forget Dispose() in one code path, leading to resource leaks. Only used when using is unavailable (legacy C# versions)."

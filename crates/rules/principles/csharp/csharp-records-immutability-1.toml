@@ -1,0 +1,31 @@
+id = "CSHARP-RECORDS-IMMUTABILITY-1"
+title = "Data transfer objects and value types use records (C# 9+) or immutable classes; mutable classes are avoided outside of domain entities"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by code review and optional Roslyn analyzers that recommend records for immutable data and flag mutable properties on non-entity classes. Conformance holds when DTOs and value types are records and entity classes are explicitly designed for mutation with clear boundaries."
+
+[decision]
+question = "How are data structures designed to be mutable or immutable?"
+default = "records-and-immutable-classes"
+why = "Immutability makes code easier to reason about, thread-safe without locks, and cacheable (the same immutable value can be safely shared and reused). Mutable classes require defensive copying, defensive null checks, and synchronization to be thread-safe. Records (C# 9+) are immutable value types that automatically generate Equals, GetHashCode, ToString, and a deconstructor based on properties. A record's properties are init-only by default (can be set during construction but never reassigned), making the entire type immutable. Immutable classes (with private setters or init-only properties) provide the same benefits. Mutable classes should be rare and limited to entities whose state is managed by a unit-of-work (database transaction). DTOs, API request/response models, and query results should always be immutable records so that callers can safely share and pass them without surprise modifications."
+
+[[option]]
+id = "records-and-immutable-classes"
+label = "use records (C# 9+) for immutable data; immutable classes for older targets"
+directive = "Data transfer objects, API request/response models, and value types are records (record class or record struct). Entity classes are explicitly designed for mutation with clear boundaries and documented as mutable. Non-entity classes use init-only properties or private setters to enforce immutability. Records use init-only or read-only properties. No accidental mutation via public setters outside of aggregate roots."
+why = "The adopted default. Immutability is thread-safe, sharable, and easier to reason about. Records eliminate boilerplate (Equals, GetHashCode, ToString)."
+
+[[option]]
+id = "mutable-classes-everywhere"
+label = "use mutable classes with public getters and setters"
+directive = "All classes, including DTOs and value types, use public properties with mutable setters. Properties can be modified after instantiation."
+why = "Simple to write initially but leads to bugs: accidental mutations, thread-safety issues, and hard-to-debug state changes at a distance."
+
+[[option]]
+id = "immutable-with-manual-copy"
+label = "use immutable classes but with explicit copy-on-modify patterns"
+directive = "Classes are immutable (init-only properties) but modifications are done by creating a new instance via a copy constructor or with-expressions. Example: `var updated = person with { Name = \"Alice\" };`"
+why = "Correct but more verbose than records. Necessary for older C# versions (pre-9.0) or to maintain a specific class hierarchy."
