@@ -183,6 +183,24 @@ pub fn clarifying_questions_md(questions: &[String]) -> String {
     md
 }
 
+/// Build a clarifying-questions comment that ALSO carries the hidden clarify
+/// marker for `external_id` + `questions`. The marker is an HTML comment, so it
+/// is invisible in the rendered issue but present in the raw body the API
+/// returns on poll, which lets the bridge (a) match the PO's answer back to this
+/// exact question set and (b) detect an already-posted equivalent comment so a
+/// retry does not double-post.
+///
+/// See [`crate::clarify_marker`] for the marker format and rationale.
+pub fn clarifying_questions_md_with_marker(external_id: &str, questions: &[String]) -> String {
+    let mut md = clarifying_questions_md(questions);
+    // The marker goes on its own trailing line so it never visually disturbs the
+    // bullet list and is trivial to strip if ever needed.
+    md.push('\n');
+    md.push_str(&crate::clarify_marker::marker_for(external_id, questions));
+    md.push('\n');
+    md
+}
+
 /// Build the Markdown status rollup comment pushed back to a GitHub issue when
 /// `push_status` is called. Contains:
 /// 1. A PR link checklist (repo, url, open/merged/closed as checkbox state).
@@ -596,7 +614,7 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         questions: &[String],
     ) -> anyhow::Result<String> {
         let coord = self.resolve_coord(reference)?;
-        let md = clarifying_questions_md(questions);
+        let md = clarifying_questions_md_with_marker(&reference.external_id, questions);
         let body = serde_json::to_string(&serde_json::json!({ "body": md }))
             .unwrap_or_else(|_| format!(r#"{{"body":"{}"}}"#, md.replace('"', "\\\"")));
         let url = Self::comments_url(&coord, &reference.external_id);
@@ -817,6 +835,30 @@ mod tests {
             "intro must still mention Product Owner"
         );
         assert!(!md.contains("- "), "no bullets when no questions");
+    }
+
+    #[test]
+    fn clarifying_questions_md_with_marker_embeds_a_parseable_marker() {
+        let questions = vec!["What is the target audience?".to_string()];
+        let md = clarifying_questions_md_with_marker("42", &questions);
+        // The visible content is unchanged: it still mentions the PO and bullets.
+        assert!(md.to_lowercase().contains("product owner"));
+        assert!(md.contains("- What is the target audience?"));
+        // And it carries the hidden marker for this item + question set.
+        let parsed = crate::clarify_marker::parse_marker_from_body(&md);
+        assert_eq!(
+            parsed,
+            Some(crate::clarify_marker::compute_question_set_id("42", &questions)),
+            "the embedded marker id must match the deterministic fingerprint"
+        );
+    }
+
+    #[test]
+    fn clarifying_questions_md_with_marker_is_stable_for_same_inputs() {
+        let questions = vec!["Q?".to_string()];
+        let a = clarifying_questions_md_with_marker("42", &questions);
+        let b = clarifying_questions_md_with_marker("42", &questions);
+        assert_eq!(a, b, "same item + questions must render byte-identical (idempotency)");
     }
 
     // ── status_rollup_md ───────────────────────────────────────────────────
@@ -1412,6 +1454,13 @@ mod tests {
         assert!(
             md.to_lowercase().contains("product owner"),
             "comment body must mention Product Owner: {md}"
+        );
+        // The posted comment now carries the clarify marker for issue 42 so the
+        // PO's reply can be matched back to this exact question round.
+        assert_eq!(
+            crate::clarify_marker::parse_marker_from_body(md),
+            Some(crate::clarify_marker::compute_question_set_id("42", &questions)),
+            "posted clarify comment must embed the marker for this item + questions: {md}"
         );
     }
 

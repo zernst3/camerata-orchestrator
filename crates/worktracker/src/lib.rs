@@ -25,6 +25,14 @@ pub use sync::{
 pub mod clarify_bridge;
 pub use clarify_bridge::{ClarifyBridge, PendingClarification, PoAnswer};
 
+/// Provider-agnostic clarify markers: a stable id embedded in a posted question
+/// comment, used to match answers back to their question round and to make a
+/// retried post idempotent.
+pub mod clarify_marker;
+pub use clarify_marker::{
+    body_matches_id, compute_question_set_id, marker_for, parse_marker_from_body, render_marker,
+};
+
 /// Injectable HTTP transport seam + `FakeTransport` test double + `ReqwestTransport`.
 pub mod http;
 
@@ -53,9 +61,9 @@ pub use azure_devops::{
     AdoConfig, AdoParsedWorkItem, AdoProvider,
 };
 pub use github::{
-    clarifying_questions_md, issues_since_path, markdown_comment,
-    parse_issue as github_parse_issue, parse_issues, status_closes_issue, status_rollup_md,
-    status_to_labels, GithubConfig, GithubProvider,
+    clarifying_questions_md, clarifying_questions_md_with_marker, issues_since_path,
+    markdown_comment, parse_issue as github_parse_issue, parse_issues, status_closes_issue,
+    status_rollup_md, status_to_labels, GithubConfig, GithubProvider,
 };
 pub use github_projects::{
     parse_project_items, project_items_query, GithubProjectConfig, GithubProjectsSource,
