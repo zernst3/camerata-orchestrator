@@ -85,6 +85,10 @@ pub enum VcsTarget {
     PrTitle,
     /// The pull-request body.
     PrBody,
+    /// The pull-request title and body concatenated (title + "\n" + body), used
+    /// by [`IdLocation::Either`] to check for a story-id in either location
+    /// without requiring both independently.
+    PrFullContent,
     /// The branch name.
     BranchName,
 }
@@ -92,11 +96,17 @@ pub enum VcsTarget {
 impl VcsTarget {
     /// Extract this target's text from `action`, or `None` when the action does
     /// not have this slice (e.g. `PrTitle` against a `Commit`).
-    fn extract<'a>(&self, action: &'a VcsAction) -> Option<&'a str> {
+    ///
+    /// Returns [`std::borrow::Cow<str>`] because most variants borrow directly from
+    /// the action, but [`VcsTarget::PrFullContent`] must allocate a concatenation of
+    /// the PR title and body.
+    fn extract<'a>(&self, action: &'a VcsAction) -> Option<std::borrow::Cow<'a, str>> {
         match (self, action) {
-            (VcsTarget::CommitMessage, VcsAction::Commit { message }) => Some(message),
+            (VcsTarget::CommitMessage, VcsAction::Commit { message }) => {
+                Some(std::borrow::Cow::Borrowed(message))
+            }
             (VcsTarget::CommitSubject, VcsAction::Commit { message }) => {
-                Some(message.lines().next().unwrap_or(""))
+                Some(std::borrow::Cow::Borrowed(message.lines().next().unwrap_or("")))
             }
             (VcsTarget::CommitBody, VcsAction::Commit { message }) => {
                 // Body = everything after the first newline.  When there is no
@@ -106,11 +116,23 @@ impl VcsTarget {
                     Some(pos) => &message[pos + 1..],
                     None => "",
                 };
-                Some(body)
+                Some(std::borrow::Cow::Borrowed(body))
             }
-            (VcsTarget::PrTitle, VcsAction::PullRequest { title, .. }) => Some(title),
-            (VcsTarget::PrBody, VcsAction::PullRequest { body, .. }) => Some(body),
-            (VcsTarget::BranchName, VcsAction::Branch { name }) => Some(name),
+            (VcsTarget::PrTitle, VcsAction::PullRequest { title, .. }) => {
+                Some(std::borrow::Cow::Borrowed(title))
+            }
+            (VcsTarget::PrBody, VcsAction::PullRequest { body, .. }) => {
+                Some(std::borrow::Cow::Borrowed(body))
+            }
+            (VcsTarget::PrFullContent, VcsAction::PullRequest { title, body }) => {
+                // Concatenate title + newline + body so a story-id in either location
+                // satisfies a SubstantiveWithStoryId matcher on this target.  Used by
+                // [`IdLocation::Either`] for PR actions.
+                Some(std::borrow::Cow::Owned(format!("{title}\n{body}")))
+            }
+            (VcsTarget::BranchName, VcsAction::Branch { name }) => {
+                Some(std::borrow::Cow::Borrowed(name))
+            }
             _ => None,
         }
     }
@@ -123,6 +145,7 @@ impl VcsTarget {
             VcsTarget::CommitBody => "commit body (lines after subject)",
             VcsTarget::PrTitle => "PR title",
             VcsTarget::PrBody => "PR body",
+            VcsTarget::PrFullContent => "PR title or body",
             VcsTarget::BranchName => "branch name",
         }
     }
@@ -297,28 +320,44 @@ fn is_substantive(text: &str, min_non_blank_chars: usize) -> bool {
 }
 
 /// True when `text` contains `prefix` immediately followed by `separator` and one
-/// or more ASCII digits (e.g. prefix `"#"`, separator `'#'` matches `#42`; prefix
+/// or more ASCII digits (e.g. prefix `""`, separator `'#'` matches `#42`; prefix
 /// `"AB"`, separator `'#'` matches `AB#42`; prefix `"STORY"`, separator `'-'`
 /// matches `STORY-42`).
 ///
 /// Scans every occurrence of `prefix + separator` so a non-digit occurrence does
 /// not mask a valid reference elsewhere.
+///
+/// # BUG-3 fix — degenerate `prefix`/`separator` combination
+///
+/// The caller's canonical contract is `prefix = ""` + `separator = '#'` for a bare
+/// `#<num>` reference (GitHub/GitLab style).  A user who incorrectly sets
+/// `prefix = "#"` with `separator = '#'` would produce the search token `"##"`,
+/// which never appears in a commit message like `"Closes #42."`, causing the gate
+/// to **always fail** even on valid commits.
+///
+/// This function normalises the degenerate case: if `prefix` already ends with
+/// the separator character, the separator is not appended again, so
+/// `prefix = "#"` + `separator = '#'` searches for `"#"` (identical to the
+/// canonical `prefix = ""` + `separator = '#'` path) and correctly matches `#42`.
+///
+/// Callers should prefer the canonical `prefix = ""` form; this normalisation is a
+/// defensive fallback, not an endorsement of the ambiguous spelling.
 fn contains_story_id(text: &str, prefix: &str, separator: char) -> bool {
-    // Build the token we search for: e.g. "#" + '#' = "##" (for bare #42), or
-    // "AB" + '#' = "AB#", or "STORY" + '-' = "STORY-".
-    let mut token = prefix.to_owned();
-    token.push(separator);
-
-    // Special-case: prefix "#" with separator '#' means we want bare `#42`.
-    // The token would be "##" which won't match "#42".  Handle this by treating
-    // an empty prefix specially — if prefix starts with the separator char we
-    // use just the separator as the token.
-    // Actually, a cleaner design: if prefix is empty, token is just the separator.
-    // The caller's contract: prefix="" + separator='#' means "a bare #<num>".
-    let token = if prefix.is_empty() {
+    // Build the search token.  If `prefix` is empty, the token is just the
+    // separator char (e.g. `'#'` → searches for `"#"`).  If `prefix` already
+    // ends with the separator char (the degenerate `prefix="#" separator='#'`
+    // case), we do NOT append the separator again — the prefix IS the token.
+    // Otherwise append the separator normally (e.g. `"AB"` + `'#'` → `"AB#"`).
+    let token: String = if prefix.is_empty() {
         separator.to_string()
+    } else if prefix.ends_with(separator) {
+        // Degenerate case (BUG-3): prefix already ends with separator; appending
+        // it again would produce "##" when the user meant "#".  Use prefix as-is.
+        prefix.to_owned()
     } else {
-        token
+        let mut t = prefix.to_owned();
+        t.push(separator);
+        t
     };
 
     let mut search_from = 0;
@@ -480,7 +519,7 @@ pub fn evaluate(rules: &[ProcessRule], action: &VcsAction) -> Vec<ProcessViolati
             let Some(text) = target.extract(action) else {
                 continue; // this rule's slice is not part of this action
             };
-            if !rule.matcher.matches(text) {
+            if !rule.matcher.matches(&text) {
                 violations.push(ProcessViolation {
                     rule_id: rule.id.clone(),
                     target,
@@ -771,48 +810,145 @@ pub fn build_rules(config: &ProcessRuleConfig) -> Vec<ProcessRule> {
     let mut rules = Vec::new();
 
     // PROCESS-COMMIT-DOC-1: substantive body + optional story-id.
+    //
+    // When `require_story_id` is true, `id_location` controls WHERE the story-id must
+    // appear (BUG-1 fix):
+    //
+    //   Body (default): story-id in CommitBody / PrBody — the pre-existing behaviour.
+    //   Subject:        story-id in CommitSubject / PrTitle; body is still required to be
+    //                   substantive (but no story-id in the body is demanded).
+    //   Either:         story-id anywhere in CommitMessage / PrFullContent (subject OR body).
+    //                   The body must still be substantive.
+    //
+    // When `require_story_id` is false, `id_location` is irrelevant: only the substantive
+    // body check fires.
     if config.commit_doc.enabled {
         let cfg = &config.commit_doc;
         let fmt = &cfg.story_id_format;
 
-        // The commit target: CommitBody.
-        // The PR target: PrBody (when apply_body_rule is true).
-        let mut applies_to = vec![VcsTarget::CommitBody];
+        // Targets for the body-length (substantive) check — always CommitBody + PrBody.
+        let mut body_targets = vec![VcsTarget::CommitBody];
         if config.pr.apply_body_rule {
-            applies_to.push(VcsTarget::PrBody);
+            body_targets.push(VcsTarget::PrBody);
         }
 
-        if cfg.require_story_id {
-            rules.push(ProcessRule {
-                id: "PROCESS-COMMIT-DOC-1".to_string(),
-                description: format!(
-                    "Commit body and PR body must contain at least {} non-blank \
-                     characters and a story-id reference ({}{}digits).",
-                    cfg.min_body_chars,
-                    fmt.prefix,
-                    fmt.separator,
-                ),
-                applies_to,
-                matcher: Matcher::SubstantiveWithStoryId {
-                    min_non_blank_chars: cfg.min_body_chars,
-                    story_id_prefix: fmt.prefix.clone(),
-                    story_id_separator: fmt.separator,
-                },
-            });
-        } else {
-            // Story-id not required: only the body-length check applies.
-            // Matcher::Substantive covers this exactly (no story-id component).
+        if !cfg.require_story_id {
+            // No story-id required: only the body-length check applies.
             rules.push(ProcessRule {
                 id: "PROCESS-COMMIT-DOC-1".to_string(),
                 description: format!(
                     "Commit body and PR body must contain at least {} non-blank characters.",
                     cfg.min_body_chars,
                 ),
-                applies_to,
+                applies_to: body_targets,
                 matcher: Matcher::Substantive {
                     min_non_blank_chars: cfg.min_body_chars,
                 },
             });
+        } else {
+            match cfg.id_location {
+                // ── Body (default): story-id in the body / PR body ───────────────
+                IdLocation::Body => {
+                    // The SubstantiveWithStoryId matcher simultaneously checks the
+                    // body length AND the story-id presence — one rule covers both.
+                    rules.push(ProcessRule {
+                        id: "PROCESS-COMMIT-DOC-1".to_string(),
+                        description: format!(
+                            "Commit body and PR body must contain at least {} non-blank \
+                             characters and a story-id reference ({}{}digits).",
+                            cfg.min_body_chars,
+                            fmt.prefix,
+                            fmt.separator,
+                        ),
+                        applies_to: body_targets,
+                        matcher: Matcher::SubstantiveWithStoryId {
+                            min_non_blank_chars: cfg.min_body_chars,
+                            story_id_prefix: fmt.prefix.clone(),
+                            story_id_separator: fmt.separator,
+                        },
+                    });
+                }
+
+                // ── Subject: story-id in the subject / PR title ───────────────────
+                IdLocation::Subject => {
+                    // Rule 1: body must still be substantive (no story-id in body required).
+                    rules.push(ProcessRule {
+                        id: "PROCESS-COMMIT-DOC-1".to_string(),
+                        description: format!(
+                            "Commit body and PR body must contain at least {} non-blank characters \
+                             (story-id is required in the subject/title, not the body).",
+                            cfg.min_body_chars,
+                        ),
+                        applies_to: body_targets,
+                        matcher: Matcher::Substantive {
+                            min_non_blank_chars: cfg.min_body_chars,
+                        },
+                    });
+
+                    // Rule 2: story-id must appear in the commit subject / PR title.
+                    // Using min_non_blank_chars=0 because subject length is not gated here.
+                    let mut id_targets = vec![VcsTarget::CommitSubject];
+                    if config.pr.apply_id_rule {
+                        id_targets.push(VcsTarget::PrTitle);
+                    }
+                    rules.push(ProcessRule {
+                        id: "PROCESS-COMMIT-DOC-1".to_string(),
+                        description: format!(
+                            "Commit subject and PR title must contain a story-id reference \
+                             ({}{}digits) when id_location=subject.",
+                            fmt.prefix,
+                            fmt.separator,
+                        ),
+                        applies_to: id_targets,
+                        matcher: Matcher::SubstantiveWithStoryId {
+                            min_non_blank_chars: 0,
+                            story_id_prefix: fmt.prefix.clone(),
+                            story_id_separator: fmt.separator,
+                        },
+                    });
+                }
+
+                // ── Either: story-id in the subject OR the body ────────────────────
+                IdLocation::Either => {
+                    // Rule 1: body must still be substantive.
+                    rules.push(ProcessRule {
+                        id: "PROCESS-COMMIT-DOC-1".to_string(),
+                        description: format!(
+                            "Commit body and PR body must contain at least {} non-blank characters \
+                             (story-id is required in either the subject/title or the body).",
+                            cfg.min_body_chars,
+                        ),
+                        applies_to: body_targets,
+                        matcher: Matcher::Substantive {
+                            min_non_blank_chars: cfg.min_body_chars,
+                        },
+                    });
+
+                    // Rule 2: story-id must appear ANYWHERE in the full commit message
+                    // (CommitMessage covers subject+body) or anywhere in the full PR content
+                    // (PrFullContent = title + "\n" + body).  A single check on the concatenated
+                    // text means "story-id in subject OR in body" without requiring it in both.
+                    let mut id_targets = vec![VcsTarget::CommitMessage];
+                    if config.pr.apply_body_rule || config.pr.apply_id_rule {
+                        id_targets.push(VcsTarget::PrFullContent);
+                    }
+                    rules.push(ProcessRule {
+                        id: "PROCESS-COMMIT-DOC-1".to_string(),
+                        description: format!(
+                            "Commit message or PR content must contain a story-id reference \
+                             ({}{}digits) in the subject or body (id_location=either).",
+                            fmt.prefix,
+                            fmt.separator,
+                        ),
+                        applies_to: id_targets,
+                        matcher: Matcher::SubstantiveWithStoryId {
+                            min_non_blank_chars: 0,
+                            story_id_prefix: fmt.prefix.clone(),
+                            story_id_separator: fmt.separator,
+                        },
+                    });
+                }
+            }
         }
     }
 
@@ -1320,7 +1456,7 @@ mod tests {
             message: "feat: subject\n\nBody paragraph here.".to_string(),
         };
         let body = VcsTarget::CommitBody.extract(&action).unwrap();
-        assert_eq!(body, "\nBody paragraph here.");
+        assert_eq!(body.as_ref(), "\nBody paragraph here.");
     }
 
     #[test]
@@ -1329,7 +1465,7 @@ mod tests {
             message: "feat: subject only".to_string(),
         };
         let body = VcsTarget::CommitBody.extract(&action).unwrap();
-        assert_eq!(body, "", "subject-only commit has an empty body, not None");
+        assert_eq!(body.as_ref(), "", "subject-only commit has an empty body, not None");
     }
 
     // ── VcsTarget::extract edge cases ────────────────────────────────────────
@@ -1340,7 +1476,7 @@ mod tests {
             message: "feat: summary line\n\nBody paragraph here.".to_string(),
         };
         let subject = VcsTarget::CommitSubject.extract(&action);
-        assert_eq!(subject, Some("feat: summary line"));
+        assert_eq!(subject.as_deref(), Some("feat: summary line"));
     }
 
     #[test]
@@ -1370,7 +1506,7 @@ mod tests {
             body: "Detailed PR body here.".to_string(),
         };
         assert_eq!(
-            VcsTarget::PrBody.extract(&action),
+            VcsTarget::PrBody.extract(&action).as_deref(),
             Some("Detailed PR body here.")
         );
     }
@@ -1700,5 +1836,254 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    // ── BUG-1: IdLocation is honoured by build_rules ──────────────────────────
+
+    /// BUG-1 regression: before the fix, `id_location` was stored in
+    /// `CommitDocConfig` but never read by `build_rules`. The story-id was ALWAYS
+    /// checked in the commit body/PR body, regardless of what the project configured.
+    /// A commit with the story-id in the subject only would be rejected even when
+    /// `id_location = Subject` or `id_location = Either`.  These tests fail before
+    /// the fix and pass after.
+
+    fn make_commit_doc_config_with_location(loc: IdLocation) -> ProcessRuleConfig {
+        ProcessRuleConfig {
+            commit_doc: CommitDocConfig {
+                enabled: true,
+                min_body_chars: 10,
+                require_story_id: true,
+                id_location: loc,
+                story_id_format: StoryIdFormat::default(), // bare #<num>
+            },
+            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn bug1_id_location_body_requires_story_id_in_body_not_subject() {
+        // Default: id_location = Body. Story-id in subject ONLY must fail.
+        let config = make_commit_doc_config_with_location(IdLocation::Body);
+        let rules = build_rules(&config);
+
+        // Story-id only in subject: must fail (body has no #<num>).
+        let only_in_subject = VcsAction::Commit {
+            message: "fix: #42 handle null\n\nFixes the null pointer handler path.".to_string(),
+        };
+        assert!(
+            gate(&rules, &only_in_subject).is_err(),
+            "BUG-1: id_location=Body: story-id in subject only must fail"
+        );
+
+        // Story-id in body: must pass.
+        let in_body = VcsAction::Commit {
+            message: "fix: handle null\n\nFixes the null pointer handler path. Refs #42.".to_string(),
+        };
+        assert!(
+            gate(&rules, &in_body).is_ok(),
+            "id_location=Body: story-id in body must pass"
+        );
+    }
+
+    #[test]
+    fn bug1_id_location_subject_requires_story_id_in_subject() {
+        // id_location = Subject: story-id must appear in the commit subject / PR title.
+        let config = make_commit_doc_config_with_location(IdLocation::Subject);
+        let rules = build_rules(&config);
+
+        // Story-id in subject: must pass (body is substantive but has no story-id).
+        let id_in_subject = VcsAction::Commit {
+            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_subject).is_ok(),
+            "BUG-1: id_location=Subject: story-id in subject must pass"
+        );
+
+        // Story-id only in body: must fail (subject lacks the required #<num>).
+        let id_in_body_only = VcsAction::Commit {
+            message: "fix: handle null pointer\n\nFixes the null pointer. Refs #42. Long enough.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_body_only).is_err(),
+            "BUG-1: id_location=Subject: story-id in body only must fail (subject is checked)"
+        );
+    }
+
+    #[test]
+    fn bug1_id_location_either_accepts_story_id_in_subject_or_body() {
+        // id_location = Either: story-id may appear in subject OR body.
+        let config = make_commit_doc_config_with_location(IdLocation::Either);
+        let rules = build_rules(&config);
+
+        // Story-id in subject only: must pass.
+        let id_in_subject = VcsAction::Commit {
+            message: "fix: #42 handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_subject).is_ok(),
+            "BUG-1: id_location=Either: story-id in subject must pass"
+        );
+
+        // Story-id in body only: must pass.
+        let id_in_body = VcsAction::Commit {
+            message: "fix: handle null pointer\n\nFixes the null pointer handler path. Refs #42.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_body).is_ok(),
+            "BUG-1: id_location=Either: story-id in body must pass"
+        );
+
+        // Story-id in neither: must fail.
+        let id_nowhere = VcsAction::Commit {
+            message: "fix: handle null pointer\n\nFixes the null pointer handler path here.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_nowhere).is_err(),
+            "BUG-1: id_location=Either: story-id absent from both must fail"
+        );
+    }
+
+    #[test]
+    fn bug1_id_location_either_pr_accepts_story_id_in_title_or_body() {
+        // id_location = Either on a PR: story-id in title OR body is sufficient.
+        let config = make_commit_doc_config_with_location(IdLocation::Either);
+        let rules = build_rules(&config);
+
+        // Story-id in title only.
+        let id_in_title = VcsAction::PullRequest {
+            title: "#42 Fix null pointer in handler".to_string(),
+            body: "Fixes the null pointer handler path in the API layer.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_title).is_ok(),
+            "BUG-1: id_location=Either PR: story-id in title must pass"
+        );
+
+        // Story-id in body only.
+        let id_in_body = VcsAction::PullRequest {
+            title: "Fix null pointer in handler".to_string(),
+            body: "Fixes the null pointer handler path. Refs #42. Sufficient length.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_body).is_ok(),
+            "BUG-1: id_location=Either PR: story-id in body must pass"
+        );
+    }
+
+    #[test]
+    fn bug1_id_location_subject_pr_checks_title_not_body() {
+        // id_location = Subject on a PR: story-id must be in PR title.
+        let config = ProcessRuleConfig {
+            commit_doc: CommitDocConfig {
+                enabled: true,
+                min_body_chars: 10,
+                require_story_id: true,
+                id_location: IdLocation::Subject,
+                story_id_format: StoryIdFormat::default(),
+            },
+            conventional_commit: ConventionalCommitConfig { enabled: false, ..Default::default() },
+            pr: PrCoverage { apply_body_rule: true, apply_id_rule: true },
+            ..Default::default()
+        };
+        let rules = build_rules(&config);
+
+        // Story-id in PR title: must pass.
+        let id_in_title = VcsAction::PullRequest {
+            title: "#42 Fix null pointer".to_string(),
+            body: "Detailed description of the fix with enough chars.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_title).is_ok(),
+            "id_location=Subject PR: story-id in title must pass"
+        );
+
+        // Story-id only in PR body: must fail (title is checked, not body).
+        let id_in_body_only = VcsAction::PullRequest {
+            title: "Fix null pointer".to_string(),
+            body: "Detailed description of the fix. Refs #42. Enough chars here.".to_string(),
+        };
+        assert!(
+            gate(&rules, &id_in_body_only).is_err(),
+            "id_location=Subject PR: story-id in body only must fail"
+        );
+    }
+
+    // ── BUG-3: contains_story_id prefix="#" + separator='#' edge case ────────────
+
+    /// BUG-3 regression: `contains_story_id("Closes #42.", "#", '#')` would construct
+    /// the search token `"##"` (by appending separator to prefix), which never appears
+    /// in `"Closes #42."`, causing the gate to ALWAYS reject valid commits when a user
+    /// followed the inline comment that suggested `prefix="#"` for a bare `#<num>`.
+    /// The correct canonical form is `prefix=""`, `separator='#'`, but the degenerate
+    /// `prefix="#"`, `separator='#'` must also work (BUG-3 fix).
+    #[test]
+    fn bug3_prefix_hash_with_separator_hash_matches_bare_hash_number() {
+        // Canonical form: prefix="" + separator='#'. Always worked.
+        assert!(
+            contains_story_id("Closes #42.", "", '#'),
+            "canonical prefix='' separator='#' must match #42"
+        );
+
+        // Degenerate form: prefix="#" + separator='#'. Before the fix this returned false
+        // (searched for "##" which was never in the text).
+        assert!(
+            contains_story_id("Closes #42.", "#", '#'),
+            "BUG-3: degenerate prefix='#' separator='#' must also match #42 (same intent)"
+        );
+
+        // Edge: the prefix already ends with separator for '-' as well.
+        assert!(
+            contains_story_id("PROJ-42 done", "PROJ-", '-'),
+            "BUG-3: prefix ending with separator must not double-append the separator"
+        );
+
+        // Must NOT match when there truly are no digits after '#'.
+        assert!(
+            !contains_story_id("no reference here", "#", '#'),
+            "degenerate prefix='#' must not produce false positives"
+        );
+    }
+
+    #[test]
+    fn bug3_story_id_in_subject_with_degenerate_prefix_passes_gate() {
+        // When a project mistakenly sets prefix="#" + separator='#' in StoryIdFormat,
+        // the gate must still accept a commit that contains `#42` in the story-id location.
+        // Before the fix, the token "##" was searched and never found → always rejected.
+        let rule = ProcessRule::commit_documentation(10, "#", '#');
+        let rules = [rule];
+
+        let passing = VcsAction::Commit {
+            message: "fix: null check\n\nFixes the null pointer issue. #42 closes this.".to_string(),
+        };
+        assert!(
+            gate(&rules, &passing).is_ok(),
+            "BUG-3: degenerate prefix='#' must not cause spurious gate failure on valid #42 refs"
+        );
+    }
+
+    // ── VcsTarget::PrFullContent ──────────────────────────────────────────────
+
+    #[test]
+    fn pr_full_content_concatenates_title_and_body() {
+        let action = VcsAction::PullRequest {
+            title: "Fix the thing".to_string(),
+            body: "Detailed explanation #42.".to_string(),
+        };
+        // PrFullContent = title + "\n" + body.
+        let full = VcsTarget::PrFullContent.extract(&action).unwrap();
+        assert!(full.contains("Fix the thing"), "must include title");
+        assert!(full.contains("Detailed explanation #42."), "must include body");
+        assert!(full.contains('\n'), "title and body separated by newline");
+    }
+
+    #[test]
+    fn pr_full_content_returns_none_for_commit_action() {
+        let action = VcsAction::Commit { message: "any".to_string() };
+        assert!(
+            VcsTarget::PrFullContent.extract(&action).is_none(),
+            "PrFullContent must return None for Commit actions"
+        );
     }
 }
