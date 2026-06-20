@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-VUE-NO-DIRECT-DOM-1"
+title = "Do not manipulate the DOM directly; declare the desired state and let Vue render it"
+tag = "stack"
+domain = "javascript:vue"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Direct DOM manipulation?"
+default = "declarative-rendering-no-direct-dom"
+why = "Vue is a declarative framework: you describe the desired state (data, computed values, props) and Vue renders it to the DOM. Directly manipulating the DOM via document.querySelector, jQuery, or vanilla JavaScript bypasses Vue's reactivity system. If you use document.querySelector to hide an element, Vue still thinks the element should be visible, so if a reactive data change causes Vue to re-render, it may unhide the element, contradicting the direct DOM change. Coordinating between direct DOM manipulation and Vue's rendering leads to bugs. The rule is: use v-if, v-show, v-class, v-style, and reactive data to declare state, and never call document.querySelector, element.style, or jQuery methods inside a Vue component. The only exceptions are animations (where you may need to measure element dimensions via getBoundingClientRect) and working with third-party libraries that require direct DOM access (in which case the third-party code is isolated in a wrapper component)."
+
+[[option]]
+id = "declarative-rendering-no-direct-dom"
+label = "Declare state; let Vue render; no direct DOM manipulation"
+directive = "Vue reactivity (data, computed, props) drives the DOM state. v-if, v-show, v-bind:class, v-bind:style, and other Vue directives declare the desired state. No direct DOM access via document, jQuery, or element manipulation in component code."
+why = "The adopted default. Declarative rendering keeps Vue's reactivity system and the DOM in sync."
+
+[[option]]
+id = "direct-dom-manipulation"
+label = "Directly manipulate the DOM"
+directive = "Component code accesses and modifies the DOM directly via document.querySelector, element.style, element.classList, jQuery, or similar methods."
+why = "A defensible alternative the project considered and did not adopt as the default."

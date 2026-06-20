@@ -1,0 +1,24 @@
+id = "RUST-SQLX-CONNECTION-POOL-SIZED-1"
+title = "Use a connection pool with explicit size configuration and reuse connections"
+tag = "stack"
+domain = "rust:sqlx"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Connection pool sizing?"
+default = "configure-sized-connection-pool"
+why = "A database connection is expensive to create (involves a network round trip, authentication, and resource allocation on the server). Creating a new connection for every query is wasteful. A connection pool maintains a set of open connections and reuses them across queries. When a query needs a connection, it borrows one from the pool; when done, it returns it. sqlx provides PgPoolOptions to configure the pool size (min_connections, max_connections, acquire timeout, idle timeout, and test-on-acquire). Sizing the pool requires understanding the application's concurrency: if there are 100 concurrent requests and each waits on a database operation, the pool should have at least 100 connections, or some requests will wait in a queue. Configuring the pool explicitly (not just using defaults) ensures the application behaves predictably under load."
+
+[[option]]
+id = "configure-sized-connection-pool"
+label = "Configure an explicit connection pool with size"
+directive = "A connection pool is created via sqlx::PgPoolOptions (or the respective DB engine's equivalent) with explicit min_connections, max_connections, acquire timeout, and idle timeout settings. All queries use this pool. Pool size is set based on expected concurrency and database connection limits."
+why = "The adopted default. A configured pool reuses connections and prevents resource exhaustion."
+
+[[option]]
+id = "create-connection-per-query"
+label = "Create a new connection for each query"
+directive = "Each query creates a new database connection, uses it, and closes it, without connection pooling."
+why = "A defensible alternative the project considered and did not adopt as the default."

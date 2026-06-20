@@ -1,0 +1,24 @@
+id = "RUST-TOKIO-BOUNDED-CHANNELS-1"
+title = "Use bounded channels to prevent memory exhaustion and apply backpressure"
+tag = "stack"
+domain = "rust:tokio"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Bounded channels?"
+default = "use-bounded-channels"
+why = "tokio::sync channels can be bounded (capacity limit) or unbounded. An unbounded channel has no size limit, so a fast sender can enqueue messages faster than a slow receiver can process them, and the in-memory queue grows until memory is exhausted. A bounded channel (e.g., mpsc with capacity 100) has a fixed limit; once the channel is full, the sender must wait until the receiver processes messages and makes space. This backpressure prevents a sender from overwhelming the receiver and protects the system from unbounded memory growth. When a channel is unbounded, the receiver has no way to signal 'I can't keep up,' and the sender never slows down. If a task produces items quickly and another task consumes them slowly, the queue grows without limit. Bounded channels make this explicit: the sender feels the backpressure and can make decisions (drop items, apply rate limiting, or retry). The capacity should be chosen based on acceptable latency and memory footprint, not arbitrarily."
+
+[[option]]
+id = "use-bounded-channels"
+label = "Use bounded channels to apply backpressure"
+directive = "Channels are created with a bounded capacity (e.g., tokio::sync::mpsc::channel(capacity)). Unbounded channels are not used for inter-task communication. The capacity is chosen based on the expected message size, processing rate, and acceptable memory use."
+why = "The adopted default. Bounded channels prevent memory exhaustion and apply natural backpressure between producers and consumers."
+
+[[option]]
+id = "use-unbounded-channels"
+label = "Use unbounded channels"
+directive = "Channels are created unbounded (e.g., tokio::sync::mpsc::unbounded_channel()) to avoid backpressure and allow senders to proceed without waiting."
+why = "A defensible alternative the project considered and did not adopt as the default."

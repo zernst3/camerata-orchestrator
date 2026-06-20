@@ -1,0 +1,24 @@
+id = "RUST-TOKIO-NO-BLOCKING-IN-ASYNC-1"
+title = "Do not call blocking operations directly in async code; use tokio::task::spawn_blocking"
+tag = "stack"
+domain = "rust:tokio"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Blocking operations in async code?"
+default = "use-spawn-blocking-for-blocking-calls"
+why = "Tokio is a cooperative multitasking runtime; it schedules many async tasks on a small number of worker threads. When a task calls a blocking operation (e.g., a synchronous I/O read, std::fs::File, a mutex lock that will block, or CPU-intensive work) directly inside an async function, it blocks the entire worker thread. While that task is blocked, all other tasks scheduled on that thread cannot run, even if they are ready (e.g., waiting for a network response). If many tasks block their worker threads simultaneously, the runtime starves and the application becomes unresponsive. tokio::task::spawn_blocking runs the blocking operation on a separate thread pool so the async executor can keep running other tasks. When a blocking operation is unavoidable (e.g., reading from a file or computing a hash), spawn_blocking is the correct tool. If the operation is I/O that has an async alternative (e.g., tokio::fs instead of std::fs), the async version should be used instead."
+
+[[option]]
+id = "use-spawn-blocking-for-blocking-calls"
+label = "Use tokio::task::spawn_blocking for blocking operations"
+directive = "Any blocking operation (synchronous I/O, CPU work, blocking lock acquisition) is wrapped in tokio::task::spawn_blocking so it runs on a separate thread pool. The async function awaits the spawn_blocking result. Blocking calls are not made directly inside async functions."
+why = "The adopted default. spawn_blocking prevents blocking the async runtime and keeps concurrent tasks responsive."
+
+[[option]]
+id = "blocking-calls-inline-in-async"
+label = "Call blocking operations directly inside async functions"
+directive = "Blocking operations are called directly inside async functions without spawn_blocking. The async executor manages the blocking."
+why = "A defensible alternative the project considered and did not adopt as the default."

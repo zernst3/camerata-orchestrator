@@ -1,0 +1,24 @@
+id = "RUST-AXUM-HANDLERS-THIN-DELEGATE-1"
+title = "Handlers stay thin; business logic and data access live in services or repositories"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Handlers stay thin and delegate to services?"
+default = "handlers-thin-delegate-to-services"
+why = "A handler is a translation layer: it reads the validated HTTP request (now a typed value), calls into the application (a service or repository), and translates the result (or error) into a response. When business rules or data access move into the handler itself, the logic becomes reachable only through an HTTP request, so it cannot be unit-tested or reused by a CLI or a scheduled job without spinning up the web layer. The same rule, duplicated into a second handler that needs it, drifts out of sync. And the handler mixes transport concerns with domain concerns, so a change to either touches code that does both. Keeping handlers thin and delegating to a service (or repository) layer makes domain logic independently testable, reusable across entry points, and changeable without touching routing. This separation mirrors the layering principle on the database side: the API layer talks protocol, the domain and repository layers own the rules and the data."
+
+[[option]]
+id = "handlers-thin-delegate-to-services"
+label = "Handlers stay thin; delegate to services or repositories"
+directive = "Handlers are limited to HTTP concerns: extract and validate the request, call a service or repository function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler calls. A direct database query or business-rule computation written inside a handler is forbidden; it moves behind the service layer."
+why = "The adopted default. Thin handlers keep transport concerns separate from domain logic, enable reuse, and improve testability."
+
+[[option]]
+id = "handlers-contain-business-logic-and-data-access"
+label = "Handlers contain business logic and data access inline"
+directive = "Handlers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
+why = "A defensible alternative the project considered and did not adopt as the default."

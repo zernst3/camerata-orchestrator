@@ -1,0 +1,24 @@
+id = "RUST-TOKIO-CANCELLATION-SAFE-SELECTS-1"
+title = "Use tokio::select! safely; ensure the selected branch leaves the system in a consistent state"
+tag = "stack"
+domain = "rust:tokio"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Cancellation safety in select!?"
+default = "ensure-select-cancellation-safe"
+why = "tokio::select! waits on multiple branches (futures) and runs whichever completes first. If one branch is a timeout or a cancellation signal, and the timeout fires before the other branch completes, that branch is dropped without running to completion. If the dropped branch was midway through a database transaction, a partial write, or updating shared state, the system is left in an inconsistent state. The rule is: before using select!, reason through what happens if any branch is cancelled. If cancellation would leave a resource or transaction in a bad state, the select! is unsafe. Some safe patterns: wrapping the selected work inside a transaction that can be rolled back, ensuring all shared state updates are atomic, or using a different concurrency pattern (e.g., a oneshot channel that is checked instead of select!). If the risk of inconsistency is unavoidable, document it explicitly and ensure cleanup code runs even if the branch is cancelled."
+
+[[option]]
+id = "ensure-select-cancellation-safe"
+label = "Ensure select! branches are cancellation-safe"
+directive = "Before using tokio::select!, reason through what happens if a branch is cancelled mid-execution (e.g., due to timeout, shutdown signal, or another branch completing). If cancellation would leave a resource, transaction, or shared state in an inconsistent state, either refactor to use a safe pattern (transactions, atomic updates, oneshot channels) or document the known risk and add explicit cleanup code that runs even after cancellation."
+why = "The adopted default. Cancellation-safe code prevents resource leaks and inconsistent state."
+
+[[option]]
+id = "select-branches-not-validated"
+label = "Do not validate cancellation safety of select! branches"
+directive = "select! is used without explicit reasoning about what happens if a branch is cancelled or times out. The application relies on cleanup code or eventual consistency to handle any partial state."
+why = "A defensible alternative the project considered and did not adopt as the default."

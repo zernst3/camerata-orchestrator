@@ -1,0 +1,24 @@
+id = "RUST-SQLX-COMPILE-CHECKED-QUERIES-1"
+title = "Use the sqlx::query! macro for compile-time SQL validation; never use format! to build SQL strings"
+tag = "stack"
+domain = "rust:sqlx"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Compile-checked SQL queries?"
+default = "use-sqlx-query-macro"
+why = "sqlx::query! is a compile-time macro that checks SQL syntax and column names against the live database schema at build time. If the SQL is invalid or refers to a non-existent column, the build fails immediately. This catches errors before deployment. Using format! or string concatenation to build SQL strings bypasses this check. When SQL is built dynamically at runtime, typos in column names, missing joins, or SQL injection vulnerabilities can slip past the compiler. sqlx::query! also binds parameters via ? placeholders and macro argument substitution, which prevents SQL injection. If a query must be truly dynamic (e.g., filtering by different columns based on user input), the valid column names are validated in Rust code before being interpolated, not interpolated directly into the SQL string. The rule is: all queries use sqlx::query! unless the query is so dynamic that it cannot be validated at compile time; in that case, the dynamic parts are validated and parameterized explicitly."
+
+[[option]]
+id = "use-sqlx-query-macro"
+label = "Use sqlx::query! for compile-time SQL validation"
+directive = "SQL queries are written using sqlx::query! (or sqlx::query_as!, sqlx::query_scalar!, etc.) which validates the SQL against the database schema at compile time. Parameters are bound using placeholders (?) and macro arguments. SQL strings are never built with format!, string concatenation, or string interpolation."
+why = "The adopted default. Compile-time validation and parameterized binding prevent SQL errors and injection vulnerabilities."
+
+[[option]]
+id = "use-format-or-string-interpolation"
+label = "Build SQL strings with format! or string interpolation"
+directive = "SQL queries are built using format!, string concatenation, or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
+why = "A defensible alternative the project considered and did not adopt as the default."

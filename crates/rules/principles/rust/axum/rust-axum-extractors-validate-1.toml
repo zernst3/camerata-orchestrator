@@ -1,0 +1,24 @@
+id = "RUST-AXUM-EXTRACTORS-VALIDATE-1"
+title = "Use extractors for request validation; reject invalid requests at the boundary"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Use extractors for request validation?"
+default = "use-extractors-for-validation"
+why = "Axum extractors run before the handler and convert raw HTTP data into typed, validated application data. Putting validation in an extractor means the handler receives only valid data; an invalid request is rejected at the framework boundary with a 400 or 422 before any business logic runs. If validation logic lives instead inside the handler or in the service layer, three problems follow. First, the handler and service layer must both know the HTTP validation rules, creating duplicate logic and drift risk. Second, an invalid request still invokes the handler, so error paths must be written for all possible invalid states even if the application should reject them outright. Third, the boundary between 'data shaped correctly?' and 'business logic accepts this data?' becomes blurred, making it hard to reason about which layer owns which constraint. Extractors keep the boundary clean: type safety and HTTP-level validation happen at the edge, and the handler assumes valid, typed input."
+
+[[option]]
+id = "use-extractors-for-validation"
+label = "Use extractors for request validation; reject invalid requests at the boundary"
+directive = "Request validation (checking path parameters, query parameters, JSON body shape, required fields, type conversions) happens in custom extractors or built-in Axum extractors (Path, Query, Json, RawBody) that run before the handler. Invalid requests are rejected with an HTTP error response by the extractor before the handler is invoked. The handler receives only validated, typed data."
+why = "The adopted default. Extractors enforce validation at the HTTP boundary, so the handler assumes valid input and avoids duplicate validation logic."
+
+[[option]]
+id = "validation-happens-inside-handlers-or-services"
+label = "validation happens inside handlers or services"
+directive = "Request data is extracted into a generic type in the handler, and validation (checking field presence, type correctness, constraints) happens inside the handler or is delegated to the service layer."
+why = "A defensible alternative the project considered and did not adopt as the default."

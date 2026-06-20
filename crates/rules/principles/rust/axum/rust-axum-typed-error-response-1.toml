@@ -1,0 +1,24 @@
+id = "RUST-AXUM-TYPED-ERROR-RESPONSE-1"
+title = "Handlers return typed error types that implement IntoResponse, not raw HTTP responses"
+tag = "stack"
+domain = "rust:axum"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Typed error responses?"
+default = "typed-errors-implement-intoresponse"
+why = "Axum handlers return Result<T, E> where the error type E implements IntoResponse, which converts application errors into HTTP responses. A handler that computes a business result (e.g., a user, or a 'not found' error) returns that result in the Result; the IntoResponse implementation on the error type decides what status code and body to send to the client. When error handling lives instead as inline HTTP status and response building in handlers, two problems follow. First, the same error (e.g., 'user not found') must be mapped to the same HTTP status (404) in every handler that can fail in that way; duplication and drift accumulate. Second, the handler becomes cluttered with response construction code instead of focusing on the business logic. Typed errors keep error mapping centralized and computable (the Rust type system enforces that every error variant is handled), and handlers stay focused on business logic."
+
+[[option]]
+id = "typed-errors-implement-intoresponse"
+label = "Handlers return typed error types that implement IntoResponse"
+directive = "Handlers return a domain Result type (e.g., Result<User, UserError>). The error type UserError implements IntoResponse, so the handler just returns the Result and Axum converts UserError into a status code and response body. Error mapping is centralized in the IntoResponse impl, not duplicated in handlers."
+why = "The adopted default. Typed errors centralize error-to-HTTP mapping and keep handlers focused on business logic."
+
+[[option]]
+id = "handlers-build-http-responses-directly"
+label = "Handlers build HTTP responses directly for errors"
+directive = "Each handler constructs StatusCode and response bodies directly when errors occur, mapping domain errors to HTTP responses inline in the handler code."
+why = "A defensible alternative the project considered and did not adopt as the default."
