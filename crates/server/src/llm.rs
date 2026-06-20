@@ -19,7 +19,7 @@
 //!
 //! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One model the UI offers, tagged with its vendor so the selector can group/extend.
 /// `price_in` / `price_out` are USD per MILLION tokens (input / output), used by the UI's
@@ -740,6 +740,374 @@ impl Llm {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// MESSAGE BATCHES API (#61)
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// The Anthropic Message Batches API (POST /v1/messages/batches) runs up to 100k
+// requests asynchronously at a flat 50% discount on all input + output tokens. This
+// is the right delivery layer for large Camerata scans (hundreds of chunk × rule-batch
+// pairs): instead of rate-limited real-time calls that fire one after another, the
+// whole batch is submitted in one POST, processed out-of-band by Anthropic (typically
+// seconds to minutes on small scans, up to 24h on very large ones), and the results
+// are fetched in one round-trip keyed by `custom_id`.
+//
+// KEY CONSTRAINTS (from the Anthropic spec):
+//   - Max 100k requests per batch, 256MB total POST body.
+//   - Results arrive UNORDERED — must be keyed back to their inputs via `custom_id`.
+//   - Only the `api` backend supports batches (no CLI path).
+//   - Composes with prompt caching: set `cache_control` as usual in the batch item.
+//   - Polling interval: the spec recommends >= 1s between polls; we use 10s to be gentle.
+//   - A batch whose individual items fail individually (e.g. per-item token-limit exceeded)
+//     still returns `processing_status == "ended"` — check `result.type` per item.
+//
+// USAGE PATTERN:
+//   1. Build a `Vec<BatchItem>` — one per (chunk × rule-batch) pair.
+//   2. Call `Llm::submit_batch` → returns a `batch_id` + item count.
+//   3. Store `batch_id` on the job (for the UI's status line).
+//   4. Poll `Llm::poll_batch_status` until `processing_status == "ended"`.
+//   5. Call `Llm::fetch_batch_results` → a map of `custom_id -> LlmResponse`.
+//   6. Feed the responses into `audit_pass`'s parse+dedup+calibrate tail via
+//      `reassemble_batch_results` (same dedup/merge path as parallel mode).
+
+/// One item to include in a Message Batch submission. Maps 1:1 to the Anthropic
+/// batch request object (a `custom_id` plus a `params` block that mirrors `/v1/messages`).
+///
+/// `custom_id` must be unique within the batch and <= 64 chars. Camerata uses
+/// deterministic ids of the form `c{chunk}-b{batch}` so results can be mapped back
+/// without a separate lookup table.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchItem {
+    /// Unique id for this request within the batch (max 64 chars, `[a-zA-Z0-9_-]+`).
+    /// Camerata uses `c{ci}-b{bi}` (e.g. `c0-b2`) matching the chunk/batch indices.
+    pub custom_id: String,
+    /// The per-item request parameters (mirrors POST /v1/messages body structure).
+    pub params: BatchItemParams,
+}
+
+/// The `params` block within a batch item. Shape mirrors the `/v1/messages` body.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchItemParams {
+    pub model: String,
+    pub max_tokens: u32,
+    pub system: Option<String>,
+    pub messages: Vec<BatchMessage>,
+}
+
+/// One message in the `messages` array of a batch item.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchMessage {
+    pub role: String,
+    pub content: serde_json::Value,
+}
+
+/// Build a [`BatchItem`] from a [`LlmRequest`] and a deterministic `custom_id`.
+/// The content block handles prompt caching the same way `complete_api` does: when
+/// `req.cache_prefix_len` is set, the user content is split into a cached-prefix block
+/// plus a suffix block. The system prompt is forwarded verbatim (the batch API accepts
+/// the same `system` field as the messages API).
+pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
+    let content = match req.cache_prefix_len {
+        Some(split_at) if split_at < req.prompt.len() => {
+            let safe_split = req.prompt
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= split_at)
+                .last()
+                .unwrap_or(split_at)
+                .min(req.prompt.len());
+            let prefix = &req.prompt[..safe_split];
+            let suffix = &req.prompt[safe_split..];
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": prefix,
+                    "cache_control": {"type": "ephemeral"}
+                },
+                {
+                    "type": "text",
+                    "text": suffix
+                }
+            ])
+        }
+        _ => serde_json::json!(req.prompt),
+    };
+    BatchItem {
+        custom_id: custom_id.into(),
+        params: BatchItemParams {
+            model: model.to_string(),
+            max_tokens: req.max_tokens,
+            system: req.system.clone(),
+            messages: vec![BatchMessage {
+                role: "user".to_string(),
+                content,
+            }],
+        },
+    }
+}
+
+/// Result of submitting a message batch.
+#[derive(Debug, Clone)]
+pub struct BatchSubmitResult {
+    /// The Anthropic batch id (e.g. `msgbatch_01AbCd...`). Store this on the job.
+    pub batch_id: String,
+    /// Number of items accepted into the batch.
+    pub request_counts: BatchRequestCounts,
+}
+
+/// Item-level counts from the batch object (mirrors Anthropic's `request_counts` field).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BatchRequestCounts {
+    pub processing: u32,
+    pub succeeded: u32,
+    pub errored: u32,
+    pub canceled: u32,
+    pub expired: u32,
+}
+
+/// Current status of a submitted batch as returned by GET /v1/messages/batches/{id}.
+#[derive(Debug, Clone)]
+pub struct BatchStatus {
+    /// `in_progress` | `ended` — when `ended`, results are available.
+    pub processing_status: String,
+    /// Live item counts (updated as the batch processes).
+    pub request_counts: BatchRequestCounts,
+}
+
+/// One result row from the batch results JSONL stream. Only `succeeded` rows carry a
+/// usable response; other types surface an error so the caller can log and skip.
+#[derive(Debug, Clone)]
+pub struct BatchResultRow {
+    /// The `custom_id` the caller assigned when building the item.
+    pub custom_id: String,
+    /// The completion text + token usage when the item succeeded.
+    pub response: Option<LlmResponse>,
+    /// The error message when `result_type != "succeeded"`.
+    pub error: Option<String>,
+}
+
+impl Llm {
+    /// Submit a batch of requests to the Anthropic Message Batches API. Returns the
+    /// `batch_id` + initial counts, or an error if the submission failed. Requires the
+    /// `api` backend and a valid `ANTHROPIC_API_KEY`. The batch processes asynchronously;
+    /// poll with [`poll_batch_status`] and fetch results with [`fetch_batch_results`].
+    ///
+    /// CAP ENFORCEMENT: logs a warning when `items.len() > 100_000` (the API hard cap);
+    /// the caller is responsible for splitting before calling this function. A 256MB POST
+    /// body limit is not checked here (the average Camerata batch item is ~5-20KB, so
+    /// 100k items is already the binding constraint in practice).
+    pub async fn submit_batch(&self, items: Vec<BatchItem>) -> anyhow::Result<BatchSubmitResult> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Message Batches API requires the `api` backend and ANTHROPIC_API_KEY to be set"
+            )
+        })?;
+        if items.len() > 100_000 {
+            // Log but don't hard-fail: the API may raise a 4xx which we'll surface anyway.
+            eprintln!(
+                "[camerata-server/llm] batch has {} items, which exceeds the 100k cap — \
+                 the API will reject it; split into sub-batches before calling submit_batch",
+                items.len()
+            );
+        }
+        let body = serde_json::json!({ "requests": items });
+        let resp = reqwest::Client::new()
+            .post("https://api.anthropic.com/v1/messages/batches")
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "message-batches-2024-09-24")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Message Batches submit failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Message Batches API HTTP {status}: {text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch response: {e}"))?;
+        let batch_id = v["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("batch response missing `id` field: {text}"))?
+            .to_string();
+        let counts = parse_request_counts(&v["request_counts"]);
+        Ok(BatchSubmitResult { batch_id, request_counts: counts })
+    }
+
+    /// Poll the status of a submitted batch. Returns the `processing_status` and current
+    /// item counts. When `processing_status == "ended"` the batch is complete and results
+    /// can be fetched with [`fetch_batch_results`].
+    pub async fn poll_batch_status(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY")
+        })?;
+        let resp = reqwest::Client::new()
+            .get(format!("https://api.anthropic.com/v1/messages/batches/{batch_id}"))
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "message-batches-2024-09-24")
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("batch poll request failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("batch poll HTTP {status}: {text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse batch poll: {e}"))?;
+        let processing_status = v["processing_status"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let counts = parse_request_counts(&v["request_counts"]);
+        Ok(BatchStatus { processing_status, request_counts: counts })
+    }
+
+    /// Stream the results of a completed batch from the Anthropic results URL. Each line
+    /// of the JSONL response is one `BatchResultRow` keyed by `custom_id`. Callers MUST
+    /// call this only after [`poll_batch_status`] reports `processing_status == "ended"`.
+    ///
+    /// Results arrive UNORDERED — the caller must build a `custom_id -> response` map
+    /// (see [`reassemble_batch_results`]) and not rely on line order.
+    pub async fn fetch_batch_results(
+        &self,
+        batch_id: &str,
+    ) -> anyhow::Result<Vec<BatchResultRow>> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY")
+        })?;
+        let resp = reqwest::Client::new()
+            .get(format!(
+                "https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
+            ))
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "message-batches-2024-09-24")
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("batch results fetch failed: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("batch results HTTP {status}: {text}");
+        }
+        parse_batch_results_jsonl(&text)
+    }
+
+    /// Convenience accessor for the API key (needed by the batch polling loop to confirm
+    /// the backend is viable before submitting). Returns `None` for the CLI backend.
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+}
+
+/// Parse the `request_counts` object from a batch API response. Missing fields are zero.
+fn parse_request_counts(v: &serde_json::Value) -> BatchRequestCounts {
+    BatchRequestCounts {
+        processing: v["processing"].as_u64().unwrap_or(0) as u32,
+        succeeded: v["succeeded"].as_u64().unwrap_or(0) as u32,
+        errored: v["errored"].as_u64().unwrap_or(0) as u32,
+        canceled: v["canceled"].as_u64().unwrap_or(0) as u32,
+        expired: v["expired"].as_u64().unwrap_or(0) as u32,
+    }
+}
+
+/// Parse the JSONL results body (one JSON object per line) into a vec of `BatchResultRow`.
+/// Robust: malformed lines are skipped (logged at debug), so one bad item never aborts
+/// the whole result set. The caller converts this vec into a `custom_id -> response` map
+/// via [`reassemble_batch_results`].
+pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultRow>> {
+    let mut rows = Vec::new();
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            // Malformed lines are rare (Anthropic's JSONL is well-formed); log at debug
+            // level via eprintln only in debug builds to avoid noise in prod.
+            #[cfg(debug_assertions)]
+            eprintln!("[camerata-server/llm] skipping malformed batch result line: {line}");
+            continue;
+        };
+        let custom_id = match v["custom_id"].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                #[cfg(debug_assertions)]
+                eprintln!("[camerata-server/llm] batch result line missing custom_id, skipping");
+                continue;
+            }
+        };
+        let result_type = v["result"]["type"].as_str().unwrap_or("error");
+        if result_type == "succeeded" {
+            // The response mirrors the /v1/messages response shape.
+            let msg = &v["result"]["message"];
+            let model_id = msg["model"].as_str().unwrap_or("").to_string();
+            let out = msg["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            let (input_tokens, output_tokens, cache_read, cache_creation) =
+                usage_tokens(&msg["usage"]);
+            let cost_usd =
+                price_for(&model_id).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
+                    (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
+                    _ => None,
+                });
+            rows.push(BatchResultRow {
+                custom_id,
+                response: Some(LlmResponse {
+                    text: out,
+                    model: model_id,
+                    backend: "api/batch".to_string(),
+                    cost_usd,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens: cache_read,
+                    cache_creation_input_tokens: cache_creation,
+                }),
+                error: None,
+            });
+        } else {
+            let error_msg = v["result"]["error"]["message"]
+                .as_str()
+                .unwrap_or(result_type)
+                .to_string();
+            rows.push(BatchResultRow {
+                custom_id,
+                response: None,
+                error: Some(error_msg),
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// Build a `custom_id -> LlmResponse` map from a flat list of `BatchResultRow`s (the
+/// unordered JSONL stream from [`Llm::fetch_batch_results`]). Items whose result was an
+/// error (no `response`) are absent from the map, so the caller's reassembler can detect
+/// which (chunk, batch) pairs failed and handle them (log, skip, surface as partial).
+///
+/// This is the KEY STEP that undoes the unordered delivery: the caller assigned
+/// deterministic `custom_id`s of the form `c{ci}-b{bi}` when building the batch, and this
+/// map lets it look up each (ci, bi) pair's response in O(1).
+pub fn reassemble_batch_results(
+    rows: Vec<BatchResultRow>,
+) -> std::collections::HashMap<String, LlmResponse> {
+    rows.into_iter()
+        .filter_map(|r| r.response.map(|resp| (r.custom_id, resp)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +1234,160 @@ mod tests {
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
+    }
+
+    // ── Message Batches (#61) ──────────────────────────────────────────────────────
+
+    /// `build_batch_item` produces a correctly-shaped item with the deterministic `custom_id`
+    /// and the prompt forwarded into the `messages[0].content` field.
+    #[test]
+    fn build_batch_item_plain_prompt() {
+        let req = LlmRequest::new("audit this code")
+            .with_model("claude-sonnet-4-6")
+            .with_max_tokens(2048);
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-4-6");
+        assert_eq!(item.custom_id, "c0-b1");
+        assert_eq!(item.params.model, "claude-sonnet-4-6");
+        assert_eq!(item.params.max_tokens, 2048);
+        assert!(item.params.system.is_none());
+        // Plain string content when no cache prefix is set.
+        let v = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        assert_eq!(v.as_str().unwrap_or(""), "audit this code");
+    }
+
+    /// When `cache_prefix_len` is set, the content is split into two blocks: a cached
+    /// prefix block with `cache_control` and a suffix block without.
+    #[test]
+    fn build_batch_item_with_cache_prefix() {
+        let prompt = "static prefix part\ndynamic suffix";
+        let split = "static prefix part\n".len();
+        let req = LlmRequest::new(prompt)
+            .with_cache_prefix_len(split)
+            .with_model("claude-sonnet-4-6");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-4-6");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr.len(), 2);
+        // First block: the static prefix with cache_control.
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "static prefix part\n");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        // Second block: the suffix, no cache_control.
+        assert_eq!(arr[1]["type"], "text");
+        assert_eq!(arr[1]["text"], "dynamic suffix");
+        assert!(arr[1].get("cache_control").is_none());
+    }
+
+    /// System prompt is forwarded onto `params.system` and present in the serialized item.
+    #[test]
+    fn build_batch_item_with_system_prompt() {
+        let req = LlmRequest::new("check this")
+            .with_system("you are an auditor")
+            .with_model("claude-haiku-4-5-20251001");
+        let item = build_batch_item("c0-b0", &req, "claude-haiku-4-5-20251001");
+        assert_eq!(item.params.system.as_deref(), Some("you are an auditor"));
+        // Ensure it serialises correctly (no missing field).
+        let v = serde_json::to_value(&item.params).unwrap();
+        assert_eq!(v["system"], "you are an auditor");
+    }
+
+    /// `parse_batch_results_jsonl` extracts succeeded rows, maps error rows, and skips
+    /// malformed lines — the fundamental parse + reassemble contract.
+    #[test]
+    fn parse_batch_results_jsonl_succeeded_and_errored() {
+        let jsonl = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding A"}],"usage":{"input_tokens":100,"output_tokens":50}}}}
+{"custom_id":"c1-b0","result":{"type":"errored","error":{"message":"token limit exceeded"}}}
+{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
+malformed line, not json
+"#;
+        let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
+        // 2 succeeded + 1 errored; the malformed line is skipped.
+        assert_eq!(rows.len(), 3, "3 valid rows (2 ok + 1 error), malformed skipped");
+        let ok: Vec<_> = rows.iter().filter(|r| r.response.is_some()).collect();
+        let err: Vec<_> = rows.iter().filter(|r| r.error.is_some()).collect();
+        assert_eq!(ok.len(), 2, "two succeeded rows");
+        assert_eq!(err.len(), 1, "one error row");
+
+        // Spot-check a succeeded row.
+        let c0b0 = ok.iter().find(|r| r.custom_id == "c0-b0").expect("c0-b0 present");
+        let resp = c0b0.response.as_ref().unwrap();
+        assert_eq!(resp.text, "finding A");
+        assert_eq!(resp.backend, "api/batch");
+        // input_tokens = base(100) + cache_read(0) + cache_creation(0) = 100
+        assert_eq!(resp.input_tokens, Some(100), "input when no cache fields");
+        assert_eq!(resp.output_tokens, Some(50));
+
+        // The error row carries the message.
+        let e = err[0];
+        assert_eq!(e.custom_id, "c1-b0");
+        assert_eq!(e.error.as_deref(), Some("token limit exceeded"));
+    }
+
+    /// `reassemble_batch_results` maps succeeded rows by custom_id and excludes error rows.
+    #[test]
+    fn reassemble_maps_by_custom_id_excludes_errors() {
+        let rows = vec![
+            BatchResultRow {
+                custom_id: "c0-b0".to_string(),
+                response: Some(LlmResponse {
+                    text: "text A".to_string(),
+                    model: "m".to_string(),
+                    backend: "api/batch".to_string(),
+                    cost_usd: None,
+                    input_tokens: Some(10),
+                    output_tokens: Some(5),
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                error: None,
+            },
+            BatchResultRow {
+                custom_id: "c1-b0".to_string(),
+                response: None,
+                error: Some("limit exceeded".to_string()),
+            },
+            BatchResultRow {
+                custom_id: "c0-b1".to_string(),
+                response: Some(LlmResponse {
+                    text: "text B".to_string(),
+                    model: "m".to_string(),
+                    backend: "api/batch".to_string(),
+                    cost_usd: None,
+                    input_tokens: Some(20),
+                    output_tokens: Some(8),
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                }),
+                error: None,
+            },
+        ];
+        let map = reassemble_batch_results(rows);
+        assert_eq!(map.len(), 2, "two succeeded rows in map");
+        assert!(map.contains_key("c0-b0"));
+        assert!(map.contains_key("c0-b1"));
+        // Error row is absent.
+        assert!(!map.contains_key("c1-b0"), "error row excluded from map");
+        assert_eq!(map["c0-b0"].text, "text A");
+        assert_eq!(map["c0-b1"].text, "text B");
+    }
+
+    /// `parse_batch_results_jsonl` is robust to a fully-empty body (returns an empty vec,
+    /// never an error). Empty bodies arise when a batch has 0 items that completed.
+    #[test]
+    fn parse_batch_results_empty_body_is_ok() {
+        let rows = parse_batch_results_jsonl("").expect("empty body should not error");
+        assert!(rows.is_empty());
+    }
+
+    /// `build_batch_item` serialises correctly (no private fields, correct JSON shape).
+    #[test]
+    fn batch_item_serialises_to_expected_shape() {
+        let req = LlmRequest::new("hello").with_model("claude-sonnet-4-6").with_max_tokens(512);
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-4-6");
+        let v = serde_json::to_value(&item).unwrap();
+        assert_eq!(v["custom_id"], "c0-b0");
+        assert!(v["params"]["model"].is_string());
+        assert!(v["params"]["messages"].is_array());
+        assert_eq!(v["params"]["max_tokens"], 512);
     }
 }

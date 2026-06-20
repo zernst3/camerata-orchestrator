@@ -4254,6 +4254,15 @@ fn estimate_audit_cost(
     const CACHE_WRITE_MULT: f64 = 1.25;
     const CACHE_READ_MULT: f64 = 0.10;
 
+    // Batch mode (#61): the Anthropic Message Batches API charges a flat 50% discount on
+    // ALL input and output tokens for the SCAN passes (which are submitted as a batch).
+    // The calibration pass always runs real-time (a single call over aggregated findings
+    // — not batched), so calib pricing is NOT discounted.
+    let batch_discount = if mode == "batch" { 0.5 } else { 1.0 };
+    let (eff_audit_in, eff_audit_out) = (audit_in * batch_discount, audit_out * batch_discount);
+    // Calibration is real-time even in batch mode: one call over the aggregated findings.
+    let (eff_calib_in, eff_calib_out) = (calib_in, calib_out);
+
     let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
     let batches = if mode == "sequential" {
         1
@@ -4263,12 +4272,12 @@ fn estimate_audit_cost(
     let passes = chunks * batches;
     let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
 
-    // ── Scan passes, priced at the AUDIT model ──
+    // ── Scan passes, priced at the AUDIT model (with batch discount applied) ──
     //
     // Without caching: the full digest is re-sent at full input price every pass.
-    // With caching (parallel mode, batches > 1): per chunk, batch 0 pays full input + the
-    // one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at 0.1×.
-    // Sequential (batches == 1) has no reuse, so no discount.
+    // With caching (parallel/batch mode, batches > 1): per chunk, batch 0 pays full input
+    // + the one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at
+    // 0.1×. Sequential (batches == 1) has no reuse, so no discount.
     //
     // Overhead tokens (rules block, system prompt) are always sent at full price since they
     // vary per batch.
@@ -4299,8 +4308,8 @@ fn estimate_audit_cost(
     let cal_in = scan_out * cal_passes;
     let cal_out = scan_out * cal_passes;
 
-    let dollars = ((scan_in * audit_in + scan_out * audit_out)
-        + (cal_in * calib_in + cal_out * calib_out))
+    let dollars = ((scan_in * eff_audit_in + scan_out * eff_audit_out)
+        + (cal_in * eff_calib_in + cal_out * eff_calib_out))
         / 1_000_000.0
         * FUDGE;
     let total_tokens = ((scan_in + scan_out + cal_in + cal_out) * FUDGE) as u64;
@@ -4333,6 +4342,11 @@ struct JobStateView {
     report: Option<ScanReportView>,
     #[serde(default)]
     message: Option<String>,
+    /// Batch mode (#61): the Anthropic Message Batch id currently being processed
+    /// (`msgbatch_01...`). Surfaced in the job-progress status line so the user can
+    /// look it up in the Anthropic console. `None` for parallel/sequential mode jobs.
+    #[serde(default)]
+    batch_id: Option<String>,
 }
 
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).
@@ -6957,11 +6971,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                         option { value: "parallel", "Parallel" }
                         option { value: "sequential", "Sequential (slower, gentlest)" }
                         option { value: "job", "Background job (walk away)" }
+                        option { value: "batch", "Batch (50% off — async, API key required)" }
                     }
                     if audit_mode() == recommended_mode {
                         span { class: "audit-mode-rec", "✓ auto-selected for this scan's size" }
                     }
-                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans." }
+                    span { class: "audit-model-hint", "Parallel runs rule-batches concurrently. Background job runs server-side so you can leave and watch findings stream in — best for huge / multi-repo scans. Batch uses the Anthropic Message Batches API for a flat 50% discount on all tokens; requires ANTHROPIC_API_KEY and the api backend; results arrive asynchronously (seconds to minutes, up to 24h on very large scans)." }
                 }
                 // Thorough calibration (#51) — opt-in, costs more AI.
                 div { class: "audit-model-row",
@@ -8148,6 +8163,48 @@ mod tests {
         assert!(
             dollars_thorough > dollars_default,
             "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
+        );
+    }
+
+    /// Batch mode applies a flat 50% discount to the SCAN passes vs. parallel on the same
+    /// config. Calibration is NOT discounted (it always runs real-time). The pass count
+    /// is identical (same chunking + rule-batching).
+    #[test]
+    fn batch_mode_cheaper_than_parallel_due_to_scan_discount() {
+        // 30 rules, 350k chars = 1 chunk, 2 rule-batches. Calibration = same model.
+        let (_, dollars_parallel, passes_parallel) =
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+        let (_, dollars_batch, passes_batch) =
+            estimate_audit_cost(350_000, 30, "batch", 3.0, 15.0, 3.0, 15.0, false);
+        assert_eq!(
+            passes_parallel, passes_batch,
+            "same pass count in parallel and batch (only pricing differs)"
+        );
+        // Batch must be cheaper than parallel (scan discount applied), but the ratio is
+        // not exactly 0.5 because calibration is priced at full rate in both modes.
+        assert!(
+            dollars_batch < dollars_parallel,
+            "batch is cheaper than parallel: {dollars_batch:.4} < {dollars_parallel:.4}"
+        );
+        // The discount is at least 25% overall (scan dominates in a 2-batch, 1-chunk case).
+        let ratio = dollars_batch / dollars_parallel;
+        assert!(
+            ratio < 0.75,
+            "batch should be at least 25% cheaper than parallel: ratio={ratio:.4}"
+        );
+    }
+
+    /// Batch mode with 0 rules (free-form, 1 pass per chunk): calibration cost is
+    /// identical in both modes; scan cost is halved. Total must be cheaper in batch mode.
+    #[test]
+    fn batch_mode_zero_rules_cheaper_than_parallel() {
+        let (_, dollars_parallel, _) =
+            estimate_audit_cost(200_000, 0, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+        let (_, dollars_batch, _) =
+            estimate_audit_cost(200_000, 0, "batch", 3.0, 15.0, 3.0, 15.0, false);
+        assert!(
+            dollars_batch < dollars_parallel,
+            "batch cheaper even with 0 rules: {dollars_batch:.4} < {dollars_parallel:.4}"
         );
     }
 }
