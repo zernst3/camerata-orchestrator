@@ -1321,6 +1321,7 @@ fn is_code_auditable_rule(id: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn audit_repos(
     sources: &[(String, std::path::PathBuf)],
     selected: &[SelectedRule],
@@ -1331,7 +1332,20 @@ pub async fn audit_repos(
     thorough: bool,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
-) -> ScanReport {
+    // The project's prior scan manifest, when incremental scanning is on. `None` = a full scan
+    // (no cache, or the user forced it). Returned alongside the report is the FRESH manifest to
+    // persist, so the next scan can go incremental.
+    incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // Fingerprint the rule selection so a change to it invalidates the incremental cache
+    // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
+    // if its rule fingerprint matches.
+    let rules_fp = crate::scan_cache::rules_fingerprint(
+        selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
+    );
+    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
+    let mut manifest_builder =
+        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp);
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
@@ -1391,22 +1405,64 @@ pub async fn audit_repos(
                 stacks.push(detect_stack(spec, &files));
                 // Deterministic security floor (always-on, every repo): ENFORCED findings.
                 // This is the non-deselectable critical floor, so it is NOT repo-scoped —
-                // hardcoded secrets / raw-SQL concat are unsafe in any code repo. Push them
-                // to the job up front so the live preview shows the criticals immediately.
+                // hardcoded secrets / raw-SQL concat are unsafe in any code repo. It is
+                // token-free, so it ALWAYS runs over the whole tree (never incremental) —
+                // the floor must never go stale.
                 let mut repo_findings = audit_files(spec, &files);
                 if let Some((jstore, jid)) = job {
                     jstore.add_findings(jid, repo_findings.clone());
                 }
-                // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
-                match crate::ai_audit::audit_repo(
-                    &llm, spec, &files, &semantic, model, calibration_model, mode, thorough,
-                    feedback, job, Some(&meter),
-                )
-                .await
-                {
-                    Ok((ai_findings, _ai_rules)) => repo_findings.extend(ai_findings),
-                    Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+
+                // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
+                // Partition the repo's files into changed vs unchanged against the prior
+                // manifest; AI-audit only the CHANGED set, and carry forward cached findings
+                // for unchanged, still-present files. The AI audit still receives the WHOLE
+                // file set as repo-map context (cheap symbol list) so cross-file rules keep
+                // their architectural view even when only changed bodies are sent.
+                let part = crate::scan_cache::partition(effective_prior, spec, &files);
+                if incremental_prior.is_some() && effective_prior.is_none() {
+                    notes.push(format!(
+                        "{spec}: rule selection changed since last scan — full re-scan"
+                    ));
                 }
+                if effective_prior.is_some() && part.unchanged_count > 0 {
+                    notes.push(format!(
+                        "{spec}: incremental — {} changed, {} reused from cache",
+                        part.changed.len(),
+                        part.unchanged_count
+                    ));
+                }
+                // The AI findings that apply to this repo after the scan: carried-forward
+                // (unchanged files) ∪ freshly audited (changed files).
+                let mut ai_for_repo: Vec<Finding> = part.carried.clone();
+                if let Some((jstore, jid)) = job {
+                    // Carried findings are real results for this run — surface them in the
+                    // live preview alongside the floor.
+                    jstore.add_findings(jid, part.carried.clone());
+                }
+                // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
+                // Skipped entirely when nothing changed (a fully-cached repo costs zero tokens).
+                if part.changed.is_empty() {
+                    if effective_prior.is_some() && !files.is_empty() {
+                        notes.push(format!("{spec}: no changes — AI audit skipped (fully cached)"));
+                    }
+                } else {
+                    match crate::ai_audit::audit_repo(
+                        &llm, spec, &part.changed, &semantic, model, calibration_model, mode,
+                        thorough, feedback, job, Some(&meter), Some(&files),
+                    )
+                    .await
+                    {
+                        Ok((ai_findings, _ai_rules)) => ai_for_repo.extend(ai_findings),
+                        Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                    }
+                }
+
+                // Record this repo into the fresh manifest: fingerprints of EVERY current file
+                // (so next run can tell what changed) + the repo's AI findings (carried ∪ fresh).
+                manifest_builder.record_repo(spec, &files, &ai_for_repo);
+
+                repo_findings.extend(ai_for_repo);
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
@@ -1425,7 +1481,7 @@ pub async fn audit_repos(
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
-    report
+    (report, manifest_builder.finish())
 }
 
 #[cfg(test)]

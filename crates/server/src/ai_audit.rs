@@ -1141,12 +1141,17 @@ pub async fn audit_repo(
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     job: Option<(&crate::jobs::JobStore, &str)>,
     meter: Option<&UsageMeter>,
+    // The full repo file set to build the repo MAP from, when it differs from `files`. On an
+    // incremental scan `files` is only the CHANGED bodies, but the repo map should still cover
+    // the WHOLE repo so cross-file rules keep their architectural view. `None` → use `files`.
+    map_files: Option<&[(String, String)]>,
 ) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
     if files.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    // Cross-file context for every chunk (which dirs are which layer, where types live).
-    let repo_map = build_repo_map(files);
+    // Cross-file context for every chunk (which dirs are which layer, where types live). On an
+    // incremental scan this is built from the whole repo, not just the changed files.
+    let repo_map = build_repo_map(map_files.unwrap_or(files));
     // Key findings to the adopted rule ids (so a violation shows under e.g.
     // ARCH-STRICT-LAYERING-1, not an invented AI- name).
     let adopted: std::collections::HashSet<String> =
