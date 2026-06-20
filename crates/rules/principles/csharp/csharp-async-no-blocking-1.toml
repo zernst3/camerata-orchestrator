@@ -29,3 +29,14 @@ id = "async-void-handlers"
 label = "use async void for fire-and-forget event handlers"
 directive = "Fire-and-forget operations (e.g., background tasks, event handlers without return values) are declared async void and invoked without await."
 why = "Removes the ability to wait for completion or catch exceptions; exceptions thrown in async void handlers crash the process or are silently lost. Use async Task with fire-and-forget (Task.Run or background job queue) instead."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices?view=aspnetcore-10.0"
+title = "ASP.NET Core Best Practices — Avoid blocking calls"
+
+[[sources]]
+url = "https://www.nuget.org/packages/AsyncFixer"
+title = "AsyncFixer NuGet package"
+linter = "AsyncFixer: AsyncFixer02"

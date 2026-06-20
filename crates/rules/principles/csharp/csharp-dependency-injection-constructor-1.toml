@@ -3,9 +3,8 @@ title = "Dependencies are injected via constructor parameters, not [Inject] attr
 tag = "stack"
 domain = "csharp:aspnet"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and optional Roslyn analyzers that flag [Inject] attributes and recommend constructor injection. Conformance holds when all dependencies are constructor parameters and marked private readonly."
 
 [decision]
 question = "How are dependencies injected into classes?"
@@ -29,3 +28,9 @@ id = "service-locator"
 label = "use a service locator or manual resolution from IServiceProvider"
 directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
 why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/guidelines"
+title = "Dependency injection guidelines — .NET | Microsoft Learn"

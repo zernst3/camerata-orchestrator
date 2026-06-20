@@ -28,3 +28,9 @@ id = "explicit-load"
 label = "Explicit loading via context.Entry(entity).Collection/Reference().Load()"
 directive = "Related data is loaded on demand via context.Entry(entity).Collection(e => e.Items).LoadAsync() after the parent query, in code that explicitly decides when to load each relationship."
 why = "More explicit than lazy loading but still issues per-entity round-trips when called in a loop. Appropriate for single-entity detail views that conditionally need related data; inappropriate as the general strategy for collection queries."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/performance/efficient-querying"
+title = "Efficient Querying — EF Core | Microsoft Learn"

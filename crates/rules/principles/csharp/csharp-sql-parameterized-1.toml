@@ -23,3 +23,14 @@ id = "string-concatenation-with-escaping"
 label = "build query strings by concatenating with manual escaping"
 directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
 why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca2100"
+title = "CA2100: Review SQL queries for security vulnerabilities | Microsoft Learn"
+linter = "CA2100"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/framework/data/adonet/configuring-parameters-and-parameter-data-types"
+title = "Configuring parameters and parameter data types — ADO.NET | Microsoft Learn"

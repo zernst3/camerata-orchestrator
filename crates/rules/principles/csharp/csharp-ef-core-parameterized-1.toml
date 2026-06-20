@@ -3,9 +3,8 @@ title = "Entity Framework queries use parameterized LINQ syntax; no raw SQL stri
 tag = "stack"
 domain = "csharp:aspnet"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and static analysis (Semgrep, custom Roslyn analyzers) that flag FromSqlRaw() or interpolated strings in raw SQL. Conformance holds when all database queries use parameterized LINQ or FromSqlInterpolated with proper parameter expressions."
 
 [decision]
 question = "How are dynamic values passed to Entity Framework queries?"
@@ -29,3 +28,9 @@ id = "raw-sql-concatenated"
 label = "build raw SQL by string concatenation with manual escaping"
 directive = "Raw SQL is constructed by concatenating or interpolating user input directly into the query string, with optional manual escaping or quoting logic."
 why = "Canonical SQL-injection vulnerability; every site is a latent injection waiting for unsanitized input."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/querying/sql-queries"
+title = "SQL Queries — EF Core | Microsoft Learn"

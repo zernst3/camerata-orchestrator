@@ -3,9 +3,8 @@ title = "Three-layer architecture: controllers handle HTTP only, services contai
 tag = "stack"
 domain = "csharp:aspnet"
 layer = "architecture"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and optional Roslyn analyzers that flag database calls in controllers, business logic in repositories, or mixed concerns. Conformance holds when controllers delegate to services, services orchestrate repositories, and repositories only perform CRUD operations."
 
 [decision]
 question = "How are concerns separated between controllers, services, and repositories?"
@@ -29,3 +28,9 @@ id = "god-services"
 label = "create large service classes that mix multiple concerns"
 directive = "Services contain multiple unrelated business domains or responsibilities. A single service handles user management, order processing, and reporting. Controllers call monolithic services without clear boundaries."
 why = "Services become impossible to test and reuse; adding a new API endpoint often requires duplicating logic in a new service."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/common-web-application-architectures"
+title = "Common web application architectures — .NET | Microsoft Learn"

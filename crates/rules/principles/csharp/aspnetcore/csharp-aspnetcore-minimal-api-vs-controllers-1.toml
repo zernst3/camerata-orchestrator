@@ -28,3 +28,9 @@ id = "mixed-minimal-and-controller"
 label = "Both Minimal APIs and MVC controllers coexist in the same project"
 directive = "Some endpoints are registered via Map* and others live in ControllerBase classes; the mix is determined per-endpoint by what is convenient at the time of authoring."
 why = "A defensible alternative the project considered and did not adopt as the default. Two routing models in one project multiply the mental model surface without adding capability either model lacks."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/apis?view=aspnetcore-9.0"
+title = "Choose between controller-based APIs and minimal APIs | Microsoft Learn"

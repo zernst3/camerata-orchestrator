@@ -3,9 +3,8 @@ title = "DbContext is registered as Scoped (per-request); never Singleton"
 tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by verifying the DI registration in Program.cs uses AddDbContext<T> (which registers Scoped by default) and that no AddSingleton<DbContext> or AddTransient<DbContext> calls appear. A Roslyn analyzer or integration test that resolves the DbContext lifetime from the service container and asserts Scoped catches misconfiguration at CI time."
 
 [decision]
 question = "What DI lifetime is used for the application's DbContext?"
@@ -29,3 +28,9 @@ id = "transient-dbcontext"
 label = "DbContext registered as Transient"
 directive = "DbContext is registered via AddTransient<AppDbContext>(), creating a new instance per injection site within a request."
 why = "Breaks transaction scope: two injection sites within the same request receive two independent change trackers. Changes made through one cannot participate in a transaction with the other. Inappropriate for any scenario that requires cross-service transactionality within a request."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/dbcontext-configuration/"
+title = "DbContext Lifetime, Configuration, and Initialization — EF Core | Microsoft Learn"

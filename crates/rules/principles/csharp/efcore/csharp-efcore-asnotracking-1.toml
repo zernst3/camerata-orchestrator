@@ -28,3 +28,9 @@ id = "always-track"
 label = "All queries tracked; AsNoTracking never used"
 directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
 why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/querying/tracking"
+title = "Tracking vs. No-Tracking Queries — EF Core | Microsoft Learn"

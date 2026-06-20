@@ -22,3 +22,9 @@ id = "fat-controllers-inline-logic"
 label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
 why = "A defensible alternative the project considered and did not adopt as the default. Inline logic is reachable only through HTTP, is not reusable across entry points, and conflates protocol concerns with domain concerns in a single method."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/common-web-application-architectures"
+title = "Common web application architectures — .NET | Microsoft Learn"

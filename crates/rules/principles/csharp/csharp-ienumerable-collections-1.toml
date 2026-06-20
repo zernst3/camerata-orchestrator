@@ -3,9 +3,8 @@ title = "Methods return IEnumerable<T> or ICollection<T> instead of arrays or Li
 tag = "stack"
 domain = "csharp"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and optional Roslyn analyzers that flag public methods returning concrete collection types (List<T>, T[], HashSet<T>) and recommend IEnumerable<T> or ICollection<T>. Conformance holds when all public methods return abstract collection interfaces."
 
 [decision]
 question = "What types do public methods return when returning collections?"
@@ -29,3 +28,9 @@ id = "return-concrete-with-defensive-copy"
 label = "return a new List<T> copy of the internal collection"
 directive = "Public methods return a new List<T> or array copy of the internal collection, protecting the original from modification."
 why = "Safe but inefficient; every call allocates a new collection. Acceptable for small collections or when safety outweighs performance; use IEnumerable<T> for better efficiency and the same safety guarantee."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/guidelines-for-collections"
+title = "Guidelines for Collections — Framework Design Guidelines | Microsoft Learn"

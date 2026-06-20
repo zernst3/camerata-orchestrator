@@ -3,9 +3,8 @@ title = "Data transfer objects and value types use records (C# 9+) or immutable 
 tag = "stack"
 domain = "csharp"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and optional Roslyn analyzers that recommend records for immutable data and flag mutable properties on non-entity classes. Conformance holds when DTOs and value types are records and entity classes are explicitly designed for mutation with clear boundaries."
 
 [decision]
 question = "How are data structures designed to be mutable or immutable?"
@@ -29,3 +28,9 @@ id = "immutable-with-manual-copy"
 label = "use immutable classes but with explicit copy-on-modify patterns"
 directive = "Classes are immutable (init-only properties) but modifications are done by creating a new instance via a copy constructor or with-expressions. Example: `var updated = person with { Name = \"Alice\" };`"
 why = "Correct but more verbose than records. Necessary for older C# versions (pre-9.0) or to maintain a specific class hierarchy."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/types/records"
+title = "C# record types — Microsoft Learn"

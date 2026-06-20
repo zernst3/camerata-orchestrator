@@ -3,9 +3,8 @@ title = "LINQ queries pass values as parameters; string interpolation into raw S
 tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by a Roslyn analyzer or Semgrep rule that flags string interpolation inside FromSqlRaw, ExecuteSqlRaw, and Database.ExecuteSqlRaw calls. Conformance holds when all raw SQL calls use FromSqlInterpolated / ExecuteSqlInterpolated (which parameterize the FormattableString) or pass SqlParameter objects to FromSqlRaw / ExecuteSqlRaw. A string interpolation expression inside FromSqlRaw is a forbidden pattern and fails the build."
 
 [decision]
 question = "How are user-controlled values passed into EF Core queries, including raw SQL escapes?"
@@ -29,3 +28,9 @@ id = "string-concatenation-raw-sql"
 label = "String concatenation or interpolation of user values into raw SQL"
 directive = "Raw SQL queries are assembled via string interpolation or concatenation of user-provided values, passed to FromSqlRaw or ExecuteSqlRaw as a pre-built string."
 why = "Produces SQL injection vulnerabilities whenever a user-controlled value reaches the concatenation. Forbidden."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/querying/sql-queries"
+title = "SQL Queries — EF Core | Microsoft Learn"

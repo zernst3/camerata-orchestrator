@@ -29,3 +29,14 @@ id = "sync-actions-no-async-dependencies"
 label = "Synchronous actions that call only synchronous service methods"
 directive = "Actions are declared synchronously and service methods they call are also synchronous; async is introduced only at the data-access layer and wrapped synchronously before crossing the service boundary."
 why = "Avoids async complexity at the cost of blocking threads for every I/O call; scales poorly beyond low concurrency. Acceptable for truly CPU-only endpoints with no I/O dependency."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices?view=aspnetcore-10.0"
+title = "ASP.NET Core Best Practices — Avoid blocking calls | Microsoft Learn"
+
+[[sources]]
+url = "https://www.nuget.org/packages/AsyncFixer"
+title = "AsyncFixer NuGet package"
+linter = "AsyncFixer: AsyncFixer02"

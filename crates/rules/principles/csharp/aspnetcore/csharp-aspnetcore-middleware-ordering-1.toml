@@ -22,3 +22,14 @@ id = "ad-hoc-middleware-order"
 label = "Middleware is ordered by developer discretion at the time of addition"
 directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
 why = "A defensible alternative the project considered and did not adopt as the default. Ad-hoc ordering produces correct results accidentally when all additions happen to fall in the right sequence, and produces silent auth bypass or CORS failures when they do not."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/?view=aspnetcore-10.0"
+title = "ASP.NET Core Middleware — canonical middleware order | Microsoft Learn"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/diagnostics/asp0001?view=aspnetcore-10.0"
+title = "ASP0001: Authorization middleware is incorrectly configured | Microsoft Learn"
+linter = "ASP0001"
