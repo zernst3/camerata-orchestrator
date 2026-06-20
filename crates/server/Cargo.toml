@@ -50,6 +50,9 @@ portable-pty = "0.8"
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }
 camerata-worktracker = { path = "../worktracker" }
+# Post-story hooks: the `PostStoryHook` trait and `StoryDocEmitter` live in the
+# agent crate so they can also be used directly in the fleet/CLI paths.
+camerata-agent = { path = "../agent" }
 # The run engine evaluates planted tool calls through the REAL gate (deterministic,
 # token-free), so a cockpit "run" shows genuine deny/allow verdicts, not narration.
 camerata-core = { path = "../core" }
@@ -72,3 +75,4 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # test-util gives start_paused so the run executor's sleeps resolve instantly in tests.
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
+tempfile = "3"

@@ -30,6 +30,9 @@ pub use session::{
 pub mod generic;
 pub use generic::GenericCliDriver;
 
+pub mod post_story_hook;
+pub use post_story_hook::{DocConvention, PostStoryHook, StoryCompletion, StoryDocEmitter};
+
 // ─── crate-local error type (RUST-DOMAIN-4 / RUST-DOMAIN-6) ───────────────────
 
 #[derive(Debug, Error)]
