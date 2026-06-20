@@ -1,0 +1,30 @@
+id = "GO-WEB-HANDLER-TIMEOUTS-1"
+title = "Handlers have a per-route or per-group timeout; long-running operations move to background jobs or set explicit context deadlines"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How should timeouts be enforced on individual HTTP handlers?"
+default = "per-route-timeout-explicit-context"
+why = "A handler without a timeout can hang indefinitely if a downstream service is slow or stuck, blocking the handler goroutine and exhausting the server's goroutine pool. Long enough hangs starve the server of capacity to handle new requests. A per-route or per-group timeout ensures handlers are bounded; operations that exceed the timeout are cancelled via the context. Long-running operations (bulk imports, report generation, image processing) do not fit in a typical request-response timeout; they should be enqueued as background jobs that run outside the request cycle. A handler that spawns a background job returns immediately; the job runs asynchronously and the client is notified when it completes."
+
+[[option]]
+id = "per-route-timeout-explicit-context"
+label = "Routes have explicit timeouts; long-running operations use background jobs"
+directive = "Handlers are wrapped with a timeout middleware (per-route or per-group), or the handler explicitly sets a context deadline with context.WithTimeout. The timeout is appropriate to the operation: a fast API call might be 5 seconds, a database query might be 10 seconds. Operations known to be long (report generation, batch processing) are enqueued as background jobs; the handler enqueues the job and returns immediately with a job ID."
+why = "The adopted default. Per-route timeouts prevent handler goroutines from hanging indefinitely; background jobs separate long-running work from the request cycle."
+
+[[option]]
+id = "global-timeout-only"
+label = "Only global read and write deadlines on the server; no per-handler timeouts"
+directive = "The HTTP server is configured with a global ReadTimeout and WriteTimeout; individual handlers do not set deadlines. These timeouts apply to the HTTP protocol layer (reading the request, writing the response) but do not enforce a business-logic timeout."
+why = "Simplicity; trades per-operation timeout control for a single global deadline. Effective for servers with uniform request profiles."
+
+[[option]]
+id = "no-timeouts"
+label = "No timeouts; handlers may block indefinitely"
+directive = "The server has no timeout configuration and handlers do not set deadlines; operations may take as long as they need."
+why = "Simplest to implement; high risk of goroutine leaks and server starvation if any handler blocks or is slow."

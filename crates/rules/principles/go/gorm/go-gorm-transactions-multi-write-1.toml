@@ -1,0 +1,30 @@
+id = "GO-GORM-TRANSACTIONS-MULTI-WRITE-1"
+title = "Multiple write operations to different tables are wrapped in a transaction; consistency is enforced at the database level"
+tag = "stack"
+domain = "go:gorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should multiple write operations be coordinated to ensure consistency?"
+default = "transactions-multi-write"
+why = "A transaction groups multiple writes into an atomic unit: either all succeed, or all roll back if any fails. A service that inserts a user record and then inserts a related profile record is two writes; if the profile insert fails after the user insert succeeds, the database is left with a user without a profile, violating the application's invariant. GORM's db.WithTxn(...) or db.BeginTx(...) starts a transaction; all writes inside the transaction are coordinated. If any write fails, the transaction rolls back automatically and the database is consistent. A multi-step operation that does not wrap writes in a transaction is brittle: network failures, database locks, or concurrent writes can leave the database in a partially-consistent state. Transactions are not just nice-to-have; they are the fundamental mechanism for maintaining database consistency."
+
+[[option]]
+id = "transactions-multi-write"
+label = "Multi-step writes use transactions; all-or-nothing consistency"
+directive = "Any operation that performs multiple writes (insert user, insert profile; transfer from account A to account B) wraps the writes in a transaction using db.WithTxn(ctx, func(tx *gorm.DB) error { ... }) or db.BeginTx(ctx, nil).Create(...).Save(...).Commit(). If any write fails, the transaction rolls back and the database is not left in a partial state. Single writes do not require a transaction (the database ensures single-write atomicity)."
+why = "The adopted default. Transactions enforce all-or-nothing semantics; the database is always consistent."
+
+[[option]]
+id = "no-transactions"
+label = "Writes are not coordinated; no transaction wrapping"
+directive = "Multiple writes are performed as separate db.Create(...) calls without a transaction wrapper. If one fails mid-operation, the database is left in a partial state."
+why = "Simpler to code; high risk of consistency violations. Acceptable only for truly independent writes with no invariants (e.g., logging)."
+
+[[option]]
+id = "transaction-one-per-request"
+label = "Every request is wrapped in a transaction, even single reads"
+directive = "The application wraps all database operations in a transaction, including reads, using db.BeginTx for every handler."
+why = "Trades performance for consistency; can cause lock contention and deadlocks if transactions are long-lived. Appropriate only if serializable isolation is required."

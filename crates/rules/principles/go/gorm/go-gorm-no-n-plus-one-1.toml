@@ -1,0 +1,30 @@
+id = "GO-GORM-NO-N-PLUS-ONE-1"
+title = "Related data is loaded with Preload or Join in a single query; no N+1 patterns where a loop fetches related records one-by-one"
+tag = "stack"
+domain = "go:gorm"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should related records (foreign keys, associations) be loaded from the database?"
+default = "preload-join-one-query"
+why = "A query that fetches N parent records, then in a loop calls a database query to fetch each parent's related children, results in N+1 queries: 1 for the parents, N for each parent's children. If N = 100, that is 101 queries. GORM provides Preload() which generates a second query to fetch all children matching the parent IDs, and Join() which generates a single JOIN query. Both reduce the round trips to 2 or 1. Code that selects all parents, iterates over them, and inside the loop calls another query for each parent's children is the N+1 anti-pattern; it is slow, creates unnecessary network traffic, and is easy to miss during code review. A repository method that returns parents with their children preloaded in a single efficient query is the standard pattern. Identifying N+1 is a linting target for refactoring: a loop that queries the database is the signature."
+
+[[option]]
+id = "preload-join-one-query"
+label = "Related data is loaded in a single query using Preload or Join"
+directive = "When a handler or service needs to fetch records and their related associations, the repository method loads them in a single query using GORM's Preload() for separate queries per association (optimized into a second query for all children), or Join() for a single JOIN query. The repository method signature includes the associations it loads; callers do not load related data in a loop."
+why = "The adopted default. GORM's Preload and Join are optimized to load related data efficiently; one query or two instead of N+1."
+
+[[option]]
+id = "lazy-loading-in-loop"
+label = "Each record's related data is fetched in a loop"
+directive = "A handler or service fetches a list of parents, then iterates over them and calls a database query for each parent to fetch its children."
+why = "Simple to code; results in N+1 queries and poor performance. Easy to introduce without realizing the cost."
+
+[[option]]
+id = "manual-join-in-app"
+label = "Related records are fetched separately and joined in application code"
+directive = "Fetch parents in one query, fetch all children in a second query, then iterate through parents and find their children from the in-memory children list."
+why = "Reduces queries to 2 instead of N+1; more complex code to join in memory. Acceptable as a middle ground if JOIN is not feasible in SQL."

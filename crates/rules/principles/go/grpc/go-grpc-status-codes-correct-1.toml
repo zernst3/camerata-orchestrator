@@ -1,0 +1,30 @@
+id = "GO-GRPC-STATUS-CODES-CORRECT-1"
+title = "gRPC status codes are used correctly: INTERNAL for unexpected errors, INVALID_ARGUMENT for validation failures, PERMISSION_DENIED for auth, NOT_FOUND for missing resources"
+tag = "stack"
+domain = "go:grpc"
+layer = "framework"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How should gRPC status codes be assigned to different error conditions?"
+default = "status-codes-semantically-correct"
+why = "gRPC status codes (codes.OK, codes.INVALID_ARGUMENT, codes.NOT_FOUND, codes.PERMISSION_DENIED, codes.INTERNAL, etc.) are the semantic layer of error communication; clients rely on them to determine whether an error is retriable, whether the user should re-authenticate, or whether the request was malformed. A client seeing INTERNAL retries with exponential backoff; a client seeing INVALID_ARGUMENT does not retry because the input is wrong. A handler that returns INTERNAL for a validation error (bad input) causes a client to retry when it should not. A handler that returns INVALID_ARGUMENT for an internal server error (database failure, network timeout) causes a client to treat a genuine transient failure as permanent input failure. The status code must match the nature of the error: missing resources are NOT_FOUND, permission failures are PERMISSION_DENIED, validation failures are INVALID_ARGUMENT, internal server faults are INTERNAL, request body parsing failures are INVALID_ARGUMENT, etc."
+
+[[option]]
+id = "status-codes-semantically-correct"
+label = "Status codes are assigned semantically: NOT_FOUND for missing resources, INVALID_ARGUMENT for validation, etc."
+directive = "Each RPC implementation maps domain and infrastructure errors to the correct gRPC status code. Validation errors are codes.InvalidArgument, missing resources are codes.NotFound, authentication failures are codes.Unauthenticated, permission failures are codes.PermissionDenied, transient infrastructure errors are codes.Internal or codes.Unavailable, input-parsing errors are codes.InvalidArgument. Status messages provide additional context (why the input was invalid, what was not found). A helper or middleware pattern ensures consistent error mapping across handlers."
+why = "The adopted default. Clients can rely on status codes for error handling logic; the semantic meaning enables proper retry strategies and error recovery."
+
+[[option]]
+id = "status-all-internal"
+label = "All errors are returned as INTERNAL"
+directive = "Every error, regardless of cause, is wrapped as a gRPC status.Internal. The error message contains the full detail."
+why = "Simplifies error handling in handlers; trades semantic error codes for a single catch-all. Clients cannot distinguish between validation failures and transient server faults."
+
+[[option]]
+id = "status-inconsistent"
+label = "Status codes are assigned inconsistently across handlers"
+directive = "Different handlers map similar errors to different status codes; the error code does not reliably indicate the error kind."
+why = "Common in transitional codebases; makes client-side error handling impossible."

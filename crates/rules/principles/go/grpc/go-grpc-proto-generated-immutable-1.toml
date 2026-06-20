@@ -1,0 +1,30 @@
+id = "GO-GRPC-PROTO-GENERATED-IMMUTABLE-1"
+title = "Proto-generated code is not hand-edited; changes flow through .proto definitions and code generation, never direct edits to generated files"
+tag = "stack"
+domain = "go:grpc"
+layer = "library"
+enforcement = "mechanical"
+default = true
+
+[decision]
+question = "How should proto-generated Go code be maintained?"
+default = "proto-generated-immutable"
+why = "The protoc compiler generates Go code from .proto definitions. Handwriting or editing the generated code defeats the generator: the next time protoc runs, it overwrites those edits. Edits to generated files silently vanish on the next code-generation run, leaving the codebase in an inconsistent state. The .proto file is the single source of truth for the message schema, service interface, and field names; all changes must be made there and regenerated. A CI step (or pre-commit hook) that runs protoc on .proto files and commits the generated code, or fails if the generated code is out of sync, prevents drift. Hand-edits to generated files are a code-smell that signals a missing .proto change or a failure to regenerate."
+
+[[option]]
+id = "proto-generated-immutable"
+label = "Generated code is immutable; changes flow through .proto → code generation"
+directive = "All proto-generated files (.pb.go, _grpc.pb.go) are treated as read-only build artifacts. Changes to the gRPC interface, message fields, or service methods are made in the .proto definition, then code is regenerated via `protoc`. CI or pre-commit checks ensure generated code is up-to-date; out-of-sync generated code is a build failure."
+why = "The adopted default. Generated code is a build artifact, not a maintained source file; the .proto definition is the source of truth."
+
+[[option]]
+id = "hand-edited-generated"
+label = "Generated code is hand-edited to add helper methods or tweak types"
+directive = "Developers edit .pb.go or _grpc.pb.go directly to add helper methods, change field names, or adjust types beyond what .proto supports."
+why = "Trades single-source-of-truth for post-generation customization; high risk of accidental overwrites when protoc is re-run, and makes the codebase hard to maintain."
+
+[[option]]
+id = "mixed-proto-and-hand-code"
+label = "Some proto definitions are used; other message/service code is written by hand"
+directive = "Part of the interface uses .proto with code generation; other parts are hand-written Go types and stubs."
+why = "Inconsistent and confusing; makes it unclear which parts are generated and which are manual, and breaks the gRPC toolchain's assumptions."

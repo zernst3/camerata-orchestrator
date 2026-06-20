@@ -1,0 +1,30 @@
+id = "GO-WEB-THIN-HANDLERS-DELEGATION-1"
+title = "Handlers bind input, call a service, and format output; business logic is delegated to services, not implemented in handlers"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What role should HTTP handlers play relative to business logic and data access?"
+default = "thin-handlers-service-delegation"
+why = "An HTTP handler has three narrow jobs: bind and validate the request, call the appropriate service method, and format the response. A handler that implements business logic or accesses the database directly couples that logic to HTTP and makes it untestable without an HTTP setup, unmockable for other callers (CLI, background jobs, other services), and expensive to change because the coupling spans presentation and domain. A service layer (or application layer) houses the business logic, receives already-validated domain objects, orchestrates data access via repositories, and returns domain objects. A handler calls the service with the validated input, catches errors, and formats them as HTTP responses; the same service is called by a CLI command or a background job without any HTTP-specific code. This layering also makes it testable: service tests mock repositories and run fast, without HTTP server setup."
+
+[[option]]
+id = "thin-handlers-service-delegation"
+label = "Handlers are thin; business logic and queries live in services and repositories"
+directive = "An HTTP handler is a wrapper around a service call: it binds request input to a DTO, calls a service method with the DTO, and formats the response. The handler does not contain if-statements for business logic, does not call the database directly, and does not orchestrate multiple steps. All multi-step workflows, permission checks, and data transformations are in the service or repository layer. A handler error-path simply formats the service's returned error as an HTTP response."
+why = "The adopted default. Handlers are narrow adapters that translate HTTP to the service layer; business logic lives where it can be tested and reused across interfaces."
+
+[[option]]
+id = "fat-handlers"
+label = "Handlers contain business logic, permission checks, and data access"
+directive = "HTTP handlers directly call the database, implement business logic and permission checks, and orchestrate multi-step workflows; there is no intervening service layer or the service layer is thin."
+why = "Collocates all the code for a handler in one place, reducing indirection; trades reusability and testability for simplicity in small applications."
+
+[[option]]
+id = "handler-service-boundary-blur"
+label = "Boundaries are unclear; some logic is in handlers, some in services"
+directive = "Services exist, but handlers also implement some business logic or call the database directly; the division of responsibility is inconsistent across routes."
+why = "Common in transitional codebases; introduces confusion and duplicated logic patterns across handlers and services."

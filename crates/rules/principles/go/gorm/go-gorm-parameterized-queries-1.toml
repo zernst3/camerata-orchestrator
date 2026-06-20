@@ -1,0 +1,30 @@
+id = "GO-GORM-PARAMETERIZED-QUERIES-1"
+title = "All SQL queries use parameterized arguments, never string interpolation or fmt.Sprintf; GORM query builder is preferred over raw SQL"
+tag = "stack"
+domain = "go:gorm"
+layer = "library"
+enforcement = "mechanical"
+default = true
+
+[decision]
+question = "How should variables be included in SQL queries?"
+default = "parameterized-queries"
+why = "SQL injection is a critical vulnerability: a query built by concatenating strings or using fmt.Sprintf with user input allows an attacker to inject SQL that alters the query logic. GORM's query builder (db.Where(...), db.Order(...)) automatically parameterizes arguments and escapes strings. Raw SQL queries also support parameterization: db.Raw(\"SELECT * FROM users WHERE id = ?\", userID) uses ?-placeholders for parameters, and GORM passes userID separately so it cannot be interpreted as SQL syntax. A raw query built with fmt.Sprintf(\"SELECT * FROM users WHERE id = %d\", userID) is vulnerable if userID is attacker-controlled. The GORM query builder is preferred because it is harder to misuse; parameterized raw SQL is acceptable when the builder cannot express the query, but requires careful review. Queries must be audited: a string that contains user input and is interpolated into SQL is a red flag, even if the specific case seems safe."
+
+[[option]]
+id = "parameterized-queries"
+label = "Parameterized queries: builder preferred, raw SQL with ? placeholders acceptable"
+directive = "The codebase uses GORM's query builder (db.Where(\"age > ?\", 30).Find(&users)) for queries the builder can express. When raw SQL is necessary, it uses parameterized placeholders (db.Raw(\"SELECT * FROM users WHERE age > ?\", 30).Scan(&users)). User input, request parameters, and any untrusted values are always passed as parameters, never interpolated into the SQL string. A linting rule or code review practice flags fmt.Sprintf in query contexts as a violation."
+why = "The adopted default. Parameterized queries prevent SQL injection; the query builder is the idiomatic first choice, raw SQL with parameters is acceptable as a fallback."
+
+[[option]]
+id = "string-interpolation"
+label = "Queries are built by string concatenation or fmt.Sprintf"
+directive = "Handlers or repositories build SQL queries by concatenating strings or using fmt.Sprintf with variables, e.g., fmt.Sprintf(\"SELECT * FROM users WHERE name = '%s'\", userName)."
+why = "Easy to code for simple cases; high risk of SQL injection if any input is user-controlled or untrusted. Often undetectable until an attacker exploits it."
+
+[[option]]
+id = "builder-no-raw-sql"
+label = "Only the GORM query builder is used; raw SQL is forbidden entirely"
+directive = "All queries must use db.Where(...), db.Select(...), etc.; raw SQL is not permitted."
+why = "Strongest safety guarantee; trades flexibility for security. Some queries the builder cannot express require redesign."

@@ -1,0 +1,30 @@
+id = "GO-WEB-GRACEFUL-SHUTDOWN-1"
+title = "Server shutdown is graceful: in-flight requests are allowed to complete; new requests are rejected after shutdown is signaled"
+tag = "stack"
+domain = "go:web"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How should the HTTP server handle shutdown when a stop signal (SIGTERM, interrupt) is received?"
+default = "graceful-shutdown-with-timeout"
+why = "A server that stops abruptly mid-request corrupts in-flight transactions, leaves database connections dangling, and breaks clients. Go's *http.Server provides Shutdown(ctx) which stops accepting new connections and waits for in-flight requests to complete before closing listeners. A context deadline ensures the wait does not hang forever if a request is stuck. A graceful shutdown—wait for in-flight requests with a timeout, then force-close—gives requests a chance to finish cleanly while ensuring the process eventually terminates. The alternative, immediate termination (os.Exit, return from main), is a deadlock and data-corruption risk."
+
+[[option]]
+id = "graceful-shutdown-with-timeout"
+label = "Graceful shutdown: wait for in-flight requests with a deadline, then force-close"
+directive = "The application sets up a signal handler (SIGTERM, SIGINT) that calls server.Shutdown(context.WithTimeout(context.Background(), 30*time.Second)). This stops accepting new connections and waits up to 30 seconds for in-flight requests to complete. If the context deadline is exceeded, Shutdown returns and the server is closed forcefully. The main function waits for Shutdown to return before exiting, ensuring all in-flight work is given a chance to complete."
+why = "The adopted default. Graceful shutdown ensures in-flight requests complete, database transactions finish, and the process terminates cleanly; the deadline prevents indefinite hangs."
+
+[[option]]
+id = "immediate-termination"
+label = "Server terminates immediately on signal"
+directive = "The application ignores shutdown signals or calls os.Exit immediately upon receiving them, terminating all in-flight requests and goroutines."
+why = "Simplicity; trades request consistency and clean shutdown for speed. In-flight requests are interrupted mid-operation, potentially leaving partial transactions and resource leaks."
+
+[[option]]
+id = "shutdown-no-timeout"
+label = "Graceful shutdown without a deadline; waits indefinitely for requests to complete"
+directive = "Shutdown is called without a context deadline; the server waits for all in-flight requests to complete, no matter how long it takes."
+why = "Ensures all requests complete; risks indefinite hangs if a request is stuck or loops endlessly."
