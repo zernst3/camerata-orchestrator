@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is inbound request data validated and typed before use in Flask route handlers?"
@@ -28,3 +29,7 @@ id = "no-validation-trust-client"
 label = "pass request data directly to the model or database layer without validation"
 directive = "Route handlers pass `request.json` or individual fields directly to model constructors or service functions on the assumption the client sent the correct shape."
 why = "Every field is user-controlled; missing fields become None or raise KeyError, wrong types reach the database layer, and extra fields may overwrite unexpected columns."
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/api/#flask.Request.json"
+title = "Flask docs — Request.json (raw untrusted client data)"

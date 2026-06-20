@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is a Flask application instantiated and how are its routes organized?"
@@ -28,3 +29,11 @@ id = "flask-class-based-views-only"
 label = "use Flask's MethodView for all routes, no Blueprints"
 directive = "Routes are defined as MethodView subclasses registered on the global app; no blueprints are used."
 why = "MethodView is a valid pattern for resource-oriented endpoints but does not address the global-app testing or circular-import problems that blueprints solve."
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/patterns/appfactories/"
+title = "Flask docs — Application Factories (create_app pattern, testing with multiple instances)"
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/blueprints/"
+title = "Flask docs — Modular Applications with Blueprints"

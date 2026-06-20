@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) scanning for f-strings, `%`-formatting, `.format()`, or string concatenation feeding a value into `.raw(...)`, `.extra(...)`, or `cursor.execute(...)`. Conformance holds when the CI gate runs and any parameterized-via-interpolation SQL site fails; it fails when no SQL-injection lint covers Django-specific raw query APIs."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values placed into Django database queries, including raw and extra queries?"
@@ -29,3 +30,17 @@ id = "extra-method"
 label = "use .extra() for complex filtering"
 directive = "Complex queries use `.extra(where=[...])` with values interpolated into the where strings."
 why = "Deprecated since Django 3.2 and injection-prone; replaced by `RawSQL`, `Window`, and other ORM constructs for complex cases."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/topics/db/sql/"
+title = "Django docs — Performing raw SQL queries (params argument, cursor.execute parameterization)"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
+title = "Ruff S608 — hardcoded-sql-expression"
+linter = "Ruff: S608"
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
+title = "Bandit B608 — hardcoded_sql_expressions"
+linter = "Bandit: B608"

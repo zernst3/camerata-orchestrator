@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a static type checker (mypy or pyright) configured at error severity in CI, with a coverage floor that fails when a public function signature is missing parameter or return annotations. Conformance holds when the type checker runs in CI in a strict-enough mode that an untyped public def fails the build; it fails when no type checker runs or it only warns."
+verification = "grounded"
 
 [decision]
 question = "Do public functions and methods carry type hints, checked by a static type checker in CI?"
@@ -29,3 +30,17 @@ id = "no-type-hints"
 label = "omit type hints and rely on runtime behavior"
 directive = "Functions are written without type annotations, and type correctness is verified only by tests and at runtime."
 why = "Keeps the source terser but forfeits every static guarantee and pushes type errors to runtime, often in production."
+
+[[sources]]
+url = "https://peps.python.org/pep-0484/"
+title = "PEP 484 — Type Hints"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/missing-type-function-argument/"
+title = "Ruff ANN001 — missing-type-function-argument"
+linter = "Ruff: ANN001"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/missing-return-type-undocumented-public-function/"
+title = "Ruff ANN201 — missing-return-type-undocumented-public-function"
+linter = "Ruff: ANN201"

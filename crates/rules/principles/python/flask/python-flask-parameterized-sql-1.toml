@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()`, or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()`, or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values placed into database queries in a Flask + SQLAlchemy application?"
@@ -29,3 +30,13 @@ id = "stored-procedures-only"
 label = "move all parameterized logic into database stored procedures"
 directive = "Business logic involving dynamic SQL is pushed into stored procedures called from Python with only scalar arguments."
 why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex, and removes Python-level testability."
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
+title = "Ruff S608 — hardcoded-sql-expression"
+linter = "Ruff: S608"
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
+title = "Bandit B608 — hardcoded_sql_expressions"
+linter = "Bandit: B608"

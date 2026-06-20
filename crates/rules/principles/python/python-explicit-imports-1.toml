@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "prose"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are imports and module boundaries managed?"
@@ -22,3 +23,12 @@ id = "permissive-imports"
 label = "allow wildcard imports and implicit surface"
 directive = "Wildcard imports are permitted and modules expose whatever is defined at the top level as their de facto public surface."
 why = "Convenient but obscures where names come from, defeats static tooling, and lets new exports silently shadow local names."
+
+[[sources]]
+url = "https://peps.python.org/pep-0008/#imports"
+title = "PEP 8 — Imports (wildcard imports should be avoided)"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/undefined-local-with-import-star/"
+title = "Ruff F403 — undefined-local-with-import-star (wildcard import)"
+linter = "Ruff: F403"

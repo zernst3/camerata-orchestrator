@@ -5,6 +5,7 @@ domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How do FastAPI path operations obtain a database session?"
@@ -28,3 +29,7 @@ id = "global-session"
 label = "share a module-level global session"
 directive = "A single module-level session object is shared across requests and imported wherever a session is needed."
 why = "Sessions are not safe to share across concurrent requests; a global session produces cross-request data corruption under load."
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/sql-databases/"
+title = "FastAPI Tutorial — SQL Databases (per-request session via Depends yield)"

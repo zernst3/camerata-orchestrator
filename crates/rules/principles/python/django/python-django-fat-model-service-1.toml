@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does business logic live in a Django application: in views, in model methods, or in a separate service layer?"
@@ -28,3 +29,7 @@ id = "fat-serializers"
 label = "push business logic into DRF serializer create/update methods"
 directive = "Business rules for create and update operations live in `Serializer.create()` and `Serializer.update()` methods of Django REST Framework serializers."
 why = "A common but problematic pattern: serializers are validation + serialization adapters, not a business logic layer; pushing orchestration into them creates the same testability and reuse problem as fat views."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
+title = "Django Design Philosophies — Models include domain logic; views are simple"

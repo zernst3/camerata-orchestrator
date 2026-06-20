@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does business logic live relative to web views and route handlers?"
@@ -22,3 +23,7 @@ id = "logic-in-views"
 label = "put business logic directly in views/handlers"
 directive = "Business rules and persistence orchestration are written inside view functions or route handlers alongside the HTTP handling."
 why = "Ties the logic to the request cycle: it cannot be reused outside HTTP or unit-tested without the web stack, and rules get duplicated across endpoints."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/misc/design-philosophies/"
+title = "Django Design Philosophies — Simplicity; models contain domain logic"

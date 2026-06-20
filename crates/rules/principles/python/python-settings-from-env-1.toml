@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does the application read its configuration and secrets from?"
@@ -28,3 +29,13 @@ id = "hardcoded-config"
 label = "hardcode configuration and secrets in source"
 directive = "Configuration values and secrets are written directly into Python source or committed config modules."
 why = "Both a security leak (secrets in VCS history) and operationally rigid (rotation or env changes require a code edit and redeploy)."
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
+title = "Bandit B105 — hardcoded_password_string (CWE-259)"
+linter = "Bandit: B105"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-password-default/"
+title = "Ruff S107 — hardcoded-password-default"
+linter = "Ruff: S107"

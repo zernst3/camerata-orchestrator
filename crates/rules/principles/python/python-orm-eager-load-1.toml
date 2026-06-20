@@ -3,9 +3,10 @@ title = "ORM relationships accessed in loops are eager-loaded; no N+1"
 tag = "stack"
 domain = "python"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
 qualifies = "Prose check: a query-count assertion exercises each list-returning code path and fails when round-trips grow with result-set size. The realistic mechanism for SQLAlchemy is a per-test query counter (an `after_cursor_execute` event listener counting statements, or a strict-loading / `raiseload` mode that raises on lazy access) plus review for relationship access inside a loop. Conformance holds when such a query-count guard runs in CI and a lazy-loaded relationship accessed in a loop fails it; it fails when no per-path query-count check exists and N+1 patterns merge unnoticed."
+verification = "grounded"
 
 [decision]
 question = "How are related ORM rows loaded when iterating a result set?"
@@ -23,3 +24,7 @@ id = "lazy-load-default"
 label = "rely on lazy loading and per-item relationship access"
 directive = "Relationships keep the default lazy-load behavior, and code accesses related rows per item inside loops as needed."
 why = "Simpler at the call site but reintroduces N+1: one query per item, fine in tests, orders of magnitude slower in production."
+
+[[sources]]
+url = "https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html"
+title = "SQLAlchemy — Relationship Loading Techniques (selectinload, joinedload, N+1 problem)"

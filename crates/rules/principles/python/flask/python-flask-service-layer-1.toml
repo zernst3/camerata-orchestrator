@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does business logic live in a Flask application: in route handlers or in a service layer?"
@@ -28,3 +29,7 @@ id = "logic-in-models"
 label = "push all logic into SQLAlchemy model class methods"
 directive = "Business rules live as SQLAlchemy model class methods; route handlers call model methods directly."
 why = "Acceptable for single-model operations but creates God-object models when cross-model orchestration is pushed into one model's methods."
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/patterns/appfactories/"
+title = "Flask docs — Application Factories (separating concerns, testability)"

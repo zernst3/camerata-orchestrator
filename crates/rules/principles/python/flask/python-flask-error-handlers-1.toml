@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are exceptions and error conditions translated into HTTP responses in a Flask application?"
@@ -28,3 +29,7 @@ id = "flask-default-error-pages"
 label = "rely on Flask's default error pages for all unhandled exceptions"
 directive = "No error handlers are registered; Flask's default HTML error pages (404 page, 500 page) handle all exceptions."
 why = "Returns HTML to clients expecting JSON; leaks stack traces in debug mode; provides no structured error information for API clients."
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/errorhandling/"
+title = "Flask docs — Handling Application Errors (errorhandler decorator, Blueprint error handlers)"
