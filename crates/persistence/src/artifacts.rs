@@ -85,6 +85,18 @@ pub enum ArtifactKind {
     Suggestion,
     /// A refinement session transcript or summary.
     RefinementSession,
+    /// A structured decision record surfaced during a story's investigation
+    /// phase (the dev-side decision the architect approves/rejects before any
+    /// code is written). Migrated here from the inline-on-the-UoW home so the
+    /// per-story decision history is queryable, versioned, and provenance-tracked
+    /// like every other living document. The `payload` is a JSON snapshot of a
+    /// `camerata_worktracker::investigation::DecisionRecord`.
+    DecisionRecord,
+    /// An investigation note authored by the AI agent during the investigation
+    /// phase (what it found, the ambiguities, the intended scope). One per story.
+    /// The `payload` is a JSON snapshot of a
+    /// `camerata_worktracker::investigation::InvestigationArtifact`.
+    InvestigationNote,
 }
 
 impl ArtifactKind {
@@ -96,6 +108,8 @@ impl ArtifactKind {
             ArtifactKind::Clarification => "clarification",
             ArtifactKind::Suggestion => "suggestion",
             ArtifactKind::RefinementSession => "refinement_session",
+            ArtifactKind::DecisionRecord => "decision_record",
+            ArtifactKind::InvestigationNote => "investigation_note",
         }
     }
 
@@ -107,6 +121,8 @@ impl ArtifactKind {
             "clarification" => Some(ArtifactKind::Clarification),
             "suggestion" => Some(ArtifactKind::Suggestion),
             "refinement_session" => Some(ArtifactKind::RefinementSession),
+            "decision_record" => Some(ArtifactKind::DecisionRecord),
+            "investigation_note" => Some(ArtifactKind::InvestigationNote),
             _ => None,
         }
     }
@@ -1088,11 +1104,29 @@ mod tests {
             ArtifactKind::Clarification,
             ArtifactKind::Suggestion,
             ArtifactKind::RefinementSession,
+            ArtifactKind::DecisionRecord,
+            ArtifactKind::InvestigationNote,
         ] {
             let s = kind.as_str();
             let parsed = ArtifactKind::parse_str(s).expect("ArtifactKind round-trip");
             assert_eq!(parsed, kind, "ArtifactKind::{s}");
         }
+
+        // Explicit wire-format assertions for the two ROUTE-A additions so an
+        // accidental rename of the stored string is caught.
+        assert_eq!(ArtifactKind::DecisionRecord.as_str(), "decision_record");
+        assert_eq!(
+            ArtifactKind::InvestigationNote.as_str(),
+            "investigation_note"
+        );
+        assert_eq!(
+            ArtifactKind::parse_str("decision_record"),
+            Some(ArtifactKind::DecisionRecord)
+        );
+        assert_eq!(
+            ArtifactKind::parse_str("investigation_note"),
+            Some(ArtifactKind::InvestigationNote)
+        );
 
         // EditActor
         for actor in [EditActor::User, EditActor::Ai] {

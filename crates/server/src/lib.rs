@@ -90,6 +90,13 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// The central, version-tracked SQLite artifact store (ROUTE-A). Backs the per-story
+    /// decision-record + investigation-note history that used to live inline on the UoW.
+    /// `None` until a data-dir-backed store is opened in [`AppState::from_env`]; tests
+    /// run without it (the UoW falls back to inline decisions). Held here so future
+    /// callers (queryable history endpoints) can reach the same store the UoW writes to.
+    #[allow(dead_code)]
+    artifacts: Option<Arc<dyn camerata_persistence::ArtifactStore>>,
 }
 
 impl AppState {
@@ -112,6 +119,7 @@ impl AppState {
             uow: crate::uow::UowStore::new(),
             escalations: crate::escalation::EscalationStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            artifacts: None,
         }
     }
 
@@ -143,6 +151,21 @@ impl AppState {
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+            // Central artifact store (ROUTE-A): per-story decision records + investigation
+            // notes are versioned here. Opened on the same data dir as the other stores.
+            // Best-effort: if the store can't be opened (no runtime handle, or sqlx error),
+            // the UoW keeps its inline-decisions behaviour so the app still runs.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let db_path = dir.join("artifacts.db");
+                let opened = tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::SqliteStore::open_path(&db_path))
+                });
+                if let Ok(store) = opened {
+                    let store: Arc<dyn camerata_persistence::ArtifactStore> = Arc::new(store);
+                    state.artifacts = Some(store.clone());
+                    state.uow = state.uow.with_artifacts(store);
+                }
+            }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
             state.routines = RoutineStore::at(dir.join("routines.json"));
