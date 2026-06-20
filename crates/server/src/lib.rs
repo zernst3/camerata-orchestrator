@@ -2245,18 +2245,49 @@ async fn chat_escalation(
         .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))
 }
 
-/// Resolve an escalation with the human's answer; the answer is translated into a resume
-/// directive and stored on the (now resolved) escalation.
+/// Resolve an escalation with the human's answer. The answer is run through the
+/// AI-translation step (issue #43) — the lead-engineer agent restates it as a precise,
+/// structured resume payload on the model the caller selects — and stored on the (now
+/// resolved) escalation. On any model failure it falls back to the deterministic scaffold,
+/// so resolving never dead-ends. The blocked routine is returned to `Idle` so its next slot
+/// can run.
 async fn answer_escalation(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<crate::escalation::AnswerEscalationReq>,
 ) -> Result<Json<crate::escalation::Escalation>, AppError> {
-    state
+    let esc = state
         .escalations
-        .resolve(&id, &req.answer)
-        .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))
+        .get(&id)
+        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+    if esc.status != crate::escalation::EscalationStatus::Open {
+        return Err(AppError(anyhow::anyhow!("no open escalation: {id}")));
+    }
+    // Translate the human answer into a structured resume payload via the real LLM seam
+    // (model-selectable, with a deterministic fallback inside translate_answer_ai).
+    let driver = crate::escalation::LlmTranslator {
+        llm: crate::llm::Llm::from_env(),
+    };
+    let model = state
+        .routines
+        .list()
+        .into_iter()
+        .find(|r| r.id == esc.routine_id)
+        .map(|r| r.model)
+        .unwrap_or_default();
+    let payload =
+        crate::escalation::translate_answer_ai(&driver, &esc, &req.answer, &model).await;
+    let resolved = state
+        .escalations
+        .resolve_with_payload(&id, &req.answer, &payload)
+        .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))?;
+    // The block is cleared: return the routine to Idle so the scheduler can run its next
+    // slot (the directive is recorded on the resolved escalation for the resumed run to
+    // consult).
+    let _ = state
+        .routines
+        .set_status(&resolved.routine_id, crate::routine::RoutineStatus::Idle);
+    Ok(Json(resolved))
 }
 
 /// Edit an existing routine (name / schedule / intent / prompt / scope).

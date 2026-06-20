@@ -65,6 +65,12 @@ pub struct Escalation {
     /// The human answer translated into a resume directive for the routine.
     #[serde(default)]
     pub translated_directive: Option<String>,
+    /// The STRUCTURED resume payload the AI-translation step produced (issue #43): the
+    /// precise shape a routine resume consumes. `translated_directive` is its rendered
+    /// human-readable text; this is the machine-usable record. `None` for escalations
+    /// resolved before this field existed.
+    #[serde(default)]
+    pub resume_payload: Option<ResumePayload>,
     pub created: String,
     #[serde(default)]
     pub resolved: Option<String>,
@@ -94,30 +100,210 @@ pub struct AnswerEscalationReq {
     pub answer: String,
 }
 
-/// Turn a human's plain-language answer into a precise resume directive for the routine.
+/// The structured resume payload a routine needs to continue: the AI-translation step's
+/// OUTPUT (issue #43). A human's plain-language answer is messy; a routine resume wants
+/// something precise. This is that precise shape — the decision restated, the concrete
+/// directive the agent should act on, and a confidence/needs-reescalation flag so an
+/// ambiguous answer doesn't get applied blindly.
 ///
-/// This is the deterministic scaffold: it restates the decision in the structured form a
-/// routine resume expects, so the loop works offline and the human always sees what will
-/// be handed back. When Claude is connected, the lead-engineer agent authors this for
-/// real (the prompt + the translator agent's scope is the design fork flagged in #43).
-/// Returns `(directive, authored_by)` where `authored_by` is `"scaffold"` today.
-pub fn translate_answer(esc: &Escalation, answer: &str) -> (String, String) {
-    let directive = format!(
-        "Resume directive for routine \"{name}\" (escalation {id}).\n\n\
-         Human decision:\n{answer}\n\n\
-         This resolves the block:\n- Stopped for: {stopped_for}\n- Reason: {reason}\n\n\
-         Apply the decision above and continue the routine under its existing governance \
-         scope. If the decision is ambiguous or conflicts with a rule, stop and escalate \
-         again rather than guessing.\n\n\
-         [Translated by scaffold — connect Claude so the lead-engineer agent restates the \
-         decision as a precise, rule-checked resume directive.]",
+/// It is `Serialize`/`Deserialize` so the translator can return it as JSON (the model is
+/// asked for exactly these fields) and so it travels over the API on the resolved
+/// escalation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResumePayload {
+    /// The human's decision restated crisply (one line where possible).
+    pub decision: String,
+    /// The concrete directive the routine should act on to continue.
+    pub directive: String,
+    /// True when the answer was clear enough to apply; false means the routine should
+    /// re-escalate rather than guess.
+    pub confident: bool,
+    /// How it was produced: `"claude"` (the lead-engineer agent authored it), `"echo"`
+    /// (a test/offline driver), or `"scaffold"` (the deterministic fallback).
+    pub authored_by: String,
+}
+
+impl ResumePayload {
+    /// Render the payload as the human-readable resume directive stored on the escalation
+    /// (back-compat with the existing `translated_directive` string the UI shows).
+    pub fn to_directive_text(&self) -> String {
+        let confidence = if self.confident {
+            "Confident: apply and continue."
+        } else {
+            "LOW CONFIDENCE: the decision is ambiguous — re-escalate rather than guessing."
+        };
+        format!(
+            "Decision: {decision}\n\nResume directive:\n{directive}\n\n{confidence}\n\n\
+             [Translated by {by}.]",
+            decision = self.decision,
+            directive = self.directive,
+            confidence = confidence,
+            by = self.authored_by,
+        )
+    }
+}
+
+/// A driver that turns the translation prompt into a model completion. Abstracted so the
+/// AI-translation step can be unit-tested with a FAKE/echo driver (no live model call),
+/// while production uses the real [`crate::llm::Llm`] via [`LlmTranslator`].
+///
+/// Kept inside the server crate (no cross-crate trait surface added — ROUTE-1 safe).
+#[async_trait::async_trait]
+pub trait TranslationDriver: Send + Sync {
+    /// Complete `prompt` (with `system` grounding) on `model`. Returns the raw model text
+    /// (expected to be the JSON of a [`ResumePayload`], but the parser is lenient).
+    async fn complete(&self, system: &str, prompt: &str, model: &str) -> anyhow::Result<String>;
+}
+
+/// Production driver: the real LLM seam. Thin wrapper so the handler can pass a
+/// `&dyn TranslationDriver` and tests can swap in a fake.
+pub struct LlmTranslator {
+    pub llm: crate::llm::Llm,
+}
+
+#[async_trait::async_trait]
+impl TranslationDriver for LlmTranslator {
+    async fn complete(&self, system: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
+        let req = crate::llm::LlmRequest::new(prompt)
+            .with_system(system)
+            .with_model(model);
+        let resp = self.llm.complete(req).await?;
+        Ok(resp.text)
+    }
+}
+
+/// System grounding for the translator agent: it restates a human decision as a precise,
+/// rule-checked resume payload — it does NOT make the decision or take action.
+pub fn translate_system_prompt() -> String {
+    "You are Camerata's lead engineer translating a human's plain-language decision into a \
+     PRECISE resume directive for a blocked, governed routine. You do NOT make the decision \
+     or change it — you restate exactly what the human authorized as something the routine \
+     can act on. Return ONLY a JSON object with these fields and nothing else: \
+     {\"decision\": string (the human's decision, restated crisply), \
+     \"directive\": string (the concrete action the routine should take to continue, under \
+     its existing governance scope), \
+     \"confident\": boolean (true only if the answer is clear enough to apply; false if it \
+     is ambiguous or conflicts with the stated reason — in which case the routine should \
+     re-escalate rather than guess)}. No prose, no markdown fences."
+        .to_string()
+}
+
+/// Build the translation prompt: the escalation context + the human's raw answer.
+pub fn translate_user_prompt(esc: &Escalation, answer: &str) -> String {
+    let suggestions = if esc.suggestions.is_empty() {
+        "(none offered)".to_string()
+    } else {
+        esc.suggestions
+            .iter()
+            .map(|s| format!("- {s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "Routine: {name}\n\
+         Why it stopped: {reason}\n\
+         Decision needed: {stopped_for}\n\
+         Options the routine proposed:\n{suggestions}\n\
+         Additional context: {raw}\n\n\
+         The human's plain-language decision:\n{answer}\n\n\
+         Translate this into the JSON resume payload.",
         name = esc.routine_name,
-        id = esc.id,
-        answer = answer.trim(),
-        stopped_for = esc.stopped_for,
         reason = esc.reason,
-    );
-    (directive, "scaffold".to_string())
+        stopped_for = esc.stopped_for,
+        suggestions = suggestions,
+        raw = if esc.raw_context.is_empty() { "(none)" } else { esc.raw_context.as_str() },
+        answer = answer.trim(),
+    )
+}
+
+/// Parse a translator's raw text into a [`ResumePayload`]. Lenient: accepts a bare JSON
+/// object or one wrapped in ```json fences, and tolerates a missing `confident` (defaults
+/// to true) so a terse model reply still yields a usable payload. Returns `None` when the
+/// text isn't usable JSON — the caller then falls back to the deterministic scaffold.
+pub fn parse_resume_payload(text: &str, authored_by: &str) -> Option<ResumePayload> {
+    let trimmed = strip_code_fences(text.trim());
+    // Find the first {...} span so leading/trailing prose doesn't defeat parsing.
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let json = &trimmed[start..=end];
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let decision = v["decision"].as_str()?.trim().to_string();
+    let directive = v["directive"].as_str()?.trim().to_string();
+    if decision.is_empty() || directive.is_empty() {
+        return None;
+    }
+    // A missing `confident` defaults to true (the model gave a directive; treat as usable).
+    let confident = v["confident"].as_bool().unwrap_or(true);
+    Some(ResumePayload {
+        decision,
+        directive,
+        confident,
+        authored_by: authored_by.to_string(),
+    })
+}
+
+/// Strip a leading/trailing ``` or ```json fence if present, so a fenced JSON reply parses.
+fn strip_code_fences(s: &str) -> &str {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```"))
+        .unwrap_or(s);
+    s.strip_suffix("```").unwrap_or(s).trim()
+}
+
+/// The deterministic scaffold payload: used offline and as the fallback when the translator
+/// is unreachable or returns unusable text. It restates the decision verbatim so the loop
+/// always works and the human always sees what will be handed back.
+pub fn scaffold_resume_payload(esc: &Escalation, answer: &str) -> ResumePayload {
+    ResumePayload {
+        decision: answer.trim().to_string(),
+        directive: format!(
+            "Apply the human decision above to routine \"{name}\" and continue under its \
+             existing governance scope. Stopped for: {stopped_for}. If the decision is \
+             ambiguous or conflicts with a rule, stop and escalate again rather than \
+             guessing.",
+            name = esc.routine_name,
+            stopped_for = esc.stopped_for,
+        ),
+        confident: !answer.trim().is_empty(),
+        authored_by: "scaffold".to_string(),
+    }
+}
+
+/// Turn a human's plain-language answer into a precise resume directive for the routine —
+/// the AI-translation step (issue #43), routed through a [`TranslationDriver`] so it's
+/// unit-testable with a fake/echo driver and runs on the model the caller selects.
+///
+/// On any failure (driver error, empty/unparseable reply) it falls back to the deterministic
+/// [`scaffold_resume_payload`], so resolving an escalation NEVER dead-ends. Returns the
+/// structured [`ResumePayload`]; call [`ResumePayload::to_directive_text`] for the string the
+/// UI shows.
+pub async fn translate_answer_ai(
+    driver: &dyn TranslationDriver,
+    esc: &Escalation,
+    answer: &str,
+    model: &str,
+) -> ResumePayload {
+    let system = translate_system_prompt();
+    let user = translate_user_prompt(esc, answer);
+    match driver.complete(&system, &user, model).await {
+        Ok(text) => parse_resume_payload(&text, "claude")
+            .unwrap_or_else(|| scaffold_resume_payload(esc, answer)),
+        Err(_) => scaffold_resume_payload(esc, answer),
+    }
+}
+
+/// Deterministic translation (no model call): restate the decision in the structured form a
+/// routine resume expects, so the loop works offline and synchronously. Returns
+/// `(directive_text, authored_by)`. The [`EscalationStore::resolve`] path uses this; the
+/// HTTP handler uses [`translate_answer_ai`] for the AI-authored version.
+pub fn translate_answer(esc: &Escalation, answer: &str) -> (String, String) {
+    let payload = scaffold_resume_payload(esc, answer);
+    (payload.to_directive_text(), payload.authored_by)
 }
 
 /// System grounding for the lead-engineer review agent. It must HELP the human understand
@@ -330,6 +516,7 @@ impl EscalationStore {
             status: EscalationStatus::Open,
             human_answer: None,
             translated_directive: None,
+            resume_payload: None,
             created: Self::now_rfc3339(),
             resolved: None,
             conversation: Vec::new(),
@@ -351,16 +538,36 @@ impl EscalationStore {
         self.raise(req, routine_name)
     }
 
-    /// Resolve an escalation with the human answer + its translated directive. Returns the
-    /// updated escalation, or `None` if the id is unknown or already resolved.
+    /// Resolve an escalation with the human answer, translating it with the DETERMINISTIC
+    /// scaffold (no model call). Returns the updated escalation, or `None` if the id is
+    /// unknown or already resolved. The HTTP handler prefers [`resolve_with_payload`] so the
+    /// AI-authored translation is stored; this stays for the offline/synchronous path.
     pub fn resolve(&self, id: &str, answer: &str) -> Option<Escalation> {
+        let payload = {
+            let guard = self.items.lock().ok()?;
+            let e = guard.iter().find(|e| e.id == id && e.status == EscalationStatus::Open)?;
+            scaffold_resume_payload(e, answer)
+        };
+        self.resolve_with_payload(id, answer, &payload)
+    }
+
+    /// Resolve an escalation with the human answer + an already-translated [`ResumePayload`]
+    /// (e.g. the AI-authored one from [`translate_answer_ai`]). Stores both the rendered
+    /// directive text (for the UI) and the structured payload. Returns the updated
+    /// escalation, or `None` if the id is unknown or already resolved.
+    pub fn resolve_with_payload(
+        &self,
+        id: &str,
+        answer: &str,
+        payload: &ResumePayload,
+    ) -> Option<Escalation> {
         let mut guard = self.items.lock().ok()?;
         let e = guard
             .iter_mut()
             .find(|e| e.id == id && e.status == EscalationStatus::Open)?;
-        let (directive, _authored_by) = translate_answer(e, answer);
         e.human_answer = Some(answer.to_string());
-        e.translated_directive = Some(directive);
+        e.translated_directive = Some(payload.to_directive_text());
+        e.resume_payload = Some(payload.clone());
         e.status = EscalationStatus::Resolved;
         e.resolved = Some(Self::now_rfc3339());
         let updated = e.clone();
@@ -427,5 +634,125 @@ mod tests {
         assert_eq!(r.routine_id, routine.id);
         assert!(r.reason.contains('2'));
         assert_eq!(r.suggestions.len(), 3);
+    }
+
+    // ── AI-translation step (fake/echo drivers; never a live model call) ──────────────
+
+    /// A driver that returns whatever JSON it was constructed with — so the parser +
+    /// shaper can be tested deterministically without touching a real model.
+    struct CannedDriver(String);
+
+    #[async_trait::async_trait]
+    impl TranslationDriver for CannedDriver {
+        async fn complete(&self, _system: &str, _prompt: &str, _model: &str) -> anyhow::Result<String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A driver that ECHOES the prompt back (NOT valid JSON), proving the fallback path:
+    /// an unusable reply yields the deterministic scaffold rather than dead-ending.
+    struct EchoDriver;
+
+    #[async_trait::async_trait]
+    impl TranslationDriver for EchoDriver {
+        async fn complete(&self, _system: &str, prompt: &str, _model: &str) -> anyhow::Result<String> {
+            Ok(format!("Here is the prompt I received:\n{prompt}"))
+        }
+    }
+
+    /// A driver that always errors, proving the error branch falls back to the scaffold.
+    struct FailingDriver;
+
+    #[async_trait::async_trait]
+    impl TranslationDriver for FailingDriver {
+        async fn complete(&self, _system: &str, _prompt: &str, _model: &str) -> anyhow::Result<String> {
+            anyhow::bail!("model unreachable")
+        }
+    }
+
+    fn open_escalation() -> Escalation {
+        let store = EscalationStore::new();
+        store.raise(req("rt-1"), "Nightly")
+    }
+
+    #[tokio::test]
+    async fn translate_shapes_valid_json_into_payload() {
+        let esc = open_escalation();
+        let json = r#"{"decision":"Use Postgres","directive":"Provision a Postgres backend and continue.","confident":true}"#;
+        let driver = CannedDriver(json.to_string());
+        let payload = translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6").await;
+        assert_eq!(payload.decision, "Use Postgres");
+        assert!(payload.directive.contains("Postgres"));
+        assert!(payload.confident);
+        assert_eq!(payload.authored_by, "claude");
+        // The rendered directive text carries the decision (what the UI shows).
+        assert!(payload.to_directive_text().contains("Use Postgres"));
+    }
+
+    #[tokio::test]
+    async fn translate_tolerates_code_fences_and_surrounding_prose() {
+        let esc = open_escalation();
+        let fenced = "Sure, here it is:\n```json\n{\"decision\":\"Cancel the run\",\"directive\":\"Abort and report.\",\"confident\":false}\n```\nThanks!";
+        let driver = CannedDriver(fenced.to_string());
+        let payload = translate_answer_ai(&driver, &esc, "cancel it", "m").await;
+        assert_eq!(payload.decision, "Cancel the run");
+        assert!(!payload.confident, "confident:false carried through");
+        assert_eq!(payload.authored_by, "claude");
+    }
+
+    #[tokio::test]
+    async fn translate_falls_back_to_scaffold_on_unparseable_reply() {
+        let esc = open_escalation();
+        // Echo driver returns prose, not JSON -> the scaffold takes over (never dead-ends).
+        let payload = translate_answer_ai(&EchoDriver, &esc, "use option B", "m").await;
+        assert_eq!(payload.authored_by, "scaffold");
+        // The scaffold restates the human's raw answer as the decision.
+        assert_eq!(payload.decision, "use option B");
+        assert!(payload.confident, "non-empty answer -> confident scaffold");
+        assert!(payload.directive.contains("Nightly"), "routine name in directive");
+    }
+
+    #[tokio::test]
+    async fn translate_falls_back_to_scaffold_on_driver_error() {
+        let esc = open_escalation();
+        let payload = translate_answer_ai(&FailingDriver, &esc, "approve", "m").await;
+        assert_eq!(payload.authored_by, "scaffold");
+        assert_eq!(payload.decision, "approve");
+    }
+
+    #[test]
+    fn parse_rejects_empty_or_missing_required_fields() {
+        // Missing directive.
+        assert!(parse_resume_payload(r#"{"decision":"x"}"#, "claude").is_none());
+        // Empty decision.
+        assert!(parse_resume_payload(r#"{"decision":"  ","directive":"y"}"#, "claude").is_none());
+        // Not JSON at all.
+        assert!(parse_resume_payload("just some words", "claude").is_none());
+        // Missing `confident` defaults to true (terse but usable).
+        let p = parse_resume_payload(r#"{"decision":"x","directive":"y"}"#, "claude").unwrap();
+        assert!(p.confident);
+    }
+
+    #[tokio::test]
+    async fn resolve_with_payload_stores_structured_and_rendered_forms() {
+        let store = EscalationStore::new();
+        let e = store.raise(req("rt-1"), "Nightly");
+        let json = r#"{"decision":"Use SQLite","directive":"Switch the store to SQLite and continue.","confident":true}"#;
+        let payload = translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m").await;
+
+        let resolved = store
+            .resolve_with_payload(&e.id, "sqlite please", &payload)
+            .expect("resolved");
+        assert_eq!(resolved.status, EscalationStatus::Resolved);
+        assert_eq!(resolved.human_answer.as_deref(), Some("sqlite please"));
+        // Structured payload is recorded for the resumed run to consult.
+        let stored = resolved.resume_payload.expect("payload recorded");
+        assert_eq!(stored.decision, "Use SQLite");
+        assert_eq!(stored.authored_by, "claude");
+        // Rendered directive carries the decision (what the UI shows).
+        assert!(resolved.translated_directive.unwrap().contains("Use SQLite"));
+
+        // Already resolved -> resolving again is a no-op None.
+        assert!(store.resolve_with_payload(&e.id, "x", &payload).is_none());
     }
 }

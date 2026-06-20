@@ -26,6 +26,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
+# Object-safe async trait for the escalation translation-driver seam (issue #43), so the
+# AI-translation step is unit-testable with a fake/echo driver instead of a live model call.
+async-trait = { workspace = true }
 # Auto-load a gitignored .env at the repo root (standalone-server path).
 dotenvy = "0.15"
 # Resolve the per-user data dir to persist projects across launches.
