@@ -56,6 +56,22 @@ struct BranchListView {
     branches: Vec<String>,
 }
 
+/// Full git status from `/api/projects/:id/git/status`: branch, dirty flag,
+/// ahead/behind counts, and a human-readable detail string.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct GitStatusView {
+    #[serde(default)]
+    branch: String,
+    #[serde(default)]
+    dirty: bool,
+    #[serde(default)]
+    ahead: Option<u32>,
+    #[serde(default)]
+    behind: Option<u32>,
+    #[serde(default)]
+    detail: String,
+}
+
 // ── BFF fetch helpers ─────────────────────────────────────────────────────────
 
 async fn fetch_settings() -> Option<SettingsView> {
@@ -157,6 +173,27 @@ async fn ship(project_id: &str, repo: &str, branch: &str, title: &str) -> Option
 /// Minimal percent-encode for `owner/repo` paths in query strings (encodes `/` as `%2F`).
 fn urlencoding_simple(s: &str) -> String {
     s.replace('/', "%2F").replace(' ', "%20")
+}
+
+/// Fetch the full git status (branch + dirty + ahead/behind) for `repo`.
+/// Returns `None` when the repo is not locally resolved or git fails.
+async fn api_git_status(project_id: &str, repo: &str) -> Option<GitStatusView> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/git/status?repo={}",
+        crate::BFF_URL,
+        project_id,
+        urlencoding_simple(repo),
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if v.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        serde_json::from_value(v).ok()
+    } else {
+        None
+    }
 }
 
 async fn api_git_branches(project_id: &str, repo: &str) -> Option<BranchListView> {
@@ -613,6 +650,15 @@ fn GitPanel(repo: String, project_id: String) -> Element {
     let mut dragged_sha = use_signal(String::new);
 
     // ── data fetches ─────────────────────────────────────────────────────────
+    let pid_s = project_id.clone();
+    let rp_s = repo.clone();
+    let status_res = use_resource(move || {
+        let _dep = git_refresh();
+        let pid = pid_s.clone();
+        let rp = rp_s.clone();
+        async move { api_git_status(&pid, &rp).await }
+    });
+
     let pid_b = project_id.clone();
     let rp_b = repo.clone();
     let branches_res = use_resource(move || {
@@ -631,6 +677,7 @@ fn GitPanel(repo: String, project_id: String) -> Element {
         async move { api_git_log(&pid, &rp, 30).await }
     });
 
+    let git_status = status_res.read().clone().flatten();
     let branch_list = branches_res.read().clone().flatten().unwrap_or_default();
     let commits: Vec<CommitRow> = log_res
         .read()
@@ -641,6 +688,39 @@ fn GitPanel(repo: String, project_id: String) -> Element {
 
     rsx! {
         div { class: "git-panel",
+            // ── Status bar (branch · ahead/behind · dirty) ────────────────
+            {
+                let status_detail = git_status.as_ref().map(|s| s.detail.clone()).unwrap_or_default();
+                let is_dirty = git_status.as_ref().map(|s| s.dirty).unwrap_or(false);
+                let ahead = git_status.as_ref().and_then(|s| s.ahead);
+                let behind = git_status.as_ref().and_then(|s| s.behind);
+                let has_status = !status_detail.is_empty();
+                rsx! {
+                    if has_status {
+                        div { class: "git-status-bar",
+                            span { class: "git-status-detail", "{status_detail}" }
+                            if is_dirty {
+                                span { class: "git-status-badge git-status-dirty", "dirty" }
+                            }
+                            if ahead == Some(0) && behind == Some(0) {
+                                span { class: "git-status-badge git-status-sync", "in sync" }
+                            } else {
+                                if let Some(a) = ahead {
+                                    if a > 0 {
+                                        span { class: "git-status-badge git-status-ahead", "{a} ahead" }
+                                    }
+                                }
+                                if let Some(b) = behind {
+                                    if b > 0 {
+                                        span { class: "git-status-badge git-status-behind", "{b} behind" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Branch list ───────────────────────────────────────────────
             div { class: "git-section",
                 p { class: "git-section-label", "Branches" }
