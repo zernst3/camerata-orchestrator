@@ -48,26 +48,77 @@ pub enum RulesError {
 // Enforcement kind
 // ────────────────────────────────────────────────────────────────────────────
 
-/// The three emission tiers for a camerata rule (from CAMERATA-ANATOMY-1).
+/// The emission tiers for a camerata rule (from CAMERATA-ANATOMY-1).
 ///
-/// - `Prose`      — human-readable rationale only; no generated artifact.
-/// - `Structured` — emits a structured section (e.g. a CONVENTIONS.md entry).
-/// - `Mechanical` — emits a runnable check (linter, CI gate, etc.).
+/// - `Prose`         — human-readable rationale only; no generated artifact.
+/// - `Structured`    — emits a structured section (e.g. a CONVENTIONS.md entry).
+/// - `Mechanical`    — emits a runnable check (linter, regex, CI gate, etc.).
+/// - `Architectural` — a *deterministically* checkable structural rule that no
+///   regex can express and no LLM is needed to judge: it requires parsing the
+///   code into an AST and reasoning over its structure (e.g. "a handler does
+///   not touch the DB directly", "a service does not bypass the repository",
+///   "no cross-boundary imports"). Like `Mechanical`, it is a hard, repeatable
+///   check; unlike `Mechanical`, the check is an AST/static-analysis pass rather
+///   than a lint pattern. See
+///   `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`.
+///
+/// Tier ordering by strictness/automation: `Prose` < `Structured` < `Mechanical`
+/// < `Architectural`. `Architectural` is the most precise tier — it never
+/// produces a false "probably" the way a regex digest scan can.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EnforcementKind {
     Prose,
     Structured,
     Mechanical,
+    Architectural,
+}
+
+impl EnforcementKind {
+    /// The lowercase wire/TOML string for this tier. Inverse of [`EnforcementKind::from_tag`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EnforcementKind::Prose => "prose",
+            EnforcementKind::Structured => "structured",
+            EnforcementKind::Mechanical => "mechanical",
+            EnforcementKind::Architectural => "architectural",
+        }
+    }
+
+    /// Parse a tier from its lowercase wire/TOML string. Inverse of
+    /// [`EnforcementKind::as_str`]. Unknown strings return `None`.
+    ///
+    /// Named `from_tag` rather than `from_str` so it is not confused with the
+    /// `std::str::FromStr` trait method (which would return a `Result`).
+    pub fn from_tag(s: &str) -> Option<Self> {
+        match s {
+            "prose" => Some(EnforcementKind::Prose),
+            "structured" => Some(EnforcementKind::Structured),
+            "mechanical" => Some(EnforcementKind::Mechanical),
+            "architectural" => Some(EnforcementKind::Architectural),
+            _ => None,
+        }
+    }
+
+    /// Whether this tier is enforced at the CI / integration stage rather than at
+    /// the write-time gate. Both `Mechanical` (lint / query-plan / migration audit)
+    /// and `Architectural` (AST static analysis) run in CI: they need the full
+    /// parsed module (or build/DB context), which the write-time gate does not have.
+    /// `Prose` and `Structured` are human-reviewed at PR.
+    pub fn is_ci_enforced(&self) -> bool {
+        matches!(self, EnforcementKind::Mechanical | EnforcementKind::Architectural)
+    }
+
+    /// Whether this tier emits into `CONVENTIONS.md` (citable by id) rather than
+    /// `AGENTS.md` (agent-judged prose). Everything except `Prose` is citable.
+    pub fn emits_to_conventions(&self) -> bool {
+        !matches!(self, EnforcementKind::Prose)
+    }
 }
 
 impl std::fmt::Display for EnforcementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnforcementKind::Prose => f.write_str("prose"),
-            EnforcementKind::Structured => f.write_str("structured"),
-            EnforcementKind::Mechanical => f.write_str("mechanical"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -902,6 +953,52 @@ mod tests {
         assert_eq!(EnforcementKind::Prose.to_string(), "prose");
         assert_eq!(EnforcementKind::Structured.to_string(), "structured");
         assert_eq!(EnforcementKind::Mechanical.to_string(), "mechanical");
+        assert_eq!(EnforcementKind::Architectural.to_string(), "architectural");
+    }
+
+    #[test]
+    fn enforcement_kind_str_round_trip() {
+        for kind in [
+            EnforcementKind::Prose,
+            EnforcementKind::Structured,
+            EnforcementKind::Mechanical,
+            EnforcementKind::Architectural,
+        ] {
+            let s = kind.as_str();
+            assert_eq!(
+                EnforcementKind::from_tag(s),
+                Some(kind.clone()),
+                "round-trip for {s}"
+            );
+        }
+        assert_eq!(EnforcementKind::from_tag("nonsense"), None);
+    }
+
+    #[test]
+    fn enforcement_kind_toml_deserializes_architectural() {
+        // The serde rename must accept the lowercase "architectural" tag from a
+        // corpus TOML file.
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            enforcement: EnforcementKind,
+        }
+        let w: Wrapper = toml::from_str(r#"enforcement = "architectural""#)
+            .expect("architectural tier should deserialize");
+        assert_eq!(w.enforcement, EnforcementKind::Architectural);
+    }
+
+    #[test]
+    fn enforcement_kind_tier_partitioning() {
+        // Architectural is CI-enforced (like mechanical) and citable in CONVENTIONS.md.
+        assert!(EnforcementKind::Architectural.is_ci_enforced());
+        assert!(EnforcementKind::Mechanical.is_ci_enforced());
+        assert!(!EnforcementKind::Structured.is_ci_enforced());
+        assert!(!EnforcementKind::Prose.is_ci_enforced());
+
+        assert!(EnforcementKind::Architectural.emits_to_conventions());
+        assert!(EnforcementKind::Mechanical.emits_to_conventions());
+        assert!(EnforcementKind::Structured.emits_to_conventions());
+        assert!(!EnforcementKind::Prose.emits_to_conventions());
     }
 
     // ── Async corpus loader (integration test against real corpus) ────────────
@@ -924,6 +1021,34 @@ mod tests {
         for rule in set.iter() {
             assert!(!rule.id.0.is_empty(), "empty id in rule {:?}", rule.title);
         }
+    }
+
+    #[tokio::test]
+    async fn corpus_loads_architectural_tier_rules() {
+        // The bundled corpus ships the example Architectural-tier rules; loading
+        // them exercises the serde rename round-trip against real files.
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let Some(rule) = set.get_by_id("ARCH-HANDLER-NO-DB-1") else {
+            return; // rule not in this corpus version
+        };
+        assert_eq!(
+            rule.enforcement,
+            EnforcementKind::Architectural,
+            "ARCH-HANDLER-NO-DB-1 must load as the Architectural tier"
+        );
+        assert!(rule.enforcement.is_ci_enforced());
+        assert!(rule.enforcement.emits_to_conventions());
+
+        // Confirm the tier participates in enforcement-based selection.
+        let arch = select(&set, &Filter::ByEnforcement(EnforcementKind::Architectural));
+        assert!(
+            arch.iter().any(|r| r.id_str() == "ARCH-HANDLER-NO-DB-1"),
+            "Architectural filter must surface the rule"
+        );
     }
 
     #[tokio::test]

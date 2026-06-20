@@ -996,12 +996,13 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// AI activity (prompts and output) registers into the transcript store so the UI can
 /// show, live, that the model is actually working.
 /// Partition selected audit rules into the ones the code-only AI scan should check
-/// (prose / structured) and the MECHANICAL ones it should NOT. Mechanical rules are enforced
-/// in CI from build/runtime/DB context (query-plan, migration audit, AST lint), so scanning
-/// them from a static code digest only yields weak, low-confidence findings (e.g. "an index
-/// probably exists in a migration somewhere"). The corpus is the source of each rule's tier;
-/// a rule absent from the corpus (e.g. a custom rule) defaults to scannable.
-/// Returns `(scannable, excluded_mechanical_ids)`.
+/// (prose / structured) and the CI-tier ones it should NOT (mechanical / architectural).
+/// CI-tier rules are enforced in CI from build/runtime/DB context (query-plan, migration audit,
+/// AST static analysis), so scanning them from a static code digest only yields weak,
+/// low-confidence findings (e.g. "an index probably exists in a migration somewhere"). The
+/// corpus is the source of each rule's tier; a rule absent from the corpus (e.g. a custom rule)
+/// defaults to scannable.
+/// Returns `(scannable, excluded_ci_tier_ids)`.
 async fn split_scannable_rules(
     selected: Vec<crate::onboard::SelectedRule>,
 ) -> (Vec<crate::onboard::SelectedRule>, Vec<String>) {
@@ -1011,16 +1012,16 @@ async fn split_scannable_rules(
     } else {
         None
     };
-    let is_mechanical = |id: &str| -> bool {
+    let is_ci_tier = |id: &str| -> bool {
         set.as_ref()
             .and_then(|s| s.get_by_id(id))
-            .map(|r| r.enforcement == camerata_rules::EnforcementKind::Mechanical)
+            .map(|r| r.enforcement.is_ci_enforced())
             .unwrap_or(false)
     };
     let mut scannable = Vec::new();
     let mut excluded = Vec::new();
     for r in selected {
-        if is_mechanical(&r.id) {
+        if is_ci_tier(&r.id) {
             excluded.push(r.id);
         } else {
             scannable.push(r);
@@ -2088,11 +2089,7 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
                 .map(|o| o.directive.clone())
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| rule.summary.clone());
-            let enforcement = match rule.enforcement {
-                camerata_rules::EnforcementKind::Prose => "prose",
-                camerata_rules::EnforcementKind::Structured => "structured",
-                camerata_rules::EnforcementKind::Mechanical => "mechanical",
-            };
+            let enforcement = rule.enforcement.as_str();
             out.push(crate::arm::ArmRule {
                 id: sel.rule_id.clone(),
                 title: rule.title.clone(),

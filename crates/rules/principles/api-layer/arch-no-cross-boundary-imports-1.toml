@@ -1,0 +1,25 @@
+id = "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1"
+title = "No cross-boundary imports — modules import only their declared dependencies"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Architectural check (AST tier): a static-analysis pass parses the import/use declarations of each module and rejects any import that crosses a declared architectural boundary (a controller importing a repository, a domain module importing an infrastructure module, a feature module importing another feature's internals). This is a structural fact about the module graph, not a text pattern: an import string alone does not say which boundary it crosses; the checker needs the boundary map plus the parsed import list. No LLM is needed — the dependency either is or is not in the allowed set. Conformance holds when the import-boundary AST check runs in CI and a forbidden import fails the build; it fails when any module can import any other with nothing enforcing the layering."
+
+[decision]
+question = "What position does the project take on: No cross-boundary imports — modules import only their declared dependencies?"
+default = "modules-import-only-across-declared-allowed-boundaries"
+why = "Architecture lives or dies by its dependency direction. Once a single forbidden import lands (a domain type reaching into the web framework, a feature reaching into a sibling's internals) the boundary is gone and every later change is free to lean on the leak. An AST/import-graph check holds the direction mechanically, so the architecture diagram and the actual module graph never drift apart. Relying on review to police imports fails because a forbidden `use` line is one of the easiest things to miss in a large diff."
+
+[[option]]
+id = "modules-import-only-across-declared-allowed-boundaries"
+label = "No cross-boundary imports — modules import only their declared dependencies"
+directive = "Each architectural layer/feature declares which other modules it may depend on; an AST import-graph check parses every module's imports and rejects any that crosses a forbidden boundary (controller→repository, domain→infrastructure, feature→sibling-internals). The allowed dependency direction is enforced in CI so a forbidden import fails the build, keeping the real module graph aligned with the intended architecture."
+why = "The adopted default. Dependency direction is the architecture; enforcing it by AST keeps the diagram and the code in lockstep, where review alone reliably misses a single forbidden `use` line in a large diff."
+
+[[option]]
+id = "modules-may-import-any-other-module"
+label = "modules may import any other module freely …"
+directive = "modules may import any other module freely, with no import-boundary check and no declared dependency direction"
+why = "A defensible alternative the project considered and did not adopt as the default: it removes friction for small codebases, but offers no mechanism to stop architectural erosion as the codebase grows."

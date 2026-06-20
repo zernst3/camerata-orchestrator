@@ -14,6 +14,13 @@
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be
 //! unit-tested without spawning real subprocesses.
 
+/// Architectural (AST-tier) governance checks: deterministic structural rules
+/// that no regex can express and no LLM is needed to judge (e.g. "a handler does
+/// not touch the DB directly"). Ships a self-contained PROOF checker today; the
+/// `syn`-backed production design is routed in
+/// `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`.
+pub mod architectural;
+
 pub mod parse;
 pub mod subprocess;
 

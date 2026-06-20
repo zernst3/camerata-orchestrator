@@ -737,22 +737,23 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                     why: o.why.clone(),
                 })
                 .collect();
-            let enforcement = match r.enforcement {
-                camerata_rules::EnforcementKind::Prose => "prose",
-                camerata_rules::EnforcementKind::Structured => "structured",
-                camerata_rules::EnforcementKind::Mechanical => "mechanical",
-            };
-            let kind = if matches!(r.enforcement, camerata_rules::EnforcementKind::Mechanical) {
+            let enforcement = r.enforcement.as_str();
+            // Both mechanical and architectural tiers carry a deterministic CI-tier check;
+            // everything else is human-reviewed.
+            let kind = if r.enforcement.is_ci_enforced() {
                 "mechanical"
             } else {
                 "review"
             };
-            // Placement is HONEST per enforcement tier, not a one-size string: only mechanical
-            // rules get a deterministic CI gate; structured/prose rules are human-reviewed at PR
-            // (structured against CONVENTIONS.md, prose as AGENTS.md guidance).
+            // Placement is HONEST per enforcement tier, not a one-size string: mechanical and
+            // architectural rules get a deterministic CI-tier check; structured/prose rules are
+            // human-reviewed at PR (structured against CONVENTIONS.md, prose as AGENTS.md guidance).
             let placement = match r.enforcement {
                 camerata_rules::EnforcementKind::Mechanical => {
                     "Mechanical CI gate (deterministic check) in each repo this rule's domain applies to"
+                }
+                camerata_rules::EnforcementKind::Architectural => {
+                    "Architectural CI gate (deterministic AST/static-analysis check) in each repo this rule's domain applies to"
                 }
                 camerata_rules::EnforcementKind::Structured => {
                     "Reviewed at PR against CONVENTIONS.md (structured; no mechanical gate)"
