@@ -1,0 +1,30 @@
+id = "PYTHON-FLASK-REQUEST-VALIDATION-1"
+title = "Request input is validated through marshmallow or pydantic schemas before reaching business logic"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is inbound request data validated and typed before use in Flask route handlers?"
+default = "schema-validation-marshmallow-or-pydantic"
+why = "Flask does not provide built-in input validation. `request.json`, `request.form`, and `request.args` return raw dicts or MultiDicts whose keys and value types are fully controlled by the client. Passing these values directly to a model constructor, service function, or database query means the application operates on data whose shape it only assumed: a missing field becomes `None`, a string arrives where an integer was expected, or an extra field flows where it was not intended. Marshmallow Schemas and Pydantic models (or Flask-specific wrappers like webargs or Flask-Pydantic) declare the expected fields, types, and constraints, validate and deserialize the input in one step, and return structured errors for invalid input before any business logic runs. Flask-RESTX and Flasgger provide similar validation tied to OpenAPI spec generation."
+
+[[option]]
+id = "schema-validation-marshmallow-or-pydantic"
+label = "marshmallow Schema or pydantic model validates and deserializes all inbound data"
+directive = "Every route that accepts state-changing input (POST, PUT, PATCH) validates `request.json` (or `request.form`) against a marshmallow Schema or a pydantic model before any business logic runs. Deserialized, validated data is passed to the service or model layer; the raw `request.json` dict is never passed downstream directly. Routes return a structured 400 response (with field-level error details) when validation fails. `request.args` query parameters are similarly validated for routes where they are business-significant. Accessing `request.json.get('field')` or `request.json['field']` and passing the raw string to a service without schema validation is forbidden."
+why = "The adopted default. Marshmallow/pydantic schemas run a declared contract, produce typed Python objects, and generate structured error responses; manual dict access duplicates this incompletely."
+
+[[option]]
+id = "manual-dict-access"
+label = "access request.json fields directly with .get() checks"
+directive = "Route handlers read fields with `request.json.get('field', default)` and validate presence and type with manual `if` checks before use."
+why = "Duplicates schema-validation work incompletely; each validation is ad-hoc and inconsistent; missing a check at one field introduces a bug silently."
+
+[[option]]
+id = "no-validation-trust-client"
+label = "pass request data directly to the model or database layer without validation"
+directive = "Route handlers pass `request.json` or individual fields directly to model constructors or service functions on the assumption the client sent the correct shape."
+why = "Every field is user-controlled; missing fields become None or raise KeyError, wrong types reach the database layer, and extra fields may overwrite unexpected columns."

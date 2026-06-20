@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-CSRF-1"
+title = "CSRF protection is on by default; only API-only JSON endpoints are selectively exempt with token auth"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is CSRF protection handled for state-changing requests?"
+default = "csrf-on-with-selective-api-exemption"
+why = "Rails includes `protect_from_forgery with: :exception` in ApplicationController by default, which requires a valid authenticity token on every non-GET/HEAD/OPTIONS/TRACE request. Disabling it globally removes the defense for all form-based state changes; an attacker can craft a page that causes authenticated users to submit requests to the application without their knowledge. The appropriate exemption is narrow: pure API endpoints that authenticate with a Bearer token or API key (not cookies) do not benefit from CSRF tokens because the attacker cannot forge the Authorization header from a cross-origin page — the Same-Origin Policy prevents the browser from reading it. Blanket `skip_before_action :verify_authenticity_token` in ApplicationController, or in any controller that also uses cookie-based session auth, is the dangerous pattern."
+
+[[option]]
+id = "csrf-on-with-selective-api-exemption"
+label = "protect_from_forgery on globally; API controllers opt out only when using token auth"
+directive = "ApplicationController includes `protect_from_forgery with: :exception` (or `:null_session` for JSON API responses). Controllers that serve pure JSON API requests authenticated exclusively with a Bearer token or API key (never a session cookie) may call `protect_from_forgery with: :null_session` or `skip_before_action :verify_authenticity_token` scoped to that controller only. Any controller that handles requests from a browser session (session cookie present) must retain CSRF protection. Exempting an entire application or ApplicationController from CSRF verification is forbidden."
+why = "The adopted default. CSRF protection is necessary for all cookie-session-based state changes. Token-authenticated API-only controllers are a safe, narrow exemption because the Same-Origin Policy prevents forged requests from supplying the Authorization header."
+
+[[option]]
+id = "csrf-disabled-globally"
+label = "disable CSRF protection globally"
+directive = "CSRF verification is skipped application-wide via `skip_before_action :verify_authenticity_token` in ApplicationController or by removing `protect_from_forgery`."
+why = "Removes the defense for all cookie-based state changes; an attacker can trigger authenticated actions from any cross-origin page the user visits."
+
+[[option]]
+id = "csrf-double-submit-cookie"
+label = "use the double-submit cookie pattern instead of server-side token"
+directive = "CSRF protection is implemented as a double-submit cookie rather than Rails' default synchronizer-token pattern."
+why = "A valid alternative for stateless APIs, but requires careful implementation; the Rails built-in synchronizer token is simpler and the right default for server-rendered applications."

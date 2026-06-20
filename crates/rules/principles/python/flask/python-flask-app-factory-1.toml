@@ -1,0 +1,30 @@
+id = "PYTHON-FLASK-APP-FACTORY-1"
+title = "Flask apps are created with an application factory and blueprints, not a module-level app instance"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is a Flask application instantiated and how are its routes organized?"
+default = "app-factory-plus-blueprints"
+why = "A module-level `app = Flask(__name__)` created at import time makes testing difficult: there is no way to create a second app instance with a different configuration (e.g. a test database URL) without reloading the module. All routes live in one file or must import the global app, creating circular-import risks. The application factory pattern (`create_app(config=None)`) creates the Flask instance inside a function, registers blueprints and extensions, and returns the app. Tests call `create_app('testing')` to get a fresh instance with test config. Blueprints group related routes (e.g. `auth`, `api`, `admin`) into separate modules with their own URL prefixes, keeping route files focused and making it possible to register or exclude feature sets per environment."
+
+[[option]]
+id = "app-factory-plus-blueprints"
+label = "create_app() factory + Blueprint per feature area"
+directive = "The Flask application is created inside a `create_app(config=None)` factory function in `app/__init__.py` (or equivalent). Routes are organized as Blueprints (`auth_bp`, `api_bp`, etc.), each in its own module, and registered on the app inside `create_app`. Extensions (SQLAlchemy, Migrate, LoginManager) are instantiated at module level without an app and initialized with `ext.init_app(app)` inside the factory. A module-level `app = Flask(__name__)` outside the factory is forbidden; route decorators (`@app.route(...)`) that reference the global app rather than a Blueprint are forbidden."
+why = "The adopted default. The factory pattern enables multiple app instances with different configs (dev vs. test); Blueprints keep routes modular and eliminate circular imports."
+
+[[option]]
+id = "global-app-instance"
+label = "create app at module level; register routes directly on the global app"
+directive = "The Flask app is created as `app = Flask(__name__)` at module import time; routes use `@app.route(...)` decorators on the global instance; all extensions are initialized on the global app."
+why = "The quickstart-tutorial pattern; works for single-file prototypes but makes testing harder (no way to create a second instance with different config) and creates circular imports in multi-module apps."
+
+[[option]]
+id = "flask-class-based-views-only"
+label = "use Flask's MethodView for all routes, no Blueprints"
+directive = "Routes are defined as MethodView subclasses registered on the global app; no blueprints are used."
+why = "MethodView is a valid pattern for resource-oriented endpoints but does not address the global-app testing or circular-import problems that blueprints solve."

@@ -1,0 +1,31 @@
+id = "PYTHON-DJANGO-SETTINGS-FROM-ENV-1"
+title = "Django settings read credentials from environment variables; no secrets in settings.py"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Gitleaks, Trufflehog, or Bandit (B105 / B106 / B107) scanning for hardcoded secret patterns in `settings.py` and related config files. Conformance holds when the CI gate runs and any string literal matching a common secret pattern in a committed settings file fails; it fails when no secret-scan gate covers `settings.py`."
+
+[decision]
+question = "How are credentials and environment-specific values provided to Django's settings module?"
+default = "env-vars-in-settings"
+why = "A Django `settings.py` file is Python source code committed to version control. Embedding `SECRET_KEY`, database passwords, API keys, or `ALLOWED_HOSTS` values as string literals means they enter git history permanently, are visible to anyone with repository access, and survive in every clone and container image. Per-environment values (different databases for dev, staging, and production) hardcoded into a single committed file require editing the file or maintaining multiple committed versions. `os.environ.get()` or a library like `django-environ` or `python-decouple` reads values from the process environment at startup, keeping secrets out of the repository and per-environment configuration out of source control. `SECRET_KEY` in particular must be treated as a credential: exposure invalidates all sessions and HMAC signatures."
+
+[[option]]
+id = "env-vars-in-settings"
+label = "read all credentials and env-specific values from environment variables"
+directive = "All values that vary by environment or that are credentials (SECRET_KEY, database URL, email credentials, API keys, ALLOWED_HOSTS, CORS origins) are read from environment variables via `os.environ.get('VAR')`, `os.environ['VAR']`, `django-environ`'s `env(...)`, or `python-decouple`'s `config(...)`. `settings.py` contains only the logic to read these values and their defaults for local development (where the risk is low); no production credential or secret appears as a string literal. A `.env` file for local development is listed in `.gitignore` and is never committed."
+why = "The adopted default. Environment variables keep secrets outside the repository and git history; per-environment values are injected at deploy time without modifying source."
+
+[[option]]
+id = "hardcoded-in-settings"
+label = "embed credentials as string literals directly in settings.py"
+directive = "SECRET_KEY, database passwords, and API keys are defined as string literals in `settings.py` and committed to version control."
+why = "The credentials enter git history permanently; anyone with repository access can read them; rotation requires a commit."
+
+[[option]]
+id = "per-environment-settings-files"
+label = "maintain separate settings files per environment committed to git"
+directive = "Environment-specific settings live in committed files (`settings_dev.py`, `settings_prod.py`) that contain the actual credentials for each environment."
+why = "Keeps environments isolated but still commits production credentials to the repository; rotation still requires a commit."

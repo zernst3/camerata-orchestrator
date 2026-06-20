@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-SKINNY-CONTROLLERS-1"
+title = "Controllers are thin HTTP adapters; business logic lives in service objects or domain models"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does business logic live in a Rails application: in controllers, models, or a dedicated service layer?"
+default = "service-objects-or-fat-models"
+why = "A controller's responsibility is HTTP-shaped: parse the request, call into the application, translate the result into a response. When business rules accumulate in controller actions they become testable only through integration tests that spin up the full request stack, are unreachable from background jobs or rake tasks without faking a request, and duplicate across actions that share a workflow step. Moving logic into service objects (plain Ruby objects with a `call` method) or into well-scoped model methods keeps each concern in one place that is independently unit-testable. Fat controllers also resist refactoring: the tenth rule added to an action makes the first nine harder to see. The Rails community long debated fat-model vs. service-objects; the modern consensus is service objects for cross-resource orchestration and model methods for single-resource domain logic, with controllers delegating to one of the two."
+
+[[option]]
+id = "service-objects-or-fat-models"
+label = "thin controllers; business logic in service objects or domain model methods"
+directive = "Controller actions are limited to HTTP concerns: authenticate/authorize the caller, parse and validate input (via strong params), call a service object or model method, and map the result to a response (render or redirect). Business rules, cross-model orchestration, third-party calls, and any logic that could be triggered outside of HTTP (from a job, a rake task, or a REPL) live in a service object (`app/services/`) or in a model method. An action longer than roughly 10 lines is a signal that logic needs to move out. Inline SQL, multi-step workflows, and external HTTP calls inside a controller action are the patterns to eliminate."
+why = "The adopted default. Thin controllers keep logic independently testable, reusable from non-HTTP entry points, and easier to reason about in isolation."
+
+[[option]]
+id = "fat-controller"
+label = "put business logic and orchestration directly in controller actions"
+directive = "Controller actions contain business rules, database queries, and cross-resource coordination inline, rather than delegating to service objects or model methods."
+why = "Mixes transport concerns with domain concerns; logic becomes reachable only through HTTP and is hard to test or reuse."
+
+[[option]]
+id = "fat-model-only"
+label = "all logic goes into model classes, no service objects"
+directive = "All business logic lives in ActiveRecord model methods; no separate service layer exists. Controllers delegate to model methods exclusively."
+why = "Works for single-resource operations but creates God-object models when cross-resource orchestration is pushed into one model's methods."

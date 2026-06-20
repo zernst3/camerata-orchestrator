@@ -1,0 +1,31 @@
+id = "RUBY-RAILS-NO-STRING-SQL-1"
+title = "ActiveRecord queries use placeholders or hash conditions; SQL is never built from interpolated strings"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by brakeman (SQL injection findings) and a Rubocop-Rails rule. Conformance holds when every `.where`, `.order`, `.joins`, `.group`, and `.having` call either passes a hash condition or a string literal with `?`/named-bind placeholders (`where('active = ? AND role = ?', true, role)`), never an interpolated string (`where(\"role = '#{role}'\")`). Any site where a Ruby variable or expression is interpolated directly into a SQL fragment string fails."
+
+[decision]
+question = "How are dynamic values placed into ActiveRecord query fragments?"
+default = "placeholders-or-hash-conditions"
+why = "String interpolation in a SQL fragment (`where(\"name = '#{params[:name]}'\")`) places user-controlled text directly into the query grammar, which is the canonical SQL injection vulnerability. ActiveRecord provides two safe alternatives: hash conditions (`where(name: params[:name])`) that quote and bind the value automatically, and placeholder strings (`where('name = ?', params[:name])`) that pass the value as a bind parameter. Both let the database driver handle quoting and type coercion, so the value can never be interpreted as SQL syntax regardless of its contents. Brakeman detects the interpolated form at static analysis time, making the CI gate enforceable without runtime coverage."
+
+[[option]]
+id = "placeholders-or-hash-conditions"
+label = "hash conditions or ? / :named placeholders only"
+directive = "Every ActiveRecord query method that accepts a SQL fragment (`.where`, `.order`, `.joins`, `.having`, `.group`) receives either a hash (`where(status: 'active')`) or a string literal with `?` or `:name` placeholders whose values are passed as subsequent arguments (`where('status = ? AND role = :role', 'active', role: role)`). String interpolation (`\"#{variable}\"`) and string concatenation (`'col = ' + value`) inside any SQL fragment are forbidden. Column and table names that must be dynamic come from a fixed allow-list, not from request input."
+why = "The adopted default. Hash conditions and placeholder syntax bind values separately from the SQL grammar so they can never be parsed as SQL, eliminating injection."
+
+[[option]]
+id = "sanitize-sql-for-conditions"
+label = "manually sanitize with sanitize_sql_for_conditions"
+directive = "Dynamic values are passed through `ActiveRecord::Base.sanitize_sql_for_conditions` or `connection.quote` before interpolation into a SQL string."
+why = "Reduces injection risk but is error-prone: missing a sanitize call at any one site reintroduces the vulnerability, and the code is harder to audit than explicit bind parameters."
+
+[[option]]
+id = "string-interpolation"
+label = "interpolate values directly into SQL fragment strings"
+directive = "Dynamic values are embedded into SQL strings via Ruby string interpolation or concatenation inside `.where`, `.order`, or other query methods."
+why = "The canonical SQL injection antipattern; every such site is a latent vulnerability waiting for one unsanitized input."
