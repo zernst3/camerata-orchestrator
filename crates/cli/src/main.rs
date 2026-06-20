@@ -15,6 +15,7 @@ async fn main() -> anyhow::Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "acceptance" => run_acceptance_cmd().await,
+        "gate-probe" => run_gate_probe_cmd().await,
         "live-demo" => camerata::live_demo::run_live_demo().await,
         "build-demo" => camerata::build_demo::run_build_demo().await,
         "po-demo" => camerata::po_demo::run_po_demo().await,
@@ -28,6 +29,9 @@ async fn main() -> anyhow::Result<()> {
             println!("usage:");
             println!(
                 "  camerata acceptance        run the in-process planted-violation acceptance scenario"
+            );
+            println!(
+                "  camerata gate-probe        #14 end-to-end gate-loop GO/NO-GO on a story (both layers, no claude)"
             );
             println!("  camerata live-demo         spawn a REAL claude -p twice; prove gateway deny + allow live");
             println!("  camerata build-demo        run a LIVE governed FLEET (2 agents) that writes + builds + tests a crate");
@@ -97,6 +101,47 @@ async fn run_acceptance_cmd() -> anyhow::Result<()> {
         Ok(())
     } else {
         eprintln!("ACCEPTANCE: FAIL");
+        std::process::exit(1);
+    }
+}
+
+/// #14 — the end-to-end gate-loop GO/NO-GO on a story. Runs BOTH gate layers in-process (no
+/// model) and prints a single verdict; exit 1 on NO-GO.
+async fn run_gate_probe_cmd() -> anyhow::Result<()> {
+    use camerata::gate_probe::run_gate_probe;
+    let r = run_gate_probe().await?;
+
+    println!("== Camerata gate-loop probe (#14) — end-to-end, no claude ==");
+    println!("story: {}", r.story);
+    println!();
+    println!("LAYER 1 — deny-before-execute (real gateway):");
+    match &r.layer1_forbidden {
+        Decision::Deny { rule, reason } => {
+            println!("  agent's forbidden write -> DENIED [{}]: {}", rule.0, reason)
+        }
+        Decision::Allow => {
+            println!("  agent's forbidden write -> ALLOWED  (NO-GO — deny-before-execute not wired)")
+        }
+    }
+    match &r.layer1_clean {
+        Decision::Allow => println!("  clean write             -> ALLOWED  (expected)"),
+        Decision::Deny { rule, reason } => {
+            println!("  clean write             -> DENIED [{}]: {}  (NO-GO — gate is deny-all)", rule.0, reason)
+        }
+    }
+    println!();
+    println!("LAYER 2 — bounce-and-revise (real coordinator):");
+    println!(
+        "  agent passes: {} (initial + revise), bounced: {}, revise clean: {}",
+        r.agent_passes, r.layer2_bounced, r.layer2_clean
+    );
+    println!();
+
+    if r.go() {
+        println!("GATE PROBE: GO  — the loop denies before execute, bounces on violation, and resolves.");
+        Ok(())
+    } else {
+        eprintln!("GATE PROBE: NO-GO");
         std::process::exit(1);
     }
 }
