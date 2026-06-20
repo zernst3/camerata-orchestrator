@@ -1,0 +1,25 @@
+id = "RUBY-RAILS-PARAMETERIZED-QUERIES-1"
+title = "SQL queries in ActiveRecord use parameterized queries; string interpolation is forbidden"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a static-analysis gate (Brakeman, RuboCop) that flags string interpolation and concatenation in ActiveRecord methods like find_by_sql, execute, or raw. Conformance holds when the linter runs in CI and catches string-interpolated SQL."
+
+[decision]
+question = "How are dynamic values incorporated into SQL queries in ActiveRecord?"
+default = "activerecord-binding-parameters"
+why = "Building a SQL string by interpolating a value with string interpolation or concatenation puts attacker-controlled text directly into the query grammar, creating the canonical SQL-injection vulnerability. Rails ActiveRecord provides automatic parameterization through placeholders (?, :key) which send the SQL text and values to the database separately, ensuring a value can never be parsed as SQL no matter what it contains. The parameterized form is the same amount of code and removes the entire class of bug; there is no case where interpolation is the right call for a value."
+
+[[option]]
+id = "activerecord-binding-parameters"
+label = "Use ActiveRecord parameterized queries with placeholders or hash binding"
+directive = "Every dynamic value in a SQL statement is passed as a binding parameter using ? placeholders, :named parameters, or ActiveRecord's where/find_by methods. Raw SQL queries use User.where('email = ?', email) or User.where('id = :id', id: id), never string interpolation like User.where(\"email = '#{email}'\"). Method chaining (User.where(email: email)) is preferred over raw SQL. The raw_sql column names and table names that must be dynamic come from a fixed allow-list, never from request input."
+why = "The adopted default. ActiveRecord parameterization sends SQL and values separately, preventing SQL injection entirely."
+
+[[option]]
+id = "string-interpolation-with-escaping"
+label = "Interpolate values into SQL with manual escaping"
+directive = "Dynamic values are added to SQL strings via string interpolation with manual escaping or quoting logic rather than parameterized binding."
+why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database contexts."

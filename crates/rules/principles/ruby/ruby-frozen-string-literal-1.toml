@@ -1,0 +1,25 @@
+id = "RUBY-FROZEN-STRING-LITERAL-1"
+title = "All Ruby files declare frozen_string_literal: true to prevent accidental string mutations"
+tag = "stack"
+domain = "ruby"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by RuboCop with the FrozenStringLiteral cop enabled (default in modern Rails). Conformance holds when all .rb files begin with # frozen_string_literal: true and CI rejects files without it."
+
+[decision]
+question = "Are string literals frozen by default to prevent accidental mutations?"
+default = "frozen-string-literal"
+why = "In Ruby, string literals are mutable by default: str = 'hello'; str << ' world' mutates the original string object. When the same string literal appears in multiple places (e.g., the constant 'ERROR' used as a hash key in ten methods), a mutation in one place mutates all references, causing subtle bugs. The frozen_string_literal pragma at the top of a file makes all literals in that file immutable, preventing accidental mutations and making the behavior explicit. This is a Ruby best practice enforced by Rails generators (Rails 6+) and recommended by the Ruby style guide. The pragma has no performance cost and eliminates a class of bug; there is no case where mutable string literals are preferable in a modern codebase."
+
+[[option]]
+id = "frozen-string-literal"
+label = "Enable frozen_string_literal: true in all Ruby files"
+directive = "Every .rb file begins with the line # frozen_string_literal: true (on the first or second line, after a shebang if present). All string literals in the file are frozen and immutable. Methods that need to mutate a string call .dup or .clone first. This is the standard in Rails 6+ and modern Ruby projects."
+why = "The adopted default. Immutable strings by default eliminate accidental mutation bugs."
+
+[[option]]
+id = "mutable-strings"
+label = "Allow string literals to be mutable by default"
+directive = "String literals are not frozen and can be mutated in place."
+why = "Simplifies code that needs mutable strings but introduces subtle mutation bugs across references."

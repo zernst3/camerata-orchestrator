@@ -1,0 +1,24 @@
+id = "RUBY-THIN-CONTROLLERS-1"
+title = "Controllers stay thin; business logic and data access belong in models, services, or repository classes"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where do business rules and database queries live?"
+default = "fat-models-or-service-layer"
+why = "A controller's responsibility is HTTP-shaped: parse the request, invoke application logic, and render a response. When business rules and database queries move into the controller, three consequences follow. The logic becomes reachable only through an HTTP request, so it cannot be tested in isolation, reused by a job or CLI, or invoked by another controller without duplication. The same rule copied into a second controller drifts out of sync. And the controller now mixes HTTP concerns (params, status codes, response format) with domain concerns (order workflow, permission checks), making changes to either touch code that does both. Keeping controllers thin — handling only HTTP translation — and moving the logic into models (for simple cases) or service classes (for complex workflows) makes the domain logic independently testable, reusable across entry points, and changeable without touching routing. This is the classic Rails adage: 'fat models, skinny controllers.' In larger systems, a service layer (often called Use Cases or Interactors) sits between the controller and the model, orchestrating multiple models and repositories to implement a single business action."
+
+[[option]]
+id = "fat-models-or-service-layer"
+label = "Keep controllers thin; business logic lives in models, services, or repositories"
+directive = "Controllers are limited to HTTP concerns: validate and parse the request (Rails strong_parameters), call a model method or service class, and render the result. Business rules, validations, and data access (queries, updates, deletions, external API calls) live in an ActiveRecord model or a dedicated service/use-case class. A database query or business computation written inline in a controller action is forbidden; it moves behind a model method or service class the controller delegates to. Example: controller calls @order = CreateOrderService.new(user, params).call; service owns the query and workflow logic."
+why = "The adopted default. Logic in models or services is independently testable, reusable across entry points, and separately changeable from routing."
+
+[[option]]
+id = "fat-controllers"
+label = "Controllers contain business logic and data access; business logic lives inline in request handlers"
+directive = "Controllers handle validation, queries, business rules, and rendering all in the action method, rather than delegating to models or services."
+why = "A defensible alternative the project considered and did not adopt; mixes transport concerns with domain concerns, inhibits reuse and testing."

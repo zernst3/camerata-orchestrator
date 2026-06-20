@@ -1,0 +1,24 @@
+id = "RUBY-ACTIVERECORD-SCOPES-1"
+title = "Common query patterns are encapsulated in ActiveRecord scopes; avoid repeating where() chains across the codebase"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How are repeated or complex query conditions organized?"
+default = "activerecord-scopes"
+why = "When a where() clause is written in multiple places — e.g., User.where(is_active: true, created_at: ...) appears in three controllers — the query definition is scattered, and a change to the business rule (e.g., 'active users must have verified email') requires updates to every copy. Worse, the copies drift; one gets updated and others do not, creating inconsistent behavior. ActiveRecord scopes (User.scope(:active, -> { where(is_active: true) })) centralize the definition so the change touches one place. Scopes also read more naturally at the call site (User.active) and reduce boilerplate where() syntax. For complex conditions, scopes make the intent clear: User.recent.active.with_orders reads as a composed business meaning, not a detail of the query. This is a reusable-logic pattern; the same principle holds for other ORMs and query builders."
+
+[[option]]
+id = "activerecord-scopes"
+label = "Encapsulate query patterns in ActiveRecord scopes"
+directive = "Common or complex query conditions are defined as scopes in the model. Example: scope :active, -> { where(is_active: true) }; scope :recent, -> { where('created_at > ?', 1.week.ago) }; scope :with_orders, -> { joins(:orders).distinct }. Queries are then chained as User.active.recent.with_orders. Scopes are public, documented, and testable in isolation. A where() clause used in more than one place is a candidate for a scope."
+why = "The adopted default. Scopes centralize query definitions, making them reusable, consistent, and changeable in one place."
+
+[[option]]
+id = "inline-where-clauses"
+label = "Write where() conditions inline at each call site"
+directive = "Query conditions are written inline wherever needed, without scope abstraction. Example: User.where(is_active: true, created_at: ...) is written in each controller or service that needs it."
+why = "Reads naturally but couples business rules to multiple code locations, making changes error-prone and inconsistent."

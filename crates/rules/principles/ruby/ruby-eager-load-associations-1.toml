@@ -1,0 +1,25 @@
+id = "RUBY-EAGER-LOAD-ASSOCIATIONS-1"
+title = "Related records are loaded eagerly with includes() or eager_load(); N+1 queries are forbidden"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a runtime detection linter (Bullet gem, or custom N+1 detection in CI) that flags queries where a loop over a collection issues a separate query for each item. Conformance holds when CI runs the detector and rejects N+1 patterns."
+
+[decision]
+question = "How are associated records loaded alongside a parent collection?"
+default = "eager-load-with-includes"
+why = "When a controller or service iterates over a collection of records and accesses an association on each one, ActiveRecord issues a separate query for each item by default: one query for @users, then N queries for @users.map(&:posts), totaling N+1 queries. This pattern is invisible in the code but devastating in production: a page with 100 users performs 101 queries instead of 2, degrading latency by orders of magnitude. ActiveRecord's includes() and eager_load() methods load the association upfront in a single or two queries, so the entire iteration completes in O(1) additional queries. includes() is the idiomatic choice; it selects the most efficient strategy (a separate query or a LEFT OUTER JOIN) based on the conditions. There is no performance downside to eager loading; the queries are unavoidable, and batching them is always faster than issuing them serially."
+
+[[option]]
+id = "eager-load-with-includes"
+label = "Use includes() or eager_load() to load associations upfront"
+directive = "When a collection's associations are accessed in a loop or iteration, the query uses includes(:association) or eager_load(:association) to load the data upfront. Example: @posts = Post.includes(:author, :comments).all; @posts.each { |p| puts p.author.name } performs two queries, not N+1. For nested associations, use includes(author: :team). Rails's eager_load() is used when a JOIN is required for filtering or sorting by the association."
+why = "The adopted default. Eager loading in a single or two queries is always faster than issuing N+1 queries serially."
+
+[[option]]
+id = "lazy-load-on-access"
+label = "Allow ActiveRecord to load associations lazily on first access"
+directive = "Associations are accessed on demand without explicit eager loading; each access triggers a separate query if the data is not already loaded."
+why = "Defensible for small datasets or simple views but creates an N+1 pattern when iterated in a loop. Most applications prefer eager loading for predictable performance."

@@ -1,0 +1,24 @@
+id = "RUBY-SMALL-METHODS-1"
+title = "Methods are kept small and focused; complex logic is extracted into smaller private methods or separate classes"
+tag = "stack"
+domain = "ruby"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How large and complex should individual methods be?"
+default = "small-focused-methods"
+why = "A method that handles multiple responsibilities or spans many lines (rule of thumb: >15-20 lines) is harder to understand, test, and change. When a method does one thing well and is small enough to fit on a screen, it is easier to name precisely, document concisely, and test in isolation. Small methods also enable reuse: a private method that calculates a subresult can be called by multiple paths in the same class. In Ruby, extracting a small method has minimal boilerplate (just def private_helper ... end), so there is no friction to the refactor. This is a readability and maintainability pattern; it does not eliminate complexity, but it makes it navigable."
+
+[[option]]
+id = "small-focused-methods"
+label = "Keep methods small and focused; extract complex logic into smaller methods or classes"
+directive = "Each method has a single responsibility and is kept to 10-20 lines of code. Complex logic is extracted into smaller private methods with descriptive names (e.g., validate_payment, calculate_discount, notify_user) or into separate service classes for broader workflows. A method that spans more than 20 lines is a candidate for extraction. Comments that explain what a block of code does signal that it should be extracted into a named method."
+why = "The adopted default. Small methods are easier to name, test, understand, and reuse."
+
+[[option]]
+id = "large-methods"
+label = "Allow large, multi-step methods for convenience"
+directive = "Methods can span many lines and handle multiple responsibilities in a single implementation."
+why = "Reduces indirection but makes code harder to follow, test, and reuse."

@@ -1,0 +1,31 @@
+id = "RUBY-AVOID-EVAL-SEND-1"
+title = "eval(), instance_eval(), class_eval(), and dynamic send() with user input are forbidden; use safer dispatch patterns"
+tag = "stack"
+domain = "ruby"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Brakeman which flags eval, instance_eval, class_eval, and send/public_send with string or symbol parameters derived from user input. Conformance holds when the linter runs in CI and these patterns fail the build."
+
+[decision]
+question = "How are method names or code dynamically invoked?"
+default = "dispatch-table-or-case-statement"
+why = "eval() and eval-like functions (instance_eval, class_eval) execute arbitrary Ruby code from a string, and dynamic send() / public_send() with a string argument can invoke arbitrary methods. When the string is derived from user input, an attacker can execute code or invoke internal methods they are not intended to reach. Even 'safe' input filtering is often incomplete: an attacker may guess method names, access private methods, or use method-chain syntax to tunnel through the dispatcher. The idiomatically safe pattern in Ruby is either a fixed dispatch table (a hash or case statement mapping user input to a whitelisted set of method names or lambdas) or using send() with a hardcoded symbol (not a user-derived string). If the dispatcher must be dynamic, the keys should come from a fixed allow-list, not from user input."
+
+[[option]]
+id = "dispatch-table-or-case-statement"
+label = "Use a fixed dispatch table (hash or case statement) to route to whitelisted methods"
+directive = "Dynamic dispatch is implemented as a case statement or hash that maps a fixed set of values (derived from user input) to hardcoded method names or lambdas. Example: ACTIONS = { 'create' => :create_action, 'delete' => :delete_action }; send(ACTIONS[params[:action]]) if ACTIONS.key?(params[:action]). Or use a case statement. The allowed actions are hardcoded; new actions require code review. eval(), instance_eval(), class_eval(), and send() with user-derived strings are forbidden."
+why = "The adopted default. A fixed whitelist eliminates the ability to invoke unintended methods."
+
+[[option]]
+id = "permitted-symbols"
+label = "Use send() with a hardcoded symbol or string-to-symbol allowlist"
+directive = "Dynamic method invocation uses send() with a hardcoded symbol (send(:method_name)) or a symbol converted from user input via a strict allowlist. Example: ALLOWED_METHODS = %i[create delete update]; send(params[:action].to_sym) if ALLOWED_METHODS.include?(params[:action].to_sym)."
+why = "Acceptable alternative when the allowlist is kept small and reviewed. Converts the user input to a symbol only after allowlist validation."
+
+[[option]]
+id = "eval-with-user-input"
+label = "Use eval() or send() with user input"
+directive = "Dynamic code or method names are dispatched directly from user input via eval(), instance_eval(), class_eval(), or send() with a string parameter."
+why = "Arbitrary code execution or method invocation vulnerability; every site is a vector for an attacker."

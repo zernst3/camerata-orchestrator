@@ -1,0 +1,24 @@
+id = "RUBY-CONCERNS-JUDICIOUSLY-1"
+title = "Concerns (module mixins) are used sparingly for cross-cutting behavior; large concerns or single-use concerns are flags"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "When is a concern (Rails mixin module) the right abstraction?"
+default = "concerns-for-true-cross-cutting"
+why = "Rails Concerns are a powerful tool for sharing code across multiple models. A Concern that adds a method used by three or more models (e.g., Sluggable for URL-friendly IDs, Timestamps for audit trails) is a good fit. However, concerns can become a junk drawer: a concern with a single method used by one model is just a private method; a concern with 50 lines of logic is a code smell that the abstraction is doing too much. Large concerns are also harder to understand and test because they implicitly depend on the including class having certain columns or methods. The better pattern for complex logic is a separate service class or repository. Concerns shine when they add a small, well-named piece of behavior that applies across multiple models and is truly orthogonal to the model's primary responsibility."
+
+[[option]]
+id = "concerns-for-true-cross-cutting"
+label = "Use Concerns for code shared by 3+ models; avoid large or single-use concerns"
+directive = "A Concern is created only when the code is reused across multiple (3+) models and represents a single, orthogonal behavior. Examples: Sluggable, Paranoid (soft deletes), Timestamps, Publishable. A Concern is not a dumping ground for odds and ends; if a method is used by only one model or if the concern is >50 lines, the logic belongs in the model itself or in a separate service/repository class. Large concerns are extracted into service classes; single-use Concerns are inlined into the model."
+why = "The adopted default. Small, focused Concerns reduce duplication across models without becoming a source of hidden dependencies."
+
+[[option]]
+id = "concerns-liberally"
+label = "Use Concerns extensively, even for single-use or large behaviors"
+directive = "Concerns are used for any logic that can be extracted, including single-use Concerns and large cross-cutting blocks."
+why = "Can reduce boilerplate but risks creating hard-to-follow mixins with hidden dependencies and implicit expectations about the including class."
