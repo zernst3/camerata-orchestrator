@@ -650,7 +650,7 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         for (s, _, _) in votes_for {
             counts[rank(s)] += 1;
         }
-        let max = *counts.iter().max().unwrap();
+        let max = counts.iter().copied().max().unwrap_or(0);
         let sev = if counts[2] == max {
             "high"
         } else if counts[1] == max {
