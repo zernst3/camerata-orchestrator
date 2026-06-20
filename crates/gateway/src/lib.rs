@@ -331,14 +331,20 @@ fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
                 .iter()
                 .any(|suf| lower.ends_with(suf)));
 
-    // Private-key / keystore file extensions.
-    const KEY_EXTS: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc"];
+    // Private-key / keystore file extensions. `.ppk` (PuTTY private key) and
+    // `.gpg` / `.pgp` (GnuPG / PGP key material) were evasion gaps — all three
+    // routinely hold private keys and must be denied like .pem/.key/etc.
+    const KEY_EXTS: &[&str] = &[
+        ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc", ".ppk", ".gpg", ".pgp",
+    ];
     let is_key_ext = KEY_EXTS.iter().any(|ext| lower.ends_with(ext));
 
-    // Conventional SSH / signing private-key filenames.
+    // Conventional SSH / signing private-key filenames. `secring` / `secring.gpg`
+    // is GnuPG's secret keyring (the `.gpg` ext above already covers `secring.gpg`,
+    // and this catches a bare `secring`).
     let is_private_key_file = matches!(
         lower.as_str(),
-        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | ".npmrc" | ".pgpass"
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" | ".npmrc" | ".pgpass" | "secring"
     );
 
     if is_env || is_key_ext || is_private_key_file {
@@ -378,36 +384,48 @@ fn sec_secrets_regex() -> &'static Regex {
         // preserve them. Use \x20 for a literal space inside [...] in (?x) mode.
         Regex::new(
             r"(?x)
-            # GitHub personal / oauth / user / server / fine-grained tokens
-            (ghp_[A-Za-z0-9_]{10,})
-            | (gho_[A-Za-z0-9_]{10,})
-            | (ghu_[A-Za-z0-9_]{10,})
-            | (ghs_[A-Za-z0-9_]{10,})
+            # GitHub personal / oauth / user / server / refresh / fine-grained tokens.
+            # `ghr_` (refresh) was an evasion gap — a leaked refresh token is as
+            # dangerous as an access token, so it is now covered alongside the rest.
+            (gh[pours]_[A-Za-z0-9_]{10,})
             | (github_pat_[A-Za-z0-9_]{10,})
-            # Slack tokens (bot, app, legacy, refresh, socket)
-            | (xox[baprs]-[A-Za-z0-9\-]{10,})
-            # AWS access key IDs
-            | (AKIA[0-9A-Z]{16})
+            # Slack tokens (bot, app, legacy, refresh, socket, AND `xoxe` rotating /
+            # `xoxc` client tokens — adversarial cases that previously slipped the
+            # original `[baprs]`-only class).
+            | (xox[baceprs]-[A-Za-z0-9\-]{10,})
+            # AWS access key IDs. `AKIA` is the long-term form; `ASIA` is the
+            # temporary STS session form and was an evasion gap — both are a 4-letter
+            # prefix + 16 uppercase-alphanumeric chars.
+            | ((?:AKIA|ASIA)[0-9A-Z]{16})
             # OpenAI / Stripe-style secret keys (sk- prefix, 20+ chars)
             # Stripe also uses sk-live_ and sk-test_ sub-prefixes; those
             # start with sk- so this pattern covers them.
             | (sk-[A-Za-z0-9]{20,})
             # Google API keys
             | (AIza[0-9A-Za-z_\-]{35})
-            # PEM private key header (RSA PRIVATE KEY, EC PRIVATE KEY, PRIVATE KEY, etc.)
+            # PEM / armored private key header. Covers RSA / EC / DSA / OPENSSH /
+            # ENCRYPTED ... PRIVATE KEY (the `[A-Z\x20]*` middle), AND the PGP variant
+            # `-----BEGIN PGP PRIVATE KEY BLOCK-----` whose tail is `KEY BLOCK-----`
+            # rather than `KEY-----` (the `(?:\x20BLOCK)?` clause). The trailing ` BLOCK`
+            # gap was an evasion: a real exported GPG private key was being allowed.
             # \x20 = literal space: Rust regex (?x) strips bare spaces inside [...].
-            | (-----BEGIN\s[A-Z\x20]*PRIVATE\s+KEY-----)
+            | (-----BEGIN\s[A-Z\x20]*PRIVATE\s+KEY(?:\x20BLOCK)?-----)
             # Heuristic: a long opaque literal assigned to a SECRET-named identifier —
             # catches provider-agnostic keys (e.g. a Finnhub key) that match no known
             # prefix. The identifier carries key/secret/token/password/credential, then
             # within a short window a quoted 24+ char CONTIGUOUS-alphanumeric literal.
-            # Precision guards: the literal class excludes / and - (so a file PATH or a
-            # hyphenated secret-NAME like plaid-access-token-item-1 no longer matches), and
-            # 24+ chars drops short env-var names. This is a heuristic, not entropy/AST; the
-            # name-vs-value precision limit is the gitleaks/semgrep path (see BACKLOG).
+            # Two branches (double- vs single-quoted) because the regex crate has no
+            # backreferences; single-quoted values were an evasion gap. A trailing run of
+            # base64 padding `=` is permitted INSIDE the closing quote (`[A-Za-z0-9+_]{24,}=*`)
+            # so a base64 secret like QUJD...WXYZ= no longer slips on its `=` padding,
+            # while `=` is still excluded from the 24+ contiguous-char count.
+            # Precision guards (unchanged): the literal class excludes / and - (so a file
+            # PATH or a hyphenated secret-NAME like plaid-access-token-item-1 does not match),
+            # and 24+ chars drops short env-var names. This is a heuristic, not entropy/AST;
+            # the name-vs-value precision limit is the gitleaks/semgrep path (see BACKLOG).
             | ((?i:[A-Za-z0-9_]*(?:key|secret|token|password|passwd|credential)[A-Za-z0-9_]*)
                [^\n]{0,40}?
-               \x22[A-Za-z0-9+_]{24,}\x22)
+               (?: \x22[A-Za-z0-9+_]{24,}=*\x22 | '[A-Za-z0-9+_]{24,}=*' ))
             ",
         )
         .expect("SEC-NO-HARDCODED-SECRETS-1 regex must compile")
@@ -515,21 +533,34 @@ fn arch_url_secret_regex() -> &'static Regex {
         // collisions (r#"..."# closes on the first "# sequence). We instead
         // exclude whitespace (\s) and a safe set of URL-terminating chars.
         // (?ix) = case-insensitive + verbose (# comments, whitespace ignored).
-        Regex::new(
+        // Shared secret-param alternation. A param name matches only when it sits
+        // DIRECTLY between a `[?&]` boundary and an `=`, so a longer host name like
+        // `sort_key` or `tokenizer` cannot match the bare `key`/`token` arms (the
+        // boundary anchoring is the precision guard). Beyond the original five
+        // (api_key/token/secret/password/access_token) this now also denies the
+        // adversarial variants that previously slipped: `auth_token`, `refresh_token`,
+        // `client_secret`, `private_key`, `signature`/`sig`, `pwd`/`passwd`, and a bare
+        // `key` / `apikey`. Ordered longest-first within shared stems so the engine
+        // does not stop on a shorter prefix and leave a trailing `=`-less tail.
+        const SECRET_PARAM: &str = r"(?:
+            access_token | refresh_token | auth_token | client_secret | private_key
+          | api_?key | passwd | password | pwd | secret | signature | sig | token | key
+        )";
+        Regex::new(&format!(
             r"(?ix)
             (?:
                 # Case A: a literal HTTP/HTTPS URL carrying a secret param.
-                https?://\S+ [?&] (?:api_?key|token|secret|password|access_token) =
+                https?://\S+ [?&] {SECRET_PARAM} =
                   [^\s&]+
               |
                 # Case B: a query-string SHAPE even without a literal scheme — a `?`
                 # query start, then a secret param, e.g. a templated URL like
-                # `{base}?symbol={symbol}&token={token}`. Requires the `?` so it stays
-                # URL-shaped (not any stray `&token=`).
-                \? [^\s\x22]* [?&] (?:api_?key|token|secret|password|access_token) =
+                # `{{base}}?symbol={{symbol}}&token={{token}}`. Requires the `?` so it
+                # stays URL-shaped (not any stray `&token=`).
+                \? [^\s\x22]* [?&] {SECRET_PARAM} =
             )
-            ",
-        )
+            "
+        ))
         .expect("ARCH-NO-SECRETS-IN-URL-1 regex must compile")
     })
 }
@@ -1232,5 +1263,265 @@ mod tests {
         gw.bind(s.clone(), role_with(&["GOV-1"]));
         assert_eq!(gw.session_count(), 1);
         assert_eq!(gw.role_for(&s).unwrap().name, "Backend");
+    }
+}
+
+
+// ─── adversarial / evasion-hardening tests (issue #16) ───────────────────────
+//
+// This module throws OBFUSCATED and EDGE-CASE violations at the layer-1 gate and
+// asserts each is STILL denied. Every case is paired, where it matters, with a
+// clean-control allow so a "deny everything" regression is caught. Cases that
+// previously SLIPPED (Allow when they should Deny) drove the regex/logic
+// tightening in the arms above; each such case is commented with what it closed.
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use serde_json::json;
+
+    fn write(path: &str, content: &str) -> ToolCall {
+        ToolCall {
+            tool: "gated_write".to_string(),
+            input: json!({ "path": path, "content": content }),
+        }
+    }
+    fn path_call(path: &str) -> ToolCall {
+        ToolCall {
+            tool: "gated_write".to_string(),
+            input: json!({ "path": path, "content": "x" }),
+        }
+    }
+    fn assert_deny(rule: RuleId, call: &ToolCall, why: &str) {
+        let subset = vec![rule];
+        assert!(
+            matches!(evaluate_call(&subset, call), Decision::Deny { .. }),
+            "expected DENY ({why})"
+        );
+    }
+    fn assert_allow(rule: RuleId, call: &ToolCall, why: &str) {
+        let subset = vec![rule];
+        assert!(
+            matches!(evaluate_call(&subset, call), Decision::Allow),
+            "expected ALLOW ({why})"
+        );
+    }
+
+    // ── SEC-NO-RAW-SQL-CONCAT-1: case / whitespace obfuscation ────────────────
+
+    #[test]
+    fn sql_concat_survives_mixed_case_and_whitespace() {
+        let rule = sec_no_raw_sql_concat_1_rule();
+        // Mixed-case keyword + clause + concat: the `(?i)` flag must defeat the
+        // `sElEcT … fRoM … " +` casing trick.
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "let q = \"sElEcT id fRoM users wHeRe x = \" + v;"),
+            "mixed-case SQL string-concat",
+        );
+        // Extra/odd inner whitespace (incl. tabs and newlines) between the keyword,
+        // clause and interpolation — the `.{0,200}?` window + `s` dotall must bridge it.
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "format!(\"SELECT\\t\\tx\\n   FROM     t\\n WHERE id = {id}\")"),
+            "tab/newline-padded SQL format interpolation",
+        );
+        // Lowercase keywords with named interpolation.
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "let q = format!(\"select x from t where id = {id}\");"),
+            "all-lowercase SQL with named interpolation",
+        );
+        // Clean control: a UI string with a keyword-ish word but no SQL clause stays ALLOWED.
+        assert_allow(
+            rule,
+            &write("ui.rs", "rsx! { \"Selection: {count} row(s)\" }"),
+            "UI text with no SQL clause must not be a false positive",
+        );
+    }
+
+    // ── SEC-NO-HARDCODED-SECRETS-1: more prefixes / quoting variants ──────────
+
+    #[test]
+    fn secrets_catch_additional_token_prefixes() {
+        let rule = sec_no_hardcoded_secrets_1_rule();
+        // SLIP-FIX: `ghr_` GitHub *refresh* tokens were not covered (only ghp/gho/ghu/ghs).
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "let t = \"ghr_ABCDEFGHIJ1234567890abcdefghij12\";"),
+            "ghr_ GitHub refresh token",
+        );
+        // SLIP-FIX: Slack `xoxe-` (rotating) / `xoxc-` (client) tokens slipped the
+        // original `xox[baprs]` class. The token bodies are ASSEMBLED at runtime
+        // (prefix concatenated to the body) so no contiguous Slack-token literal
+        // exists in the source — that keeps push-protection secret scanners from
+        // false-flagging this synthetic fixture, while the value the arm sees is a
+        // genuine `xox?-` token shape.
+        let body = "-1-ABCDEFGHIJ1234567890abcdefghij";
+        for variant in ["xoxe", "xoxc"] {
+            let content = format!("let t = \"{variant}{body}\";");
+            assert_deny(
+                rule.clone(),
+                &write("a.rs", &content),
+                "Slack xoxe-/xoxc- token variant",
+            );
+        }
+        // SLIP-FIX: AWS temporary STS keys begin `ASIA`, not `AKIA`.
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "key = \"ASIAIOSFODNN7EXAMPLE\";"),
+            "ASIA temporary AWS session key",
+        );
+        // Clean control: an ordinary identifier that merely starts with `gh` is fine.
+        assert_allow(
+            rule,
+            &write("a.rs", "let github_user = \"octocat\";"),
+            "a normal gh-prefixed identifier is not a token",
+        );
+    }
+
+    #[test]
+    fn secrets_catch_pem_and_pgp_block_headers() {
+        let rule = sec_no_hardcoded_secrets_1_rule();
+        // OpenSSH armored private key.
+        assert_deny(
+            rule.clone(),
+            &write("k", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"),
+            "OpenSSH PEM private key header",
+        );
+        // SLIP-FIX: PGP keys end the header with `KEY BLOCK-----`, not `KEY-----`,
+        // so the original tail `PRIVATE\s+KEY-----` let an exported GPG key through.
+        assert_deny(
+            rule,
+            &write("k", "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n"),
+            "PGP private key BLOCK header",
+        );
+    }
+
+    #[test]
+    fn secrets_catch_single_quote_and_base64_value_variants() {
+        let rule = sec_no_hardcoded_secrets_1_rule();
+        // SLIP-FIX: the name→value heuristic only matched DOUBLE-quoted values, so a
+        // SINGLE-quoted opaque literal on a *_KEY name slipped (the regex crate has no
+        // backreferences, so the arm now has explicit double- and single-quote branches).
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "const API_KEY = 'c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7';"),
+            "single-quoted opaque secret value",
+        );
+        // SLIP-FIX: a base64 secret carries `=` padding, which the closing-quote anchor
+        // `…{24,}"` rejected; the arm now allows a trailing `=*` run inside the quotes.
+        assert_deny(
+            rule.clone(),
+            &write("a.rs", "const API_SECRET: &str = \"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\";"),
+            "base64 secret with = padding",
+        );
+        // Clean control: a hyphenated NAME (a reference) and a file PATH must NOT match —
+        // the precision guards (no `/` or `-` in the value class) must survive the widening.
+        assert_allow(
+            rule.clone(),
+            &write("a.rs", "let k = \"plaid-access-token-item-1\";"),
+            "hyphenated secret name is a reference, not a value",
+        );
+        assert_allow(
+            rule,
+            &write("a.rs", "let token_path = 'src/some/very/long/path/here.rs';"),
+            "single-quoted file path on a token var is not a secret",
+        );
+    }
+
+    // ── ARCH-NO-SECRETS-IN-URL-1: more secret params + templated URLs ─────────
+
+    #[test]
+    fn url_secrets_catch_additional_param_names() {
+        let rule = arch_no_secrets_in_url_1_rule();
+        // SLIP-FIX: only api_key/token/secret/password/access_token were covered.
+        for (param, why) in [
+            ("auth_token", "auth_token param"),
+            ("refresh_token", "refresh_token param"),
+            ("client_secret", "client_secret param"),
+            ("private_key", "private_key param"),
+            ("signature", "signature param"),
+            ("sig", "sig param"),
+            ("pwd", "pwd param"),
+            ("key", "bare key param"),
+        ] {
+            let content = format!("let u = \"https://api.x.com/a?{param}=deadbeef123\";");
+            assert_deny(rule.clone(), &write("c.rs", &content), why);
+        }
+    }
+
+    #[test]
+    fn url_secrets_catch_templated_urls_and_case_variants() {
+        let rule = arch_no_secrets_in_url_1_rule();
+        // Templated URL (no literal scheme) carrying a secret param — Case B shape.
+        assert_deny(
+            rule.clone(),
+            &write("c.rs", "format!(\"{base}?id={id}&auth_token={t}\")"),
+            "templated URL with auth_token",
+        );
+        // Mixed-case param name defeated by the `(?i)` flag.
+        assert_deny(
+            rule.clone(),
+            &write("c.rs", "let u = \"https://x.com/a?ApiKey=deadbeef123\";"),
+            "mixed-case ApiKey param",
+        );
+        // Clean controls: longer host words that merely CONTAIN a secret stem must be
+        // ALLOWED — boundary anchoring (`[?&]NAME=`) is the precision guard.
+        for (content, why) in [
+            ("let u = \"https://x.com/a?sort_key=name\";", "sort_key is not key"),
+            ("let u = \"https://x.com/a?tokenizer=bpe\";", "tokenizer is not token"),
+            ("let u = \"https://x.com/a?keyword=rust\";", "keyword is not key"),
+            ("let u = \"https://x.com/a?format=json&page=1\";", "no secret params at all"),
+        ] {
+            assert_allow(rule.clone(), &write("c.rs", content), why);
+        }
+    }
+
+    // ── SEC-NO-PATH-ESCAPE-1: nested / trailing / backslash traversal ─────────
+
+    #[test]
+    fn path_escape_survives_traversal_variants() {
+        let rule = sec_no_path_escape_1_rule();
+        for (path, why) in [
+            ("a/../../etc/passwd", "nested ../ traversal"),
+            ("a/b/c/..", "trailing .. segment"),
+            ("../outside.txt", "leading ../ traversal"),
+            ("a\\..\\..\\b", "backslash-separated .. traversal"),
+            ("src/.git/hooks/pre-commit", "nested .git directory component"),
+            ("deep/nested/.ssh/config", "nested .ssh directory component"),
+        ] {
+            assert_deny(rule.clone(), &path_call(path), why);
+        }
+        // Clean controls: a `..`-containing FILENAME and a dir named `foo.git` are NOT
+        // traversal/VCS segments and must stay ALLOWED (segment-exact matching).
+        assert_allow(rule.clone(), &path_call("notes/release..md"), "dotted filename, not a `..` segment");
+        assert_allow(rule, &path_call("mirrors/foo.git/readme.md"), "foo.git is not a `.git` segment");
+    }
+
+    // ── SEC-NO-SECRET-FILES-1: more .env / private-key file variants ──────────
+
+    #[test]
+    fn secret_files_catch_additional_key_extensions() {
+        let rule = sec_no_secret_files_1_rule();
+        for (path, why) in [
+            ("secrets/server.ppk", "PuTTY .ppk private key"),
+            ("keys/secret.gpg", ".gpg key material"),
+            ("keys/secret.pgp", ".pgp key material"),
+            ("secring", "bare GnuPG secret keyring"),
+            ("home/secring.gpg", "GnuPG secret keyring file"),
+            (".env.production", "real .env.<env> file"),
+            ("ID_RSA", "uppercased id_rsa (name match is case-insensitive)"),
+        ] {
+            assert_deny(rule.clone(), &path_call(path), why);
+        }
+        // Clean controls: templates and source files named after keys stay ALLOWED.
+        for (path, why) in [
+            (".env.example", "env template, no real secrets"),
+            ("src/keys.rs", "a source file named keys is not a key file"),
+            ("config/key.rs", "a .rs source, not a private key"),
+            ("docs/env.md", "documentation about env vars"),
+        ] {
+            assert_allow(rule.clone(), &path_call(path), why);
+        }
     }
 }
