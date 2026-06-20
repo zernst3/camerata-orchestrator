@@ -5,6 +5,15 @@ domain = "javascript:express"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://expressjs.com/en/advanced/best-practice-performance.html"
+title = "Express.js — Production best practices: error handling (async/await + next(err))"
+
+[[sources]]
+url = "https://expressjs.com/en/guide/error-handling.html"
+title = "Express.js — Error Handling: four-argument (err, req, res, next) error middleware"
 
 [decision]
 question = "What position does the project take on: Errors flow to one central error-handling middleware; async handlers forward via next?"

@@ -5,6 +5,11 @@ domain = "javascript:express"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://expressjs.com/en/advanced/best-practice-performance.html"
+title = "Express.js — Production best practices: separate business logic from route handlers"
 
 [decision]
 question = "What position does the project take on: Route handlers stay thin; business logic and data access live in a service layer?"

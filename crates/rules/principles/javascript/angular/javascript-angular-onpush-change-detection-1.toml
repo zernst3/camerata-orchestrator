@@ -5,6 +5,16 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/best-practices/skipping-subtrees"
+title = "Angular — Skipping component subtrees (OnPush change detection)"
+
+[[sources]]
+url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/README.md"
+title = "angular-eslint — prefer-on-push-component-change-detection"
+linter = "@angular-eslint/prefer-on-push-component-change-detection"
 
 [decision]
 question = "What position does the project take on: Components use OnPush change detection by default for performance?"

@@ -5,6 +5,15 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/components/dom-apis"
+title = "Angular — DOM APIs and Renderer2"
+
+[[sources]]
+url = "https://angular.dev/guide/ssr#why-use-server-side-rendering"
+title = "Angular SSR — server-safe DOM abstraction rationale"
 
 [decision]
 question = "What position does the project take on: DOM is not manipulated directly; Renderer2 and property bindings are used instead?"

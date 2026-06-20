@@ -5,6 +5,16 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://vuejs.org/style-guide/rules-essential#component-style-scoping"
+title = "Vue.js Style Guide Priority A — Component-Scoped Styling"
+
+[[sources]]
+url = "https://eslint.vuejs.org/rules/enforce-style-attribute.html"
+title = "eslint-plugin-vue — vue/enforce-style-attribute"
+linter = "eslint-plugin-vue: vue/enforce-style-attribute"
 
 [decision]
 question = "What position does the project take on: Scoped styles?"

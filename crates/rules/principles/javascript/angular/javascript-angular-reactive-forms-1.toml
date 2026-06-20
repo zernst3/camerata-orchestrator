@@ -5,6 +5,11 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/forms/reactive-forms"
+title = "Angular — Reactive forms guide"
 
 [decision]
 question = "What position does the project take on: Complex forms use reactive (FormBuilder, FormGroup) over template-driven forms?"

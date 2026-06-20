@@ -5,6 +5,16 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/style-guide"
+title = "Angular Style Guide — Avoid overly complex logic in templates"
+
+[[sources]]
+url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin-template/src/rules/no-call-expression.ts"
+title = "angular-eslint template plugin — no-call-expression"
+linter = "@angular-eslint/template/no-call-expression"
 
 [decision]
 question = "What position does the project take on: Templates are simple and logic-free; complex conditions and computations live in the component?"

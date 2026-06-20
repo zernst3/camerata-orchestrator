@@ -5,6 +5,20 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://vuejs.org/guide/components/props.html"
+title = "Vue.js — Components: Props (one-way data flow)"
+
+[[sources]]
+url = "https://vuejs.org/guide/components/events.html"
+title = "Vue.js — Component Events (emitting events up)"
+
+[[sources]]
+url = "https://eslint.vuejs.org/rules/no-mutating-props.html"
+title = "eslint-plugin-vue — vue/no-mutating-props"
+linter = "eslint-plugin-vue: vue/no-mutating-props"
 
 [decision]
 question = "What position does the project take on: Props down, events up data flow?"

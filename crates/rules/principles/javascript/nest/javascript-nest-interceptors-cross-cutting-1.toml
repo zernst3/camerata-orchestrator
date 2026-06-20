@@ -5,6 +5,11 @@ domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.nestjs.com/interceptors"
+title = "NestJS Docs — Interceptors: cross-cutting concerns"
 
 [decision]
 question = "What position does the project take on: Interceptors for cross-cutting concerns?"

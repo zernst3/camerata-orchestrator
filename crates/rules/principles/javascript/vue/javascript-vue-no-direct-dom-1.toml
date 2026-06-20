@@ -5,6 +5,15 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://vuejs.org/guide/essentials/reactivity-fundamentals.html"
+title = "Vue.js — Reactivity Fundamentals: declare state, let Vue render"
+
+[[sources]]
+url = "https://vuejs.org/guide/extras/ways-of-using-vue.html"
+title = "Vue.js — Progressive Enhancement: declarative rendering model"
 
 [decision]
 question = "What position does the project take on: Direct DOM manipulation?"

@@ -5,6 +5,15 @@ domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.nestjs.com/modules"
+title = "NestJS Docs — Modules: providers and dependency injection"
+
+[[sources]]
+url = "https://docs.nestjs.com/providers"
+title = "NestJS Docs — Providers: @Injectable and constructor injection"
 
 [decision]
 question = "What position does the project take on: Modules and dependency injection?"

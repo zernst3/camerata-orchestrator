@@ -5,6 +5,15 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/routing/route-guards"
+title = "Angular — Route guards: CanActivateFn"
+
+[[sources]]
+url = "https://angular.dev/api/router/CanActivateFn"
+title = "Angular API — CanActivateFn"
 
 [decision]
 question = "What position does the project take on: Protected routes are guarded by canActivate guards, not checked in component ngOnInit?"

@@ -5,6 +5,15 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://pinia.vuejs.org/introduction.html"
+title = "Pinia — Introduction: official Vue state management recommendation"
+
+[[sources]]
+url = "https://vuejs.org/guide/scaling-up/state-management"
+title = "Vue.js — State Management: Pinia as official solution"
 
 [decision]
 question = "What position does the project take on: Shared state management with Pinia?"

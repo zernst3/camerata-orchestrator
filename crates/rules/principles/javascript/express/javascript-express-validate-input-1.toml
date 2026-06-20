@@ -5,6 +5,11 @@ domain = "javascript:express"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://expressjs.com/en/advanced/best-practice-security.html"
+title = "Express.js — Production best practices: Security — Do not trust user input"
 
 [decision]
 question = "What position does the project take on: Request input is validated at the boundary before use?"

@@ -5,6 +5,11 @@ domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.nestjs.com/guards"
+title = "NestJS Docs — Guards: CanActivate for authentication and authorization"
 
 [decision]
 question = "What position does the project take on: Guards for auth?"

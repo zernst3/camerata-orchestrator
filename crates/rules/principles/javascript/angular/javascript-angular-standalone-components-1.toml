@@ -5,6 +5,16 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/components/anatomy-of-components"
+title = "Angular — Anatomy of components (standalone: true)"
+
+[[sources]]
+url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/src/rules/prefer-standalone.ts"
+title = "angular-eslint — prefer-standalone"
+linter = "@angular-eslint/prefer-standalone"
 
 [decision]
 question = "What position does the project take on: Components are standalone (modern Angular) with explicit dependency imports?"
