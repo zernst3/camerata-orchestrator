@@ -769,7 +769,50 @@ pub fn build_report(
 
 // ── Tech-debt ticket (accept findings as debt -> open a GitHub issue) ───────────
 
+/// Escape a single field for RFC 4180 CSV: if the value contains a comma, double-quote,
+/// or newline, wrap it in double-quotes and double any internal double-quotes.
+fn csv_escape(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
+        let escaped = field.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        field.to_string()
+    }
+}
+
+/// Render accepted findings for one repo as a CSV (RFC 4180).
+///
+/// Columns: `rule_id`, `severity`, `path`, `line`, `detail`.
+///
+/// Fields containing commas, double-quotes, or newlines are quoted; internal
+/// double-quotes are doubled. This is a pure function and is used by
+/// [`tech_debt_issue_body`] to embed a fenced ```csv block in each repo's
+/// issue body.
+pub fn tech_debt_csv(findings: &[Finding]) -> String {
+    let mut out = String::from("rule_id,severity,path,line,detail\n");
+    for f in findings {
+        out.push_str(&csv_escape(&f.rule_id));
+        out.push(',');
+        out.push_str(&csv_escape(&f.severity));
+        out.push(',');
+        out.push_str(&csv_escape(&f.path));
+        out.push(',');
+        // Line is a usize — never needs escaping.
+        out.push_str(&f.line.to_string());
+        out.push(',');
+        out.push_str(&csv_escape(&f.detail));
+        out.push('\n');
+    }
+    out
+}
+
 /// Render selected findings as a GitHub issue body, grouped by repo.
+///
+/// Each repo section includes a fenced ```csv block containing that repo's
+/// findings (columns: rule_id, severity, path, line, detail). GitHub Issues
+/// cannot receive true file attachments via the API, so the CSV is embedded
+/// inline as a fenced code block — the pragmatic delivery path that requires
+/// no new API capability.
 pub fn tech_debt_issue_body(findings: &[Finding]) -> String {
     use std::collections::BTreeMap;
     let mut s = String::from(
@@ -781,9 +824,9 @@ pub fn tech_debt_issue_body(findings: &[Finding]) -> String {
     for f in findings {
         by_repo.entry(f.repo.as_str()).or_default().push(f);
     }
-    for (repo, fs) in by_repo {
+    for (repo, fs) in &by_repo {
         s.push_str(&format!("### {repo}\n\n"));
-        for f in fs {
+        for f in fs.iter() {
             s.push_str(&format!(
                 "- **[{}]** `{}` — `{}:{}`\n",
                 f.severity.to_uppercase(),
@@ -793,6 +836,14 @@ pub fn tech_debt_issue_body(findings: &[Finding]) -> String {
             ));
         }
         s.push('\n');
+        // Embed a per-repo CSV so each issue is self-contained and machine-readable.
+        // The CSV columns mirror the Finding fields most useful for triage tooling:
+        // rule_id, severity, path, line, detail.
+        let repo_findings: Vec<Finding> = fs.iter().map(|f| (*f).clone()).collect();
+        let csv = tech_debt_csv(&repo_findings);
+        s.push_str("```csv\n");
+        s.push_str(&csv);
+        s.push_str("```\n\n");
     }
     s.push_str("\n_Filed by Camerata onboarding._");
     s
@@ -1776,5 +1827,154 @@ mod tests {
         assert!(r.findings.is_empty());
         assert_eq!(r.repos.len(), 2);
         assert!(r.message.unwrap().contains("CAMERATA_GITHUB_TOKEN"));
+    }
+
+    // ── Regression: repo↔issue boundary (issue #41) ─────────────────────────────
+
+    /// Helper: build a minimal Finding for a given repo.
+    fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
+        Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "high".to_string(),
+            snippet: "s".to_string(),
+            detail: "detail text".to_string(),
+            status: "active".to_string(),
+            also_matches: Vec::new(),
+        }
+    }
+
+    /// The UI calls create_ticket(repo, group) once per repo, where `group` is
+    /// already filtered to that repo's findings. This test locks that boundary:
+    /// when `tech_debt_issue_body` is called with findings from repo A only, the
+    /// produced body must contain repo A's paths and must NOT contain any path
+    /// from repo B (even if repo B findings exist in the broader selection).
+    #[test]
+    fn tech_debt_ticket_body_isolates_repo_findings() {
+        let api_findings = vec![
+            finding_for("me/api", "src/config.rs", 12, "SEC-NO-HARDCODED-SECRETS-1"),
+            finding_for("me/api", "src/db.rs", 55, "SEC-NO-RAW-SQL-CONCAT-1"),
+        ];
+        let web_findings = vec![
+            finding_for("me/web", "pages/index.tsx", 3, "ARCH-NO-SECRETS-IN-URL-1"),
+        ];
+
+        // Simulate the per-repo issue bodies the UI creates (one call per repo).
+        let api_body = tech_debt_issue_body(&api_findings);
+        let web_body = tech_debt_issue_body(&web_findings);
+
+        // API issue: contains only API paths.
+        assert!(api_body.contains("src/config.rs"), "api body must contain its own path");
+        assert!(api_body.contains("src/db.rs"), "api body must contain its own path");
+        assert!(
+            !api_body.contains("pages/index.tsx"),
+            "api body must NOT contain web repo path: {api_body}"
+        );
+
+        // Web issue: contains only web paths.
+        assert!(web_body.contains("pages/index.tsx"), "web body must contain its own path");
+        assert!(
+            !web_body.contains("src/config.rs"),
+            "web body must NOT contain api repo path: {web_body}"
+        );
+        assert!(
+            !web_body.contains("src/db.rs"),
+            "web body must NOT contain api repo path: {web_body}"
+        );
+
+        // Each body also embeds its repo's CSV block.
+        assert!(api_body.contains("```csv"), "api body must embed a csv block");
+        assert!(web_body.contains("```csv"), "web body must embed a csv block");
+        assert!(api_body.contains("SEC-NO-HARDCODED-SECRETS-1"), "csv must include rule_id");
+        assert!(web_body.contains("ARCH-NO-SECRETS-IN-URL-1"), "csv must include rule_id");
+    }
+
+    // ── Per-repo CSV (issue #41) ──────────────────────────────────────────────────
+
+    #[test]
+    fn tech_debt_csv_header_and_basic_row() {
+        let findings = vec![finding_for("me/api", "src/main.rs", 10, "SEC-NO-HARDCODED-SECRETS-1")];
+        let csv = tech_debt_csv(&findings);
+        let mut lines = csv.lines();
+        assert_eq!(lines.next().unwrap(), "rule_id,severity,path,line,detail");
+        let data_row = lines.next().expect("expected a data row");
+        assert!(data_row.contains("SEC-NO-HARDCODED-SECRETS-1"));
+        assert!(data_row.contains("src/main.rs"));
+        assert!(data_row.contains("10"));
+        assert!(data_row.contains("high"));
+    }
+
+    #[test]
+    fn tech_debt_csv_empty_findings_produces_header_only() {
+        let csv = tech_debt_csv(&[]);
+        assert_eq!(csv, "rule_id,severity,path,line,detail\n");
+    }
+
+    #[test]
+    fn csv_escape_plain_value_is_unchanged() {
+        assert_eq!(csv_escape("hello"), "hello");
+        assert_eq!(csv_escape("SEC-NO-HARDCODED-SECRETS-1"), "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
+    #[test]
+    fn csv_escape_value_with_comma_is_quoted() {
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+    }
+
+    #[test]
+    fn csv_escape_value_with_internal_double_quote_doubles_it() {
+        // RFC 4180: a double-quote inside a quoted field is escaped by doubling it.
+        assert_eq!(csv_escape("say \"hello\""), "\"say \"\"hello\"\"\"");
+    }
+
+    #[test]
+    fn csv_escape_value_with_newline_is_quoted() {
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn tech_debt_csv_escapes_special_fields_correctly() {
+        let f = Finding {
+            repo: "me/api".into(),
+            path: "src/tricky,path.rs".into(),
+            line: 1,
+            rule_id: "RULE-1".into(),
+            severity: "high".into(),
+            snippet: "s".into(),
+            detail: "contains a \"quoted\" word and a comma, here".into(),
+            status: "active".into(),
+            also_matches: Vec::new(),
+        };
+        let csv = tech_debt_csv(&[f]);
+        let data_row = csv.lines().nth(1).expect("expected data row");
+        // The path field contains a comma so it must be wrapped in quotes.
+        assert!(
+            data_row.contains("\"src/tricky,path.rs\""),
+            "comma in path must be quoted: {data_row}"
+        );
+        // The detail contains both quotes and a comma — the whole field is quoted and
+        // internal quotes are doubled.
+        assert!(
+            data_row.contains("\"contains a \"\"quoted\"\" word and a comma, here\""),
+            "detail with comma+quote must be fully escaped: {data_row}"
+        );
+    }
+
+    #[test]
+    fn tech_debt_issue_body_embeds_csv_block_per_repo() {
+        let findings = vec![
+            finding_for("me/api", "src/config.rs", 5, "SEC-NO-HARDCODED-SECRETS-1"),
+        ];
+        let body = tech_debt_issue_body(&findings);
+        // The body must contain a fenced csv block.
+        assert!(body.contains("```csv\n"), "body must open a csv fence: {body}");
+        assert!(body.contains("```"), "body must close the csv fence: {body}");
+        // The CSV block contains the header row.
+        assert!(body.contains("rule_id,severity,path,line,detail"), "csv header must appear in body: {body}");
+        // The CSV block contains the data row.
+        assert!(body.contains("SEC-NO-HARDCODED-SECRETS-1"), "csv data must appear in body: {body}");
+        assert!(body.contains("src/config.rs"), "path must appear in csv block: {body}");
     }
 }
