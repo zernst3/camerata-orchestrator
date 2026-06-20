@@ -265,7 +265,13 @@ impl RefinementReviewer for StubRefinementReviewer {
 
 // ─── live Claude reviewer ────────────────────────────────────────────────────
 
-/// The default model id the live review call uses.
+/// The fallback model id the live review call uses when no model is configured
+/// by the caller. Matches the server catalog's `DEFAULT_MODEL`; kept in sync
+/// manually. Behind the seam: only this concrete type names a model.
+///
+/// Callers that want a different model should use
+/// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
+/// environment variable overrides this at runtime for CLI / one-off invocations.
 pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
@@ -283,17 +289,26 @@ impl Default for ClaudeRefinementReviewer {
 }
 
 impl ClaudeRefinementReviewer {
-    /// Construct with the default model.
+    /// Construct with the configured model: reads `CAMERATA_REVIEWER_MODEL`
+    /// first, then falls back to [`DEFAULT_REVIEWER_MODEL`]. Use
+    /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
+    /// from a per-project config or the server's `/api/models` catalog).
     pub fn new() -> Self {
-        Self {
-            model: DEFAULT_REVIEWER_MODEL.to_string(),
-        }
+        let model = std::env::var("CAMERATA_REVIEWER_MODEL")
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_REVIEWER_MODEL.to_string());
+        Self { model }
     }
 
-    /// Construct with an explicit model id.
+    /// Construct with an explicit model id. Blank ids are treated as the
+    /// configured default (env var or constant).
     pub fn with_model(model: impl Into<String>) -> Self {
-        Self {
-            model: model.into(),
+        let m = model.into();
+        if m.trim().is_empty() {
+            Self::new()
+        } else {
+            Self { model: m }
         }
     }
 

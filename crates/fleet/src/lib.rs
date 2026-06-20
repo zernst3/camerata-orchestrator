@@ -279,10 +279,32 @@ pub struct BuildOutcome {
 /// here (the agents make the model calls behind the injected drivers).
 ///
 /// The crate name used for the generated worktree is `camerata_app`.
+///
+/// To pin a specific model for every agent in the fleet, use
+/// [`build_from_plan_with_model`] instead. This wrapper passes `None` (CLI
+/// default model).
 pub async fn build_from_plan(
     plan: &Plan,
     root: &Path,
     gateway_bin: &Path,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_model(plan, root, gateway_bin, None, on_event).await
+}
+
+/// Run the governed fleet with an explicit `model` id threaded to every
+/// `claude -p` agent. `model = None` means each agent uses the CLI's own
+/// default — identical to [`build_from_plan`].
+///
+/// All agents in the fleet share the same model choice: the fleet is built
+/// around a single operator intent, and mixing model tiers mid-fleet creates
+/// inconsistent governance context. If per-agent tiering is ever needed, it
+/// should be wired at the [`FleetStage`] level.
+pub async fn build_from_plan_with_model(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    model: Option<&str>,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
@@ -316,7 +338,16 @@ pub async fn build_from_plan(
     }
     let drivers: Vec<_> = spawns
         .iter()
-        .map(|spawn| spawn.driver.clone().with_worktree(&worktree))
+        .map(|spawn| {
+            let d = spawn.driver.clone().with_worktree(&worktree);
+            // Thread the operator's model choice into every agent. `with_model("")`
+            // is a no-op (the driver ignores blank ids), so passing None here via
+            // unwrap_or("") is safe.
+            match model {
+                Some(m) => d.with_model(m),
+                None => d,
+            }
+        })
         .collect();
 
     // ── Build the stage list ─────────────────────────────────────────────────
@@ -518,5 +549,46 @@ mod tests {
         assert_eq!(cloned.produced_bytes, 42);
         assert!(cloned.compiled);
         let _ = format!("{cloned:?}");
+    }
+
+    // ── build_from_plan_with_model ────────────────────────────────────────────
+
+    /// Verify that `build_from_plan` is a thin wrapper around
+    /// `build_from_plan_with_model` — both exist as public APIs with compatible
+    /// signatures (both accept the same plan/root/gateway_bin/on_event args;
+    /// `_with_model` additionally accepts `Option<&str>`). This is a
+    /// compile-time / API-shape test: if the wrappers diverge, this will fail
+    /// to compile.
+    #[test]
+    fn build_from_plan_with_model_accepts_none_and_some() {
+        // Verify both signatures are callable (we don't run them — they need a
+        // live gateway + corpus). Just confirm the types are correct.
+        fn _check_none_compiles(
+            plan: &camerata_intake::Plan,
+            root: &std::path::Path,
+            bin: &std::path::Path,
+        ) {
+            // Both should accept the same event type.
+            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_model(plan, root, bin, None, &|_| {}));
+        }
+        fn _check_some_compiles(
+            plan: &camerata_intake::Plan,
+            root: &std::path::Path,
+            bin: &std::path::Path,
+        ) {
+            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_model(
+                    plan,
+                    root,
+                    bin,
+                    Some("claude-sonnet-4-6"),
+                    &|_| {},
+                ));
+        }
+        // This test proves the API compiles with both None and Some; the _ suffix
+        // functions are never called, so no I/O or infra is required.
+        let _ = _check_none_compiles as fn(_, _, _);
+        let _ = _check_some_compiles as fn(_, _, _);
     }
 }

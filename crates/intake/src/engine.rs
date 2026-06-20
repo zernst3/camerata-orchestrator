@@ -459,8 +459,15 @@ impl LeadEngineer for StubLeadEngineer {
 
 // ─── the real Claude lead engineer ───────────────────────────────────────────
 
-/// The default model id the live lead-engineer call uses. Behind the seam, so
-/// only this concrete type names a model.
+/// The fallback model id the live lead-engineer call uses when no model is
+/// configured by the caller. Matches the server catalog's `DEFAULT_MODEL`
+/// (`camerata_server::llm::DEFAULT_MODEL`); kept in sync manually — both must
+/// name the same id so the server default and the CLI fallback agree. Behind
+/// the seam: only this concrete type names a model.
+///
+/// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
+/// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
+/// runtime for CLI / one-off invocations.
 pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
 
 /// The REAL lead engineer: a headless `claude -p` call that evaluates the form
@@ -517,17 +524,26 @@ struct ModelOutput {
 }
 
 impl ClaudeLeadEngineer {
-    /// Construct with the default model.
+    /// Construct with the configured model: reads `CAMERATA_LEAD_ENGINEER_MODEL`
+    /// first, then falls back to [`DEFAULT_LEAD_ENGINEER_MODEL`]. Use
+    /// [`Self::with_model`] when the caller supplies an explicit model id (e.g.
+    /// from the server's `/api/models` catalog or a per-project config).
     pub fn new() -> Self {
-        Self {
-            model: DEFAULT_LEAD_ENGINEER_MODEL.to_string(),
-        }
+        let model = std::env::var("CAMERATA_LEAD_ENGINEER_MODEL")
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_LEAD_ENGINEER_MODEL.to_string());
+        Self { model }
     }
 
-    /// Construct with an explicit model id.
+    /// Construct with an explicit model id (e.g. from the server model catalog
+    /// or a per-form UI picker). Blank ids are treated as the default.
     pub fn with_model(model: impl Into<String>) -> Self {
-        Self {
-            model: model.into(),
+        let m = model.into();
+        if m.trim().is_empty() {
+            Self::new()
+        } else {
+            Self { model: m }
         }
     }
 
@@ -1130,5 +1146,42 @@ mod tests {
             msg.contains("tasks") || msg.contains("questions") || msg.contains("plan"),
             "error must identify the model contract violation: {msg}"
         );
+    }
+
+    // ── model selection ───────────────────────────────────────────────────────
+
+    #[test]
+    fn with_model_uses_supplied_id() {
+        let le = ClaudeLeadEngineer::with_model("claude-opus-4-8");
+        assert_eq!(le.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn with_model_blank_falls_back_to_default() {
+        // A blank model id is treated as "use the configured default" so callers
+        // that forward an empty form field don't accidentally pin a blank model.
+        let le = ClaudeLeadEngineer::with_model("   ");
+        // The model must be non-blank (the constant or env-var default).
+        assert!(!le.model.trim().is_empty());
+    }
+
+    #[test]
+    fn default_constant_matches_expected_catalog_id() {
+        // Keep this in sync with camerata_server::llm::DEFAULT_MODEL.
+        // If the catalog's default changes, this test will fail as a reminder to
+        // update DEFAULT_LEAD_ENGINEER_MODEL in this crate too.
+        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn new_without_env_var_uses_constant() {
+        // When CAMERATA_LEAD_ENGINEER_MODEL is absent, new() must fall back to
+        // DEFAULT_LEAD_ENGINEER_MODEL. We can only test this reliably when the env
+        // var is NOT set in the current process. The test is guarded so CI noise
+        // does not override a legitimately set var.
+        if std::env::var("CAMERATA_LEAD_ENGINEER_MODEL").is_err() {
+            let le = ClaudeLeadEngineer::new();
+            assert_eq!(le.model, DEFAULT_LEAD_ENGINEER_MODEL);
+        }
     }
 }

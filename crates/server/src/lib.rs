@@ -336,14 +336,31 @@ async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStor
     Ok(Json(list))
 }
 
+/// Optional request body for starting a governed run. All fields are optional
+/// so the existing no-body callers remain compatible.
+#[derive(serde::Deserialize, Default)]
+struct StartRunReq {
+    /// The model id (`/api/models`) for every `claude -p` agent in the live
+    /// fleet. Ignored for the scripted (token-free) path. `None`/blank falls
+    /// back to the CLI default so the live fleet's behaviour is unchanged when
+    /// the caller sends no body.
+    #[serde(default)]
+    model: Option<String>,
+}
+
 /// Start a governed run for a story. Returns the run id immediately; the run walks
 /// to completion on a background task, driving planted tool calls through the REAL
 /// gate (deterministic, token-free). Poll `GET /api/runs/:id` for status + verdicts.
+///
+/// The optional JSON body accepts `{ "model": "<id>" }` to pin the model for the
+/// live-fleet path. The scripted (token-free) path ignores it.
 async fn start_run(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
+    req: Option<Json<StartRunReq>>,
 ) -> Json<serde_json::Value> {
-    let (run_id, mode) = start_governed_run(&state, &story_id).await;
+    let model = req.and_then(|Json(r)| r.model).filter(|m| !m.trim().is_empty());
+    let (run_id, mode) = start_governed_run(&state, &story_id, model).await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
 }
 
@@ -352,7 +369,14 @@ async fn start_run(
 /// in, the token-free scripted gate otherwise. Returns `(run_id, mode)`. Shared so a
 /// brownfield remediation run is governed EXACTLY like any other dev task, not a
 /// special path: fixing the audited items is a development task, the first one.
-async fn start_governed_run(state: &AppState, story_id: &str) -> (String, &'static str) {
+///
+/// `model` is forwarded to every `claude -p` agent in the live-fleet path. It is
+/// ignored for the scripted path (which makes no agent calls).
+async fn start_governed_run(
+    state: &AppState,
+    story_id: &str,
+    model: Option<String>,
+) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
     let run_id = state.runs.create(story_id, mode);
@@ -366,10 +390,13 @@ async fn start_governed_run(state: &AppState, story_id: &str) -> (String, &'stat
             Ok(Some(s)) => (s.title, s.description),
             _ => (story_id.to_string(), String::new()),
         };
-        tokio::spawn(async move { live_fleet::execute_live_run(store, rid, title, desc).await });
+        tokio::spawn(
+            async move { live_fleet::execute_live_run(store, rid, title, desc, model).await },
+        );
     } else {
         // Token-free scripted path: real gate verdicts over planted calls, with the
         // per-agent transcripts (generated prompt + actions + verdicts) populated.
+        // `model` is not relevant here — no agent process is spawned.
         let transcripts = state.transcripts.clone();
         tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
