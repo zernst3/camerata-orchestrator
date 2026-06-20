@@ -133,6 +133,20 @@ struct ConnView {
     ok: Option<bool>,
     #[serde(default)]
     error: Option<String>,
+    /// Structured error category for GitHub connections: `no_token`,
+    /// `invalid_or_expired`, `insufficient_scope`, or `unreachable`.
+    /// Absent for non-GitHub connections or when there is no error.
+    #[serde(default)]
+    error_category: Option<String>,
+    /// Authenticated GitHub login, present when the GitHub probe succeeded.
+    #[serde(default)]
+    login: Option<String>,
+    /// OAuth scopes granted to the GitHub token (classic PATs only; fine-grained
+    /// PATs return an empty list).  Captured from the API response for future
+    /// scope-diagnostic UI; not yet rendered in toasts.
+    #[serde(default)]
+    #[allow(dead_code)]
+    scopes: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -252,7 +266,29 @@ pub fn ConnectionWatcher() -> Element {
                         match c.ok {
                             // Newly failing (first probe or a transition to failure).
                             Some(false) if prev_ok != Some(Some(false)) => {
-                                let detail = c.error.clone().unwrap_or_else(|| "unreachable".into());
+                                // Use the typed error category to produce an
+                                // actionable message when available.
+                                let detail = match c.error_category.as_deref() {
+                                    Some("invalid_or_expired") => {
+                                        "token is invalid or expired (HTTP 401). \
+                                         Regenerate your CAMERATA_GITHUB_TOKEN."
+                                            .to_string()
+                                    }
+                                    Some("insufficient_scope") => {
+                                        "token lacks required scope (HTTP 403). \
+                                         Ensure your PAT has repo + read:user scopes."
+                                            .to_string()
+                                    }
+                                    Some("unreachable") => {
+                                        "GitHub is unreachable. Check your network or \
+                                         GitHub status."
+                                            .to_string()
+                                    }
+                                    _ => c
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| "unreachable".into()),
+                                };
                                 push_toast(
                                     toasts,
                                     ToastKind::Error,
@@ -261,10 +297,15 @@ pub fn ConnectionWatcher() -> Element {
                             }
                             // Recovered after a failure.
                             Some(true) if matches!(prev_ok, Some(Some(false))) => {
+                                let who = c
+                                    .login
+                                    .as_deref()
+                                    .map(|l| format!(" (authenticated as {l})"))
+                                    .unwrap_or_default();
                                 push_toast(
                                     toasts,
                                     ToastKind::Info,
-                                    format!("{} reconnected.", c.label),
+                                    format!("{} reconnected.{who}", c.label),
                                 );
                             }
                             _ => {}
