@@ -5,6 +5,16 @@ domain = "go"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#contexts"
+title = "Go Code Review Comments — Contexts"
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters — contextcheck"
+linter = "golangci-lint: contextcheck"
 qualifies = "A context.Context carrying a deadline, timeout, or cancellation signal should flow from the HTTP handler (or entry point) through every layer of the call stack to all goroutines spawned. This ensures that if the client disconnects or a deadline is exceeded, all downstream work (database queries, subprocess calls, external API calls) is cancelled, preventing wasted work and resource leaks."
 
 [decision]

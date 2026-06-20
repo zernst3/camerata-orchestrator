@@ -5,6 +5,15 @@ domain = "go:grpc"
 layer = "framework"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://grpc.io/docs/languages/go/basics/"
+title = "gRPC — Basics tutorial (Go) — Bidirectional streaming"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#goroutine-lifetimes"
+title = "Go Code Review Comments — Goroutine Lifetimes"
 
 [decision]
 question = "How should streaming RPC implementations handle loop cleanup and context cancellation?"

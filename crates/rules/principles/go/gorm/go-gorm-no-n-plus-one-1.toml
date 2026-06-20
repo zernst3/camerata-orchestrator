@@ -5,6 +5,11 @@ domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gorm.io/docs/preload.html"
+title = "GORM — Preloading (Eager Loading)"
 
 [decision]
 question = "How should related records (foreign keys, associations) be loaded from the database?"

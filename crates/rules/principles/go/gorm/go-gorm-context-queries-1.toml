@@ -5,6 +5,15 @@ domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gorm.io/docs/context.html"
+title = "GORM — Context"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#contexts"
+title = "Go Code Review Comments — Contexts"
 
 [decision]
 question = "How should database queries be parameterized with request context and timeouts?"

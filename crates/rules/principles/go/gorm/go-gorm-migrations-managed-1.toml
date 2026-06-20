@@ -3,8 +3,13 @@ title = "Schema changes are managed by migrations; direct SQL ALTER statements o
 tag = "stack"
 domain = "go:gorm"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gorm.io/docs/migration.html"
+title = "GORM — Migration"
 
 [decision]
 question = "How should schema changes (add column, create table, rename field) be applied to the database?"

@@ -5,6 +5,12 @@ domain = "go"
 layer = "language"
 enforcement = "mechanical"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://securego.io/docs/rules/g201-g202.html"
+title = "gosec — G201/G202: SQL query construction using format string/string concatenation"
+linter = "golangci-lint: gosec (G201, G202)"
 qualifies = "Enforced by a static-analysis gate (Bandit-equivalent or sqlc-integration) that flags string concatenation, fmt.Sprintf, or raw query strings feeding values into db.Query(...), db.Exec(...), rows.Scan(...), or ORM method calls. Conformance holds when the gate runs in CI and an interpolated query fails the build."
 
 [decision]

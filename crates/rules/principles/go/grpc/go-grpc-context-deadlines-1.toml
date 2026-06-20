@@ -5,6 +5,15 @@ domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://grpc.io/docs/guides/deadlines/"
+title = "gRPC — Deadlines"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#contexts"
+title = "Go Code Review Comments — Contexts"
 
 [decision]
 question = "How should context deadlines be handled across gRPC service implementations and calls?"

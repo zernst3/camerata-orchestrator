@@ -5,6 +5,11 @@ domain = "go"
 layer = "language"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/blog/go1.13-errors"
+title = "Go Blog — Working with Errors in Go 1.13"
 qualifies = "When an error is returned from a lower layer and needs context, it is wrapped with fmt.Errorf(\"context: %w\", err) not fmt.Errorf(\"context: %v\", err). This preserves the error chain so that callers can inspect the root cause with errors.Unwrap or errors.Is(err, target), keeping debugging chains intact."
 
 [decision]

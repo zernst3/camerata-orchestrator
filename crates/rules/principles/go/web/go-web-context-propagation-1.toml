@@ -5,6 +5,16 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#contexts"
+title = "Go Code Review Comments — Contexts"
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters — contextcheck"
+linter = "golangci-lint: contextcheck"
 
 [decision]
 question = "How should request scope (deadline, cancellation, user info, tracing IDs) be propagated through the call stack?"
