@@ -1,0 +1,35 @@
+id = "RUST-NO-UNWRAP-1"
+title = "unwrap() is forbidden in non-test code; propagate the error instead"
+tag = "stack"
+domain = "rust"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Mechanical, enforced by clippy: set `clippy::unwrap_used = \"deny\"` under [workspace.lints.clippy] and run `cargo clippy -D warnings` as a required CI gate. Test code is exempt via `allow-unwrap-in-tests = true` in clippy.toml; integration tests under crates/*/tests/ carry a file-level `#![allow(clippy::unwrap_used)]`. Conformance holds when the clippy gate is green; it fails the moment any non-test `unwrap()` compiles. The strict frontier (`expect_used`, `panic`, slice indexing) is the natural next tier."
+
+[decision]
+question = "What position does the project take on: unwrap() is forbidden in non-test code?"
+default = "deny-unwrap-used-workspace-wide-via-clippy-lint"
+why = """
+A panic in long-running or server code is a crash and a denial-of-service vector, not a recoverable error, so a stray unwrap() turns an expected failure (a missing row, a parse error, a closed socket) into a process abort under load. Discouraging unwrap() by convention does not survive scale: a single feature branch reintroduces one during a large merge and a human reviewer reading the diff easily skates past it. Denying unwrap_used at the workspace level via clippy converts the convention into a mechanical guarantee checked on every build, so the property holds regardless of who or what wrote the code, and a reintroduced unwrap fails the merge before anyone reads a line. Test code is exempt because a panic in a test IS the assertion. Warning instead of denying surfaces occurrences but lets them accumulate, which defeats the point of a guarantee. Relying on code review alone is the failure mode this rule exists to replace.
+"""
+
+[[option]]
+id = "deny-unwrap-used-workspace-wide-via-clippy-lint"
+label = "unwrap_used is denied workspace-wide via clippy; non-test code handles the error"
+directive = """
+The clippy lint unwrap_used is set to deny under [workspace.lints.clippy], so any .unwrap() in non-test code fails the build. Test code is exempt via allow-unwrap-in-tests = true in clippy.toml, and integration tests under crates/*/tests/ carry a file-level #![allow(clippy::unwrap_used)]. Non-test code must handle the fallible value explicitly: propagate with ?, map to a structured error, or destructure with a fallback. A cargo clippy -D warnings gate enforces it in CI so a feature branch cannot reintroduce an unwrap without failing the merge.
+"""
+why = "The adopted default. Converts a convention into a per-build mechanical guarantee, so a reintroduced unwrap fails the merge before a human reads the diff."
+
+[[option]]
+id = "set-unwrap-used-to-warn-surfacing-without-blocki"
+label = "unwrap_used is set to warn, surfacing occurrences without …"
+directive = "The unwrap_used lint is set to warn rather than deny, so occurrences appear in clippy output but do not fail the build; the team is trusted to clean them up."
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "discourage-unwrap-by-convention-and-code-review"
+label = "unwrap() is discouraged by convention and caught in code …"
+directive = "unwrap() is discouraged by convention and caught in code review rather than by a lint; no mechanical gate is configured."
+why = "A defensible alternative the project considered and did not adopt as the default."
