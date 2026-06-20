@@ -1,0 +1,30 @@
+id = "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1"
+title = "Multi-write operations are wrapped in an explicit transaction; partial writes are not observable"
+tag = "stack"
+domain = "csharp:efcore"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Multi-write operations are wrapped in an explicit transaction; partial writes are not observable?"
+default = "explicit-transaction-for-multi-write"
+why = "EF Core's SaveChanges/SaveChangesAsync wraps all pending changes in a single implicit transaction by default. This means all changes tracked in one DbContext instance since the last SaveChanges are committed atomically. The implicit transaction covers only changes that were tracked on that one DbContext. When a service method calls SaveChanges multiple times (first to insert a parent, then to insert a child using the parent's generated ID), the first SaveChanges commits in its own transaction. If the second fails, the parent row is committed and the child is not: the database is in a partial state that the application may never resolve. Explicit transactions via context.Database.BeginTransactionAsync() cover multiple SaveChanges calls within the same scope, so either all commits succeed or the entire operation rolls back. The discipline is to identify any code path that calls SaveChanges more than once within a logical operation (the definition of a business transaction, not an EF Core operation) and wrap it in an explicit transaction. The common trigger is ID generation: an entity must be persisted to receive its database-generated ID before a related entity referencing that ID can be inserted. The explicit transaction is the correct tool; structuring the DbContext to track both entities together and calling SaveChanges once (letting EF Core order the inserts) is the alternative."
+
+[[option]]
+id = "explicit-transaction-for-multi-write"
+label = "Explicit transaction wrapping all SaveChanges calls that form one logical operation"
+directive = "Any service method that calls SaveChangesAsync more than once within a single logical operation wraps both calls in using var tx = await context.Database.BeginTransactionAsync(); ... await tx.CommitAsync() (with the full async/await pattern for rollback on exception). If the operation can be restructured so that EF Core's implicit per-SaveChanges transaction covers it (by adding all entities to the same tracked context instance and calling SaveChanges once), that restructuring is preferred over an explicit transaction. Calling SaveChanges twice without an explicit transaction, where the second call's success is required for the first call's result to be valid, is forbidden."
+why = "The adopted default. Explicit transactions guarantee that multi-step writes are atomic: a failure after the first SaveChanges but before the second rolls back the first, leaving no partial state."
+
+[[option]]
+id = "single-saveschanges-restructure"
+label = "Restructure operations so a single SaveChanges covers all writes"
+directive = "Operations that would require multiple SaveChanges calls are restructured: all entities are added to the DbContext's tracked set before any SaveChanges is called, EF Core orders the inserts by detected relationships, and a single SaveChanges covers all writes. Explicit transactions are not used."
+why = "Cleaner than an explicit transaction when EF Core can detect and order the relationships automatically. Requires that all entities be tracked on the same DbContext instance and that EF Core's relationship detection covers the dependency order."
+
+[[option]]
+id = "multiple-saveschanges-no-transaction"
+label = "Multiple SaveChanges calls without an explicit transaction"
+directive = "Service methods call SaveChangesAsync multiple times within a logical operation without wrapping them in an explicit transaction. Each SaveChanges has its own implicit per-call transaction."
+why = "Leaves the database in partial state if any call after the first fails; the committed rows from the first call remain, requiring compensating writes or manual cleanup. Forbidden when the second call's success is required for the first call's result to be valid."

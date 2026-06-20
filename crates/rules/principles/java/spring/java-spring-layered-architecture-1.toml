@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-LAYERED-ARCHITECTURE-1"
+title = "Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer?"
+default = "strict-layer-hierarchy"
+why = "Spring's stereotype annotations (@RestController, @Service, @Repository) are not purely decorative: each layer carries a distinct responsibility and a distinct set of things it is allowed to depend on. @RestController methods translate HTTP to service calls; @Service methods implement domain rules and orchestrate data access; @Repository methods (or Spring Data interfaces) perform SQL / JPA operations. Violating the hierarchy in either direction produces specific failure modes. A @Service injecting a @RestController to reuse HTTP-shaping code couples domain logic to the HTTP protocol, making the service impossible to test or reuse outside the web layer. A @RestController injecting a @Repository directly to 'save a round trip' puts data-access code in the HTTP layer, bypasses any @Transactional annotations on the service, and makes the HTTP handler responsible for both the protocol translation and the persistence logic. The layered boundary is not a style guideline: it determines where @Transactional annotations take effect, where exception-to-HTTP mapping occurs, and which code is testable without a Spring container."
+
+[[option]]
+id = "strict-layer-hierarchy"
+label = "Controllers depend on services; services depend on repositories; no upward dependencies"
+directive = "@RestController classes inject only @Service (or @Component) beans, not @Repository beans. @Service classes inject @Repository beans and other @Service beans; they do not inject @RestController beans. @Repository interfaces (Spring Data) or classes inject only JPA infrastructure (EntityManager, JdbcTemplate); they do not inject @Service or @RestController beans. This hierarchy is the single direction of dependency: Controller → Service → Repository. Any injection that points upward in this hierarchy (Service → Controller, Repository → Service) is forbidden and indicates that the logic should be refactored to a lower-layer component."
+why = "The adopted default. Strict layer hierarchy ensures @Transactional semantics apply at the right scope, HTTP concerns stay in controllers, persistence concerns stay in repositories, and each layer is independently testable."
+
+[[option]]
+id = "controller-accesses-repository-directly"
+label = "Controllers inject repositories directly for simple CRUD endpoints"
+directive = "For endpoints that perform simple CRUD operations (list, get by ID, delete), the @RestController injects the @Repository or Spring Data interface directly, bypassing the service layer. A service layer is introduced only when business logic is needed."
+why = "Reduces boilerplate for simple CRUD; bypasses @Transactional service-layer semantics, encourages business-logic creep into controllers as requirements evolve, and creates inconsistency between endpoints that do and do not use the service layer."
+
+[[option]]
+id = "service-to-service-orchestration"
+label = "A top-level orchestration service injects multiple lower-level services; cross-service injection is allowed"
+directive = "Higher-level @Service classes inject and coordinate multiple lower-level @Service classes. Repositories are injected only into the lowest-level service directly above them. Controllers inject only top-level orchestration services."
+why = "Horizontal service-to-service calls are standard and encouraged for separating domain concerns. This option is not an alternative to the strict hierarchy; it is the standard mechanism for service composition within the service layer."

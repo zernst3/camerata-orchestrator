@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-THIN-CONTROLLERS-1"
+title = "@RestController methods contain no business logic; they translate HTTP to service calls and return DTOs"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: @RestController methods contain no business logic; they translate HTTP to service calls and return DTOs?"
+default = "thin-controllers-delegate-to-service"
+why = "A @RestController method's responsibility is protocol translation: extract the validated request parameters and body, call the service method that owns the business rule or data operation, and map the service result or exception onto an HTTP response (status code, headers, body DTO). When business logic (conditional branching, rule evaluation, multi-step orchestration) lives inside a @RestController method, it is entangled with the HTTP layer: the logic is only reachable via an HTTP request, so it cannot be unit-tested without spinning up the web layer (MockMvc or a full Spring context), it cannot be reused from a @Scheduled job or a message listener, and a change to the domain rule requires touching HTTP-layer code. The @Transactional annotation is particularly relevant here: @Transactional on a controller method requires the Spring Security and MVC proxy chain to play together correctly with the transaction AOP; on a service method it is unambiguous. The thin-controller rule is architectural: the boundary between the HTTP adapter and the application core is a structural decision, not a style preference."
+
+[[option]]
+id = "thin-controllers-delegate-to-service"
+label = "@RestController methods delegate entirely to @Service; no domain logic inline"
+directive = "@RestController methods perform exactly: (1) read validated request input (from @RequestBody, @PathVariable, @RequestParam), (2) call one @Service method, (3) map the service result to a ResponseEntity with the appropriate status code and a DTO body. Conditional logic beyond HTTP-concern branching (is the result empty? return 404 vs 200), data transformation (entity-to-DTO mapping is in the service or a mapper), and multi-step orchestration do not appear in controller methods. @Transactional is not placed on controller methods. A controller method body longer than ~10 lines is a signal that business logic has leaked into the controller."
+why = "The adopted default. Thin controllers keep the domain logic in the service layer where it is independently testable, transactionally managed, and reusable from non-HTTP entry points."
+
+[[option]]
+id = "fat-controllers-inline-logic"
+label = "Business logic inline in @RestController methods"
+directive = "Controller methods contain the full business rule implementation: validate inputs, apply domain rules, call repositories directly, and construct the response. Services are not introduced unless the same logic is needed in multiple controllers."
+why = "A defensible alternative the project considered and did not adopt as the default. Inline logic in controllers is reachable only via HTTP, bypasses @Transactional semantics on the service layer, and mixes HTTP protocol concerns with domain concerns."
+
+[[option]]
+id = "command-handler-per-request"
+label = "Controllers dispatch to per-request command handler objects"
+directive = "Each HTTP endpoint dispatches to a dedicated command or query handler class (one class per use case). Controllers are thin; handlers contain the domain logic and may inject repositories directly. No shared @Service beans."
+why = "An explicit alternative architectual style (CQRS-style command handlers). More ceremony than a shared service layer for projects that do not need per-use-case isolation; appropriate when use cases have materially different cross-cutting concerns (logging, authorization, caching) that would clutter a shared service."

@@ -1,0 +1,30 @@
+id = "CSHARP-ASPNETCORE-OPTIONS-PATTERN-1"
+title = "Configuration values are bound via the Options pattern (IOptions<T>); no raw IConfiguration access in service classes"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Configuration values are bound via the Options pattern (IOptions<T>); no raw IConfiguration access in service classes?"
+default = "options-pattern-ioptionst"
+why = "ASP.NET Core's IConfiguration is a flat string-keyed dictionary that accepts any key and returns null for missing keys silently. When service classes accept IConfiguration and read values by string key, three things follow. The configuration requirement of the class is invisible from its constructor: callers cannot tell which keys it reads, whether any are missing, or what happens when one is absent. Missing or misspelled keys are null at runtime, often surfacing as NullReferenceException or a silent wrong value deep in a request, not at application startup. Testing the class requires constructing a mock IConfiguration that matches the exact string keys the class reads, an implementation detail that now leaks into the test. The Options pattern replaces this with a typed POCO bound from configuration in Program.cs: the section is bound once, validated at startup (via ValidateOnStart or DataAnnotations), and injected as IOptions<T>. The service class declares exactly what configuration it needs in its constructor (the POCO type), the POCO's fields are statically typed (no silent null for a missing key), and the binding failure is a startup error rather than a runtime error under load. Named and snapshot options (IOptionsSnapshot<T>) also allow per-request reload without restarting the process."
+
+[[option]]
+id = "options-pattern-ioptionst"
+label = "Configuration bound to typed POCO via IOptions<T>; validated at startup"
+directive = "Each logical group of configuration values is represented by a POCO class with public properties. The section is bound in Program.cs via builder.Services.Configure<MyOptions>(builder.Configuration.GetSection('MySection')) and startup validation is enabled via .ValidateOnStart() or ValidateDataAnnotations(). Service classes accept IOptions<MyOptions> (or IOptionsSnapshot<MyOptions> for per-request reload) in their constructor, not IConfiguration. Direct IConfiguration injection into service or repository classes is forbidden; raw string-keyed reads (configuration['Key']) outside of Program.cs are forbidden."
+why = "The adopted default. Typed binding exposes configuration requirements in the constructor signature, catches missing or malformed values at startup rather than at runtime under load, and eliminates string-keyed reads scattered across service classes."
+
+[[option]]
+id = "raw-iconfiguration-injection"
+label = "IConfiguration injected into services; values read by string key"
+directive = "Services accept IConfiguration in their constructor and read values via configuration['Section:Key'] or configuration.GetValue<T>('Key'). No POCO binding or startup validation."
+why = "A defensible alternative the project considered and did not adopt as the default. String-keyed reads are untyped, invisible to callers of the constructor, and surface missing keys as null at runtime rather than as a startup error."
+
+[[option]]
+id = "hardcoded-fallbacks"
+label = "Configuration values are read via IConfiguration with hardcoded fallbacks"
+directive = "Services read configuration values via GetValue<T>('Key', defaultValue) with hardcoded fallbacks, so missing keys silently resolve to the default rather than failing."
+why = "Hardcoded fallbacks hide misconfiguration; a service that should fail fast on a missing required value instead silently uses a hardcoded default that may be correct for local dev and wrong for production."

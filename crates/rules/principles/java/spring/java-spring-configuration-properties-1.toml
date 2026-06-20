@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-CONFIGURATION-PROPERTIES-1"
+title = "@ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: @ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections?"
+default = "configuration-properties-for-grouped-config"
+why = "@Value('${property.key}') injects a single environment property into a field by string key. The string key is opaque to tooling until runtime, there is no compile-time validation that the key exists, a misspelled key fails at startup (if the property has no default) or silently uses the default (if it has one), and a class with five @Value fields holds five individual string keys with no structural relationship between them. @ConfigurationProperties binds a prefix of the configuration namespace (application.yml or environment variables) to a typed POJO: all keys under the prefix are bound to fields by name, the binding is validated at startup via @Validated + Bean Validation annotations on the POJO, and the POJO is a self-contained description of the configuration section the class requires. IDE tooling (Spring Boot Configuration Processor) generates metadata from the POJO, enabling auto-completion and documentation in application.yml. The comparison: a JwtProperties class with @ConfigurationProperties(prefix = 'jwt') and fields secret, expiry, issuer is validated at startup, documented in the IDE, and testable by constructing a JwtProperties instance directly. Three @Value injections of jwt.secret, jwt.expiry, and jwt.issuer lack those properties unless ConfigurationProcessor metadata is added manually."
+
+[[option]]
+id = "configuration-properties-for-grouped-config"
+label = "@ConfigurationProperties for grouped settings; @Value only for isolated single-value cases"
+directive = "Any group of two or more related configuration keys is represented by a @ConfigurationProperties(prefix = '...') class (a POJO with public getters/setters or a Java record) validated with @Validated and Bean Validation annotations (@NotBlank, @NotNull, @Min, etc.). The class is registered as a @Bean or discovered via @EnableConfigurationProperties and @ConfigurationPropertiesScan. @Value may be used for genuinely isolated single-value injections (a single flag, a single URL with no related keys) but is not the default pattern for grouped settings. @Value with default values that mask missing-key failures is avoided."
+why = "The adopted default. @ConfigurationProperties produces typed, validated, IDE-documented configuration bindings; the POJO is the self-contained contract of what configuration the component requires."
+
+[[option]]
+id = "value-injection-only"
+label = "@Value for all configuration injection; no @ConfigurationProperties"
+directive = "All configuration values are injected via @Value('${key}') directly into the fields of the beans that use them. No @ConfigurationProperties classes are defined."
+why = "String keys are opaque at compile time, grouping is lost, validation requires per-field @Value default logic, and IDE documentation requires manual metadata. Works for a handful of keys; becomes unmaintainable at scale."
+
+[[option]]
+id = "environment-direct"
+label = "Environment bean injected and queried by key in code"
+directive = "A spring Environment bean is injected into service classes and queried via environment.getProperty('key') or environment.getRequiredProperty('key') in code."
+why = "Even less typed than @Value: string keys appear in code, validation requires explicit getRequiredProperty checks, and the bean's configuration requirements are invisible from its constructor signature."

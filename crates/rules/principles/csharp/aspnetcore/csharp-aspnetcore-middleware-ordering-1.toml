@@ -1,0 +1,24 @@
+id = "CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1"
+title = "Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution?"
+default = "canonical-middleware-order"
+why = "ASP.NET Core middleware executes in registration order, and order is not a style preference: it is a correctness constraint. UseAuthentication must appear before UseAuthorization because authorization decisions require an authenticated identity — reversing them means authorization runs with no principal and every policy check either fails open or throws. Both must appear after UseRouting (or after the combined UseEndpoints in older patterns) because authorization is policy-matched per-endpoint, and the routing middleware is what resolves which endpoint's metadata (policy name, role requirements) the authorization middleware reads. Exception handling middleware (UseExceptionHandler / UseDeveloperExceptionPage) must appear first so it can catch exceptions from every layer beneath it, including auth; placed anywhere else it misses whatever is above it. Static files, CORS, HTTPS redirection, and HSTS each have their own placement requirements relative to auth and routing. The canonical order is not arbitrary: it is the order where each middleware has the context it needs. Deviation from it is invisible at startup and surfaces as security holes (auth bypassed), broken CORS preflight handling, or unexpected 500s on pages the developer thought were working."
+
+[[option]]
+id = "canonical-middleware-order"
+label = "Canonical middleware order: exception handler → HSTS → HTTPS redirect → static files → routing → CORS → auth/n → endpoints"
+directive = "Middleware is registered in this order: UseExceptionHandler (or UseDeveloperExceptionPage in development) first, then UseHsts, UseHttpsRedirection, UseStaticFiles, UseRouting, UseCors, UseAuthentication, UseAuthorization, and finally MapControllers / MapEndpoints (or the equivalent endpoint registration). No middleware that depends on an authenticated identity (authorization, business logic) is registered before UseAuthentication. No authorization middleware is registered before UseRouting. Any custom middleware that inspects the authenticated user is placed after UseAuthentication."
+why = "The adopted default. Each middleware requires specific context established by the middleware above it; the canonical order is the only order where all inter-middleware dependencies are satisfied."
+
+[[option]]
+id = "ad-hoc-middleware-order"
+label = "Middleware is ordered by developer discretion at the time of addition"
+directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
+why = "A defensible alternative the project considered and did not adopt as the default. Ad-hoc ordering produces correct results accidentally when all additions happen to fall in the right sequence, and produces silent auth bypass or CORS failures when they do not."

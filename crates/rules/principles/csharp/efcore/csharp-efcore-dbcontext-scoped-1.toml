@@ -1,0 +1,31 @@
+id = "CSHARP-EFCORE-DBCONTEXT-SCOPED-1"
+title = "DbContext is registered as Scoped (per-request); never Singleton"
+tag = "stack"
+domain = "csharp:efcore"
+layer = "library"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by verifying the DI registration in Program.cs uses AddDbContext<T> (which registers Scoped by default) and that no AddSingleton<DbContext> or AddTransient<DbContext> calls appear. A Roslyn analyzer or integration test that resolves the DbContext lifetime from the service container and asserts Scoped catches misconfiguration at CI time."
+
+[decision]
+question = "What DI lifetime is used for the application's DbContext?"
+default = "scoped-per-request"
+why = "DbContext is designed to be a unit-of-work: it tracks changes, caches entity instances, and coordinates a single logical operation's database interaction. It is not thread-safe. Registering DbContext as Singleton creates a single instance shared across all concurrent requests. Two simultaneous requests operating on the same DbContext instance produce data corruption: changes tracked for request A are visible to and potentially SaveChanges'd by request B; identity-map cached entities from request A are returned stale to request B; and concurrent access from two threads produces race conditions that EF Core explicitly documents as unsupported. Registering as Transient creates a new instance per injection site: a controller that injects both a DbContext and a service that also injects DbContext within the same request gets two instances with two separate change trackers, so changes made through one are invisible to the other and cannot be included in a single transaction. Scoped (one instance per HTTP request, the AddDbContext<T> default) is the correct lifetime: the same instance flows through all injections within one request, enabling transactions that span multiple service calls, and is disposed at request end, releasing the database connection back to the pool."
+
+[[option]]
+id = "scoped-per-request"
+label = "DbContext registered as Scoped via AddDbContext<T>"
+directive = "DbContext is registered via builder.Services.AddDbContext<AppDbContext>(options => ...) which registers it as Scoped by default. No AddSingleton<AppDbContext> or AddTransient<AppDbContext> call appears. IDbContextFactory<T> (which is registered as Singleton and creates Scoped or Transient contexts on demand) may be used for background services and Blazor Server components that have non-request lifetimes, but never as a replacement for direct Scoped injection in HTTP request handlers."
+why = "The adopted default. Scoped lifetime gives one DbContext instance per HTTP request, allowing transactions to span multiple service-layer calls within the same request, and disposes the connection at request end."
+
+[[option]]
+id = "singleton-dbcontext"
+label = "DbContext registered as Singleton"
+directive = "DbContext is registered via AddSingleton<AppDbContext>(), sharing one instance across all requests and threads."
+why = "Produces data corruption under concurrent load: shared change tracker, stale identity-map cache entries, and thread-safety violations. Forbidden."
+
+[[option]]
+id = "transient-dbcontext"
+label = "DbContext registered as Transient"
+directive = "DbContext is registered via AddTransient<AppDbContext>(), creating a new instance per injection site within a request."
+why = "Breaks transaction scope: two injection sites within the same request receive two independent change trackers. Changes made through one cannot participate in a transaction with the other. Inappropriate for any scenario that requires cross-service transactionality within a request."

@@ -1,0 +1,31 @@
+id = "CSHARP-EFCORE-NO-LAZY-LOADING-1"
+title = "Lazy loading is disabled; all navigation property access is intentional and explicit"
+tag = "stack"
+domain = "csharp:efcore"
+layer = "library"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by verifying UseLazyLoadingProxies() is absent from DbContext configuration, and that no navigation properties are declared virtual (the signal for proxy-based lazy loading). A Roslyn or Semgrep rule that flags virtual navigation properties on entity classes catches inadvertent re-enablement."
+
+[decision]
+question = "What position does the project take on: Lazy loading is disabled; all navigation property access is intentional and explicit?"
+default = "lazy-loading-disabled"
+why = "Lazy loading is EF Core's automatic database-query-on-navigation-access feature: when an entity's navigation property is accessed and the relationship has not been loaded, EF Core issues a SELECT to load it transparently. The transparency is the problem. From the caller's perspective, accessing entity.Orders looks like reading a C# property. The actual cost — a round-trip to the database — is invisible at the call site. In a loop (for each user in users, read user.Orders), this invisibility produces the N+1 pattern at the cost of a syntax that looks like a simple property access. The silent database query also requires the DbContext to still be alive when the navigation is accessed; accessing a lazy-loaded navigation on an entity after the DbContext has been disposed throws an InvalidOperationException. Disabling lazy loading makes every navigation property access that has not been explicitly loaded return null or an empty collection, which is a loud, immediate signal that the relationship was not loaded — the failure mode that surfaces the missing Include in a test or in dev, not in production under load. With lazy loading disabled, all data loading is explicit and visible at the query site."
+
+[[option]]
+id = "lazy-loading-disabled"
+label = "Lazy loading disabled; navigation properties loaded via Include or explicit load only"
+directive = "UseLazyLoadingProxies() is not called. Navigation properties on entity classes are not declared virtual (removing the proxy interception point). All navigation property data is loaded via Include/ThenInclude at query time or via explicit context.Entry(entity).Reference/Collection.LoadAsync() calls. An unloaded navigation property accessed after the DbContext is disposed produces null or an empty collection, not a transparent database query. Loading an entity and then accessing a navigation without having included it is treated as a bug to be fixed by adding Include, not by enabling lazy loading."
+why = "The adopted default. Disabling lazy loading makes every database round-trip explicit and visible at the query site, eliminates the N+1 pattern from transparent navigation access, and removes the disposed-context exception risk."
+
+[[option]]
+id = "lazy-loading-enabled-proxies"
+label = "Lazy loading enabled via UseLazyLoadingProxies"
+directive = "UseLazyLoadingProxies() is called in DbContext configuration. Navigation properties are declared virtual. Any access to an unloaded navigation property issues a transparent SELECT."
+why = "Convenient for CRUD scenarios with simple access patterns; produces silent N+1 queries in any loop and risks InvalidOperationException when the DbContext is disposed before the navigation is accessed."
+
+[[option]]
+id = "lazy-loading-enabled-interfaces"
+label = "Lazy loading enabled via ILazyLoader injection (non-proxy)"
+directive = "Entities implement lazy loading via constructor injection of ILazyLoader. Navigation properties call _lazyLoader.Load(this, ref _field) before returning their value."
+why = "Less magic than proxy-based lazy loading (no virtual requirement, no proxy class) but retains the same silent round-trip behavior and disposed-context risk."

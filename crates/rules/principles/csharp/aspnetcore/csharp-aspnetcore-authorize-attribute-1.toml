@@ -1,0 +1,30 @@
+id = "CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1"
+title = "[Authorize] is applied at the controller or route-group level; protected endpoints never rely on the absence of [AllowAnonymous] for security"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: [Authorize] is applied at the controller or route-group level; protected endpoints never rely on the absence of [AllowAnonymous] for security?"
+default = "authorize-at-controller-or-group-level"
+why = "ASP.NET Core's default for any endpoint is anonymous access. Adding [Authorize] to each action individually is an opt-in model: every new action starts as public and must be explicitly secured. An action that a developer forgets to annotate is silently public. The inverse model — apply [Authorize] at the controller class or route group, then use [AllowAnonymous] for the subset of endpoints that are intentionally public — is opt-out: every new action starts as protected and must be explicitly opened. A forgotten [AllowAnonymous] produces a 401, which is visible immediately; a forgotten [Authorize] produces silent unauthorized access, which may go undetected until a security review or an incident. For an API where the vast majority of endpoints require authentication, the opt-out model is both safer and less verbose. The controller- or route-group-level placement also provides a visual guarantee: any reader of the controller class header can see at a glance that the entire surface is protected, rather than needing to audit each action method individually. Role-based or policy-based authorization is layered on top of the base [Authorize] where finer-grained access control is needed."
+
+[[option]]
+id = "authorize-at-controller-or-group-level"
+label = "[Authorize] at the controller class or route group; [AllowAnonymous] on public endpoints"
+directive = "Every ControllerBase subclass that exposes protected endpoints carries [Authorize] at the class level (or its base class does). In Minimal API projects, MapGroup is used to collect protected endpoints, and RequireAuthorization() is called on the group. Public endpoints carry [AllowAnonymous] (MVC) or AllowAnonymous() (Minimal API). The combination of [Authorize] at class level and [AllowAnonymous] per action is the canonical pattern; the inverse (no class-level [Authorize], per-action [Authorize]) is forbidden for controllers where more than one action requires authentication. Role and policy requirements are expressed as [Authorize(Roles = '...')] or [Authorize(Policy = '...')] on the specific actions that need them, on top of the base class-level [Authorize]."
+why = "The adopted default. Class-level [Authorize] is an opt-out model: new actions start protected and must be explicitly opened, so a forgotten annotation produces a visible 401 rather than silent unauthorized access."
+
+[[option]]
+id = "authorize-per-action"
+label = "[Authorize] applied individually to each action that requires authentication"
+directive = "No [Authorize] appears at the controller class level. Each action that requires authentication carries its own [Authorize] (or policy variant). Actions without [Authorize] are publicly accessible."
+why = "An opt-in model: new actions start public. Safe when the majority of endpoints are public and protected endpoints are the exception; high-risk when the majority of endpoints require auth and the absence of [Authorize] is the failure mode for a forgotten annotation."
+
+[[option]]
+id = "global-authorize-filter"
+label = "Global authorization filter applied to all routes via AddControllers options"
+directive = "A global authorization filter is registered via builder.Services.AddControllers(options => options.Filters.Add(new AuthorizeFilter())), making all routes require authentication by default. [AllowAnonymous] is applied to intentionally public endpoints."
+why = "Achieves the same opt-out guarantee as class-level [Authorize] but via infrastructure rather than attribute convention; requires documenting the global filter clearly so developers understand why unattributed actions are not public."

@@ -1,0 +1,30 @@
+id = "CSHARP-ASPNETCORE-CORS-EXPLICIT-1"
+title = "CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs?"
+default = "explicit-named-origins"
+why = "ASP.NET Core does not add CORS headers by default; without UseCors and a matching policy, cross-origin requests from browsers are blocked. The temptation when first enabling CORS is to use AllowAnyOrigin(), which sets Access-Control-Allow-Origin: * on every response. For a public read-only API that serves unauthenticated content, this is correct. For an API that uses cookies, sessions, or tokens (any API that distinguishes one user from another), AllowAnyOrigin() combined with AllowCredentials() is both a specification violation (browsers reject this combination) and a security signal: any page on any domain can make credentialed cross-origin requests to the API, which defeats the browser's same-origin policy protection against CSRF-equivalent attacks. Naming origins explicitly — by reading the allowed list from configuration — means the policy is environment-specific (dev allows localhost, production allows the production domain), the policy is auditable in one place, and a misconfiguration is a startup error rather than a silent policy gap. Named policies (AddCors with a policy name, UseCors with the same name) also allow different endpoints to carry different CORS rules, which a single anonymous AllowAnyOrigin policy cannot express."
+
+[[option]]
+id = "explicit-named-origins"
+label = "Named CORS policy with explicit allowed origins read from configuration"
+directive = "CORS is configured via builder.Services.AddCors(options => options.AddPolicy('PolicyName', policy => policy.WithOrigins(...).AllowAnyMethod().AllowAnyHeader())); the allowed origins list is read from configuration, not hardcoded. UseCors('PolicyName') is called in the middleware pipeline in the canonical position (after UseRouting, before UseAuthentication). AllowAnyOrigin() is forbidden on any endpoint that uses authentication cookies or credential headers; if it is used on a public anonymous endpoint, a comment justifying it is required. AllowAnyOrigin().AllowCredentials() is forbidden unconditionally."
+why = "The adopted default. Explicit named origins are environment-configurable, auditable, and correct for authenticated APIs; they prevent the silent AllowAnyOrigin + AllowCredentials security hole."
+
+[[option]]
+id = "allow-any-origin"
+label = "AllowAnyOrigin CORS policy applied globally"
+directive = "CORS is configured via policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader() and applied globally. Any browser origin may make cross-origin requests to any endpoint."
+why = "Appropriate only for fully public, unauthenticated APIs (CDN-served static content, open read-only data APIs). Forbidden on any endpoint that authenticates users or handles user-specific data."
+
+[[option]]
+id = "no-cors-configured"
+label = "No CORS middleware configured; cross-origin requests blocked by default"
+directive = "No UseCors or AddCors is registered. All cross-origin requests are blocked by the browser's same-origin policy. Server-to-server requests (no browser, no CORS preflight) are unaffected."
+why = "Correct for an API that is consumed only server-to-server and never directly from a browser; wrong for any API that a browser-based frontend calls."

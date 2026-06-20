@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1"
+title = "@Transactional belongs on the service layer; controllers and repositories do not own transactions"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: @Transactional belongs on the service layer; controllers and repositories do not own transactions?"
+default = "transactional-on-service"
+why = "@Transactional on a Spring method wraps its execution in a database transaction: if the method completes normally, the transaction commits; if it throws a RuntimeException, the transaction rolls back. The placement of @Transactional determines the transaction boundary, which determines what constitutes an atomic unit of work. Placing @Transactional on a controller action means the transaction boundary is the HTTP request handler, which mixes HTTP concerns (request parsing, response formatting) with data-consistency concerns and prevents the service method from being called from non-HTTP entry points (jobs, CLI, message listeners) within a transaction. Placing @Transactional on a repository method means each individual data-access call is its own transaction, so a service method that calls three repository methods runs three separate transactions: if the third fails, the first two are already committed and cannot be rolled back. The service layer is the right owner because its methods represent logical operations — 'transfer funds between accounts,' 'create a user and send a welcome email' — that must succeed or fail atomically. The service method calls one or more repository methods within that single transaction boundary, and @Transactional on the service method gives Spring the instruction to wrap all of those repository calls in one transaction."
+
+[[option]]
+id = "transactional-on-service"
+label = "@Transactional on service methods; controllers and repositories are transaction-free"
+directive = "@Transactional is applied on public service-layer methods (or on the service class, with per-method overrides where needed). @RestController and @Repository classes do not carry @Transactional. readOnly = true is used on service methods that only read data (SELECTS, no writes) to allow the JPA provider to optimize for read-only mode. @Transactional(rollbackFor = Exception.class) is specified when checked exceptions must also trigger rollback (Spring's default rollback policy is unchecked exceptions only)."
+why = "The adopted default. Service methods represent logical units of work that must be atomic; @Transactional on the service layer gives Spring the transaction boundary at the level of business operations, not individual SQL statements or HTTP request handlers."
+
+[[option]]
+id = "transactional-on-repository"
+label = "@Transactional on repository methods; each data-access call is its own transaction"
+directive = "@Transactional is applied on repository methods (either custom repository methods or inherited from Spring Data's implementation). Each repository call runs in its own transaction."
+why = "Provides per-statement rollback only; a service method that calls three repository methods runs in three separate transactions with no way to roll back earlier calls if a later call fails. Appropriate only for single-statement operations that do not need to coordinate with other writes."
+
+[[option]]
+id = "transactional-on-controller"
+label = "@Transactional on controller action methods"
+directive = "@Transactional is applied on @RequestMapping methods in @RestController classes. The HTTP request handler owns the transaction boundary."
+why = "Mixes HTTP concerns with transactional concerns; prevents the service from being called transactionally from non-HTTP entry points; and couples the transaction boundary to the request lifecycle rather than the business-operation boundary."
