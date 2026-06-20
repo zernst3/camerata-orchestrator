@@ -1237,7 +1237,15 @@ pub async fn audit_repos(
     // persist, so the next scan can go incremental.
     incremental_prior: Option<&crate::scan_cache::ScanManifest>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
-    let mut manifest_builder = crate::scan_cache::ManifestBuilder::new();
+    // Fingerprint the rule selection so a change to it invalidates the incremental cache
+    // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
+    // if its rule fingerprint matches.
+    let rules_fp = crate::scan_cache::rules_fingerprint(
+        selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
+    );
+    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
+    let mut manifest_builder =
+        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp);
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
@@ -1311,8 +1319,13 @@ pub async fn audit_repos(
                 // for unchanged, still-present files. The AI audit still receives the WHOLE
                 // file set as repo-map context (cheap symbol list) so cross-file rules keep
                 // their architectural view even when only changed bodies are sent.
-                let part = crate::scan_cache::partition(incremental_prior, spec, &files);
-                if incremental_prior.is_some() && part.unchanged_count > 0 {
+                let part = crate::scan_cache::partition(effective_prior, spec, &files);
+                if incremental_prior.is_some() && effective_prior.is_none() {
+                    notes.push(format!(
+                        "{spec}: rule selection changed since last scan — full re-scan"
+                    ));
+                }
+                if effective_prior.is_some() && part.unchanged_count > 0 {
                     notes.push(format!(
                         "{spec}: incremental — {} changed, {} reused from cache",
                         part.changed.len(),
@@ -1330,7 +1343,7 @@ pub async fn audit_repos(
                 // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
                 // Skipped entirely when nothing changed (a fully-cached repo costs zero tokens).
                 if part.changed.is_empty() {
-                    if incremental_prior.is_some() && !files.is_empty() {
+                    if effective_prior.is_some() && !files.is_empty() {
                         notes.push(format!("{spec}: no changes — AI audit skipped (fully cached)"));
                     }
                 } else {

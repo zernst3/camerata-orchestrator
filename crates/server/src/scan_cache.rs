@@ -48,6 +48,12 @@ pub struct ScanManifest {
     /// Manifest schema version (see [`MANIFEST_VERSION`]).
     #[serde(default)]
     pub version: u32,
+    /// Fingerprint of the selected RULE SET this manifest's findings were produced under. If the
+    /// architect changes which rules are selected, carried findings would reflect the OLD rules,
+    /// so a manifest whose rules fingerprint differs from the current scan is treated as no cache
+    /// (a clean full scan), guaranteeing findings always match the current rule selection.
+    #[serde(default)]
+    pub rules_fingerprint: String,
     /// `repo` (`owner/repo`) → (`path` → content fingerprint) for every file audited last run.
     #[serde(default)]
     pub files: BTreeMap<String, BTreeMap<String, String>>,
@@ -58,11 +64,31 @@ pub struct ScanManifest {
     pub findings: Vec<Finding>,
 }
 
+/// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
+/// invalidates the incremental cache. Order-independent: ids and bindings are sorted first.
+pub fn rules_fingerprint<'a>(rules: impl Iterator<Item = (&'a str, &'a [String])>) -> String {
+    let mut parts: Vec<String> = rules
+        .map(|(id, repos)| {
+            let mut r: Vec<&str> = repos.iter().map(String::as_str).collect();
+            r.sort_unstable();
+            format!("{}@{}", id, r.join(","))
+        })
+        .collect();
+    parts.sort_unstable();
+    format!("{:016x}", crate::suppression::fnv1a(&parts.join("|")))
+}
+
 impl ScanManifest {
-    /// A manifest considered usable only if it matches the current schema version. A version
-    /// mismatch (older cache after an upgrade) is treated as "no cache" → a clean full scan.
+    /// A manifest is usable only if it matches the current schema version AND was produced under
+    /// the same rule selection. A version mismatch (post-upgrade) or rule-set change is treated
+    /// as "no cache" → a clean full scan.
     pub fn is_current(&self) -> bool {
         self.version == MANIFEST_VERSION
+    }
+
+    /// Whether this manifest can be reused for a scan running under `rules_fp`.
+    pub fn matches_rules(&self, rules_fp: &str) -> bool {
+        self.rules_fingerprint == rules_fp
     }
 
     /// The fingerprint recorded for a file on the last scan, if any.
@@ -100,6 +126,8 @@ impl Partition {
 ///
 /// When `prior` is `None` (no cache, or a forced full scan) everything is "changed" and nothing
 /// is carried — i.e. a full scan.
+/// `prior` must already be rule-compatible (the caller filters via [`ScanManifest::matches_rules`])
+/// and current; an incompatible or absent manifest yields a full scan.
 pub fn partition(prior: Option<&ScanManifest>, repo: &str, files: &[(String, String)]) -> Partition {
     let Some(prior) = prior.filter(|m| m.is_current()) else {
         return Partition {
@@ -144,6 +172,7 @@ pub fn partition(prior: Option<&ScanManifest>, repo: &str, files: &[(String, Str
 /// [`finish`](ManifestBuilder::finish) stamps the version and yields the manifest to save.
 #[derive(Debug, Default)]
 pub struct ManifestBuilder {
+    rules_fingerprint: String,
     files: BTreeMap<String, BTreeMap<String, String>>,
     findings: Vec<Finding>,
 }
@@ -151,6 +180,13 @@ pub struct ManifestBuilder {
 impl ManifestBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stamp the rule-set fingerprint this scan ran under (see [`rules_fingerprint`]) so a later
+    /// scan under a different selection invalidates this manifest.
+    pub fn with_rules_fingerprint(mut self, fp: String) -> Self {
+        self.rules_fingerprint = fp;
+        self
     }
 
     /// Record one repo's full current file set (fingerprinting each) and the AI findings that
@@ -174,6 +210,7 @@ impl ManifestBuilder {
     pub fn finish(self) -> ScanManifest {
         ScanManifest {
             version: MANIFEST_VERSION,
+            rules_fingerprint: self.rules_fingerprint,
             files: self.files,
             findings: self.findings,
         }
@@ -368,6 +405,44 @@ mod tests {
         let p = partition(Some(&prior), "me/api", &api);
         assert_eq!(p.carried.len(), 1);
         assert_eq!(p.carried[0].rule_id, "API-RULE", "must not pull the other repo's finding");
+    }
+
+    #[test]
+    fn rules_fingerprint_is_order_independent_and_change_sensitive() {
+        let a = rules_fingerprint(
+            [("ARCH-1", &[][..]), ("SEC-2", &["me/api".to_string()][..])].into_iter(),
+        );
+        // Same rules, different order + different repo order → same fingerprint.
+        let b = rules_fingerprint(
+            [("SEC-2", &["me/api".to_string()][..]), ("ARCH-1", &[][..])].into_iter(),
+        );
+        assert_eq!(a, b, "fingerprint must be order-independent");
+        // Adding a rule changes it.
+        let c = rules_fingerprint(
+            [("ARCH-1", &[][..]), ("SEC-2", &["me/api".to_string()][..]), ("NEW-3", &[][..])]
+                .into_iter(),
+        );
+        assert_ne!(a, c, "a changed rule selection must change the fingerprint");
+        // Changing a binding changes it.
+        let d = rules_fingerprint(
+            [("ARCH-1", &[][..]), ("SEC-2", &["me/web".to_string()][..])].into_iter(),
+        );
+        assert_ne!(a, d, "a changed repo binding must change the fingerprint");
+    }
+
+    #[test]
+    fn manifest_with_mismatched_rules_is_rejected_by_caller_check() {
+        let mut b = ManifestBuilder::new().with_rules_fingerprint("RULESET-A".to_string());
+        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        let m = b.finish();
+        assert!(m.matches_rules("RULESET-A"));
+        assert!(!m.matches_rules("RULESET-B"), "a different rule set must not match");
+        // The caller filters on matches_rules before partition; simulate that: a mismatched
+        // manifest is treated as no cache → full scan.
+        let prior = Some(&m).filter(|m| m.matches_rules("RULESET-B"));
+        let p = partition(prior, "me/api", &[file("a.rs", "x")]);
+        assert_eq!(p.changed.len(), 1, "rule-set change forces a full re-scan");
+        assert!(p.carried.is_empty());
     }
 
     #[test]

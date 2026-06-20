@@ -3413,11 +3413,12 @@ async fn audit_against(
     calibration_model: &str,
     mode: &str,
     thorough: bool,
+    incremental: bool,
 ) -> Option<ScanReportView> {
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode, "thorough": thorough }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode, "thorough": thorough, "incremental": incremental }))
         .send()
         .await
         .ok()?
@@ -3564,11 +3565,12 @@ async fn audit_job_start(
     calibration_model: &str,
     exec_mode: &str,
     thorough: bool,
+    incremental: bool,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode, "thorough": thorough }))
+        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode, "thorough": thorough, "incremental": incremental }))
         .send()
         .await
         .ok()?
@@ -5398,6 +5400,10 @@ fn ScanResults(report: ScanReportView) -> Element {
     let mut audit_mode = use_signal(|| recommended_mode.clone());
     // Thorough calibration (#51): opt-in, costs more AI. Off by default.
     let mut audit_thorough = use_signal(|| false);
+    // Full scan: when ON, ignore the incremental cache and re-audit every file. Off by default
+    // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
+    // project is full regardless (no cache yet).
+    let mut audit_full_scan = use_signal(|| false);
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
@@ -5876,6 +5882,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                             let calib = calibration_model();
                             let mode = audit_mode();
                             let thorough = audit_thorough();
+                            // Full scan forces a clean pass; otherwise the scan is incremental
+                            // (only files changed since the last scan cost AI tokens).
+                            let incremental = !audit_full_scan();
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
@@ -5888,7 +5897,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental).await else {
                                         auditing.set(false);
                                         return;
                                     };
@@ -5898,7 +5907,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough).await);
+                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental).await);
                                     auditing.set(false);
                                 });
                             }
@@ -5976,6 +5985,23 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                     span { class: "audit-model-hint",
                         "Calibration is the step AFTER the scan that recalibrates each finding's severity and flags debatable ones for review — it never drops a finding. Thorough mode runs that pass ~3× and keeps the conservative consensus (so one over-confident pass can't push a debatable architectural preference to HIGH), and judges findings proportionally to the repo's size. Noticeably more AI calls. Optional — the standard single-pass calibration is on by default."
+                    }
+                }
+                // Incremental scan — on by default; re-scans only pay AI for changed files.
+                // The checkbox forces a full re-scan over every file.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Full scan" }
+                    label { class: "audit-thorough-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: audit_full_scan(),
+                            disabled: auditing(),
+                            onchange: move |e| audit_full_scan.set(e.checked()),
+                        }
+                        span { "Re-scan every file (ignore the incremental cache)" }
+                    }
+                    span { class: "audit-model-hint",
+                        "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
                     }
                 }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
