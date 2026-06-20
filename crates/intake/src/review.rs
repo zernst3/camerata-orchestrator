@@ -786,9 +786,12 @@ mod tests {
         // object with unknown keys parses to the zero-value review. This is intentional:
         // the model may include extra keys we do not recognize, and we must not reject
         // a review that is structurally valid.
-        let review =
-            ClaudeRefinementReviewer::parse_review(r#"{"totally_wrong": 42}"#).unwrap();
-        assert_eq!(review.confidence.value(), 0, "unrecognized keys yield zero confidence");
+        let review = ClaudeRefinementReviewer::parse_review(r#"{"totally_wrong": 42}"#).unwrap();
+        assert_eq!(
+            review.confidence.value(),
+            0,
+            "unrecognized keys yield zero confidence"
+        );
         assert!(review.questions.is_empty());
     }
 
@@ -808,8 +811,7 @@ mod tests {
         // extract_json_object finds the first `{...}` span even inside an array; the
         // inner object parses as a zero-value review. Document the behavior rather than
         // asserting an error (a JSON array from the model is unexpected but not a panic).
-        let result =
-            ClaudeRefinementReviewer::parse_review(r#"[{"confidence":42}]"#);
+        let result = ClaudeRefinementReviewer::parse_review(r#"[{"confidence":42}]"#);
         // The inner `{"confidence":42}` is extracted and parsed (all other fields default).
         let review = result.expect("inner object inside array should parse");
         assert_eq!(review.confidence.value(), 42);

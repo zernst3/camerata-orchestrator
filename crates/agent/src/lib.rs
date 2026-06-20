@@ -309,18 +309,27 @@ mod tests {
     fn build_args_with_model_passes_model_flag() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-4-6");
         let args = driver.build_args(&role(), "task");
-        let i = args.iter().position(|a| a == "--model").expect("--model present");
+        let i = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model present");
         assert_eq!(args[i + 1], "claude-sonnet-4-6");
         // A blank model id is ignored (CLI default).
         let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
-        assert!(!blank.build_args(&role(), "task").iter().any(|a| a == "--model"));
+        assert!(!blank
+            .build_args(&role(), "task")
+            .iter()
+            .any(|a| a == "--model"));
     }
 
     #[test]
     fn build_args_resuming_passes_resume_flag() {
         let driver = ClaudeCliDriver::new("/tmp/mcp.json").resuming("sess-abc123");
         let args = driver.build_args(&role(), "the authorized directive");
-        let i = args.iter().position(|a| a == "--resume").expect("--resume present");
+        let i = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume present");
         assert_eq!(args[i + 1], "sess-abc123");
         // The directive still rides as the -p task.
         let p = args.iter().position(|a| a == "-p").unwrap();

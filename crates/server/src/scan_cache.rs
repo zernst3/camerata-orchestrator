@@ -93,7 +93,10 @@ impl ScanManifest {
 
     /// The fingerprint recorded for a file on the last scan, if any.
     fn fingerprint_of(&self, repo: &str, path: &str) -> Option<&str> {
-        self.files.get(repo).and_then(|m| m.get(path)).map(String::as_str)
+        self.files
+            .get(repo)
+            .and_then(|m| m.get(path))
+            .map(String::as_str)
     }
 }
 
@@ -128,7 +131,11 @@ impl Partition {
 /// is carried — i.e. a full scan.
 /// `prior` must already be rule-compatible (the caller filters via [`ScanManifest::matches_rules`])
 /// and current; an incompatible or absent manifest yields a full scan.
-pub fn partition(prior: Option<&ScanManifest>, repo: &str, files: &[(String, String)]) -> Partition {
+pub fn partition(
+    prior: Option<&ScanManifest>,
+    repo: &str,
+    files: &[(String, String)],
+) -> Partition {
     let Some(prior) = prior.filter(|m| m.is_current()) else {
         return Partition {
             changed: files.to_vec(),
@@ -192,12 +199,7 @@ impl ManifestBuilder {
     /// Record one repo's full current file set (fingerprinting each) and the AI findings that
     /// apply to it after this scan. `ai_findings` must already be the post-merge AI set for the
     /// repo (fresh ∪ carried); deterministic-floor findings should NOT be passed here.
-    pub fn record_repo(
-        &mut self,
-        repo: &str,
-        files: &[(String, String)],
-        ai_findings: &[Finding],
-    ) {
+    pub fn record_repo(&mut self, repo: &str, files: &[(String, String)], ai_findings: &[Finding]) {
         let entry = self.files.entry(repo.to_string()).or_default();
         for (path, content) in files {
             entry.insert(path.clone(), content_fingerprint(content));
@@ -256,7 +258,10 @@ impl ScanCacheStore {
     /// The stored manifest for a project, if any (and only if it's the current schema version).
     pub fn get(&self, project_id: &str) -> Option<ScanManifest> {
         let s = self.inner.lock().ok()?;
-        s.by_project.get(project_id).filter(|m| m.is_current()).cloned()
+        s.by_project
+            .get(project_id)
+            .filter(|m| m.is_current())
+            .cloned()
     }
 
     /// Replace a project's manifest and persist.
@@ -353,7 +358,10 @@ mod tests {
         b.record_repo(
             "me/api",
             &files,
-            &[finding("me/api", "a.rs", "ARCH-1"), finding("me/api", "b.rs", "ARCH-2")],
+            &[
+                finding("me/api", "a.rs", "ARCH-1"),
+                finding("me/api", "b.rs", "ARCH-2"),
+            ],
         );
         let prior = b.finish();
 
@@ -376,7 +384,10 @@ mod tests {
         b.record_repo(
             "me/api",
             &files,
-            &[finding("me/api", "a.rs", "ARCH-1"), finding("me/api", "gone.rs", "ARCH-9")],
+            &[
+                finding("me/api", "a.rs", "ARCH-1"),
+                finding("me/api", "gone.rs", "ARCH-9"),
+            ],
         );
         let prior = b.finish();
 
@@ -385,7 +396,11 @@ mod tests {
         let p = partition(Some(&prior), "me/api", &next);
 
         assert_eq!(p.unchanged_count, 1);
-        assert_eq!(p.carried.len(), 1, "only the surviving file's finding carries");
+        assert_eq!(
+            p.carried.len(),
+            1,
+            "only the surviving file's finding carries"
+        );
         assert_eq!(p.carried[0].path, "a.rs");
         assert!(
             !p.carried.iter().any(|f| f.path == "gone.rs"),
@@ -404,7 +419,10 @@ mod tests {
 
         let p = partition(Some(&prior), "me/api", &api);
         assert_eq!(p.carried.len(), 1);
-        assert_eq!(p.carried[0].rule_id, "API-RULE", "must not pull the other repo's finding");
+        assert_eq!(
+            p.carried[0].rule_id, "API-RULE",
+            "must not pull the other repo's finding"
+        );
     }
 
     #[test]
@@ -419,8 +437,12 @@ mod tests {
         assert_eq!(a, b, "fingerprint must be order-independent");
         // Adding a rule changes it.
         let c = rules_fingerprint(
-            [("ARCH-1", &[][..]), ("SEC-2", &["me/api".to_string()][..]), ("NEW-3", &[][..])]
-                .into_iter(),
+            [
+                ("ARCH-1", &[][..]),
+                ("SEC-2", &["me/api".to_string()][..]),
+                ("NEW-3", &[][..]),
+            ]
+            .into_iter(),
         );
         assert_ne!(a, c, "a changed rule selection must change the fingerprint");
         // Changing a binding changes it.
@@ -433,10 +455,17 @@ mod tests {
     #[test]
     fn manifest_with_mismatched_rules_is_rejected_by_caller_check() {
         let mut b = ManifestBuilder::new().with_rules_fingerprint("RULESET-A".to_string());
-        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         let m = b.finish();
         assert!(m.matches_rules("RULESET-A"));
-        assert!(!m.matches_rules("RULESET-B"), "a different rule set must not match");
+        assert!(
+            !m.matches_rules("RULESET-B"),
+            "a different rule set must not match"
+        );
         // The caller filters on matches_rules before partition; simulate that: a mismatched
         // manifest is treated as no cache → full scan.
         let prior = Some(&m).filter(|m| m.matches_rules("RULESET-B"));
@@ -452,12 +481,17 @@ mod tests {
             version: 0, // pretend a pre-upgrade manifest
             ..Default::default()
         };
-        stale.files.entry("me/api".into()).or_default().insert(
-            "a.rs".into(),
-            content_fingerprint("code a"),
-        );
+        stale
+            .files
+            .entry("me/api".into())
+            .or_default()
+            .insert("a.rs".into(), content_fingerprint("code a"));
         let p = partition(Some(&stale), "me/api", &files);
-        assert_eq!(p.changed.len(), 1, "a stale-version manifest is ignored → full scan");
+        assert_eq!(
+            p.changed.len(),
+            1,
+            "a stale-version manifest is ignored → full scan"
+        );
         assert_eq!(p.unchanged_count, 0);
     }
 
@@ -475,8 +509,16 @@ mod tests {
         );
         let m = b.finish();
         assert!(m.is_current());
-        assert_eq!(m.files["me/api"].len(), 2, "every current file is fingerprinted");
-        assert_eq!(m.findings.len(), 1, "only this repo's findings are recorded");
+        assert_eq!(
+            m.files["me/api"].len(),
+            2,
+            "every current file is fingerprinted"
+        );
+        assert_eq!(
+            m.findings.len(),
+            1,
+            "only this repo's findings are recorded"
+        );
         assert_eq!(m.findings[0].rule_id, "R1");
     }
 
@@ -485,7 +527,11 @@ mod tests {
         let store = ScanCacheStore::new();
         assert!(store.get("proj-1").is_none());
         let mut b = ManifestBuilder::new();
-        b.record_repo("me/api", &[file("a.rs", "x")], &[finding("me/api", "a.rs", "R1")]);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
         store.put("proj-1", b.finish());
 
         let got = store.get("proj-1").expect("manifest persisted");

@@ -65,8 +65,8 @@ pub mod github_projects;
 /// the full phase state machine, persistence strategy, and ROUTE-1 items.
 pub mod investigation;
 pub use investigation::{
-    decisions_approved_for_development, DecisionOutcome, DecisionRecord,
-    InvestigationArtifact, RevisionActor, RevisionProvenance, Versioned,
+    decisions_approved_for_development, DecisionOutcome, DecisionRecord, InvestigationArtifact,
+    RevisionActor, RevisionProvenance, Versioned,
 };
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
@@ -762,8 +762,7 @@ impl InMemoryStoryStore {
                 id: "CAM-2".into(),
                 external_ref: None,
                 title: "Fix timezone handling in reminders".into(),
-                description: "Reminder emails fire in UTC instead of the org's local zone."
-                    .into(),
+                description: "Reminder emails fire in UTC instead of the org's local zone.".into(),
                 status: FeatureStatus::SignedOff,
                 created_by: "architect".into(),
                 targets: vec![],

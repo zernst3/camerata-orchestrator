@@ -285,7 +285,8 @@ pub fn parse_project_items(json: &str) -> anyhow::Result<ProjectPage> {
                 stories.push(CanonicalStory {
                     id: node.id.clone(),
                     external_ref: Some(
-                        ExternalRef::new(Provider::GitHub, number, url).with_container(repo.clone()),
+                        ExternalRef::new(Provider::GitHub, number, url)
+                            .with_container(repo.clone()),
                     ),
                     title,
                     description,

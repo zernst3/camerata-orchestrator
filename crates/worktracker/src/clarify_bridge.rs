@@ -128,10 +128,7 @@ impl<'a> ClarifyBridge<'a> {
         already_posted: &[PendingClarification],
     ) -> anyhow::Result<PendingClarification> {
         let id = compute_question_set_id(&self.reference.external_id, questions);
-        if let Some(existing) = already_posted
-            .iter()
-            .find(|p| p.question_set_id == id)
-        {
+        if let Some(existing) = already_posted.iter().find(|p| p.question_set_id == id) {
             // Already posted this exact question set on this item; reuse it.
             return Ok(existing.clone());
         }
@@ -329,10 +326,7 @@ mod tests {
         let questions = vec!["Which currency?".to_string()];
 
         // First ask posts.
-        let first = bridge
-            .ask_idempotent(&questions, None, &[])
-            .await
-            .unwrap();
+        let first = bridge.ask_idempotent(&questions, None, &[]).await.unwrap();
         assert_eq!(provider.posted_questions().len(), 1);
 
         // A retry that knows about the first record must NOT post again.
@@ -389,10 +383,7 @@ mod tests {
         );
         provider.inject_answer(reference(), reply);
 
-        let (matched, _next) = bridge
-            .poll_matching_answer(&pending, None)
-            .await
-            .unwrap();
+        let (matched, _next) = bridge.poll_matching_answer(&pending, None).await.unwrap();
         let matched = matched.expect("the marked reply should match the pending clarification");
         assert!(matched.body.contains("USD please."));
     }
@@ -412,10 +403,7 @@ mod tests {
         let reply = format!("> {}\n\nUTC.", render_marker(&other_id));
         provider.inject_answer(reference(), reply);
 
-        let (matched, _next) = bridge
-            .poll_matching_answer(&pending, None)
-            .await
-            .unwrap();
+        let (matched, _next) = bridge.poll_matching_answer(&pending, None).await.unwrap();
         assert!(
             matched.is_none(),
             "an answer for a different round must not match this pending clarification"
@@ -433,10 +421,7 @@ mod tests {
 
         // A plain comment with no marker is not matched (could be unrelated chatter).
         provider.inject_answer(reference(), "unrelated comment, no marker");
-        let (matched, _next) = bridge
-            .poll_matching_answer(&pending, None)
-            .await
-            .unwrap();
+        let (matched, _next) = bridge.poll_matching_answer(&pending, None).await.unwrap();
         assert!(matched.is_none());
     }
 }

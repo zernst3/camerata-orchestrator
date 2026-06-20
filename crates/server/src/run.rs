@@ -131,7 +131,10 @@ pub fn provenance_markdown(p: &RunProvenance) -> String {
     if p.rules_fired.is_empty() {
         out.push_str("- Rules that bounced a write: none\n");
     } else {
-        out.push_str(&format!("- Rules that bounced a write: {}\n", p.rules_fired.join(", ")));
+        out.push_str(&format!(
+            "- Rules that bounced a write: {}\n",
+            p.rules_fired.join(", ")
+        ));
     }
     out.push_str(&format!(
         "- Rules in force ({}): {}\n",
@@ -299,15 +302,24 @@ fn scripted_agents() -> [ScriptedAgent; 2] {
             role: "Frontend engineer",
             task: "Wire the member-export action in the UI and its export config.",
             steps: &[
-                (0, "Write a workspace-relative payload file (attempted path-escape)"),
-                (1, "Write crates/api/src/export_config.rs (attempted hardcoded token)"),
+                (
+                    0,
+                    "Write a workspace-relative payload file (attempted path-escape)",
+                ),
+                (
+                    1,
+                    "Write crates/api/src/export_config.rs (attempted hardcoded token)",
+                ),
             ],
         },
         ScriptedAgent {
             session_id: "backend-1",
             role: "Backend engineer",
             task: "Implement the members-repository export method.",
-            steps: &[(2, "Write crates/api/src/members_repo.rs (repository method)")],
+            steps: &[(
+                2,
+                "Write crates/api/src/members_repo.rs (repository method)",
+            )],
         },
     ]
 }
@@ -371,7 +383,11 @@ pub async fn execute_run(store: RunStore, transcripts: TranscriptStore, run_id: 
             .steps
             .iter()
             .any(|(i, _)| events.get(*i).map(|e| e.verdict == "deny").unwrap_or(false));
-        transcripts.set_status(&run_id, a.session_id, if blocked { "blocked" } else { "done" });
+        transcripts.set_status(
+            &run_id,
+            a.session_id,
+            if blocked { "blocked" } else { "done" },
+        );
     }
 
     store.set_status(&run_id, RunStatus::Gating, false);
@@ -395,7 +411,10 @@ mod tests {
 
         // The hardcoded secret is denied by the real secrets rule.
         assert_eq!(events[1].verdict, "deny");
-        assert_eq!(events[1].rule.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
+        assert_eq!(
+            events[1].rule.as_deref(),
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        );
 
         // The clean write is allowed.
         assert_eq!(events[2].verdict, "allow");
@@ -438,7 +457,10 @@ mod tests {
 
         // Rules in force is the full enforced set (non-empty, includes the firers).
         assert_eq!(prov.rules_in_force.len(), rules.len());
-        assert!(prov.rules_in_force.iter().any(|r| r == "SEC-NO-PATH-ESCAPE-1"));
+        assert!(prov
+            .rules_in_force
+            .iter()
+            .any(|r| r == "SEC-NO-PATH-ESCAPE-1"));
 
         // The PR-body markdown carries the honest accounting.
         let md = provenance_markdown(&prov);
@@ -500,7 +522,10 @@ mod tests {
         // (which hit two denials) is blocked, the backend (clean) is done.
         let agents = transcripts.get(&id);
         assert_eq!(agents.len(), 2);
-        let fe = agents.iter().find(|a| a.session_id == "frontend-1").unwrap();
+        let fe = agents
+            .iter()
+            .find(|a| a.session_id == "frontend-1")
+            .unwrap();
         assert!(fe.prompt.contains("CAM-1"));
         assert!(fe.output.contains("GATE DENIED"));
         assert_eq!(fe.status, "blocked");

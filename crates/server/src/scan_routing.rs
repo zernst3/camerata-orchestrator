@@ -129,7 +129,10 @@ pub fn files_for_rule<'a>(
     files: &'a [(String, String)],
 ) -> Vec<&'a (String, String)> {
     let scope = rule_scope(rule_id);
-    files.iter().filter(|(p, _)| file_in_scope(p, &scope)).collect()
+    files
+        .iter()
+        .filter(|(p, _)| file_in_scope(p, &scope))
+        .collect()
 }
 
 /// A group of rules that share one scope (so they share one file subset), ready to feed the audit
@@ -191,7 +194,10 @@ pub fn plan_routes(selected: &[(String, String)], files: &[(String, String)]) ->
         };
         by_scope
             .entry(key)
-            .or_insert_with(|| RouteGroup { scope: scope.clone(), rules: Vec::new() })
+            .or_insert_with(|| RouteGroup {
+                scope: scope.clone(),
+                rules: Vec::new(),
+            })
             .rules
             .push((id.clone(), directive.clone()));
     }
@@ -215,7 +221,10 @@ mod tests {
     fn language_prefixed_rules_get_a_language_scope() {
         assert_eq!(rule_scope("RUST-DIOXUS-2"), Scope::Language("rust"));
         assert_eq!(rule_scope("DIOXUS-NO-CLONE-1"), Scope::Language("rust"));
-        assert_eq!(rule_scope("PY-NO-MUTABLE-DEFAULT-1"), Scope::Language("python"));
+        assert_eq!(
+            rule_scope("PY-NO-MUTABLE-DEFAULT-1"),
+            Scope::Language("python")
+        );
         assert_eq!(rule_scope("REACT-HOOKS-1"), Scope::Language("web"));
         assert_eq!(rule_scope("TS-STRICT-1"), Scope::Language("web"));
         assert_eq!(rule_scope("GO-ERRCHECK-1"), Scope::Language("go"));
@@ -224,7 +233,14 @@ mod tests {
     #[test]
     fn cross_cutting_rules_audit_every_file() {
         // The families that can live in ANY language must never be routed away from a file.
-        for id in ["ARCH-STRICT-LAYERING-1", "SEC-NO-RAW-SQL-CONCAT-1", "SQL-DB-INDEX-2", "API-IDEMPOTENT-1", "PROC-CITE-CONVENTION-1", "WHATEVER-NEW-1"] {
+        for id in [
+            "ARCH-STRICT-LAYERING-1",
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "SQL-DB-INDEX-2",
+            "API-IDEMPOTENT-1",
+            "PROC-CITE-CONVENTION-1",
+            "WHATEVER-NEW-1",
+        ] {
             assert_eq!(rule_scope(id), Scope::All, "{id} must audit all files");
         }
     }
@@ -266,7 +282,10 @@ mod tests {
         // Routed: RUST-1 sees 1000 (rs), REACT-1 sees 1000 (tsx), ARCH-1 sees 2200 (all) = 4200.
         assert_eq!(plan.routed_chars, 4200);
         assert!((plan.saved_fraction() - (1.0 - 4200.0 / 6600.0)).abs() < 1e-9);
-        assert!(plan.saved_fraction() > 0.0, "routing saves input on a polyglot repo");
+        assert!(
+            plan.saved_fraction() > 0.0,
+            "routing saves input on a polyglot repo"
+        );
 
         // Groups: rust, web, and All (3 distinct scopes).
         assert_eq!(plan.groups.len(), 3);
@@ -276,9 +295,15 @@ mod tests {
     fn no_savings_for_single_language_repo_with_cross_cutting_rules() {
         // A pure-Python repo audited by cross-cutting rules: routing changes nothing (safe no-op).
         let files = vec![f("a.py", 500), f("b.py", 500)];
-        let rules = vec![("ARCH-1".to_string(), "d".to_string()), ("SEC-1".to_string(), "d".to_string())];
+        let rules = vec![
+            ("ARCH-1".to_string(), "d".to_string()),
+            ("SEC-1".to_string(), "d".to_string()),
+        ];
         let plan = plan_routes(&rules, &files);
-        assert_eq!(plan.routed_chars, plan.full_chars, "no language pruning possible");
+        assert_eq!(
+            plan.routed_chars, plan.full_chars,
+            "no language pruning possible"
+        );
         assert_eq!(plan.saved_fraction(), 0.0);
     }
 
@@ -288,7 +313,10 @@ mod tests {
         let files = vec![f("a.py", 300), f("b.rs", 700)];
         let rules = vec![("PY-1".to_string(), "d".to_string())];
         let plan = plan_routes(&rules, &files);
-        assert_eq!(plan.routed_chars, 300, "the PY rule audits only the .py file");
+        assert_eq!(
+            plan.routed_chars, 300,
+            "the PY rule audits only the .py file"
+        );
         assert_eq!(plan.full_chars, 1000);
     }
 }

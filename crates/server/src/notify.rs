@@ -103,7 +103,9 @@ fn describe_event(ev: &InboundWorkItemEvent) -> String {
         InboundKind::Commented => {
             format!("New comment on story {id}{location} — a clarification answer may be waiting.")
         }
-        InboundKind::StatusChanged => format!("Story {id}{location} changed status on the tracker."),
+        InboundKind::StatusChanged => {
+            format!("Story {id}{location} changed status on the tracker.")
+        }
         InboundKind::Created => format!("New work item {id}{location} appeared on the tracker."),
         InboundKind::Updated => format!("Story {id}{location} was updated on the tracker."),
     }

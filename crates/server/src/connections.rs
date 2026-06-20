@@ -52,14 +52,12 @@ pub enum GitHubTokenError {
 impl std::fmt::Display for GitHubTokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GitHubTokenError::NoToken => write!(
-                f,
-                "no token — set CAMERATA_GITHUB_TOKEN to connect"
-            ),
-            GitHubTokenError::InvalidOrExpired => write!(
-                f,
-                "token is invalid or has expired (HTTP 401 from GitHub)"
-            ),
+            GitHubTokenError::NoToken => {
+                write!(f, "no token — set CAMERATA_GITHUB_TOKEN to connect")
+            }
+            GitHubTokenError::InvalidOrExpired => {
+                write!(f, "token is invalid or has expired (HTTP 401 from GitHub)")
+            }
             GitHubTokenError::InsufficientScope => write!(
                 f,
                 "token lacks required scope (HTTP 403 from GitHub); \
@@ -436,7 +434,10 @@ mod tests {
     fn parse_scopes_trims_whitespace() {
         let headers = headers_with("x-oauth-scopes", "  repo ,  read:user  ");
         let scopes = parse_oauth_scopes_header(&headers);
-        assert!(scopes.contains(&"repo".to_string()), "must include repo: {scopes:?}");
+        assert!(
+            scopes.contains(&"repo".to_string()),
+            "must include repo: {scopes:?}"
+        );
         assert!(
             scopes.contains(&"read:user".to_string()),
             "must include read:user: {scopes:?}"
@@ -571,7 +572,10 @@ mod tests {
         let conn = shape_connection(outcome);
         assert_eq!(conn.ok, Some(false));
         assert!(conn.error.as_deref().unwrap().contains("401"));
-        assert_eq!(conn.error_category, Some(GitHubTokenError::InvalidOrExpired));
+        assert_eq!(
+            conn.error_category,
+            Some(GitHubTokenError::InvalidOrExpired)
+        );
         assert!(conn.login.is_none());
     }
 
@@ -584,7 +588,10 @@ mod tests {
         };
         let conn = shape_connection(outcome);
         assert_eq!(conn.ok, Some(false));
-        assert_eq!(conn.error_category, Some(GitHubTokenError::InsufficientScope));
+        assert_eq!(
+            conn.error_category,
+            Some(GitHubTokenError::InsufficientScope)
+        );
         let err = conn.error.as_deref().unwrap();
         assert!(err.contains("403"), "error message must mention 403: {err}");
     }

@@ -89,7 +89,13 @@ fn parse_schedule(s: &str) -> (String, String, String, Vec<bool>, u32) {
             default_days,
             1,
         ),
-        _ => ("daily".into(), "09:00".into(), String::new(), default_days, 1),
+        _ => (
+            "daily".into(),
+            "09:00".into(),
+            String::new(),
+            default_days,
+            1,
+        ),
     }
 }
 
@@ -480,8 +486,14 @@ pub fn RoutineDashboard() -> Element {
         escalations_res.read().clone().flatten().unwrap_or_default();
     let projects: Vec<ProjectView> = projects_res.read().clone().flatten().unwrap_or_default();
     let models_resp = models_res.read().clone().flatten();
-    let models: Vec<ModelOption> = models_resp.as_ref().map(|m| m.models.clone()).unwrap_or_default();
-    let model_default = models_resp.as_ref().map(|m| m.default.clone()).unwrap_or_default();
+    let models: Vec<ModelOption> = models_resp
+        .as_ref()
+        .map(|m| m.models.clone())
+        .unwrap_or_default();
+    let model_default = models_resp
+        .as_ref()
+        .map(|m| m.default.clone())
+        .unwrap_or_default();
     // Seed the form's model from the server default once the catalog loads (only when the
     // form hasn't been given a model yet, e.g. fresh or just reset).
     if routine_model().is_empty() && !model_default.is_empty() {
@@ -499,7 +511,11 @@ pub fn RoutineDashboard() -> Element {
     let project_name = |id: &str| projects.iter().find(|p| p.id == id).map(|p| p.name.clone());
     // (group_key, group_label) for a routine; unknown/None project -> the Global group.
     let group_of = |r: &RoutineView| -> (String, String) {
-        match r.project_id.as_deref().and_then(|id| project_name(id).map(|n| (id.to_string(), n))) {
+        match r
+            .project_id
+            .as_deref()
+            .and_then(|id| project_name(id).map(|n| (id.to_string(), n)))
+        {
             Some((id, name)) => (id, name),
             None => ("\u{7f}global".to_string(), "Global".to_string()),
         }

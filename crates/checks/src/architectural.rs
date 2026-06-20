@@ -50,7 +50,8 @@ pub const HANDLER_NO_DIRECT_DB_RULE_ID: &str = "ARCH-HANDLER-NO-DB-1";
 /// Default substrings that identify a "handler" / "controller" function by name.
 /// A function whose name contains any of these (case-insensitive) is treated as a
 /// request handler whose body must not touch the database directly.
-const DEFAULT_HANDLER_MARKERS: &[&str] = &["handler", "handle_", "controller", "_route", "endpoint"];
+const DEFAULT_HANDLER_MARKERS: &[&str] =
+    &["handler", "handle_", "controller", "_route", "endpoint"];
 
 /// Default identifiers that name a direct database handle. A call of the form
 /// `<marker>.<method>(...)` inside a handler body is a direct DB access.
@@ -210,7 +211,9 @@ fn parse_fn_name(line: &str) -> Option<String> {
 /// Whether a (lowercased) function name contains any of the markers.
 fn name_matches(name: &str, markers: &[&str]) -> bool {
     let lower = name.to_ascii_lowercase();
-    markers.iter().any(|m| lower.contains(&m.to_ascii_lowercase()))
+    markers
+        .iter()
+        .any(|m| lower.contains(&m.to_ascii_lowercase()))
 }
 
 /// Whether the line contains a `marker.<ident>(` method call: the marker as a
@@ -231,19 +234,17 @@ fn line_has_db_call(line: &str, marker: &str) -> bool {
         };
 
         // Directly followed by `.` then an identifier then `(`.
-        let followed_by_call = end < bytes.len()
-            && bytes[end] == b'.'
-            && {
-                let rest = &line[end + 1..];
-                let method: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
-                !method.is_empty() && {
-                    let after_method = &rest[method.len()..];
-                    after_method.starts_with('(')
-                }
-            };
+        let followed_by_call = end < bytes.len() && bytes[end] == b'.' && {
+            let rest = &line[end + 1..];
+            let method: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            !method.is_empty() && {
+                let after_method = &rest[method.len()..];
+                after_method.starts_with('(')
+            }
+        };
 
         if boundary_before && followed_by_call {
             return true;
@@ -281,7 +282,10 @@ mod tests {
             }
         "#;
         let v = handler_no_direct_db(src);
-        assert!(v.is_empty(), "delegating handler must not be flagged: {v:#?}");
+        assert!(
+            v.is_empty(),
+            "delegating handler must not be flagged: {v:#?}"
+        );
     }
 
     #[test]
@@ -309,7 +313,10 @@ mod tests {
             let _ = db.query("select 1");
         "#;
         let v = handler_no_direct_db(src);
-        assert!(v.is_empty(), "non-handler scope DB call not flagged: {v:#?}");
+        assert!(
+            v.is_empty(),
+            "non-handler scope DB call not flagged: {v:#?}"
+        );
     }
 
     #[test]
@@ -345,7 +352,11 @@ mod tests {
             }
         "#;
         let v = handler_no_direct_db(src);
-        assert_eq!(v.len(), 1, "nested DB call inside handler is flagged: {v:#?}");
+        assert_eq!(
+            v.len(),
+            1,
+            "nested DB call inside handler is flagged: {v:#?}"
+        );
         assert_eq!(v[0].function, "create_org_handler");
     }
 

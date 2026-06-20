@@ -273,7 +273,8 @@ pub fn existing_governance_files(dir: &std::path::Path, will_write: &[String]) -
 
 /// Group resolved rules by the repo they install into.
 pub fn rules_by_repo(rules: &[ArmRule]) -> std::collections::BTreeMap<String, Vec<&ArmRule>> {
-    let mut map: std::collections::BTreeMap<String, Vec<&ArmRule>> = std::collections::BTreeMap::new();
+    let mut map: std::collections::BTreeMap<String, Vec<&ArmRule>> =
+        std::collections::BTreeMap::new();
     for r in rules {
         for repo in &r.repos {
             map.entry(repo.clone()).or_default().push(r);
@@ -303,9 +304,15 @@ pub async fn arm_repo(
     let api = "https://api.github.com";
 
     // 1. Default branch + its head sha.
-    let meta = transport.get(&format!("{api}/repos/{owner}/{repo}")).await?;
+    let meta = transport
+        .get(&format!("{api}/repos/{owner}/{repo}"))
+        .await?;
     if !(200..300).contains(&meta.status) {
-        anyhow::bail!("GET repo {owner}/{repo}: HTTP {} {}", meta.status, meta.body);
+        anyhow::bail!(
+            "GET repo {owner}/{repo}: HTTP {} {}",
+            meta.status,
+            meta.body
+        );
     }
     let base = serde_json::from_str::<serde_json::Value>(&meta.body)?["default_branch"]
         .as_str()
@@ -328,7 +335,10 @@ pub async fn arm_repo(
         "sha": head_sha,
     });
     let created = transport
-        .post(&format!("{api}/repos/{owner}/{repo}/git/refs"), &ref_body.to_string())
+        .post(
+            &format!("{api}/repos/{owner}/{repo}/git/refs"),
+            &ref_body.to_string(),
+        )
         .await?;
     if !(200..300).contains(&created.status) && created.status != 422 {
         anyhow::bail!("create branch: HTTP {} {}", created.status, created.body);
@@ -337,7 +347,9 @@ pub async fn arm_repo(
     // 3. PUT each file on the branch (include the current sha when it exists).
     for (path, content) in files {
         let existing = transport
-            .get(&format!("{api}/repos/{owner}/{repo}/contents/{path}?ref={ARM_BRANCH}"))
+            .get(&format!(
+                "{api}/repos/{owner}/{repo}/contents/{path}?ref={ARM_BRANCH}"
+            ))
             .await?;
         let sha = if (200..300).contains(&existing.status) {
             serde_json::from_str::<serde_json::Value>(&existing.body)
@@ -356,7 +368,10 @@ pub async fn arm_repo(
             put["sha"] = serde_json::json!(sha);
         }
         let resp = transport
-            .put(&format!("{api}/repos/{owner}/{repo}/contents/{path}"), &put.to_string())
+            .put(
+                &format!("{api}/repos/{owner}/{repo}/contents/{path}"),
+                &put.to_string(),
+            )
             .await?;
         if !(200..300).contains(&resp.status) {
             anyhow::bail!("PUT {path}: HTTP {} {}", resp.status, resp.body);
@@ -366,7 +381,9 @@ pub async fn arm_repo(
     // Camerata NEVER opens a PR automatically (only the explicit "Open governance PR" button
     // does, via `open_branch_pr`). This path stops at the pushed branch and returns its web URL
     // so the UI can link to it; the architect decides whether/when to open the PR.
-    Ok(format!("https://github.com/{owner}/{repo}/tree/{ARM_BRANCH}"))
+    Ok(format!(
+        "https://github.com/{owner}/{repo}/tree/{ARM_BRANCH}"
+    ))
 }
 
 #[cfg(test)]
@@ -420,10 +437,17 @@ mod tests {
         assert!(names.contains(&".camerata/rules.json"));
 
         let agents = &files.iter().find(|(n, _)| n == "AGENTS.md").unwrap().1;
-        assert!(agents.contains("P-1") && !agents.contains("S-1"), "prose only in AGENTS.md");
+        assert!(
+            agents.contains("P-1") && !agents.contains("S-1"),
+            "prose only in AGENTS.md"
+        );
         let conv = &files.iter().find(|(n, _)| n == "CONVENTIONS.md").unwrap().1;
         assert!(conv.contains("S-1") && conv.contains("M-1") && !conv.contains("P-1"));
-        let gate = &files.iter().find(|(n, _)| n == ".camerata/rules.json").unwrap().1;
+        let gate = &files
+            .iter()
+            .find(|(n, _)| n == ".camerata/rules.json")
+            .unwrap()
+            .1;
         assert!(gate.contains("P-1") && gate.contains("S-1") && gate.contains("M-1"));
     }
 
@@ -440,10 +464,18 @@ mod tests {
         assert!(names.contains(&".github/workflows/camerata-governance.yml"));
 
         // The CI checks list ONLY mechanical rules (S-1 is a doc convention, not CI).
-        let ci = &files.iter().find(|(n, _)| n == ".camerata/ci-checks.json").unwrap().1;
+        let ci = &files
+            .iter()
+            .find(|(n, _)| n == ".camerata/ci-checks.json")
+            .unwrap()
+            .1;
         assert!(ci.contains("M-1") && ci.contains("a deterministic check"));
         assert!(!ci.contains("S-1"));
-        let wf = &files.iter().find(|(n, _)| n.ends_with("camerata-governance.yml")).unwrap().1;
+        let wf = &files
+            .iter()
+            .find(|(n, _)| n.ends_with("camerata-governance.yml"))
+            .unwrap()
+            .1;
         assert!(wf.contains("M-1") && wf.contains("pull_request"));
     }
 
@@ -460,22 +492,35 @@ mod tests {
         let files = arm_files_for_repo(&refs, &[]);
 
         let conv = &files.iter().find(|(n, _)| n == "CONVENTIONS.md").unwrap().1;
-        assert!(conv.contains("A-1"), "architectural rule lands in CONVENTIONS.md");
+        assert!(
+            conv.contains("A-1"),
+            "architectural rule lands in CONVENTIONS.md"
+        );
         assert!(
             conv.contains("_Conformance:_ a deterministic check"),
             "architectural rule carries a conformance line"
         );
         let agents = &files.iter().find(|(n, _)| n == "AGENTS.md").unwrap().1;
-        assert!(!agents.contains("A-1"), "architectural rule is NOT in AGENTS.md");
+        assert!(
+            !agents.contains("A-1"),
+            "architectural rule is NOT in AGENTS.md"
+        );
 
-        let ci = &files.iter().find(|(n, _)| n == ".camerata/ci-checks.json").unwrap().1;
+        let ci = &files
+            .iter()
+            .find(|(n, _)| n == ".camerata/ci-checks.json")
+            .unwrap()
+            .1;
         assert!(ci.contains("A-1"), "architectural rule is a CI-tier check");
         let wf = &files
             .iter()
             .find(|(n, _)| n.ends_with("camerata-governance.yml"))
             .unwrap()
             .1;
-        assert!(wf.contains("A-1"), "architectural rule surfaces in the workflow");
+        assert!(
+            wf.contains("A-1"),
+            "architectural rule surfaces in the workflow"
+        );
     }
 
     #[test]
@@ -504,7 +549,11 @@ mod tests {
         assert!(agents.contains("CUSTOM-house-style"));
         assert!(agents.contains("Prefer X over Y."));
         // ...and in the gate config, so reconcile sees it and an upsert keeps it.
-        let gate = &files.iter().find(|(n, _)| n == ".camerata/rules.json").unwrap().1;
+        let gate = &files
+            .iter()
+            .find(|(n, _)| n == ".camerata/rules.json")
+            .unwrap()
+            .1;
         assert!(gate.contains("CUSTOM-house-style"));
     }
 

@@ -57,7 +57,11 @@ async fn read_gate_config(owner: &str, repo: &str, token: &str) -> anyhow::Resul
         return Ok(Vec::new());
     }
     if !(200..300).contains(&resp.status) {
-        anyhow::bail!("GET gate config for {owner}/{repo}: HTTP {} {}", resp.status, resp.body);
+        anyhow::bail!(
+            "GET gate config for {owner}/{repo}: HTTP {} {}",
+            resp.status,
+            resp.body
+        );
     }
     let v: serde_json::Value = serde_json::from_str(&resp.body)?;
     if v["encoding"].as_str() != Some("base64") {
@@ -112,7 +116,10 @@ pub async fn reconcile_repos(repos: &[String], token: &str) -> Vec<AppliedRule> 
                 None => (g.id.clone(), String::new(), Vec::new(), false),
             };
             let chosen_label = g.option.as_ref().and_then(|oid| {
-                options.iter().find(|o| &o.id == oid).map(|o| o.label.clone())
+                options
+                    .iter()
+                    .find(|o| &o.id == oid)
+                    .map(|o| o.label.clone())
             });
             applied.push(AppliedRule {
                 id: g.id.clone(),

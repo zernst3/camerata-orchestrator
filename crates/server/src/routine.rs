@@ -264,25 +264,26 @@ impl RoutineStore {
     /// A store seeded with representative routines so the dashboard has content.
     pub fn seeded() -> Self {
         let store = Self::new();
-        let mk = |id: &str, name: &str, schedule: &str, intent: &str, scope: &str, enabled: bool| {
-            Routine {
-                id: id.to_string(),
-                name: name.to_string(),
-                schedule: schedule.to_string(),
-                intent: intent.to_string(),
-                // Demo data: the operational prompt is the scaffold of the intent
-                // (the live create path does the same, or AI-authors it).
-                prompt: scaffold_prompt(intent, scope),
-                scope: scope.to_string(),
-                enabled,
-                last_run: None,
-                provisioned: true,
-                last_fired: None,
-                project_id: None,
-                model: default_model(),
-                status: RoutineStatus::Idle,
-            }
-        };
+        let mk =
+            |id: &str, name: &str, schedule: &str, intent: &str, scope: &str, enabled: bool| {
+                Routine {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    schedule: schedule.to_string(),
+                    intent: intent.to_string(),
+                    // Demo data: the operational prompt is the scaffold of the intent
+                    // (the live create path does the same, or AI-authors it).
+                    prompt: scaffold_prompt(intent, scope),
+                    scope: scope.to_string(),
+                    enabled,
+                    last_run: None,
+                    provisioned: true,
+                    last_fired: None,
+                    project_id: None,
+                    model: default_model(),
+                    status: RoutineStatus::Idle,
+                }
+            };
         let seed = vec![
             mk(
                 "rt-1",
@@ -609,21 +610,33 @@ mod tests {
         assert_eq!(edited.name, "Renamed");
         assert_eq!(edited.schedule, "weekly Mon,Wed 09:00");
         assert_eq!(edited.scope, "write (gated)");
-        assert!(edited.prompt.contains("new intent"), "empty prompt re-scaffolded");
+        assert!(
+            edited.prompt.contains("new intent"),
+            "empty prompt re-scaffolded"
+        );
         assert!(edited.enabled, "enabled flag preserved across edit");
         assert!(edited.last_run.is_some(), "last_run preserved across edit");
 
-        assert!(store.update("nope", &CreateRoutineReq {
-            name: "x".into(), schedule: "daily 09:00".into(), intent: "x".into(),
-            prompt: String::new(), scope: "read-only".into(), project_id: None, model: None,
-        }).is_none());
+        assert!(store
+            .update(
+                "nope",
+                &CreateRoutineReq {
+                    name: "x".into(),
+                    schedule: "daily 09:00".into(),
+                    intent: "x".into(),
+                    prompt: String::new(),
+                    scope: "read-only".into(),
+                    project_id: None,
+                    model: None,
+                }
+            )
+            .is_none());
     }
 
     #[test]
     fn persists_across_reload_and_advances_counter() {
         // A temp path unique to this test (no Date/rand available; use the test name).
-        let path =
-            std::env::temp_dir().join("camerata-routine-persist-across-reload-test.json");
+        let path = std::env::temp_dir().join("camerata-routine-persist-across-reload-test.json");
         let _ = std::fs::remove_file(&path);
 
         // First store: create one routine, which flushes to disk.
@@ -661,7 +674,10 @@ mod tests {
                 project_id: None,
                 model: None,
             });
-            assert_eq!(next.id, "rt-2", "counter advanced past the rehydrated max id");
+            assert_eq!(
+                next.id, "rt-2",
+                "counter advanced past the rehydrated max id"
+            );
         }
 
         // Delete also persists: a third store sees only the survivor.
@@ -750,8 +766,7 @@ mod tests {
 
     #[test]
     fn status_persists_and_back_compat_defaults_to_idle() {
-        let path =
-            std::env::temp_dir().join("camerata-routine-status-persist-test.json");
+        let path = std::env::temp_dir().join("camerata-routine-status-persist-test.json");
         let _ = std::fs::remove_file(&path);
 
         // Persist a routine in the BlockedNeedsReview state.
@@ -782,7 +797,11 @@ mod tests {
             std::fs::write(&path, legacy).unwrap();
             let store = RoutineStore::at(path.clone());
             let r = &store.list()[0];
-            assert_eq!(r.status, RoutineStatus::Idle, "missing status -> Idle default");
+            assert_eq!(
+                r.status,
+                RoutineStatus::Idle,
+                "missing status -> Idle default"
+            );
             // Other absent optional fields also defaulted (provisioned true, model set).
             assert!(r.provisioned);
             assert!(!r.model.is_empty());

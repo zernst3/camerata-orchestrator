@@ -124,13 +124,21 @@ async fn run_gate_probe_cmd() -> anyhow::Result<()> {
         r.layer1_total()
     );
     for c in &r.layer1 {
-        let verdict = if c.denied { "DENIED" } else { "ALLOWED (NO-GO)" };
+        let verdict = if c.denied {
+            "DENIED"
+        } else {
+            "ALLOWED (NO-GO)"
+        };
         println!("  {:<44} -> {verdict}  {}", c.label, c.detail);
     }
     println!(
         "  clean control write{}-> {}",
         " ".repeat(26),
-        if r.layer1_clean_allowed { "ALLOWED (expected)" } else { "DENIED (NO-GO — deny-all)" }
+        if r.layer1_clean_allowed {
+            "ALLOWED (expected)"
+        } else {
+            "DENIED (NO-GO — deny-all)"
+        }
     );
     println!();
     println!("LAYER 2 — bounce-and-revise (real coordinator):");
@@ -141,7 +149,9 @@ async fn run_gate_probe_cmd() -> anyhow::Result<()> {
     println!();
 
     if r.go() {
-        println!("GATE PROBE: GO  — the loop denies before execute, bounces on violation, and resolves.");
+        println!(
+            "GATE PROBE: GO  — the loop denies before execute, bounces on violation, and resolves."
+        );
         Ok(())
     } else {
         eprintln!("GATE PROBE: NO-GO");

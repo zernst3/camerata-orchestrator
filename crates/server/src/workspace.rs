@@ -145,7 +145,11 @@ pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout
     }
     let out = git(None, &["clone", &authed, &dir.to_string_lossy()]).await;
     // Scrub the token from origin so it never persists on disk.
-    let _ = git(Some(&dir), &["remote", "set-url", "origin", &clean_url(repo)]).await;
+    let _ = git(
+        Some(&dir),
+        &["remote", "set-url", "origin", &clean_url(repo)],
+    )
+    .await;
     match out {
         Ok(o) if o.status.success() => checkout_status(root, repo).await,
         Ok(o) => RepoCheckout::error(root, repo, format!("git clone failed: {}", stderr_of(&o))),
@@ -343,7 +347,13 @@ pub async fn apply_local_and_push(
     // intent. It only ever touches `camerata/onboard-governance`, never the repo's own branches.
     let push = git(
         Some(dir),
-        &["push", "--force", "--set-upstream", &authed_url(repo, token), branch],
+        &[
+            "push",
+            "--force",
+            "--set-upstream",
+            &authed_url(repo, token),
+            branch,
+        ],
     )
     .await?;
     if !push.status.success() {
@@ -375,16 +385,14 @@ pub struct BranchList {
 pub async fn list_branches(dir: &Path) -> anyhow::Result<BranchList> {
     let current_out = git(Some(&dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
     let current = if current_out.status.success() {
-        String::from_utf8_lossy(&current_out.stdout).trim().to_string()
+        String::from_utf8_lossy(&current_out.stdout)
+            .trim()
+            .to_string()
     } else {
         anyhow::bail!("git rev-parse: {}", stderr_of(&current_out));
     };
 
-    let branch_out = git(
-        Some(dir),
-        &["branch", "--format=%(refname:short)"],
-    )
-    .await?;
+    let branch_out = git(Some(dir), &["branch", "--format=%(refname:short)"]).await?;
     if !branch_out.status.success() {
         anyhow::bail!("git branch: {}", stderr_of(&branch_out));
     }
@@ -491,8 +499,17 @@ pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> a
 }
 
 /// Fast-forward `branch` from origin using an authenticated transient URL.
-pub async fn pull_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<String> {
-    let out = git(Some(&dir), &["pull", "--ff-only", &authed_url(repo, token), branch]).await?;
+pub async fn pull_branch(
+    dir: &Path,
+    repo: &str,
+    branch: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let out = git(
+        Some(&dir),
+        &["pull", "--ff-only", &authed_url(repo, token), branch],
+    )
+    .await?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -640,10 +657,22 @@ mod tests {
 
     #[test]
     fn parses_owner_repo_from_remote_urls() {
-        assert_eq!(parse_owner_repo("https://github.com/acme/api.git"), Some("acme/api".into()));
-        assert_eq!(parse_owner_repo("https://github.com/acme/api"), Some("acme/api".into()));
-        assert_eq!(parse_owner_repo("git@github.com:acme/api.git"), Some("acme/api".into()));
-        assert_eq!(parse_owner_repo("git@github.com:acme/api.git\n"), Some("acme/api".into()));
+        assert_eq!(
+            parse_owner_repo("https://github.com/acme/api.git"),
+            Some("acme/api".into())
+        );
+        assert_eq!(
+            parse_owner_repo("https://github.com/acme/api"),
+            Some("acme/api".into())
+        );
+        assert_eq!(
+            parse_owner_repo("git@github.com:acme/api.git"),
+            Some("acme/api".into())
+        );
+        assert_eq!(
+            parse_owner_repo("git@github.com:acme/api.git\n"),
+            Some("acme/api".into())
+        );
         // Non-GitHub or malformed -> None.
         assert_eq!(parse_owner_repo("https://gitlab.com/acme/api.git"), None);
         assert_eq!(parse_owner_repo("not a url"), None);
@@ -753,9 +782,12 @@ mod tests {
         // Clone it into the workspace via a file:// "authed" URL stand-in.
         let dir = repo_dir(&workspace, "local/demo");
         std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
-        let out = git(None, &["clone", &origin.to_string_lossy(), &dir.to_string_lossy()])
-            .await
-            .unwrap();
+        let out = git(
+            None,
+            &["clone", &origin.to_string_lossy(), &dir.to_string_lossy()],
+        )
+        .await
+        .unwrap();
         assert!(out.status.success(), "clone: {}", stderr_of(&out));
 
         // Status: cloned, on a branch, clean.
@@ -765,7 +797,9 @@ mod tests {
         assert!(!st.dirty);
 
         // Create a working branch and prove status reflects it.
-        create_branch(&workspace, "local/demo", "camerata/work").await.unwrap();
+        create_branch(&workspace, "local/demo", "camerata/work")
+            .await
+            .unwrap();
         let st2 = checkout_status(&workspace, "local/demo").await;
         assert_eq!(st2.branch.as_deref(), Some("camerata/work"));
 

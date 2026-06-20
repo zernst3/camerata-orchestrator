@@ -244,24 +244,22 @@ impl<'a> FleetCoordinator<'a> {
         let mut revised_outcome = None;
         for _ in 0..cap {
             let revise_task = build_revise_task(task, &current_violations);
-            let outcome =
-                driver
-                    .run(role, &revise_task)
+            let outcome = driver.run(role, &revise_task).await.map_err(|source| {
+                CoordinatorError::Driver {
+                    pass: "revise",
+                    source,
+                }
+            })?;
+            revised_outcome = Some(outcome);
+
+            current_violations =
+                self.checks
+                    .check(role, &self.worktree)
                     .await
-                    .map_err(|source| CoordinatorError::Driver {
+                    .map_err(|source| CoordinatorError::Check {
                         pass: "revise",
                         source,
                     })?;
-            revised_outcome = Some(outcome);
-
-            current_violations = self
-                .checks
-                .check(role, &self.worktree)
-                .await
-                .map_err(|source| CoordinatorError::Check {
-                    pass: "revise",
-                    source,
-                })?;
 
             // Clean — no point spending the rest of the iteration budget.
             if current_violations.is_empty() {
@@ -447,11 +445,18 @@ mod tests {
             vec![],                               // after revise #2: clean
         ]);
         let fleet = FleetCoordinator::new(&checks, "/tmp/wt");
-        let stages = vec![FleetStage::new(role("Implementer"), "write lib.rs", &driver)];
+        let stages = vec![FleetStage::new(
+            role("Implementer"),
+            "write lib.rs",
+            &driver,
+        )];
 
         let report = fleet.run_with_iterations(&stages, 2).await.unwrap();
 
-        assert!(report.is_clean(), "stage resolved on the second revise pass");
+        assert!(
+            report.is_clean(),
+            "stage resolved on the second revise pass"
+        );
         assert!(report.stages[0].report.bounced);
         // Exactly three agent runs: initial + revise #1 + revise #2 (two bounces).
         let calls = driver.calls.lock().unwrap();
@@ -471,7 +476,11 @@ mod tests {
             vec![RuleId("RUST-CLIPPY".to_string())], // after the one revise: still dirty
         ]);
         let fleet = FleetCoordinator::new(&checks, "/tmp/wt");
-        let stages = vec![FleetStage::new(role("Implementer"), "write lib.rs", &driver)];
+        let stages = vec![FleetStage::new(
+            role("Implementer"),
+            "write lib.rs",
+            &driver,
+        )];
 
         let report = fleet.run_with_iterations(&stages, 1).await.unwrap();
 
@@ -497,7 +506,11 @@ mod tests {
             vec![RuleId("RUST-FMT".to_string())], // revise #3: still dirty (would resolve, but capped)
         ]);
         let fleet = FleetCoordinator::new(&checks, "/tmp/wt");
-        let stages = vec![FleetStage::new(role("Implementer"), "write lib.rs", &driver)];
+        let stages = vec![FleetStage::new(
+            role("Implementer"),
+            "write lib.rs",
+            &driver,
+        )];
 
         let report = fleet.run_with_iterations(&stages, 3).await.unwrap();
 
@@ -520,13 +533,21 @@ mod tests {
             vec![],                               // revise #1: clean
         ]);
         let fleet = FleetCoordinator::new(&checks, "/tmp/wt");
-        let stages = vec![FleetStage::new(role("Implementer"), "write lib.rs", &driver)];
+        let stages = vec![FleetStage::new(
+            role("Implementer"),
+            "write lib.rs",
+            &driver,
+        )];
 
         let report = fleet.run_with_iterations(&stages, 0).await.unwrap();
 
         assert!(report.is_clean());
         assert!(report.stages[0].report.bounced);
-        assert_eq!(driver.calls.lock().unwrap().len(), 2, "initial + one clamped revise");
+        assert_eq!(
+            driver.calls.lock().unwrap().len(),
+            2,
+            "initial + one clamped revise"
+        );
     }
 
     #[tokio::test]

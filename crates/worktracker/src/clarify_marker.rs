@@ -114,7 +114,10 @@ mod tests {
 
     #[test]
     fn id_is_stable_for_same_inputs() {
-        let qs = vec!["Which currency?".to_string(), "Monthly or weekly?".to_string()];
+        let qs = vec![
+            "Which currency?".to_string(),
+            "Monthly or weekly?".to_string(),
+        ];
         let a = compute_question_set_id("STORY-1", &qs);
         let b = compute_question_set_id("STORY-1", &qs);
         assert_eq!(a, b, "same item + same questions must yield the same id");
@@ -130,14 +133,8 @@ mod tests {
 
     #[test]
     fn id_changes_when_question_order_changes() {
-        let forward = compute_question_set_id(
-            "STORY-1",
-            &["A?".to_string(), "B?".to_string()],
-        );
-        let reversed = compute_question_set_id(
-            "STORY-1",
-            &["B?".to_string(), "A?".to_string()],
-        );
+        let forward = compute_question_set_id("STORY-1", &["A?".to_string(), "B?".to_string()]);
+        let reversed = compute_question_set_id("STORY-1", &["B?".to_string(), "A?".to_string()]);
         assert_ne!(forward, reversed, "order is significant");
     }
 
@@ -163,7 +160,10 @@ mod tests {
         let marker = render_marker(&id);
         assert!(marker.starts_with("<!--"));
         assert!(marker.ends_with("-->"));
-        assert_eq!(parse_marker_from_body(&marker).as_deref(), Some(id.as_str()));
+        assert_eq!(
+            parse_marker_from_body(&marker).as_deref(),
+            Some(id.as_str())
+        );
     }
 
     #[test]
@@ -185,7 +185,10 @@ mod tests {
     #[test]
     fn parse_tolerates_inner_whitespace() {
         let body = "<!-- camerata:clarify:id=clq-deadbeef -->";
-        assert_eq!(parse_marker_from_body(body).as_deref(), Some("clq-deadbeef"));
+        assert_eq!(
+            parse_marker_from_body(body).as_deref(),
+            Some("clq-deadbeef")
+        );
     }
 
     #[test]

@@ -37,7 +37,10 @@ impl DraftStore {
             .ok()
             .and_then(|s| serde_json::from_str::<HashMap<String, serde_json::Value>>(&s).ok())
             .unwrap_or_default();
-        Self { path: Some(Arc::new(path)), mem: Arc::new(Mutex::new(mem)) }
+        Self {
+            path: Some(Arc::new(path)),
+            mem: Arc::new(Mutex::new(mem)),
+        }
     }
 
     /// Best-effort flush of the whole map to disk; the in-memory mirror is authoritative.
@@ -51,7 +54,10 @@ impl DraftStore {
 
     /// The saved draft for `project_id`, or None when nothing is in progress for it.
     pub fn load(&self, project_id: &str) -> Option<serde_json::Value> {
-        self.mem.lock().ok().and_then(|m| m.get(project_id).cloned())
+        self.mem
+            .lock()
+            .ok()
+            .and_then(|m| m.get(project_id).cloned())
     }
 
     /// Replace `project_id`'s draft.

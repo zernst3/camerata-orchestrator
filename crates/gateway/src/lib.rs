@@ -327,15 +327,22 @@ fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
         &["example", "sample", "template", "dist", "defaults", "tpl"];
     let is_env = lower == ".env"
         || (lower.starts_with(".env.")
-            && !ENV_TEMPLATE_SUFFIXES
-                .iter()
-                .any(|suf| lower.ends_with(suf)));
+            && !ENV_TEMPLATE_SUFFIXES.iter().any(|suf| lower.ends_with(suf)));
 
     // Private-key / keystore file extensions. `.ppk` (PuTTY private key) and
     // `.gpg` / `.pgp` (GnuPG / PGP key material) were evasion gaps — all three
     // routinely hold private keys and must be denied like .pem/.key/etc.
     const KEY_EXTS: &[&str] = &[
-        ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc", ".ppk", ".gpg", ".pgp",
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".keystore",
+        ".jks",
+        ".asc",
+        ".ppk",
+        ".gpg",
+        ".pgp",
     ];
     let is_key_ext = KEY_EXTS.iter().any(|ext| lower.ends_with(ext));
 
@@ -705,7 +712,10 @@ mod tests {
             \x20               AND EXTRACT(YEAR FROM date) = {year}\",\n\
             \x20            user_id = user_id.value(),\n        );";
         let lines = content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", content);
-        assert!(!lines.is_empty(), "multi-line named-arg SQL format! must be caught");
+        assert!(
+            !lines.is_empty(),
+            "multi-line named-arg SQL format! must be caught"
+        );
     }
 
     #[test]
@@ -713,7 +723,10 @@ mod tests {
         // A provider-agnostic key (no ghp_/sk-/AKIA prefix) assigned to a *_KEY const.
         let content = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
         let d = arm_sec_no_hardcoded_secrets_1("", content);
-        assert!(d.is_err(), "a long opaque literal on a *_KEY const must be flagged");
+        assert!(
+            d.is_err(),
+            "a long opaque literal on a *_KEY const must be flagged"
+        );
     }
 
     #[test]
@@ -721,16 +734,24 @@ mod tests {
         // A Dioxus `select {}` (no opening string quote) must NOT match.
         assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "rsx! { select {} }").is_empty());
         // A SQL keyword as an identifier/method (no quote) must NOT match.
-        assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "let selected = items.select(|x| x);").is_empty());
+        assert!(content_match_lines(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "let selected = items.select(|x| x);"
+        )
+        .is_empty());
         // The real plant (full statement shape + interpolation) STILL matches.
-        assert!(!content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "format!(\"SELECT x WHERE id = {id}\")").is_empty());
+        assert!(!content_match_lines(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "format!(\"SELECT x WHERE id = {id}\")"
+        )
+        .is_empty());
 
         // Regression: bare "Select"/"Selection" in rsx text must NOT match (the dogfooding
         // false positives on rust-chorale, a frontend lib with zero SQL).
         for s in [
-            r#"rsx! { "Selection: {count} row(s)" }"#,   // "Selection" + interpolation, no SQL clause
-            r#"button { "Select page" }"#,               // a button label
-            r#"h1 { "Selection example" }"#,             // a heading
+            r#"rsx! { "Selection: {count} row(s)" }"#, // "Selection" + interpolation, no SQL clause
+            r#"button { "Select page" }"#,             // a button label
+            r#"h1 { "Selection example" }"#,           // a heading
             r#"let selected = view.get(); rsx!{ "{selected} chosen" }"#, // keyword-ish + interp, no clause
         ] {
             assert!(
@@ -749,18 +770,35 @@ mod tests {
     #[test]
     fn secrets_precision_guards_paths_and_hyphenated_names() {
         // A file PATH literal on a token-named var (has `/`) must NOT match.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "let token_path = \"src/some/very/long/path.rs\";").is_ok());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "let token_path = \"src/some/very/long/path.rs\";"
+        )
+        .is_ok());
         // A hyphenated secret NAME (a reference, not a value) must NOT match.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "let k = \"plaid-access-token-item-1\";").is_ok());
+        assert!(
+            arm_sec_no_hardcoded_secrets_1("", "let k = \"plaid-access-token-item-1\";").is_ok()
+        );
         // The real bare key (24+ contiguous alphanumeric) STILL matches.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";").is_err());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "const FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";"
+        )
+        .is_err());
     }
 
     #[test]
     fn secrets_does_not_flag_short_or_namelike_constants() {
         // A header NAME / env-var NAME on a secret-ish const is not a secret VALUE.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const TOKEN_HEADER: &str = \"X-Finnhub-Token\";").is_ok());
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";").is_ok());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "const TOKEN_HEADER: &str = \"X-Finnhub-Token\";"
+        )
+        .is_ok());
+        assert!(
+            arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -768,7 +806,10 @@ mod tests {
         // The plant: a format string with no literal http(s):// but a `?…&token={…}`.
         let content = "format!(\"{base}?symbol={symbol}&token={token}\")";
         let d = arm_arch_no_secrets_in_url_1("", content);
-        assert!(d.is_err(), "a templated URL query with a token param must be flagged");
+        assert!(
+            d.is_err(),
+            "a templated URL query with a token param must be flagged"
+        );
         // And the literal-scheme case still works.
         assert!(arm_arch_no_secrets_in_url_1("", "https://api.x.com/q?api_key=abc123").is_err());
         // A bare `&token=` with no query start is NOT flagged (avoids form-body FPs).
@@ -794,7 +835,10 @@ mod tests {
             ".npmrc",
         ] {
             assert!(
-                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                matches!(
+                    evaluate_call(&subset, &write_call(p)),
+                    Decision::Deny { .. }
+                ),
                 "expected DENY for {p}"
             );
         }
@@ -1266,7 +1310,6 @@ mod tests {
     }
 }
 
-
 // ─── adversarial / evasion-hardening tests (issue #16) ───────────────────────
 //
 // This module throws OBFUSCATED and EDGE-CASE violations at the layer-1 gate and
@@ -1322,13 +1365,19 @@ mod adversarial {
         // clause and interpolation — the `.{0,200}?` window + `s` dotall must bridge it.
         assert_deny(
             rule.clone(),
-            &write("a.rs", "format!(\"SELECT\\t\\tx\\n   FROM     t\\n WHERE id = {id}\")"),
+            &write(
+                "a.rs",
+                "format!(\"SELECT\\t\\tx\\n   FROM     t\\n WHERE id = {id}\")",
+            ),
             "tab/newline-padded SQL format interpolation",
         );
         // Lowercase keywords with named interpolation.
         assert_deny(
             rule.clone(),
-            &write("a.rs", "let q = format!(\"select x from t where id = {id}\");"),
+            &write(
+                "a.rs",
+                "let q = format!(\"select x from t where id = {id}\");",
+            ),
             "all-lowercase SQL with named interpolation",
         );
         // Clean control: a UI string with a keyword-ish word but no SQL clause stays ALLOWED.
@@ -1385,7 +1434,10 @@ mod adversarial {
         // OpenSSH armored private key.
         assert_deny(
             rule.clone(),
-            &write("k", "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"),
+            &write(
+                "k",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+            ),
             "OpenSSH PEM private key header",
         );
         // SLIP-FIX: PGP keys end the header with `KEY BLOCK-----`, not `KEY-----`,
@@ -1405,14 +1457,20 @@ mod adversarial {
         // backreferences, so the arm now has explicit double- and single-quote branches).
         assert_deny(
             rule.clone(),
-            &write("a.rs", "const API_KEY = 'c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7';"),
+            &write(
+                "a.rs",
+                "const API_KEY = 'c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7';",
+            ),
             "single-quoted opaque secret value",
         );
         // SLIP-FIX: a base64 secret carries `=` padding, which the closing-quote anchor
         // `…{24,}"` rejected; the arm now allows a trailing `=*` run inside the quotes.
         assert_deny(
             rule.clone(),
-            &write("a.rs", "const API_SECRET: &str = \"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\";"),
+            &write(
+                "a.rs",
+                "const API_SECRET: &str = \"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\";",
+            ),
             "base64 secret with = padding",
         );
         // Clean control: a hyphenated NAME (a reference) and a file PATH must NOT match —
@@ -1424,7 +1482,10 @@ mod adversarial {
         );
         assert_allow(
             rule,
-            &write("a.rs", "let token_path = 'src/some/very/long/path/here.rs';"),
+            &write(
+                "a.rs",
+                "let token_path = 'src/some/very/long/path/here.rs';",
+            ),
             "single-quoted file path on a token var is not a secret",
         );
     }
@@ -1468,10 +1529,22 @@ mod adversarial {
         // Clean controls: longer host words that merely CONTAIN a secret stem must be
         // ALLOWED — boundary anchoring (`[?&]NAME=`) is the precision guard.
         for (content, why) in [
-            ("let u = \"https://x.com/a?sort_key=name\";", "sort_key is not key"),
-            ("let u = \"https://x.com/a?tokenizer=bpe\";", "tokenizer is not token"),
-            ("let u = \"https://x.com/a?keyword=rust\";", "keyword is not key"),
-            ("let u = \"https://x.com/a?format=json&page=1\";", "no secret params at all"),
+            (
+                "let u = \"https://x.com/a?sort_key=name\";",
+                "sort_key is not key",
+            ),
+            (
+                "let u = \"https://x.com/a?tokenizer=bpe\";",
+                "tokenizer is not token",
+            ),
+            (
+                "let u = \"https://x.com/a?keyword=rust\";",
+                "keyword is not key",
+            ),
+            (
+                "let u = \"https://x.com/a?format=json&page=1\";",
+                "no secret params at all",
+            ),
         ] {
             assert_allow(rule.clone(), &write("c.rs", content), why);
         }
@@ -1487,15 +1560,26 @@ mod adversarial {
             ("a/b/c/..", "trailing .. segment"),
             ("../outside.txt", "leading ../ traversal"),
             ("a\\..\\..\\b", "backslash-separated .. traversal"),
-            ("src/.git/hooks/pre-commit", "nested .git directory component"),
+            (
+                "src/.git/hooks/pre-commit",
+                "nested .git directory component",
+            ),
             ("deep/nested/.ssh/config", "nested .ssh directory component"),
         ] {
             assert_deny(rule.clone(), &path_call(path), why);
         }
         // Clean controls: a `..`-containing FILENAME and a dir named `foo.git` are NOT
         // traversal/VCS segments and must stay ALLOWED (segment-exact matching).
-        assert_allow(rule.clone(), &path_call("notes/release..md"), "dotted filename, not a `..` segment");
-        assert_allow(rule, &path_call("mirrors/foo.git/readme.md"), "foo.git is not a `.git` segment");
+        assert_allow(
+            rule.clone(),
+            &path_call("notes/release..md"),
+            "dotted filename, not a `..` segment",
+        );
+        assert_allow(
+            rule,
+            &path_call("mirrors/foo.git/readme.md"),
+            "foo.git is not a `.git` segment",
+        );
     }
 
     // ── SEC-NO-SECRET-FILES-1: more .env / private-key file variants ──────────
@@ -1510,7 +1594,10 @@ mod adversarial {
             ("secring", "bare GnuPG secret keyring"),
             ("home/secring.gpg", "GnuPG secret keyring file"),
             (".env.production", "real .env.<env> file"),
-            ("ID_RSA", "uppercased id_rsa (name match is case-insensitive)"),
+            (
+                "ID_RSA",
+                "uppercased id_rsa (name match is case-insensitive)",
+            ),
         ] {
             assert_deny(rule.clone(), &path_call(path), why);
         }

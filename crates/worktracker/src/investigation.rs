@@ -501,13 +501,19 @@ mod tests {
     fn decision_outcome_serde_round_trip_all_variants() {
         // Pending
         let pending_json = serde_json::to_string(&DecisionOutcome::Pending).unwrap();
-        assert!(pending_json.contains("\"pending\""), "pending JSON: {pending_json}");
+        assert!(
+            pending_json.contains("\"pending\""),
+            "pending JSON: {pending_json}"
+        );
         let back: DecisionOutcome = serde_json::from_str(&pending_json).unwrap();
         assert_eq!(back, DecisionOutcome::Pending);
 
         // Approved
         let approved_json = serde_json::to_string(&DecisionOutcome::Approved).unwrap();
-        assert!(approved_json.contains("\"approved\""), "approved JSON: {approved_json}");
+        assert!(
+            approved_json.contains("\"approved\""),
+            "approved JSON: {approved_json}"
+        );
         let back: DecisionOutcome = serde_json::from_str(&approved_json).unwrap();
         assert_eq!(back, DecisionOutcome::Approved);
 
@@ -516,7 +522,10 @@ mod tests {
             reason: "Needs rework".to_string(),
         };
         let rejected_json = serde_json::to_string(&rejected).unwrap();
-        assert!(rejected_json.contains("\"rejected\""), "rejected JSON: {rejected_json}");
+        assert!(
+            rejected_json.contains("\"rejected\""),
+            "rejected JSON: {rejected_json}"
+        );
         assert!(rejected_json.contains("Needs rework"));
         let back: DecisionOutcome = serde_json::from_str(&rejected_json).unwrap();
         assert_eq!(back, rejected);
@@ -529,11 +538,8 @@ mod tests {
     #[test]
     fn investigation_artifact_ai_authored_sets_fields_correctly() {
         let t = Utc::now();
-        let note = InvestigationArtifact::ai_authored(
-            "CAM-1",
-            "Found ambiguity in the auth flow.",
-            t,
-        );
+        let note =
+            InvestigationArtifact::ai_authored("CAM-1", "Found ambiguity in the auth flow.", t);
 
         assert_eq!(note.story_id, "CAM-1");
         assert_eq!(note.artifact_id, "CAM-1/investigation");
@@ -559,8 +565,7 @@ mod tests {
     #[test]
     fn investigation_artifact_serde_round_trip() {
         let t = Utc::now();
-        let note =
-            InvestigationArtifact::ai_authored("CAM-3", "Investigated the story.", t);
+        let note = InvestigationArtifact::ai_authored("CAM-3", "Investigated the story.", t);
         let json = serde_json::to_string(&note).unwrap();
         let back: InvestigationArtifact = serde_json::from_str(&json).unwrap();
         assert_eq!(back.story_id, note.story_id);
@@ -573,8 +578,7 @@ mod tests {
     #[test]
     fn investigation_artifact_reviewed_round_trips_json() {
         let t = Utc::now();
-        let reviewed = InvestigationArtifact::ai_authored("CAM-4", "Note.", t)
-            .mark_reviewed(t);
+        let reviewed = InvestigationArtifact::ai_authored("CAM-4", "Note.", t).mark_reviewed(t);
         let json = serde_json::to_string(&reviewed).unwrap();
         let back: InvestigationArtifact = serde_json::from_str(&json).unwrap();
         assert!(back.reviewed);
@@ -625,7 +629,9 @@ mod tests {
     fn decision_record_reject_returns_new_copy_with_rejected_outcome() {
         let t = Utc::now();
         let pending = sample_decision(t);
-        let rejected = pending.clone().reject("Misframed — should be session storage first.", t);
+        let rejected = pending
+            .clone()
+            .reject("Misframed — should be session storage first.", t);
 
         assert!(matches!(
             &rejected.outcome,

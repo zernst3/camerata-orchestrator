@@ -322,8 +322,15 @@ pub async fn build_from_plan_with_iterations(
     max_iterations: usize,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
-    build_from_plan_with_model_and_iterations(plan, root, gateway_bin, None, max_iterations, on_event)
-        .await
+    build_from_plan_with_model_and_iterations(
+        plan,
+        root,
+        gateway_bin,
+        None,
+        max_iterations,
+        on_event,
+    )
+    .await
 }
 
 /// The full governed-fleet build: an explicit `model` for every agent AND a
@@ -607,14 +614,9 @@ mod tests {
             root: &std::path::Path,
             bin: &std::path::Path,
         ) {
-            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
-                Box::pin(build_from_plan_with_model(
-                    plan,
-                    root,
-                    bin,
-                    Some("claude-sonnet-4-6"),
-                    &|_| {},
-                ));
+            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = Box::pin(
+                build_from_plan_with_model(plan, root, bin, Some("claude-sonnet-4-6"), &|_| {}),
+            );
         }
         // This test proves the API compiles with both None and Some; the _ suffix
         // functions are never called, so no I/O or infra is required.

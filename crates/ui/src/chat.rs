@@ -46,7 +46,6 @@ struct Turn {
     text: String,
 }
 
-
 async fn fetch_models() -> Option<ModelsResp> {
     reqwest::get(format!("{}/api/models", crate::BFF_URL))
         .await
@@ -94,12 +93,24 @@ async fn fetch_rules_catalog() -> Option<String> {
     rules.sort_by(|a, b| (&a.domain, &a.id).cmp(&(&b.domain, &b.id)));
     let mut s = String::new();
     for r in &rules {
-        let domain = if r.domain.is_empty() { "general" } else { r.domain.as_str() };
-        let scope = if r.scope.is_empty() { "repo-local" } else { r.scope.as_str() };
+        let domain = if r.domain.is_empty() {
+            "general"
+        } else {
+            r.domain.as_str()
+        };
+        let scope = if r.scope.is_empty() {
+            "repo-local"
+        } else {
+            r.scope.as_str()
+        };
         s.push_str(&format!("- {} [{} · {}]: {}", r.id, domain, scope, r.title));
         if !r.options.is_empty() {
-            let labels: Vec<&str> =
-                r.options.iter().map(|o| o.label.as_str()).filter(|l| !l.is_empty()).collect();
+            let labels: Vec<&str> = r
+                .options
+                .iter()
+                .map(|o| o.label.as_str())
+                .filter(|l| !l.is_empty())
+                .collect();
             if !labels.is_empty() {
                 s.push_str(&format!("  (alternatives: {})", labels.join(" / ")));
             }
@@ -150,8 +161,7 @@ async fn send_chat(prompt: &str, model: &str, system: Option<&str>) -> Option<Ch
 /// The explicit "not covered" phrase the Guide assistant must use when a question falls
 /// outside the user guide. Hard-coded here so tests can assert it appears in the prompt —
 /// a change to the wording requires updating both the prompt and the tests together.
-pub(crate) const GUIDE_NOT_COVERED_PHRASE: &str =
-    "That isn't covered in the Camerata user guide.";
+pub(crate) const GUIDE_NOT_COVERED_PHRASE: &str = "That isn't covered in the Camerata user guide.";
 
 /// Build the Guide-mode system prompt at call time (avoids a large const). Grounded in the
 /// canonical user guide PLUS the live rules catalog, so the assistant can both explain flows and
@@ -177,7 +187,9 @@ pub(crate) fn guide_system_prompt(rules_catalog: &str) -> String {
          \n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
     );
     if !rules_catalog.trim().is_empty() {
-        p.push_str("\n\n=== CAMERATA RULES CATALOG (every governance rule, with domain · scope) ===\n");
+        p.push_str(
+            "\n\n=== CAMERATA RULES CATALOG (every governance rule, with domain · scope) ===\n",
+        );
         p.push_str(rules_catalog);
     }
     p
@@ -198,7 +210,10 @@ pub fn ChatBubble() -> Element {
             }
         }
     }
-    let backend = models.as_ref().map(|m| m.backend.clone()).unwrap_or_default();
+    let backend = models
+        .as_ref()
+        .map(|m| m.backend.clone())
+        .unwrap_or_default();
 
     let mut mode = use_signal(|| ChatMode::Research);
     let mut turns = use_signal(Vec::<Turn>::new);
@@ -526,9 +541,9 @@ mod tests {
     #[test]
     fn guide_prompt_not_covered_phrase_appears_before_guide_content() {
         let prompt = guide_system_prompt("");
-        let phrase_pos = prompt.find(GUIDE_NOT_COVERED_PHRASE).expect(
-            "GUIDE_NOT_COVERED_PHRASE not found in prompt",
-        );
+        let phrase_pos = prompt
+            .find(GUIDE_NOT_COVERED_PHRASE)
+            .expect("GUIDE_NOT_COVERED_PHRASE not found in prompt");
         let guide_pos = prompt
             .find("=== CAMERATA USER GUIDE ===")
             .expect("USER GUIDE section header not found in prompt");

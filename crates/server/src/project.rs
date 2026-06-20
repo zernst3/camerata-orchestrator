@@ -236,7 +236,10 @@ impl ProjectStore {
 
     /// All projects.
     pub fn list(&self) -> Vec<Project> {
-        self.inner.lock().map(|s| s.projects.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|s| s.projects.clone())
+            .unwrap_or_default()
     }
 
     /// Look up a project by id.
@@ -279,8 +282,16 @@ impl ProjectStore {
     /// Import a project from an external JSON export: give it a FRESH id (so it never
     /// collides with an existing one), make it active. Name / repos / ruleset come from
     /// the imported document.
-    pub fn import(&self, name: &str, repos: Vec<String>, ruleset: ProjectRuleset) -> Option<Project> {
-        Some(self.import_or_overwrite(name, repos, ruleset, Vec::new(), false)?.into_project())
+    pub fn import(
+        &self,
+        name: &str,
+        repos: Vec<String>,
+        ruleset: ProjectRuleset,
+    ) -> Option<Project> {
+        Some(
+            self.import_or_overwrite(name, repos, ruleset, Vec::new(), false)?
+                .into_project(),
+        )
     }
 
     /// Import (or overwrite) a project from an exported JSON document.
@@ -461,8 +472,16 @@ mod tests {
         // An import that only mentions "a" (edited) and a new "c" — "b" is untouched.
         p.merge_custom(&[custom("a", "A2"), custom("c", "C1")]);
         let by_name = |n: &str| p.ruleset.custom.iter().find(|c| c.name == n).cloned();
-        assert_eq!(by_name("a").unwrap().body, "A2", "named custom rule was edited");
-        assert_eq!(by_name("b").unwrap().body, "B1", "untouched custom rule REMAINS");
+        assert_eq!(
+            by_name("a").unwrap().body,
+            "A2",
+            "named custom rule was edited"
+        );
+        assert_eq!(
+            by_name("b").unwrap().body,
+            "B1",
+            "untouched custom rule REMAINS"
+        );
         assert!(by_name("c").is_some(), "new custom rule added");
         assert_eq!(p.ruleset.custom.len(), 3, "nothing dropped");
     }
@@ -494,7 +513,10 @@ mod tests {
     fn new_projects_default_to_one_iteration() {
         let store = ProjectStore::new();
         let p = store.create("A", vec![]).unwrap();
-        assert_eq!(p.max_iterations, 1, "the shipped default is a single bounce");
+        assert_eq!(
+            p.max_iterations, 1,
+            "the shipped default is a single bounce"
+        );
     }
 
     #[test]
@@ -575,7 +597,13 @@ mod tests {
     fn import_or_overwrite_creates_new_when_no_collision() {
         let store = ProjectStore::new();
         let outcome = store
-            .import_or_overwrite("Alpha", vec!["me/api".into()], ruleset_with("R-1"), vec![], false)
+            .import_or_overwrite(
+                "Alpha",
+                vec!["me/api".into()],
+                ruleset_with("R-1"),
+                vec![],
+                false,
+            )
             .unwrap();
         let project = match outcome {
             ImportOutcome::Created(p) => p,
@@ -598,7 +626,13 @@ mod tests {
         let original = store.create("Beta", vec!["me/api".into()]).unwrap();
         // Attempt import with same name, overwrite=false.
         let outcome = store
-            .import_or_overwrite("Beta", vec!["me/web".into()], ruleset_with("R-NEW"), vec![], false)
+            .import_or_overwrite(
+                "Beta",
+                vec!["me/web".into()],
+                ruleset_with("R-NEW"),
+                vec![],
+                false,
+            )
             .unwrap();
         assert!(
             matches!(outcome, ImportOutcome::Conflict),
@@ -631,9 +665,15 @@ mod tests {
             other => panic!("expected Overwritten, got {other:?}"),
         };
         // Same id preserved.
-        assert_eq!(overwritten.id, original_id, "id must not change on overwrite");
+        assert_eq!(
+            overwritten.id, original_id,
+            "id must not change on overwrite"
+        );
         // Repos/ruleset/onboarded replaced.
-        assert_eq!(overwritten.repos, vec!["me/new1".to_string(), "me/new2".to_string()]);
+        assert_eq!(
+            overwritten.repos,
+            vec!["me/new1".to_string(), "me/new2".to_string()]
+        );
         assert_eq!(overwritten.ruleset.selections[0].rule_id, "R-REPLACED");
         assert_eq!(overwritten.onboarded, vec!["me/new1".to_string()]);
         // Still active.
@@ -656,7 +696,10 @@ mod tests {
             )
             .unwrap();
         let p = outcome.project().unwrap().clone();
-        assert_eq!(p.onboarded, onboarded, "onboarded field round-trips through import");
+        assert_eq!(
+            p.onboarded, onboarded,
+            "onboarded field round-trips through import"
+        );
         // Verify it persists in the store too.
         assert_eq!(store.get(&p.id).unwrap().onboarded, onboarded);
     }

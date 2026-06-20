@@ -36,9 +36,27 @@ pub struct ModelInfo {
 /// is wired in [`Llm::complete`]. Latest/most capable first. Prices are $/Mtok and track
 /// the well-known tiering (Sonnet ~5× cheaper than Opus, Haiku ~15×).
 pub const MODELS: &[ModelInfo] = &[
-    ModelInfo { vendor: "anthropic", label: "Opus 4.8", id: "claude-opus-4-8", price_in: 15.0, price_out: 75.0 },
-    ModelInfo { vendor: "anthropic", label: "Sonnet 4.6", id: "claude-sonnet-4-6", price_in: 3.0, price_out: 15.0 },
-    ModelInfo { vendor: "anthropic", label: "Haiku 4.5", id: "claude-haiku-4-5-20251001", price_in: 1.0, price_out: 5.0 },
+    ModelInfo {
+        vendor: "anthropic",
+        label: "Opus 4.8",
+        id: "claude-opus-4-8",
+        price_in: 15.0,
+        price_out: 75.0,
+    },
+    ModelInfo {
+        vendor: "anthropic",
+        label: "Sonnet 4.6",
+        id: "claude-sonnet-4-6",
+        price_in: 3.0,
+        price_out: 15.0,
+    },
+    ModelInfo {
+        vendor: "anthropic",
+        label: "Haiku 4.5",
+        id: "claude-haiku-4-5-20251001",
+        price_in: 1.0,
+        price_out: 5.0,
+    },
 ];
 
 /// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
@@ -549,7 +567,10 @@ impl Llm {
         // interruption is what made a fully-streamed audit collapse to "0/3 findings".
         // Only fail when there's genuinely nothing to salvage.
         if !status.success() && full.trim().is_empty() {
-            anyhow::bail!("claude CLI (stream) exited {status}: {}", stderr_text.trim());
+            anyhow::bail!(
+                "claude CLI (stream) exited {status}: {}",
+                stderr_text.trim()
+            );
         }
         Ok(LlmResponse {
             text: full,
@@ -563,10 +584,9 @@ impl Llm {
 
     /// API path: POST the Anthropic Messages API with the key.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
-        let key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset"))?;
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
+        })?;
         let mut body = serde_json::json!({
             "model": model,
             "max_tokens": req.max_tokens,
@@ -604,14 +624,11 @@ impl Llm {
             .unwrap_or_default();
         let (input_tokens, output_tokens) = usage_tokens(&v["usage"]);
         // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        let cost_usd = price_for(model).and_then(|(pin, pout)| {
-            match (input_tokens, output_tokens) {
-                (Some(i), Some(o)) => {
-                    Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0)
-                }
+        let cost_usd =
+            price_for(model).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
+                (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
                 _ => None,
-            }
-        });
+            });
         Ok(LlmResponse {
             text: out,
             model: model.to_string(),

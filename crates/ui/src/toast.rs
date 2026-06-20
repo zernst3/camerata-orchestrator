@@ -179,12 +179,15 @@ struct NotificationsFeed {
 }
 
 async fn fetch_notifications(since: u64) -> Option<NotificationsFeed> {
-    reqwest::get(format!("{}/api/notifications?since={since}", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<NotificationsFeed>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/notifications?since={since}",
+        crate::BFF_URL
+    ))
+    .await
+    .ok()?
+    .json::<NotificationsFeed>()
+    .await
+    .ok()
 }
 
 /// Invisible component: drains the BFF notification feed on a cadence and pushes
@@ -284,10 +287,7 @@ pub fn ConnectionWatcher() -> Element {
                                          GitHub status."
                                             .to_string()
                                     }
-                                    _ => c
-                                        .error
-                                        .clone()
-                                        .unwrap_or_else(|| "unreachable".into()),
+                                    _ => c.error.clone().unwrap_or_else(|| "unreachable".into()),
                                 };
                                 push_toast(
                                     toasts,

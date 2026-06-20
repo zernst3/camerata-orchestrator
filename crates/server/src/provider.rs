@@ -52,12 +52,11 @@ fn github_from_env() -> Option<ProviderHandle> {
 
     // Optional default repo: present -> a labeled default; absent -> token-only,
     // every operation must name its repo via the story container.
-    let default_repo: Option<(String, String)> = non_empty("CAMERATA_GITHUB_REPO").and_then(|spec| {
-        match spec.split_once('/') {
+    let default_repo: Option<(String, String)> =
+        non_empty("CAMERATA_GITHUB_REPO").and_then(|spec| match spec.split_once('/') {
             Some((o, r)) => Some((o.to_string(), r.to_string())),
             None => non_empty("CAMERATA_GITHUB_OWNER").map(|o| (o, spec)),
-        }
-    });
+        });
 
     let (config, label) = match &default_repo {
         Some((owner, repo)) => (

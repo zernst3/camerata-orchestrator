@@ -103,13 +103,21 @@ mod tests {
         assert!(after.last_fired.is_some(), "due routine was stamped");
         assert!(after.last_run.is_some(), "due routine actually ran");
         // The scripted gate denies (2 denies), so an unattended fire raises one review.
-        assert_eq!(esc.list_open().len(), 1, "blocked unattended run raised a review");
+        assert_eq!(
+            esc.list_open().len(),
+            1,
+            "blocked unattended run raised a review"
+        );
 
         // A second immediate tick must NOT re-fire the same slot (last_fired > slot)
         // and must NOT pile up a duplicate review.
         let fired_at = after.last_fired.clone();
         tick(&store, &esc);
-        assert_eq!(store.list()[0].last_fired, fired_at, "same slot not re-fired");
+        assert_eq!(
+            store.list()[0].last_fired,
+            fired_at,
+            "same slot not re-fired"
+        );
         assert_eq!(esc.list_open().len(), 1, "review not duplicated");
     }
 
@@ -123,10 +131,19 @@ mod tests {
         // The disabled routine is skipped; the provisioned+enabled gate is what matters.
         tick(&store, &esc);
         assert!(
-            store.list().iter().find(|r| r.id == disabled.id).unwrap().last_fired.is_none(),
+            store
+                .list()
+                .iter()
+                .find(|r| r.id == disabled.id)
+                .unwrap()
+                .last_fired
+                .is_none(),
             "disabled routine never auto-fires"
         );
-        assert!(esc.list_open().is_empty(), "nothing fired, nothing escalated");
+        assert!(
+            esc.list_open().is_empty(),
+            "nothing fired, nothing escalated"
+        );
     }
 
     #[test]
@@ -135,6 +152,12 @@ mod tests {
         let esc = EscalationStore::new();
         let r = store.create(&req("Manual", "manual"));
         tick(&store, &esc);
-        assert!(store.list().iter().find(|x| x.id == r.id).unwrap().last_fired.is_none());
+        assert!(store
+            .list()
+            .iter()
+            .find(|x| x.id == r.id)
+            .unwrap()
+            .last_fired
+            .is_none());
     }
 }

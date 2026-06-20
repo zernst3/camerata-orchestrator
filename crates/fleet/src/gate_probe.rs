@@ -43,7 +43,7 @@ impl BounceThenCleanDriver {
 impl AgentDriver for BounceThenCleanDriver {
     async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome> {
         let n = {
-            let mut c = self.calls.lock().unwrap();
+            let mut c = self.calls.lock().expect("gate-probe mutex poisoned");
             *c += 1;
             *c
         };
@@ -74,7 +74,7 @@ impl DirtyThenCleanChecks {
 impl CheckRunner for DirtyThenCleanChecks {
     async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
         let n = {
-            let mut c = self.checks.lock().unwrap();
+            let mut c = self.checks.lock().expect("gate-probe mutex poisoned");
             *c += 1;
             *c
         };
@@ -150,7 +150,8 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
 
     // ── LAYER 1: deny-before-execute. One planted violation per enforced floor rule. ──
     let gateway = GovernedGateway::new().with_session(session.clone(), role.clone());
-    let planted: Vec<(&str, ToolCall)> = vec![
+    let planted: Vec<(&str, ToolCall)> =
+        vec![
         (
             "forbidden path (GOV-1)",
             write_call("crates/forbidden/leak.rs", "// agent tried to write here"),
@@ -189,7 +190,10 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
     for (label, call) in &planted {
         let (denied, detail) = match gateway.evaluate(&session, call).await {
             Decision::Deny { rule, reason } => (true, format!("[{}] {reason}", rule.0)),
-            Decision::Allow => (false, "ALLOWED — this floor rule is not wired on writes".to_string()),
+            Decision::Allow => (
+                false,
+                "ALLOWED — this floor rule is not wired on writes".to_string(),
+            ),
         };
         layer1.push(Layer1Check {
             label: label.to_string(),
@@ -210,7 +214,7 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
     let stage0 = &report.stages[0].report;
     let layer2_bounced = stage0.bounced;
     let layer2_clean = stage0.final_violations.is_empty();
-    let agent_passes = *driver.calls.lock().unwrap();
+    let agent_passes = *driver.calls.lock().expect("gate-probe mutex poisoned");
 
     Ok(GateProbeResult {
         story,
@@ -232,7 +236,11 @@ mod tests {
         // LAYER 1: the whole floor denied every planted violation.
         assert!(r.layer1_total() >= 6, "all enforced floor rules are probed");
         for c in &r.layer1 {
-            assert!(c.denied, "planted violation must be denied: {} — {}", c.label, c.detail);
+            assert!(
+                c.denied,
+                "planted violation must be denied: {} — {}",
+                c.label, c.detail
+            );
         }
         assert_eq!(
             r.layer1_denied_count(),
@@ -241,7 +249,10 @@ mod tests {
         );
         assert!(r.layer1_clean_allowed, "clean write must be allowed");
         // LAYER 2: bounced once and resolved; the driver ran an initial + a revise pass.
-        assert!(r.layer2_bounced, "the stage must bounce on the planted violation");
+        assert!(
+            r.layer2_bounced,
+            "the stage must bounce on the planted violation"
+        );
         assert!(r.layer2_clean, "the revise pass must resolve the violation");
         assert_eq!(r.agent_passes, 2, "initial + one revise pass");
         // Whole-loop predicate.

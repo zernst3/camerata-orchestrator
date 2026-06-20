@@ -211,7 +211,11 @@ pub fn translate_user_prompt(esc: &Escalation, answer: &str) -> String {
         reason = esc.reason,
         stopped_for = esc.stopped_for,
         suggestions = suggestions,
-        raw = if esc.raw_context.is_empty() { "(none)" } else { esc.raw_context.as_str() },
+        raw = if esc.raw_context.is_empty() {
+            "(none)"
+        } else {
+            esc.raw_context.as_str()
+        },
         answer = answer.trim(),
     )
 }
@@ -335,7 +339,11 @@ pub fn chat_system_prompt(esc: &Escalation) -> String {
         name = esc.routine_name,
         reason = esc.reason,
         stopped_for = esc.stopped_for,
-        raw = if esc.raw_context.is_empty() { "(none)" } else { esc.raw_context.as_str() },
+        raw = if esc.raw_context.is_empty() {
+            "(none)"
+        } else {
+            esc.raw_context.as_str()
+        },
     )
 }
 
@@ -457,16 +465,24 @@ impl EscalationStore {
     pub fn list_open(&self) -> Vec<Escalation> {
         self.items
             .lock()
-            .map(|g| g.iter().filter(|e| e.status == EscalationStatus::Open).cloned().collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|e| e.status == EscalationStatus::Open)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The open escalation for a routine, if one exists (a routine has at most one open
     /// review at a time — raising is deduped on this).
     pub fn open_for_routine(&self, routine_id: &str) -> Option<Escalation> {
-        self.items.lock().ok()?.iter().find(|e| {
-            e.routine_id == routine_id && e.status == EscalationStatus::Open
-        }).cloned()
+        self.items
+            .lock()
+            .ok()?
+            .iter()
+            .find(|e| e.routine_id == routine_id && e.status == EscalationStatus::Open)
+            .cloned()
     }
 
     /// One escalation by id.
@@ -545,7 +561,9 @@ impl EscalationStore {
     pub fn resolve(&self, id: &str, answer: &str) -> Option<Escalation> {
         let payload = {
             let guard = self.items.lock().ok()?;
-            let e = guard.iter().find(|e| e.id == id && e.status == EscalationStatus::Open)?;
+            let e = guard
+                .iter()
+                .find(|e| e.id == id && e.status == EscalationStatus::Open)?;
             scaffold_resume_payload(e, answer)
         };
         self.resolve_with_payload(id, answer, &payload)
@@ -615,7 +633,10 @@ mod tests {
         assert_eq!(resolved.status, EscalationStatus::Resolved);
         assert_eq!(resolved.human_answer.as_deref(), Some("Use Postgres"));
         let directive = resolved.translated_directive.expect("directive");
-        assert!(directive.contains("Use Postgres"), "answer carried into directive");
+        assert!(
+            directive.contains("Use Postgres"),
+            "answer carried into directive"
+        );
         assert!(directive.contains("Nightly"), "routine name in directive");
 
         // Now no open escalation for the routine; resolving again is a no-op None.
@@ -644,7 +665,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TranslationDriver for CannedDriver {
-        async fn complete(&self, _system: &str, _prompt: &str, _model: &str) -> anyhow::Result<String> {
+        async fn complete(
+            &self,
+            _system: &str,
+            _prompt: &str,
+            _model: &str,
+        ) -> anyhow::Result<String> {
             Ok(self.0.clone())
         }
     }
@@ -655,7 +681,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TranslationDriver for EchoDriver {
-        async fn complete(&self, _system: &str, prompt: &str, _model: &str) -> anyhow::Result<String> {
+        async fn complete(
+            &self,
+            _system: &str,
+            prompt: &str,
+            _model: &str,
+        ) -> anyhow::Result<String> {
             Ok(format!("Here is the prompt I received:\n{prompt}"))
         }
     }
@@ -665,7 +696,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TranslationDriver for FailingDriver {
-        async fn complete(&self, _system: &str, _prompt: &str, _model: &str) -> anyhow::Result<String> {
+        async fn complete(
+            &self,
+            _system: &str,
+            _prompt: &str,
+            _model: &str,
+        ) -> anyhow::Result<String> {
             anyhow::bail!("model unreachable")
         }
     }
@@ -680,7 +716,8 @@ mod tests {
         let esc = open_escalation();
         let json = r#"{"decision":"Use Postgres","directive":"Provision a Postgres backend and continue.","confident":true}"#;
         let driver = CannedDriver(json.to_string());
-        let payload = translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6").await;
+        let payload =
+            translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6").await;
         assert_eq!(payload.decision, "Use Postgres");
         assert!(payload.directive.contains("Postgres"));
         assert!(payload.confident);
@@ -709,7 +746,10 @@ mod tests {
         // The scaffold restates the human's raw answer as the decision.
         assert_eq!(payload.decision, "use option B");
         assert!(payload.confident, "non-empty answer -> confident scaffold");
-        assert!(payload.directive.contains("Nightly"), "routine name in directive");
+        assert!(
+            payload.directive.contains("Nightly"),
+            "routine name in directive"
+        );
     }
 
     #[tokio::test]
@@ -738,7 +778,8 @@ mod tests {
         let store = EscalationStore::new();
         let e = store.raise(req("rt-1"), "Nightly");
         let json = r#"{"decision":"Use SQLite","directive":"Switch the store to SQLite and continue.","confident":true}"#;
-        let payload = translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m").await;
+        let payload =
+            translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m").await;
 
         let resolved = store
             .resolve_with_payload(&e.id, "sqlite please", &payload)
@@ -750,7 +791,10 @@ mod tests {
         assert_eq!(stored.decision, "Use SQLite");
         assert_eq!(stored.authored_by, "claude");
         // Rendered directive carries the decision (what the UI shows).
-        assert!(resolved.translated_directive.unwrap().contains("Use SQLite"));
+        assert!(resolved
+            .translated_directive
+            .unwrap()
+            .contains("Use SQLite"));
 
         // Already resolved -> resolving again is a no-op None.
         assert!(store.resolve_with_payload(&e.id, "x", &payload).is_none());
