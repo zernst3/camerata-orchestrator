@@ -17,7 +17,7 @@
 //!   gate implementation — no divergence.
 //! - Rules are matched by [`camerata_core::RuleId`]. GOV-1 (the verified
 //!   "no writes to forbidden paths" rule) is the first concrete rule; adding
-//!   more is a match arm in [`apply_rule`].
+//!   more rules is done by adding a [`RuleEntry`] to [`RULE_REGISTRY`].
 //! - [`RULE_REGISTRY`] is the public, ordered registry of every implemented
 //!   rule id. Unknown ids (not in the registry) are safely treated as no-ops
 //!   — the gate is permissive about rules it does not implement, NOT about
@@ -104,8 +104,8 @@ pub struct RuleEntry {
 
 /// All implemented rule arms, keyed by rule-id string.
 ///
-/// Unknown ids (not present here) are treated as no-ops by [`apply_rule`].
-/// To add a rule: implement a `check_*` fn below, add it here, and add unit
+/// Unknown ids (not present here) are treated as no-ops. To add a rule:
+/// implement a `check_*` fn below, add a [`RuleEntry`] here, and add unit
 /// tests. The order here matches evaluation order inside a single rule (each
 /// rule fires independently; subset order controls cross-rule ordering via
 /// [`evaluate_call`]).
