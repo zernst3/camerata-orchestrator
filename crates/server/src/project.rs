@@ -13,6 +13,8 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
+use crate::model_tier::TierMap;
+
 /// An architect-authored rule (not from the corpus). Preserved across base-rule
 /// upserts — camerata-ai's `CustomRule`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +85,18 @@ pub struct Project {
     /// which keeps the historical behaviour. Adjustable from the Development Surface.
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
+    /// Per-capability-band model mapping for the governed fleet (ORCH-MODEL-TIERING-1).
+    ///
+    /// Maps each [`CapabilityBand`] (`fast` / `balanced` / `strongest`) to a concrete
+    /// model id. The fleet's task classifier maps each [`PlanTask`] to a band, and
+    /// this map resolves the final model id per stage.
+    ///
+    /// Serde default fills in [`TierMap::default()`] for projects persisted before this
+    /// field existed, so no migration is required. The default Claude tier map is:
+    /// `fast=claude-haiku-4-5-20251001`, `balanced=claude-sonnet-4-6`,
+    /// `strongest=claude-opus-4-8`.
+    #[serde(default)]
+    pub tier_map: TierMap,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -270,6 +284,7 @@ impl ProjectStore {
                 ruleset: ProjectRuleset::default(),
                 onboarded: Vec::new(),
                 max_iterations: default_max_iterations(),
+                tier_map: TierMap::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -331,6 +346,7 @@ impl ProjectStore {
                     ruleset,
                     onboarded,
                     max_iterations: default_max_iterations(),
+                    tier_map: TierMap::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -428,6 +444,7 @@ mod tests {
             repos: vec!["me/api".into()],
             onboarded: vec![],
             max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -464,6 +481,7 @@ mod tests {
             repos: vec![],
             onboarded: vec![],
             max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -494,6 +512,7 @@ mod tests {
             repos: vec![],
             onboarded: vec![],
             max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -527,6 +546,7 @@ mod tests {
             repos: vec![],
             onboarded: vec![],
             max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -572,6 +592,7 @@ mod tests {
             repos: vec!["me/api".into()],
             onboarded: vec![],
             max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],

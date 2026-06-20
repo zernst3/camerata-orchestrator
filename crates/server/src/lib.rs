@@ -37,6 +37,7 @@ pub mod run;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod schedule;
+pub mod model_tier;
 pub mod settings;
 pub mod suppression;
 pub mod terminal;
