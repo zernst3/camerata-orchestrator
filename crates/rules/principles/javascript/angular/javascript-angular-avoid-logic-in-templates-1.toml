@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-AVOID-LOGIC-IN-TEMPLATES-1"
+title = "Templates are simple and logic-free; complex conditions and computations live in the component"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "What position does the project take on: Templates are simple and logic-free; complex conditions and computations live in the component?"
+default = "templates-are-simple-and-logic-free-complex-cond"
+why = "A template's job is to render the view; it should be a declarative map of the component's state to the DOM. When logic lives in the template—nested *ngIf statements, ternary operators, method calls, complex expressions—the template becomes difficult to read, expensive to test (templates cannot be unit-tested the way component classes can), and fragile (a template change can have unexpected side effects). Complex logic in the template also runs on every change-detection cycle, potentially wasting performance. The correct pattern is to compute values in the component class and expose them as simple properties or methods; the template uses property bindings, *ngIf on simple conditions, and *ngFor on arrays, nothing more. If a derived value is needed multiple times, store it in a component property. If the computation is expensive, cache it or use a pipe (which is specifically designed for repeatable transformations). The rule is: avoid logic in templates. Any condition more complex than a single boolean property, any computation beyond accessing a property or calling a zero-argument getter, and any method call with side effects belong in the component class, not the template."
+
+[[option]]
+id = "templates-are-simple-and-logic-free-complex-cond"
+label = "Templates are simple and logic-free; complex conditions and computations live in the component"
+directive = "Templates contain only simple property bindings, *ngIf on single boolean conditions, and *ngFor on arrays. Complex conditions (AND/OR chains, ternary operators, comparisons), computations, method calls with side effects, and derived values are moved to the component class and exposed as properties or getter methods. A template that contains logic beyond simple bindings and single conditions is refactored to move the logic to the component."
+why = "The adopted default. Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
+
+[[option]]
+id = "templates-contain-complex-logic-ternary-operators"
+label = "templates contain complex logic, ternary operators, …"
+directive = "templates contain conditionals, method calls, computations, and complex logic expressions inline, without moving them to component properties or methods"
+why = "A defensible alternative the project considered and did not adopt as the default."

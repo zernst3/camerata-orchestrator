@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1"
+title = "Components use OnPush change detection by default for performance"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Components use OnPush change detection by default for performance?"
+default = "components-use-onpush-change-detection-by-default"
+why = "Angular's default change detection runs a check on every component in the tree whenever any asynchronous event fires (timers, network requests, user input). With OnPush, a component's view only re-renders if its input @Input() properties change by reference or if change detection is explicitly triggered. This dramatically reduces the number of checks Angular must perform in complex trees and makes performance predictable and scalable. When a component receives its data through @Input() properties (as in a presentational or 'dumb' component pattern), OnPush ensures the view is consistent with the inputs without requiring Angular to diff the entire component tree. The tradeoff—that the component must be disciplined about immutability and async data handling—is a discipline worth enforcing, because it catches the mutation bugs that make change detection unreliable at scale. The decision is: all new components default to changeDetection: ChangeDetectionStrategy.OnPush, and only explicitly switch to Default when the component structure genuinely cannot use OnPush (a rare case)."
+
+[[option]]
+id = "components-use-onpush-change-detection-by-default"
+label = "Components use OnPush change detection by default for performance"
+directive = "All new components set changeDetection: ChangeDetectionStrategy.OnPush. A component re-renders only when its @Input() properties change by reference, or when change detection is explicitly triggered via ChangeDetectorRef.markForCheck() or ChangeDetectorRef.detectChanges(). Components that handle async data (subscriptions, timers) do so with the async pipe or by explicitly triggering change detection after the update arrives. Switching a component to Default change detection requires documented justification, and the decision is reviewed during code review."
+why = "The adopted default. OnPush drastically reduces change-detection cost in large trees and makes performance predictable. It enforces immutability discipline and makes the data flow explicit."
+
+[[option]]
+id = "components-use-default-change-detection-for-simpli"
+label = "components use Default change detection for simplicity …"
+directive = "components use Angular's Default change detection strategy, re-rendering whenever any change is detected in the component tree. OnPush is used only in rare cases where performance measurement shows it is necessary."
+why = "A defensible alternative the project considered and did not adopt as the default."

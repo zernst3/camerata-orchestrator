@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-NO-DIRECT-DOM-MANIPULATION-1"
+title = "DOM is not manipulated directly; Renderer2 and property bindings are used instead"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: DOM is not manipulated directly; Renderer2 and property bindings are used instead?"
+default = "dom-is-not-manipulated-directly-renderer2-and-bin"
+why = "Direct DOM manipulation using document.querySelector(), .innerHTML, .className, or .style bypasses Angular's rendering system and creates a mismatch between the Angular model and the actual DOM. When the component re-renders or change detection runs, Angular's view may be out of sync with the directly-modified DOM, leading to bugs where the component state and the rendered view diverge. Direct manipulation also makes server-side rendering (SSR) impossible; it is not safe for web workers or other non-browser environments. Angular provides two safe patterns: property bindings in the template ([property]='value', [style.color]='value', [class.active]='value') and the Renderer2 service (for imperative DOM changes that cannot be expressed in a template). Both are safe because they integrate with Angular's rendering system. The rule is: do not use document.querySelector(), .innerHTML, .style, or .className directly; use template bindings or Renderer2 instead. Accessing the DOM via ViewChild and manipulating it must use Renderer2, not direct properties."
+
+[[option]]
+id = "dom-is-not-manipulated-directly-renderer2-and-bin"
+label = "DOM is not manipulated directly; Renderer2 and property bindings are used instead"
+directive = "DOM manipulation uses one of two patterns: (1) template bindings for declarative updates ([property]='value', [style.property]='value', [class.name]='condition') or (2) Renderer2 service for imperative DOM changes (Renderer2.setStyle, Renderer2.addClass, Renderer2.setProperty). Direct calls to document.querySelector(), .innerHTML, .style, .className, or any direct property assignment on DOM elements are forbidden. When accessing elements via ViewChild or ElementRef, only Renderer2 methods or property bindings are used to modify the DOM."
+why = "The adopted default. Property bindings and Renderer2 keep Angular's model and the DOM in sync, enable SSR and alternative rendering targets, and prevent desynchronization bugs."
+
+[[option]]
+id = "direct-dom-manipulation-using-documentqueryselec"
+label = "direct DOM manipulation using document.querySelector …"
+directive = "direct DOM manipulation is performed using document.querySelector, .innerHTML, .style, and .className assignments to modify the DOM without going through Angular's rendering system"
+why = "A defensible alternative the project considered and did not adopt as the default."

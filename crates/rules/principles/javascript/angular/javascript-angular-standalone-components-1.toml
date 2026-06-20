@@ -1,0 +1,24 @@
+id = "JAVASCRIPT-ANGULAR-STANDALONE-COMPONENTS-1"
+title = "Components are standalone (modern Angular) with explicit dependency imports"
+tag = "stack"
+domain = "javascript:angular"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Components are standalone (modern Angular) with explicit dependency imports?"
+default = "components-are-standalone-with-explicit-dependenc"
+why = "Angular 14+ introduced standalone components, eliminating NgModule boilerplate and making dependencies explicit and co-located with the component. A standalone component explicitly imports its dependencies (pipes, directives, other components) via the imports array rather than relying on an NgModule to declare them transitively. This explicitness surfaces missing dependencies at compile time, not runtime, and makes component dependencies auditable without traversing module hierarchies. Standalone components also reduce the abstraction layers required to bootstrap a feature and make tree-shaking and lazy loading more predictable. Defaulting to standalone components is the modern Angular best practice; NgModules introduce ceremony and indirect dependency resolution that is difficult to audit and test. The boundary rule is clear: new components and services default to standalone=true (or standalone services via providedIn), and the set of supported NgModules is bounded and explicitly documented."
+
+[[option]]
+id = "components-are-standalone-with-explicit-dependenc"
+label = "Components are standalone (modern Angular) with explicit dependency imports"
+directive = "All new components use standalone: true with explicit imports arrays listing their dependencies (pipes, directives, other components). Standalone services use providedIn: 'root' (or equivalent) rather than being declared in an NgModule. NgModules are only used for shared configuration (e.g., HTTP interceptors) or third-party libraries that require them, and their list is documented in a CONVENTIONS or README file. Standalone components that forget to import a required pipe or directive are rejected at build time before reaching the browser."
+why = "The adopted default. Modern Angular (14+) standalone components are explicit, tree-shakeable, and auditable. Lazy-loaded routes and feature modules need no NgModule wrapper; the component's imports array is the source of truth."
+
+[[option]]
+id = "all-components-are-declared-in-ngmodules-with-tran"
+label = "All components are declared in NgModules with transitive …"
+directive = "all components are declared in NgModules, and dependencies are managed transitively through module declarations rather than explicit imports on each component. Standalone: true is not used."
+why = "A defensible alternative the project considered and did not adopt as the default."
