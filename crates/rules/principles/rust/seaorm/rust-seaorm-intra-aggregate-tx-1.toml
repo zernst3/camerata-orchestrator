@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does atomicity for multiple writes within a single aggregate live: inside the repository method, or surfaced as a unit-of-work parameter on the repository trait?"
@@ -28,3 +29,7 @@ id = "no-repository-transaction-boundaries"
 label = "No repository transaction boundaries at all"
 directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
 why = "Trades architectural simplicity for accepting partial-write states as a normal failure mode the rest of the system has to be defensive against."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
+title = "SeaORM docs: Entity Format — ActiveModelBehavior and repository transaction patterns"

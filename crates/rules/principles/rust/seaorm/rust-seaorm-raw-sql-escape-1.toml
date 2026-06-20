@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "When the typed query builder cannot express a repository query, how may raw SQL be used at the repository boundary?"
@@ -28,3 +29,7 @@ id = "ban-raw-sql-entirely"
 label = "Repository refuses raw SQL entirely"
 directive = "The repository layer refuses raw SQL entirely; methods whose upstream source uses raw SQL are redesigned as service-layer compositions of multiple typed queries."
 why = "Trades single-query performance for keeping the entire repository surface inside the typed query builder; accepts that some query shapes require N round trips instead of one."
+
+[[sources]]
+url = "https://docs.rs/sea-orm/latest/sea_orm/"
+title = "sea-orm — Raw SQL query support and typed result mapping"

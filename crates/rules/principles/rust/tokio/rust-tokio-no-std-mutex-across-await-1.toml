@@ -5,6 +5,7 @@ domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Holding locks across await points?"
@@ -22,3 +23,11 @@ id = "use-std-mutex-in-async-code"
 label = "Use std::sync::Mutex in async code"
 directive = "std::sync::Mutex is used even if locks may be held across await points, relying on task scheduling and careful programming to avoid deadlocks."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html"
+title = "tokio::sync::Mutex — Async mutex for holding locks across await points"
+
+[[sources]]
+url = "https://tokio.rs/tokio/tutorial/shared-state"
+title = "Tokio tutorial: Shared State — Mutex usage across await points"

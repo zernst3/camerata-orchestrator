@@ -5,6 +5,7 @@ domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Bounded channels?"
@@ -22,3 +23,11 @@ id = "use-unbounded-channels"
 label = "Use unbounded channels"
 directive = "Channels are created unbounded (e.g., tokio::sync::mpsc::unbounded_channel()) to avoid backpressure and allow senders to proceed without waiting."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html"
+title = "tokio::sync::mpsc — Bounded vs unbounded channels and backpressure"
+
+[[sources]]
+url = "https://tokio.rs/tokio/tutorial/channels"
+title = "Tokio tutorial: Channels — bounded capacity and backpressure"

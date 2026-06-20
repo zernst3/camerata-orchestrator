@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Share application dependencies via State?"
@@ -22,3 +23,11 @@ id = "use-global-statics-for-dependencies"
 label = "Use global static variables for application dependencies"
 directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"
+title = "axum::extract::State — Shared application state extractor"
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/struct.Router.html"
+title = "axum::Router — with_state method and global state"

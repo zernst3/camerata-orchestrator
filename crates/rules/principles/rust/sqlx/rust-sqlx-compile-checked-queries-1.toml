@@ -5,6 +5,7 @@ domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Compile-checked SQL queries?"
@@ -22,3 +23,11 @@ id = "use-format-or-string-interpolation"
 label = "Build SQL strings with format! or string interpolation"
 directive = "SQL queries are built using format!, string concatenation, or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sqlx/latest/sqlx/macro.query.html"
+title = "sqlx::query! — Statically checked SQL query macro"
+
+[[sources]]
+url = "https://github.com/launchbadge/sqlx/blob/main/README.md"
+title = "SQLx README — compile-time SQL verification against live database schema"

@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Empty ActiveModelBehavior unless a hook is genuinely needed?"
@@ -28,3 +29,7 @@ id = "entities-without-hooks-omit-the-activemodelbehav"
 label = "entities without hooks omit the ActiveModelBehavior impl block on …"
 directive = "entities without hooks omit the ActiveModelBehavior impl block on their ActiveModel entirely instead of keeping an empty one"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
+title = "SeaORM docs: Entity Format — ActiveModelBehavior hooks; do not delete empty impl"

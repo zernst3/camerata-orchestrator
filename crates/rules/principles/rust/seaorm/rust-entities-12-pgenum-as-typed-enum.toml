@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Postgres pgEnum columns map to typed Rust enums via DeriveActiveEnum?"
@@ -28,3 +29,11 @@ id = "every-pgenum-lives-in-a-shared-enums-module-from"
 label = "every pgEnum lives in a shared _enums/ module from …"
 directive = "every pgEnum lives in a shared _enums/ module from the moment it is introduced, regardless of how many entities currently consume it"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveActiveEnum.html"
+title = "sea_orm::DeriveActiveEnum — derive macro implementing ActiveEnum trait for enums"
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/enumeration/"
+title = "SeaORM docs: Enumeration — DeriveActiveEnum and Postgres pgEnum mapping"

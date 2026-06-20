@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Single binary serves server-rendered HTML, the client bundle, and server-function endpoints?"
@@ -34,3 +35,7 @@ id = "html-rendering-is-handled-by-a-separate-rust-bin"
 label = "HTML rendering is handled by a separate Rust binary …"
 directive = "HTML rendering is handled by a separate Rust binary distinct from the API binary, with the two binaries deployed independently rather than as a single process"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/"
+title = "Dioxus fullstack: SSR, hydration, and server-function endpoints in one binary"

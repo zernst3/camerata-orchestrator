@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Event handlers are move closures in templates; callback props use the framework EventHandler type?"
@@ -34,3 +35,7 @@ id = "callback-props-are-typed-as-synchronous-function"
 label = "callback props are typed as synchronous function pointers (fn) …"
 directive = "callback props are typed as synchronous function pointers (fn) that do not capture state, rather than as the framework's EventHandler type"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/reference/event_handlers"
+title = "Dioxus reference: Event Handlers — EventHandler type for component callback props"

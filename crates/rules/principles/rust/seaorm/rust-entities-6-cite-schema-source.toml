@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Module-level doc comment citing the schema source?"
@@ -34,3 +35,7 @@ id = "the-source-of-truth-schema-authority-is-traced-t"
 label = "the source-of-truth schema authority is traced through git history …"
 directive = "the source-of-truth schema authority is traced through git history rather than recorded as a citation inside the entity file"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
+title = "SeaORM docs: Entity Format — module-level structure and documentation conventions"

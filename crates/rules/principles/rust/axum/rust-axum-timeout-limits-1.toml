@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Request timeouts and body size limits?"
@@ -22,3 +23,11 @@ id = "no-timeout-or-limit-configuration"
 label = "No timeout or limit configuration"
 directive = "The application does not configure request timeouts or body size limits, relying on the OS and network layer to eventually close connections."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html"
+title = "axum::extract::DefaultBodyLimit — Default request body size limit"
+
+[[sources]]
+url = "https://docs.rs/tower-http/latest/tower_http/timeout/index.html"
+title = "tower_http::timeout — Request timeout middleware"

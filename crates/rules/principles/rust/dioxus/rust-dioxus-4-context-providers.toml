@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Cross-tree state lives in named per-concern contexts, provided at or near the app root?"
@@ -34,3 +35,7 @@ id = "cross-tree-state-is-threaded-through-props-at-ev"
 label = "cross-tree state is threaded through props at every intermediate …"
 directive = "cross-tree state is threaded through props at every intermediate layer, with no context-system use even for state that crosses three or more tree levels"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/reference/context"
+title = "Dioxus reference: Context — use_context_provider, use_context"

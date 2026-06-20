@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Use extractors for request validation?"
@@ -22,3 +23,11 @@ id = "validation-happens-inside-handlers-or-services"
 label = "validation happens inside handlers or services"
 directive = "Request data is extracted into a generic type in the handler, and validation (checking field presence, type correctness, constraints) happens inside the handler or is delegated to the service layer."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/index.html"
+title = "axum::extract — Extractors (FromRequest, FromRequestParts)"
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/index.html#building-extractors-that-rely-on-other-extractors"
+title = "axum::extract — Custom extractor validation example"

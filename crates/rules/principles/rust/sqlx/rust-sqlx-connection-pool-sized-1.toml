@@ -5,6 +5,7 @@ domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Connection pool sizing?"
@@ -22,3 +23,11 @@ id = "create-connection-per-query"
 label = "Create a new connection for each query"
 directive = "Each query creates a new database connection, uses it, and closes it, without connection pooling."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.Pool.html"
+title = "sqlx::Pool — Connection pool: reduces connection overhead, limits per-server connections"
+
+[[sources]]
+url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolOptions.html"
+title = "sqlx::PoolOptions — max_connections, min_connections, acquire_timeout, idle_timeout"

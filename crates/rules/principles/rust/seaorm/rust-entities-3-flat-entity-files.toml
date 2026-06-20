@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: One file per entity under entities/, named for the table?"
@@ -34,3 +35,7 @@ id = "multiple-small-related-entities-are-inlined-into"
 label = "multiple small related entities are inlined into a single …"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
+title = "SeaORM docs: Entity Format — one file per entity, named for the table"
