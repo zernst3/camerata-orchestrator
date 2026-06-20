@@ -58,6 +58,85 @@ async fn fetch_rules() -> Option<Vec<CockpitRule>> {
         .ok()
 }
 
+/// One open GitHub issue from `GET /api/github/issues` (#20), as the adopt picker
+/// renders it. Mirrors the server's `IssueSummary`.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct IssueRow {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    url: String,
+}
+
+/// The `GET /api/github/issues` envelope: `ok` plus the issues, or a hint when the
+/// token is missing / the call failed. The endpoint never errors at the HTTP layer
+/// (it degrades gracefully), so a `None` here means the BFF itself was unreachable.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct IssuesResult {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    issues: Vec<IssueRow>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// List a repo's open GitHub issues for the adopt picker. `None` only when the BFF
+/// itself is unreachable; a token-less / failed GitHub call still returns `Some`
+/// with `ok: false` and a message.
+async fn fetch_github_issues(repo: &str) -> Option<IssuesResult> {
+    reqwest::get(format!(
+        "{}/api/github/issues?repo={}",
+        crate::BFF_URL,
+        urlencoding_encode(repo)
+    ))
+    .await
+    .ok()?
+    .json::<IssuesResult>()
+    .await
+    .ok()
+}
+
+/// Adopt one GitHub issue onto the spine via `POST /api/stories/adopt-issue`. The
+/// issue fields travel in the body (already fetched), so this needs no token.
+/// Returns the adopted story id on success.
+async fn adopt_github_issue(repo: &str, issue: &IssueRow) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/stories/adopt-issue", crate::BFF_URL))
+        .json(&serde_json::json!({
+            "repo": repo,
+            "number": issue.number,
+            "title": issue.title,
+            "body": issue.body,
+        }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())
+}
+
+/// Minimal percent-encoding for the `repo` query value (`owner/repo`). Encodes the
+/// `/` and a few other reserved chars so the query parses; avoids pulling in a new
+/// dependency for a single tiny value.
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            // RFC 3986 unreserved set only — everything else (incl. `/`) is encoded.
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 // ── Projects ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -2425,6 +2504,114 @@ async fn fetch_gate_probe() -> Option<GateProbeView> {
         .ok()
 }
 
+/// Adopt-from-GitHub affordance (#20): type a repo, list its open issues (including the
+/// ones onboarding emitted), and adopt one onto the spine. Token-optional and degrades
+/// gracefully — with no `CAMERATA_GITHUB_TOKEN` the BFF returns `ok:false` + a hint, which
+/// this renders instead of erroring. On adopt success it bumps `spine_refresh` so the parent
+/// re-fetches the spine and the new story appears.
+#[component]
+fn AdoptFromGithub(spine_refresh: Signal<u32>) -> Element {
+    let mut repo = use_signal(String::new);
+    let mut listing = use_signal(|| false);
+    let mut result = use_signal(|| Option::<IssuesResult>::None);
+    let mut adopting = use_signal(|| Option::<u64>::None);
+    let mut status = use_signal(|| Option::<String>::None);
+
+    let do_list = move |_| {
+        let r = repo().trim().to_string();
+        if r.is_empty() {
+            status.set(Some("Enter a repo as owner/name.".to_string()));
+            return;
+        }
+        listing.set(true);
+        status.set(None);
+        spawn(async move {
+            result.set(fetch_github_issues(&r).await);
+            listing.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "gate-selfcheck",
+            div { class: "gate-selfcheck-head",
+                span { class: "gate-selfcheck-title", "Adopt from GitHub" }
+                span { class: "gate-selfcheck-sub", "List a repo's open issues (including ones onboarding filed) and adopt one onto the spine. Needs GitHub connected." }
+            }
+            div { class: "adopt-gh-controls",
+                input {
+                    class: "adopt-gh-repo",
+                    r#type: "text",
+                    placeholder: "owner/name",
+                    value: "{repo}",
+                    oninput: move |e| repo.set(e.value()),
+                }
+                button {
+                    class: "btn-edit-sm",
+                    disabled: listing(),
+                    onclick: do_list,
+                    if listing() { "Listing…" } else { "List issues" }
+                }
+            }
+            if let Some(msg) = status() {
+                p { class: "section-hint", "{msg}" }
+            }
+            match result() {
+                None => rsx! {},
+                Some(res) if !res.ok => rsx! {
+                    p { class: "section-hint",
+                        {res.message.clone().unwrap_or_else(|| "Connect GitHub to list issues.".to_string())}
+                    }
+                },
+                Some(res) if res.issues.is_empty() => rsx! {
+                    p { class: "section-hint", "No open issues on this repo." }
+                },
+                Some(res) => {
+                    let current_repo = repo().trim().to_string();
+                    rsx! {
+                        div { class: "adopt-gh-list",
+                            for issue in res.issues.iter().cloned() {
+                                {
+                                    let n = issue.number;
+                                    let is_adopting = adopting() == Some(n);
+                                    let repo_for_click = current_repo.clone();
+                                    let issue_for_click = issue.clone();
+                                    rsx! {
+                                        div { class: "adopt-gh-row",
+                                            span { class: "adopt-gh-num", "#{issue.number}" }
+                                            span { class: "adopt-gh-title", "{issue.title}" }
+                                            button {
+                                                class: "btn-edit-sm",
+                                                disabled: is_adopting,
+                                                onclick: move |_| {
+                                                    let repo = repo_for_click.clone();
+                                                    let issue = issue_for_click.clone();
+                                                    adopting.set(Some(n));
+                                                    status.set(None);
+                                                    spawn(async move {
+                                                        match adopt_github_issue(&repo, &issue).await {
+                                                            Some(id) => {
+                                                                status.set(Some(format!("Adopted {id} onto the spine.")));
+                                                                spine_refresh.set(spine_refresh() + 1);
+                                                            }
+                                                            None => status.set(Some("Could not adopt that issue.".to_string())),
+                                                        }
+                                                        adopting.set(None);
+                                                    });
+                                                },
+                                                if is_adopting { "Adopting…" } else { "Adopt" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// In-app gate self-check (#14): runs the deterministic end-to-end gate-loop probe and shows a
 /// GO/NO-GO — deny-before-execute denied a forbidden write, and the bounce-and-revise loop
 /// resolved a planted violation. The thesis, verifiable in one click (no model, no network out).
@@ -2505,9 +2692,16 @@ pub fn CockpitApp() -> Element {
         }
     });
 
+    // Spine refresh tick: bumped after adopting a GitHub issue (#20) so the spine
+    // re-fetches and the freshly-adopted story appears without a manual reload.
+    let spine_refresh = use_signal(|| 0u32);
     // Both data sets come from the BFF over HTTP. `use_resource` runs the fetch when
-    // the cockpit mounts; the embedded server (see main.rs) is up by then.
-    let stories_res = use_resource(fetch_stories);
+    // the cockpit mounts; the embedded server (see main.rs) is up by then. The spine
+    // also re-runs whenever `spine_refresh` bumps.
+    let stories_res = use_resource(move || {
+        let _dep = spine_refresh();
+        async move { fetch_stories().await }
+    });
     let rules_res = use_resource(fetch_rules);
     // The active connection (native vs GitHub), shown honestly in the topbar.
     let provider_res = use_resource(fetch_provider);
@@ -2627,6 +2821,8 @@ pub fn CockpitApp() -> Element {
                     div { class: "cockpit",
                         CockpitNav { view }
                         CockpitNotice { kind: "empty".to_string() }
+                        // Adopt the first story straight from GitHub even with an empty spine (#20).
+                        AdoptFromGithub { spine_refresh }
                     }
                 };
             }
@@ -2651,6 +2847,7 @@ pub fn CockpitApp() -> Element {
                     CockpitNav { view }
                     CockpitTopBar { story: current.clone(), connection: conn.clone() }
                     GateSelfCheck {}
+                    AdoptFromGithub { spine_refresh }
 
                     div { class: "cockpit-body",
                         // ── LEFT: story spine (from /api/stories) + NEEDS YOU queue ──
