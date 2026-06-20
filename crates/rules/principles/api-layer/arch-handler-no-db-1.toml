@@ -1,0 +1,25 @@
+id = "ARCH-HANDLER-NO-DB-1"
+title = "Handlers never touch the database directly"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Architectural check (AST tier): a static-analysis pass parses each handler/controller function and rejects any direct database-handle method call (a `db`/`pool`/`conn`/`tx` receiver calling `.query`/`.execute`/etc.) inside its body. No regex can express this — the same `db.query(...)` token is correct in a repository function and a violation in a handler, and only the parse tree knows which scope it sits in. No LLM is needed: the answer is a hard yes/no over the AST. Conformance holds when the AST check runs in CI and a handler that calls a DB handle directly fails the build; it fails when no parse-based boundary exists and a handler can issue a query with nothing flagging it. Camerata ships a proof checker for this rule in `camerata-checks::architectural::handler_no_direct_db`."
+
+[decision]
+question = "What position does the project take on: Handlers never touch the database directly?"
+default = "handlers-delegate-all-data-access-to-services-or-repositories"
+why = "A handler's job is request/response shaping; data access is the repository's job and orchestration is the service's. When a handler reaches for a DB handle it collapses three layers into one, hiding business logic in the transport layer where it is hardest to test and review. Enforcing the boundary by AST (not naming convention or honor system) makes the violation impossible to merge. The looser alternative — trusting review to catch direct DB access — fails silently the first time a reviewer is focused on the HTTP shape and skims past the query."
+
+[[option]]
+id = "handlers-delegate-all-data-access-to-services-or-repositories"
+label = "Handlers never touch the database directly"
+directive = "Handler and controller functions contain no direct database-handle calls (no `db`/`pool`/`conn`/`tx` receiver calling a query/execute method). Handlers delegate to a service, which delegates to a repository; only repositories hold a DB handle. Enforce with an AST static-analysis check in CI that parses each handler body and rejects a direct DB call, so a handler that queries the database directly fails the build."
+why = "The adopted default. A handler's job is request/response shaping; collapsing data access into it hides business logic in the transport layer where it is hardest to test and review, and an AST check makes the violation impossible to merge rather than relying on review to notice it."
+
+[[option]]
+id = "handlers-may-query-the-database-directly"
+label = "handlers may query the database directly when convenient …"
+directive = "handlers may query the database directly when convenient, with no AST boundary preventing a controller from holding and using a DB handle"
+why = "A defensible alternative the project considered and did not adopt as the default: it is faster to write a one-off endpoint, but it erodes the layering and the erosion is invisible until the transport layer is full of business logic."

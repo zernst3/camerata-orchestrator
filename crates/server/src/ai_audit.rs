@@ -308,7 +308,11 @@ pub fn parse_ai_findings(
                 continue;
             }
             let id = format!("AI-{}", name.to_ascii_uppercase().replace(' ', "-"));
-            let mechanical = r["enforcement"].as_str() == Some("mechanical");
+            // Both mechanical and architectural tiers are CI-tier deterministic checks.
+            let mechanical = matches!(
+                r["enforcement"].as_str(),
+                Some("mechanical") | Some("architectural")
+            );
             let title = r["title"].as_str().unwrap_or(name).trim().to_string();
             // How many AI findings this rule's name accounts for.
             let finding_count = findings

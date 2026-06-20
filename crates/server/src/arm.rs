@@ -6,8 +6,9 @@
 //! — partitioned the way camerata-ai's `emit` does it:
 //!
 //! - **prose** rules -> `AGENTS.md` (behavioral, judged by the agent)
-//! - **structured / mechanical** rules -> `CONVENTIONS.md` (citable by id; mechanical
-//!   rules carry a `_Conformance:_` line)
+//! - **structured / mechanical / architectural** rules -> `CONVENTIONS.md` (citable by id;
+//!   mechanical and architectural rules carry a `_Conformance:_` line and are wired into the
+//!   CI-tier governance workflow rather than the write-time gate)
 //!
 //! plus a `.camerata/rules.json` gate config listing the armed rule ids. This module
 //! reproduces camerata-ai's `emit::render` block format faithfully (it is not on
@@ -31,7 +32,8 @@ pub struct ArmRule {
     /// screen can reconcile the repo back to the source rule's chosen alternative.
     #[serde(default)]
     pub option: Option<String>,
-    /// `prose` | `structured` | `mechanical` (partitions AGENTS.md vs CONVENTIONS.md).
+    /// `prose` | `structured` | `mechanical` | `architectural` (partitions AGENTS.md vs
+    /// CONVENTIONS.md, and which rules get a CI-tier check).
     pub enforcement: String,
     /// `repo-local` | `cross-repo` | `process`. Only repo-local rules are emitted
     /// into repo files; cross-repo + process rules are project-level (the gates read
@@ -69,14 +71,23 @@ This file is the authoritative source of structured and mechanical conventions t
 These conventions were adopted from the Camerata principle library by the project's architect, and represent committed choices, not suggestions. Structured rules are verified by code review and citation; mechanical rules can be enforced by lint, type-system, or CI checks. Cite a rule's ID when applying it (for example, per RUST-DOMAIN-6).\n\n\
 The companion file AGENTS.md holds this project's prose-enforcement directives.\n\n---\n\n";
 
+/// Whether an `ArmRule.enforcement` string names a CI-tier (deterministic, integration-stage)
+/// check rather than the write-time gate or human review. Both `mechanical` (lint / query-plan
+/// / migration audit) and `architectural` (AST static analysis) are CI-tier; they carry a
+/// `_Conformance:_` line and are wired into the governance workflow. Mirrors
+/// [`camerata_rules::EnforcementKind::is_ci_enforced`].
+fn is_ci_tier(enforcement: &str) -> bool {
+    matches!(enforcement, "mechanical" | "architectural")
+}
+
 /// Render one rule as a markdown block — faithful to camerata-ai `emit::render`:
-/// `### {id} — {title}` then the directive, then (mechanical only) a conformance
+/// `### {id} — {title}` then the directive, then (CI-tier rules only) a conformance
 /// line. Architect-only fields are not emitted.
 pub fn render_rule(r: &ArmRule) -> String {
     let mut s = String::new();
     s.push_str(&format!("### {} — {}\n", r.id, r.title));
     s.push_str(&format!("{}\n", r.directive.trim()));
-    if r.enforcement == "mechanical" {
+    if is_ci_tier(&r.enforcement) {
         if let Some(c) = &r.conformance {
             if !c.trim().is_empty() {
                 s.push_str(&format!("\n_Conformance:_ {}\n", c.trim()));
@@ -178,7 +189,7 @@ pub fn arm_files_for_repo(
     // that surfaces them, so the strict mechanical rules are enforced where they belong.
     let mechanical: Vec<&ArmRule> = rules
         .iter()
-        .filter(|r| r.enforcement == "mechanical")
+        .filter(|r| is_ci_tier(&r.enforcement))
         .copied()
         .collect();
     if !mechanical.is_empty() {
@@ -343,7 +354,7 @@ mod tests {
             option: None,
             enforcement: enf.to_string(),
             scope: "repo-local".to_string(),
-            conformance: if enf == "mechanical" {
+            conformance: if is_ci_tier(enf) {
                 Some("a deterministic check".to_string())
             } else {
                 None
@@ -407,6 +418,37 @@ mod tests {
         assert!(!ci.contains("S-1"));
         let wf = &files.iter().find(|(n, _)| n.ends_with("camerata-governance.yml")).unwrap().1;
         assert!(wf.contains("M-1") && wf.contains("pull_request"));
+    }
+
+    #[test]
+    fn architectural_rules_partition_to_conventions_and_ci() {
+        // An architectural rule is citable (CONVENTIONS.md, not AGENTS.md), carries a
+        // conformance line, and is wired into the CI governance workflow — exactly like
+        // a mechanical rule, since both are CI-tier deterministic checks.
+        let rules = [
+            rule("P-1", "prose", &["me/api"]),
+            rule("A-1", "architectural", &["me/api"]),
+        ];
+        let refs: Vec<&ArmRule> = rules.iter().collect();
+        let files = arm_files_for_repo(&refs, &[]);
+
+        let conv = &files.iter().find(|(n, _)| n == "CONVENTIONS.md").unwrap().1;
+        assert!(conv.contains("A-1"), "architectural rule lands in CONVENTIONS.md");
+        assert!(
+            conv.contains("_Conformance:_ a deterministic check"),
+            "architectural rule carries a conformance line"
+        );
+        let agents = &files.iter().find(|(n, _)| n == "AGENTS.md").unwrap().1;
+        assert!(!agents.contains("A-1"), "architectural rule is NOT in AGENTS.md");
+
+        let ci = &files.iter().find(|(n, _)| n == ".camerata/ci-checks.json").unwrap().1;
+        assert!(ci.contains("A-1"), "architectural rule is a CI-tier check");
+        let wf = &files
+            .iter()
+            .find(|(n, _)| n.ends_with("camerata-governance.yml"))
+            .unwrap()
+            .1;
+        assert!(wf.contains("A-1"), "architectural rule surfaces in the workflow");
     }
 
     #[test]
