@@ -5,6 +5,15 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://rust-lang.github.io/api-guidelines/type-safety.html"
+title = "Rust API Guidelines — C-NEWTYPE: Newtypes provide static distinctions"
+
+[[sources]]
+url = "https://doc.rust-lang.org/rust-by-example/generics/new_types.html"
+title = "Rust By Example — New Type Idiom"
 
 [[emits]]
 target = "CONVENTIONS.md"

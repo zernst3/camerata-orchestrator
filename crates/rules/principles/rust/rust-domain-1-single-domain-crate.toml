@@ -5,6 +5,15 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch07-00-managing-growing-projects-with-packages-crates-and-modules.html"
+title = "The Rust Book — Ch 7: Managing Growing Projects with Packages, Crates, and Modules"
+
+[[sources]]
+url = "https://doc.rust-lang.org/reference/items/modules.html"
+title = "The Rust Reference — Modules"
 
 [decision]
 question = "What position does the project take on: Single domain crate, modules by bounded context?"

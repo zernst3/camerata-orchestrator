@@ -6,6 +6,20 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Mechanical, enforced by clippy: set `clippy::unwrap_used = \"deny\"` under [workspace.lints.clippy] and run `cargo clippy -D warnings` as a required CI gate. Test code is exempt via `allow-unwrap-in-tests = true` in clippy.toml; integration tests under crates/*/tests/ carry a file-level `#![allow(clippy::unwrap_used)]`. Conformance holds when the clippy gate is green; it fails the moment any non-test `unwrap()` compiles. The strict frontier (`expect_used`, `panic`, slice indexing) is the natural next tier."
+verification = "grounded"
+
+[[sources]]
+url = "https://rust-lang.github.io/rust-clippy/master/index.html#unwrap_used"
+title = "Clippy Lints — clippy::unwrap_used (restriction)"
+linter = "clippy: unwrap_used"
+
+[[sources]]
+url = "https://doc.rust-lang.org/clippy/lint_configuration.html"
+title = "Clippy Configuration — allow-unwrap-in-tests"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html"
+title = "The Rust Book — Ch 9.3: To panic! or Not to panic!"
 
 [decision]
 question = "What position does the project take on: unwrap() is forbidden in non-test code?"
