@@ -160,6 +160,20 @@ appended to the task, then re-checks. A rule still violated after the revise pas
 becomes a residual in `RunReport::final_violations`; escalation is the caller's
 policy. There is currently one bounce pass.
 
+**Gate-probe — the end-to-end go/no-go (`crates/fleet/src/gate_probe.rs`).** `run_gate_probe()` is
+the deterministic, hermetic proof that BOTH gate layers are wired — no `claude`, no network, no
+tokens, so it runs in CI. It drives a story through the real engine: **Layer 1** has the real
+`GovernedGateway` evaluate one planted violation for **every rule in `enforced_gate_rules()`** (the
+full security floor) plus a clean control — every violation must `Decision::Deny` before it touches
+disk and the control must `Allow` (proves the gate isn't deny-all). **Layer 2** runs the real
+`FleetCoordinator` with a `BounceThenCleanDriver` + `DirtyThenCleanChecks` so the stage bounces
+exactly once and resolves on the revise pass. `GateProbeResult::go()` is the conjunction (whole floor
+denied ∧ control allowed ∧ bounced ∧ revise clean). Surfaced three ways: the CLI `camerata
+gate-probe` (exit 1 on NO-GO), the `gate_probe_is_go_end_to_end` CI test, and the in-app **Gate
+self-check** panel (`POST /api/gate-probe`) in Governed Development. Where `acceptance` proves a few
+rules in isolation and the coordinator unit tests prove layer 2, this runs the WHOLE loop and reports
+one verdict; `live-demo` is its non-hermetic twin (a real `claude -p` through the MCP gateway).
+
 There is also a VCS-action gate (`crates/checks/src/vcs_action.rs`) that applies
 deterministic process rules (`PROCESS-*`) over commit/PR/branch metadata — the
 fourth enforcement point distinct from the content-layer `CheckRunner`. This gates
@@ -258,6 +272,11 @@ rules it has not implemented, and adding enforcement is purely additive.
 
 The brownfield onboarding pipeline lives in two files in `crates/server/src/`:
 
+**Already-onboarded guard.** `detect_repo` checks the open project's persisted state and returns
+`RepoDetect::Found { repo, path, onboarded_in }` when the target is a repo the project has already
+onboarded; the handler refuses to start a fresh onboarding session for it (onboarding is one-time per
+repo — rule changes go through the Rules view, not a re-scan).
+
 ### File source — local-first (never GitHub)
 
 Onboarding reads code from the repo's **local working tree on disk**, never from GitHub.
@@ -344,10 +363,20 @@ Sequential block until the audit returns. `from_wire("sequential") -> Sequential
 single bounded resolution round re-runs those requested files together. The
 resolution round's own `needs_files` are ignored (bounded to prevent loops).
 
-**Calibration pass:** after all chunk passes complete, `verify_findings` runs a
-separate LLM call (selectable model) over the aggregated findings. It recalibrates
-severity and flags low-confidence findings. It never drops a finding — the
-architect triages.
+**Calibration pass:** after all chunk passes complete, `verify_findings(.., thorough,
+files_count)` runs a separate LLM call (selectable model) over the aggregated findings. It
+recalibrates severity and flags low-confidence findings. It never drops a finding — the
+architect triages. `verify_system_prompt` is hardened toward humility (an explicit rubric +
+"prefer downgrading over inventing") so the pass tightens rather than inflates severity.
+
+**Thorough calibration (opt-in consensus).** When the caller passes `thorough = true` (the UI
+checkbox), the calibration runs as a **multi-vote consensus** instead of a single pass:
+`verify_findings` issues several independent verdict calls and `consensus_verdicts()` reconciles
+them, taking the **conservative** outcome on disagreement (covered by
+`consensus_is_conservative_on_disagreement`). It also applies a **proportionality** bound scaled by
+`files_count` so a tiny repo can't be flooded with criticals. Thorough costs more model calls, so
+`estimate_audit_cost(.., thorough)` scales the calibration token estimate by `~3×` when it's on
+(the pre-scan estimate the UI shows reflects this).
 
 **Dedup and merge:** findings are deduplicated by `(path, line, rule_id)` then
 `merge_by_location` collapses all findings at the same `(path, line)` into one

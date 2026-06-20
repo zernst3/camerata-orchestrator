@@ -5,11 +5,14 @@ the way through?" walkthrough, and the canonical source the **in-app assistant**
 bubble's **Guide** mode) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status (updated 2026-06-18): the brownfield **onboarding flow is built and live** — per-repo
-> stack detection + rule selection, an optional code audit with three scan modes, a three-table
+> Status (updated 2026-06-19): the brownfield **onboarding flow is built and live** — per-repo
+> stack detection + rule selection, **custom rules** (per-repo + project-global), an optional code
+> audit with three scan modes and an opt-in **thorough-calibration** consensus pass, a three-table
 > finding triage, and an **Apply** step that writes governance onto a local branch and pushes it
-> (no PR until you ask). Projects are **exportable/importable**, repos resolve to **local
-> folders** with a health check, and onboarding state **auto-saves**. The two things you connect
+> (no PR until you ask). Re-onboarding an already-onboarded repo is **blocked**. Projects are
+> **exportable/importable**, repos resolve to **local folders** with a health check, and onboarding
+> state **auto-saves**. Governed Development carries a one-click **Gate self-check** (go/no-go) that
+> proves the deny-before-execute floor + bounce-and-revise loop are wired. The two things you connect
 > are a **GitHub token** and **Claude** (the `claude` CLI).
 
 ---
@@ -75,6 +78,10 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    path**, which makes it a workspace repo immediately — "add a repo to onboard" and "add a repo to
    the workspace" are the same act. **No GitHub connection is needed to onboard**; a token is only
    used later, to push the governance branch and open a PR.
+
+   **Already-onboarded guard:** if you point at a repo this project has already onboarded, Camerata
+   **refuses with an error** rather than silently re-running. Onboarding is a one-time act per repo;
+   to change a repo's rules after the fact, edit them in the **Rules** view (§4), don't re-onboard.
 2. **Scan + propose per-repo rules** — Camerata reads each repo's **local working tree** (it never
    downloads code from GitHub) and detects its stack: languages from extensions, frameworks from
    manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and **CI/CD** (GitHub
@@ -113,6 +120,15 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
      progress view and can walk away while findings stream in. Best for huge / multi-repo scans
      where a foreground scan would tie up the page. (Parallel and Sequential run in the
      foreground and block until they finish; Background job is the same work, just detached.)
+
+   **Thorough calibration (opt-in checkbox).** Off by default. When ticked, the calibration pass
+   that recalibrates AI-suggested severities runs as a **multi-vote consensus** instead of a single
+   pass: each finding is judged several times and the **conservative** verdict wins on disagreement
+   (a finding two votes call real and one calls noise stays). It catches more borderline cases and
+   reduces flaky severity, **at the cost of more AI calls** — so the **pre-scan cost estimate rises
+   (~3× the calibration portion)** the moment you tick it. Leave it off for a quick pass; turn it on
+   when you want the audit's severities to be trustworthy enough to act on directly. It never drops
+   findings either way — it only re-ranks and flags.
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
    the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** or
@@ -157,6 +173,17 @@ Two tables:
 
 The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
 
+**Custom rules.** Beyond the built-in corpus you can author your own rules in two scopes:
+- **Custom** — a rule that applies to a single repo (it joins that repo's selected set).
+- **Custom Global** — a project-level rule that applies to every repo, alongside the built-in
+  project-level rules.
+
+Each custom rule carries the same shape as a corpus rule (id, the decision question, options +
+default + rationale, enforcement kind) so it flows through selection, the amber needs-choice
+highlight, and Apply exactly like a built-in. You can **create, edit, and delete** custom rules from
+the Rules view; deleting one removes it from any repo it was on. Custom rules are advisory unless you
+give them a mechanical/CI enforcement kind.
+
 ---
 
 ## 5. Repo paths (resolution + health)
@@ -181,6 +208,15 @@ Select a story in the spine. The center stage has clickable stage tabs:
    (`fmt`/`clippy`/`test`); the **worktree jail** confines every write. Without `CAMERATA_LIVE_BUILD=1`
    this runs token-free/scripted (the gate deciding is still real); with it set + `claude` connected,
    a real `claude -p` fleet.
+
+   **Gate self-check (go/no-go).** This view also hosts a one-click **Gate self-check** that proves
+   the gate loop is actually wired *before* you trust it with a story. It runs the deterministic
+   end-to-end probe (no model call, no tokens): it plants one violation for **every rule in the
+   security floor**, confirms **Layer 1 denies each one** before it can touch disk, confirms a clean
+   write is **allowed** (the gate isn't deny-all), and confirms **Layer 2 bounces once on a planted
+   violation and resolves on the revise pass**. It reports a single **GO / NO-GO** verdict with the
+   floor count (e.g. "6/6 floor rules enforced"). GO means deny-before-execute + bounce-and-revise
+   are both live. The same probe runs in CI and as `camerata gate-probe` on the CLI.
 5. **QA & sign-off** — review the diff + gate results, sign off; provenance is written back.
 
 ---
