@@ -1661,6 +1661,12 @@ struct ClarificationView {
     addressee: String,
     answer: Option<String>,
     answered_by: Option<String>,
+    /// The persisted lifecycle state from the BFF (`"asked"` | `"answered"`).
+    /// Optional + defaulted so the view stays robust to any older payload that
+    /// predates the explicit field; rendering still derives open/answered from
+    /// `answer`, and this mirrors it for clients that prefer the explicit state.
+    #[serde(default)]
+    state: Option<String>,
 }
 
 /// Fetch all OPEN clarifications across stories (the NEEDS YOU queue).

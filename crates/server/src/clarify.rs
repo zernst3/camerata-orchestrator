@@ -17,6 +17,22 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+/// The lifecycle state of a clarification: posted-and-waiting vs. answered.
+///
+/// This is the persisted asked -> answered transition (issue #22 gap (c)).
+/// Previously the state was implicit in `answer.is_some()`; making it an explicit,
+/// serialized enum lets the cockpit render an unambiguous status badge and lets
+/// any future transport (the live tracker round-trip) record the transition
+/// without re-deriving it from a nullable field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClarifyState {
+    /// The question has been posted and is awaiting an answer.
+    Asked,
+    /// An answer has been recorded.
+    Answered,
+}
+
 /// One clarifying question on a story: who it is addressed to, and the answer once
 /// it comes back.
 #[derive(Clone, Serialize)]
@@ -29,11 +45,25 @@ pub struct Clarification {
     pub addressee: String,
     pub answer: Option<String>,
     pub answered_by: Option<String>,
+    /// The explicit, persisted lifecycle state. Always consistent with `answer`:
+    /// `Answered` iff `answer.is_some()`. Serialized so clients can branch on it
+    /// directly rather than re-deriving from the nullable `answer`.
+    pub state: ClarifyState,
 }
 
 impl Clarification {
     pub fn is_open(&self) -> bool {
         self.answer.is_none()
+    }
+
+    /// The lifecycle state, derived from whether an answer is present. This is the
+    /// single source of truth the stored `state` field mirrors.
+    pub fn state(&self) -> ClarifyState {
+        if self.answer.is_some() {
+            ClarifyState::Answered
+        } else {
+            ClarifyState::Asked
+        }
     }
 }
 
@@ -103,6 +133,7 @@ impl ClarificationStore {
             addressee: addressee.to_string(),
             answer: None,
             answered_by: None,
+            state: ClarifyState::Asked,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.insert(c.id.clone(), c.clone());
@@ -117,6 +148,8 @@ impl ClarificationStore {
         let c = guard.get_mut(id)?;
         c.answer = Some(answer.to_string());
         c.answered_by = Some(answered_by.to_string());
+        // Persist the asked -> answered transition explicitly.
+        c.state = ClarifyState::Answered;
         Some(c.clone())
     }
 
@@ -160,6 +193,42 @@ mod tests {
 
         // Answering an unknown id is a clean None, not a panic.
         assert!(store.answer("nope", "x", "y").is_none());
+    }
+
+    #[test]
+    fn state_transitions_asked_to_answered() {
+        let store = ClarificationStore::new();
+        let c = store.post("CAM-1", "Currency?", "@maria-pm");
+        // Freshly posted: explicit Asked state, consistent with the derived state.
+        assert_eq!(c.state, ClarifyState::Asked);
+        assert_eq!(c.state(), ClarifyState::Asked);
+        assert!(c.is_open());
+
+        let answered = store.answer(&c.id, "USD", "maria-pm").expect("exists");
+        // Answering persists the transition on the stored field.
+        assert_eq!(answered.state, ClarifyState::Answered);
+        assert_eq!(answered.state(), ClarifyState::Answered);
+        assert!(!answered.is_open());
+
+        // And the transition is durable: re-reading from the store shows Answered.
+        let reread = store
+            .for_story("CAM-1")
+            .into_iter()
+            .find(|x| x.id == c.id)
+            .expect("still present");
+        assert_eq!(reread.state, ClarifyState::Answered);
+    }
+
+    #[test]
+    fn state_field_serializes_as_snake_case() {
+        let store = ClarificationStore::new();
+        let c = store.post("CAM-1", "Currency?", "@maria-pm");
+        let json = serde_json::to_string(&c).expect("serializes");
+        assert!(json.contains("\"state\":\"asked\""), "got: {json}");
+
+        let answered = store.answer(&c.id, "USD", "maria-pm").expect("exists");
+        let json = serde_json::to_string(&answered).expect("serializes");
+        assert!(json.contains("\"state\":\"answered\""), "got: {json}");
     }
 
     #[test]
