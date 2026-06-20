@@ -23,6 +23,7 @@ pub mod clarify;
 pub mod connections;
 pub mod decompose;
 pub mod fix;
+pub mod github_issues;
 pub mod jobs;
 pub mod notify;
 pub mod onboard;
@@ -188,6 +189,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
         .route("/api/stories/adopt", post(adopt_story))
+        // GitHub Issue intake (#20): list a repo's open issues, then adopt one onto the spine.
+        .route("/api/github/issues", get(github_issues_list))
+        .route("/api/stories/adopt-issue", post(adopt_issue))
         .route("/api/onboard/scan", post(onboard_scan))
         .route("/api/onboard/audit", post(onboard_audit))
         .route("/api/onboard/audit/start", post(onboard_audit_start))
@@ -1982,6 +1986,89 @@ async fn adopt_story(
     Ok(Json(story))
 }
 
+// ── GitHub Issue intake (#20) ─────────────────────────────────────────────────
+
+/// Query for `GET /api/github/issues` — the `owner/repo` whose open issues to list.
+#[derive(serde::Deserialize)]
+struct GithubIssuesQuery {
+    repo: String,
+}
+
+/// List a repo's OPEN GitHub issues for the adopt picker. Gated on
+/// `CAMERATA_GITHUB_TOKEN`: with no token (or an unreachable API / bad repo) this
+/// returns `{ ok: false, issues: [], message }` with an empty list — it NEVER
+/// errors out or panics, so the UI degrades to a "Connect GitHub" hint. The token
+/// is never echoed back. Pull requests are filtered out by the parser.
+async fn github_issues_list(
+    axum::extract::Query(q): axum::extract::Query<GithubIssuesQuery>,
+) -> Json<serde_json::Value> {
+    let repo = q.repo.trim();
+    if repo.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "issues": [],
+            "message": "Provide a repo as `owner/name`.",
+        }));
+    }
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "issues": [],
+            "message": "Connect GitHub to list issues.",
+        }));
+    };
+    match crate::github_issues::list_open_issues(repo, &token).await {
+        Ok(issues) => Json(serde_json::json!({ "ok": true, "issues": issues })),
+        // Surface a redacted error message — never the token, never the raw URL.
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "issues": [],
+            "message": format!("Could not list issues for {repo}: {e}"),
+        })),
+    }
+}
+
+/// Request to adopt a specific GitHub issue onto the spine. The title/body are sent
+/// from the picker (already fetched in the list call) so adoption needs no second
+/// round-trip to GitHub.
+#[derive(serde::Deserialize)]
+struct AdoptIssueReq {
+    /// The source repo as `owner/name`.
+    repo: String,
+    /// The issue number.
+    number: u64,
+    /// The issue title.
+    #[serde(default)]
+    title: String,
+    /// The issue body (markdown). May be empty.
+    #[serde(default)]
+    body: String,
+}
+
+/// Adopt a GitHub issue (including an onboarding-emitted one) into the canonical
+/// story spine: map it to a `CanonicalStory` with an `ExternalRef` pointing at the
+/// issue and upsert it into the `StoryStore`. Upsert is idempotent — re-adopting the
+/// same issue refreshes the spine row rather than duplicating it. This path is
+/// token-free (the issue fields travel in the request), so it works the same in a
+/// test as in production.
+async fn adopt_issue(
+    State(state): State<AppState>,
+    Json(req): Json<AdoptIssueReq>,
+) -> Result<Json<CanonicalStory>, AppError> {
+    let repo = req.repo.trim();
+    if camerata_worktracker::RepoCoord::parse(repo).is_none() {
+        return Err(AppError(anyhow::anyhow!(
+            "repo must be `owner/name`, got `{repo}`"
+        )));
+    }
+    let story = crate::github_issues::issue_to_story(repo, req.number, &req.title, &req.body);
+    state.stories.upsert(story.clone()).await.map_err(AppError)?;
+    Ok(Json(story))
+}
+
 /// Propose the component children for a parent story (not yet created). The architect
 /// reviews/edits these, then commits.
 async fn decompose_propose(
@@ -2865,5 +2952,95 @@ mod tests {
         assert_eq!(arr[0]["id"], "CAM-1");
         // FeatureStatus serializes snake_case.
         assert_eq!(arr[0]["status"], "executing");
+    }
+
+    /// #20: POST /api/stories/adopt-issue maps a GitHub issue onto the spine (token-free,
+    /// fields travel in the request) and persists it in the in-memory StoryStore.
+    #[tokio::test]
+    async fn adopt_issue_persists_a_canonical_story_in_the_store() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let stories = state.stories.clone();
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "repo": "zernst3/camerata-orchestrator",
+            "number": 20,
+            "title": "Story intake from GitHub Issues",
+            "body": "Adopt a repo's issues into the spine.",
+        })
+        .to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/stories/adopt-issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let json = body_json(resp).await;
+        assert_eq!(json["id"], "zernst3/camerata-orchestrator#20");
+        assert_eq!(json["title"], "Story intake from GitHub Issues");
+        assert_eq!(json["status"], "intake");
+        assert_eq!(json["external_ref"]["provider"], "github");
+        assert_eq!(json["external_ref"]["external_id"], "20");
+        assert_eq!(
+            json["external_ref"]["container"],
+            "zernst3/camerata-orchestrator"
+        );
+
+        // The story is actually on the spine now (adopt persisted it).
+        let spine = stories.list().await.unwrap();
+        assert_eq!(spine.len(), 1);
+        assert_eq!(spine[0].id, "zernst3/camerata-orchestrator#20");
+    }
+
+    /// #20: a malformed repo (not `owner/name`) is rejected, not silently adopted.
+    #[tokio::test]
+    async fn adopt_issue_rejects_a_malformed_repo() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let body =
+            serde_json::json!({ "repo": "not-a-repo", "number": 1, "title": "x", "body": "" })
+                .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/stories/adopt-issue")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
+    /// an empty list, and a hint — instead of erroring or panicking.
+    #[tokio::test]
+    async fn github_issues_list_is_token_optional_and_never_panics() {
+        // Ensure no token is visible to this test process.
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/github/issues?repo=zernst3/camerata-orchestrator")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["issues"].as_array().unwrap().len(), 0);
+        assert!(json["message"].is_string());
     }
 }
