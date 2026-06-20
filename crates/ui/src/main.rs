@@ -122,6 +122,13 @@ fn App() -> Element {
     let toasts = use_signal(Vec::<toast::Toast>::new);
     use_context_provider(|| toasts);
 
+    // Ask-a-finding (#54): lifted to App so both CockpitApp (writer, inside
+    // CockpitShell) and ChatBubble (reader, sibling of CockpitShell) share the
+    // same signal. CockpitApp detects this via `try_consume_context` and skips
+    // its own `use_context_provider` call when the parent already provides it.
+    let ask_finding = use_signal(|| Option::<chat::FindingContext>::None);
+    use_context_provider(|| ask_finding);
+
     rsx! {
         // Global stylesheet, injected as a raw <style> so it works identically on
         // desktop without the asset pipeline. Keeps the whole look in one place.
@@ -139,7 +146,10 @@ fn App() -> Element {
         // UI behind it) with pointer-events:auto on each toast.
         toast::ToastHost {}
         // The research chat bubble: a floating, always-available AI scratchpad.
-        chat::ChatBubble {}
+        // Receives the ask-a-finding signal: when any FindingsTable row's "Ask AI"
+        // button fires, it writes a FindingContext here and the panel auto-opens
+        // in Project mode focused on that finding.
+        chat::ChatBubble { finding: ask_finding() }
         // The in-app terminal: a floating PTY-backed shell panel with tab support.
         // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.
         terminal::TerminalBubble {}

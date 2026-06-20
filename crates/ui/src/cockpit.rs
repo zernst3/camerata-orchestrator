@@ -183,6 +183,42 @@ struct ProjectView {
     /// Defaults to 1.
     #[serde(default = "default_max_iterations")]
     max_iterations: usize,
+    /// The project's model tier map: fast/balanced/strongest -> model id.
+    /// Serde default fills in the fleet defaults when the field is absent (back-compat).
+    #[serde(default)]
+    tier_map: TierMapView,
+}
+
+/// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
+/// capability band. Serde defaults match the fleet defaults.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct TierMapView {
+    #[serde(default = "default_fast_model_str")]
+    fast: String,
+    #[serde(default = "default_balanced_model_str")]
+    balanced: String,
+    #[serde(default = "default_strongest_model_str")]
+    strongest: String,
+}
+
+fn default_fast_model_str() -> String {
+    "claude-haiku-4-5".to_string()
+}
+fn default_balanced_model_str() -> String {
+    "claude-sonnet-4-6".to_string()
+}
+fn default_strongest_model_str() -> String {
+    "claude-opus-4-8".to_string()
+}
+
+impl Default for TierMapView {
+    fn default() -> Self {
+        Self {
+            fast: default_fast_model_str(),
+            balanced: default_balanced_model_str(),
+            strongest: default_strongest_model_str(),
+        }
+    }
 }
 
 fn default_max_iterations() -> usize {
@@ -225,6 +261,23 @@ async fn set_active_project(id: &str) -> bool {
     reqwest::Client::new()
         .post(format!("{}/api/projects/active", crate::BFF_URL))
         .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Update the project's model-tier map (fast / balanced / strongest model ids).
+/// Uses the `POST /api/projects/:id/tier-map` endpoint added in #63. Patch semantics:
+/// all three bands are always sent so a single round-trip sets the whole map.
+async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/tier-map", crate::BFF_URL, id))
+        .json(&serde_json::json!({
+            "fast":     map.fast,
+            "balanced": map.balanced,
+            "strongest": map.strongest,
+        }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1426,6 +1479,99 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
     }
 }
 
+/// Model-tier editor (#63): a compact dev-console for the project's fast / balanced /
+/// strongest model bindings. Reads from `project.tier_map` and POSTs to
+/// `PATCH /api/projects/:id/tier-map` (patch semantics: all three bands sent each save).
+///
+/// Placed in the Rules window as a distinct settings section — it is NOT part of the
+/// ruleset (no rule ids, no options, no emit target). It controls which model the fleet
+/// uses per-task-tier.
+#[component]
+fn TierMapEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    // Local editable copy of the three model strings. Seeded from the project's tier map.
+    let mut fast = use_signal(|| project.tier_map.fast.clone());
+    let mut balanced = use_signal(|| project.tier_map.balanced.clone());
+    let mut strongest = use_signal(|| project.tier_map.strongest.clone());
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "tier-map-editor",
+            p { class: "tier-map-heading", "Model tier map" }
+            p { class: "section-hint tier-map-hint",
+                "Maps each capability band to a concrete model id. The fleet resolves every task's \
+                 band (Fast / Balanced / Strongest) to the model id here at runtime. Changing this \
+                 affects all governed runs for this project from the next run onward."
+            }
+            div { class: "tier-map-rows",
+                // Fast band
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label tier-map-fast", "Fast" }
+                    span { class: "tier-map-band-desc", "(throughput — tests, simple edits)" }
+                    input {
+                        class: "tier-map-input addressee-input",
+                        r#type: "text",
+                        placeholder: "e.g. claude-haiku-4-5",
+                        value: "{fast}",
+                        oninput: move |e| fast.set(e.value()),
+                    }
+                }
+                // Balanced band
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label tier-map-balanced", "Balanced" }
+                    span { class: "tier-map-band-desc", "(mid-tier — most tasks)" }
+                    input {
+                        class: "tier-map-input addressee-input",
+                        r#type: "text",
+                        placeholder: "e.g. claude-sonnet-4-6",
+                        value: "{balanced}",
+                        oninput: move |e| balanced.set(e.value()),
+                    }
+                }
+                // Strongest band
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label tier-map-strongest", "Strongest" }
+                    span { class: "tier-map-band-desc", "(frontier-class — architecture, security)" }
+                    input {
+                        class: "tier-map-input addressee-input",
+                        r#type: "text",
+                        placeholder: "e.g. claude-opus-4-8",
+                        value: "{strongest}",
+                        oninput: move |e| strongest.set(e.value()),
+                    }
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let pid = pid.clone();
+                    let map = TierMapView {
+                        fast: fast().trim().to_string(),
+                        balanced: balanced().trim().to_string(),
+                        strongest: strongest().trim().to_string(),
+                    };
+                    if map.fast.is_empty() || map.balanced.is_empty() || map.strongest.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "All three tier model ids are required.");
+                        return;
+                    }
+                    saving.set(true);
+                    spawn(async move {
+                        if set_project_tier_map(&pid, &map).await {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Tier map saved.");
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save tier map.");
+                        }
+                        saving.set(false);
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save tier map" }
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -1749,6 +1895,22 @@ fn RulesView() -> Element {
                                 }
                             }
                         }
+
+                        // ── SETTINGS: Model tier map (#63) ────────────────────────────
+                        // NOT a ruleset concern — controls which model the fleet uses
+                        // per-task-tier at runtime. Labeled SETTINGS to distinguish from
+                        // the rule tables above.
+                        p { class: "section-label settings-label", "SETTINGS: Model tier map" }
+                        TierMapEditor { project: p_owned.clone() }
+
+                        // ── SETTINGS: Commit / PR gate settings (#65) ──────────────
+                        // The `VcsGateSettings` component owns the `process-rule-config`
+                        // surface: bypass mode + per-rule on/off toggles. It talks
+                        // directly to `/api/projects/:id/process-rule-config`.
+                        // Labeled SETTINGS (not rules) — it is a process configuration
+                        // surface, not part of the emitted ruleset.
+                        p { class: "section-label settings-label", "SETTINGS: Commit / PR gate" }
+                        crate::vcs_settings::VcsGateSettings { project_id: p_owned.id.clone() }
 
                         p { class: "section-label", "Export ruleset (source of truth)" }
                         textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
@@ -3194,6 +3356,12 @@ pub fn CockpitApp() -> Element {
         }
     }
 
+    // Ask-a-finding (#54): the signal is provided by App (in main.rs) so that
+    // ChatBubble — which is a sibling of CockpitShell, not a descendant — can
+    // read it. We just consume it here so children can get it from context.
+    // (App guarantees it's provided before CockpitApp mounts.)
+    let _ask_finding_present = use_context::<Signal<Option<crate::chat::FindingContext>>>();
+
     // A shared refresh tick: bumped whenever a clarification is posted or answered,
     // so both the NEEDS YOU queue here and the per-story thread refetch together.
     let clarify_refresh = use_signal(|| 0u32);
@@ -4021,6 +4189,54 @@ struct ActualUsageView {
     cache_creation_input_tokens: u64,
 }
 
+/// One SOC-2 control gap entry from the deep tier, mirroring `DeepReport.soc2_gaps`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct Soc2GapView {
+    control: String,
+    #[serde(default)]
+    title: String,
+    /// One of "met" | "partial" | "gap" | "unknown".
+    status: String,
+    #[serde(default)]
+    observed: String,
+    #[serde(default)]
+    gap: String,
+}
+
+/// One deep-tier lens result (SOC-2 gap / deep-security / threat-model).
+/// Mirrors `ai_audit::DeepLensResult` on the wire.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct DeepLensResultView {
+    /// Stable id: "soc2-gap" | "deep-security" | "threat-model".
+    lens: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    soc2_gaps: Vec<Soc2GapView>,
+    /// Extra security / threat findings (deep-security + threat-model free-text content).
+    #[serde(default)]
+    detail: String,
+    /// Always `true` for the deep tier — the whole tier is model-inferred, advisory.
+    #[serde(default)]
+    advisory: bool,
+    /// Per-lens honesty disclaimer surfaced in the UI.
+    #[serde(default)]
+    disclaimer: String,
+}
+
+/// The top-level deep-tier output attached to a scan report when `deep: true` was sent.
+/// Mirrors `ai_audit::DeepReport` on the wire.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct DeepReportView {
+    lenses: Vec<DeepLensResultView>,
+    /// Always `true` — the whole tier is advisory.
+    #[serde(default)]
+    advisory: bool,
+    /// Honesty disclaimer for the whole tier.
+    #[serde(default)]
+    disclaimer: String,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ScanReportView {
     #[serde(default)]
@@ -4042,6 +4258,10 @@ struct ScanReportView {
     gated: bool,
     #[serde(default)]
     message: Option<String>,
+    /// OPT-IN deep compliance & security tier output (#55). `None` unless the audit
+    /// request sent `deep: true`. Everything inside is ADVISORY + model-inferred.
+    #[serde(default)]
+    deep: Option<DeepReportView>,
 }
 
 async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -4152,6 +4372,9 @@ fn audit_rules_json(rules: &[SelectedAuditRule]) -> Vec<serde_json::Value> {
 }
 
 /// Phase 2 — audit the repos against the selected rules (each carrying its repo binding).
+/// When `deep` is true, the server also runs the three deep-tier lenses (SOC-2 gap,
+/// deep security, threat model) and attaches the results to `report.deep`.
+#[allow(clippy::too_many_arguments)]
 async fn audit_against(
     repos: &[String],
     rules: &[SelectedAuditRule],
@@ -4160,11 +4383,21 @@ async fn audit_against(
     mode: &str,
     thorough: bool,
     incremental: bool,
+    deep: bool,
 ) -> Option<ScanReportView> {
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": mode, "thorough": thorough, "incremental": incremental }))
+        .json(&serde_json::json!({
+            "repos": repos,
+            "rules": rule_json,
+            "model": model,
+            "calibration_model": calibration_model,
+            "mode": mode,
+            "thorough": thorough,
+            "incremental": incremental,
+            "deep": deep,
+        }))
         .send()
         .await
         .ok()?
@@ -4350,6 +4583,10 @@ struct JobStateView {
 }
 
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).
+/// `deep` forwards the opt-in deep compliance & security tier (#55); the server
+/// runs the three lenses after the standard audit completes and attaches the result
+/// to the final job report's `deep` field.
+#[allow(clippy::too_many_arguments)]
 async fn audit_job_start(
     repos: &[String],
     rules: &[SelectedAuditRule],
@@ -4358,11 +4595,21 @@ async fn audit_job_start(
     exec_mode: &str,
     thorough: bool,
     incremental: bool,
+    deep: bool,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
-        .json(&serde_json::json!({ "repos": repos, "rules": rule_json, "model": model, "calibration_model": calibration_model, "mode": exec_mode, "thorough": thorough, "incremental": incremental }))
+        .json(&serde_json::json!({
+            "repos": repos,
+            "rules": rule_json,
+            "model": model,
+            "calibration_model": calibration_model,
+            "mode": exec_mode,
+            "thorough": thorough,
+            "incremental": incremental,
+            "deep": deep,
+        }))
         .send()
         .await
         .ok()?
@@ -4845,6 +5092,11 @@ fn FindingsTable(
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // Ask-a-finding (#54): the app-level lifted signal, provided by CockpitApp via context.
+    // When the architect selects a finding and presses "Ask", we build a FindingContext
+    // and write it here; ChatBubble in main.rs reads from the same signal.
+    let mut ask_finding =
+        use_context::<Signal<Option<crate::chat::FindingContext>>>();
     // Keep only the findings in THIS table's triage state (absent from the map = Unresolved).
     let findings: Vec<FindingView> = {
         let d = dispositions.peek();
@@ -4924,6 +5176,8 @@ fn FindingsTable(
     // Two more clones for the tech-debt bucket buttons (resolve later / now).
     let id_map_c = id_map.clone();
     let id_map_d = id_map.clone();
+    // Ask-a-finding (#54): one more id_map clone for the "Ask" button.
+    let id_map_ask = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -5150,6 +5404,34 @@ fn FindingsTable(
                         "Move to Ignored"
                     }
                 },
+            }
+            // Ask-a-finding (#54): builds a FindingContext from the FIRST selected finding
+            // and writes it to the app-level `ask_finding` signal. The ChatBubble (mounted
+            // in App above this subtree) reads the signal and auto-opens in Project mode
+            // focused on that finding.
+            button {
+                class: "ask-finding-btn",
+                title: "Open the research chat focused on this finding (Project mode)",
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    // Use the FIRST selected row; selecting multiple and asking about all
+                    // is deferred — one coherent conversation per finding is the better UX.
+                    let Some(first_id) = sel.into_iter().next() else { return; };
+                    let Some(f) = id_map_ask.get(&first_id).cloned() else { return; };
+                    // Map FindingView -> FindingContext (pub in chat.rs).
+                    // FindingView fields: rule_id, path, line (usize), severity,
+                    // snippet, detail, repo.
+                    ask_finding.set(Some(crate::chat::FindingContext {
+                        rule_id: f.rule_id.clone(),
+                        severity: f.severity.clone(),
+                        path: f.path.clone(),
+                        line: f.line,
+                        snippet: f.snippet.clone(),
+                        detail: f.detail.clone(),
+                        repo: f.repo.clone(),
+                    }));
+                },
+                "Ask AI about this finding"
             }
             button {
                 class: "btn-edit-sm",
@@ -6403,6 +6685,11 @@ fn ScanResults(report: ScanReportView) -> Element {
     // (so re-scans are incremental — only changed files cost AI tokens). The first scan of a
     // project is full regardless (no cache yet).
     let mut audit_full_scan = use_signal(|| false);
+    // Deep compliance & security tier (#55): opt-in, the most expensive tier.
+    // Runs three extra whole-repo passes (SOC-2 gap analysis, deep security audit,
+    // threat model) after the standard audit and attaches the results as `report.deep`.
+    // Output is ADVISORY — never a SOC-2 report or a penetration test.
+    let mut audit_deep = use_signal(|| false);
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
@@ -6888,6 +7175,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             let calib = calibration_model();
                             let mode = audit_mode();
                             let thorough = audit_thorough();
+                            let deep = audit_deep();
                             // Full scan forces a clean pass; otherwise the scan is incremental
                             // (only files changed since the last scan cost AI tokens).
                             let incremental = !audit_full_scan();
@@ -6903,7 +7191,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep).await else {
                                         auditing.set(false);
                                         return;
                                     };
@@ -6913,7 +7201,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental).await);
+                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep).await);
                                     auditing.set(false);
                                 });
                             }
@@ -7011,6 +7299,27 @@ fn ScanResults(report: ScanReportView) -> Element {
                         "By default a re-scan is INCREMENTAL: only files whose content changed since the last scan of this project are sent to the AI, and findings for unchanged files are reused from cache — so re-running after a small edit costs a fraction of the tokens. The first scan of a project is always full (no cache yet). Tick this to ignore the cache and re-audit the whole codebase from scratch (e.g. after changing your rule selection, or to refresh every finding)."
                     }
                 }
+                // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Deep compliance & security (opt-in)" }
+                    label { class: "audit-thorough-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: audit_deep(),
+                            disabled: auditing(),
+                            onchange: move |e| audit_deep.set(e.checked()),
+                        }
+                        span { "Run SOC-2 gap analysis, deep security audit, and threat model" }
+                    }
+                    span { class: "audit-model-hint deep-tier-warning",
+                        "ADVISORY ONLY — not a SOC-2 report and not a penetration test. \
+                         Camerata sees static code only; controls that depend on org-level evidence \
+                         (HR policies, vendor contracts, access reviews) cannot be assessed from code. \
+                         Three extra whole-repo passes run after the standard audit. \
+                         This is the MOST EXPENSIVE tier (~3 extra whole-repo passes). \
+                         Enable only when you explicitly want compliance gap analysis for this codebase."
+                    }
+                }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
                 // model + mode + ticked rules), and — once the audit has run — the ACTUAL
                 // billed usage beside it, so the estimate is verifiable, not a black box.
@@ -7073,6 +7382,9 @@ fn ScanResults(report: ScanReportView) -> Element {
                                         "One-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files); prompt-caching can make the actual bill lower. "
                                         "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
                                         "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
+                                        if audit_deep() {
+                                            " Deep tier is checked: ~3 extra whole-repo passes (SOC-2 gap, deep security, threat model) will run after the standard audit. This is the most expensive tier — expect the actual bill to be significantly higher than this estimate."
+                                        }
                                     }
                                 }
                             }
@@ -7246,6 +7558,83 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                     }
+                    }
+                }
+
+                // ── Deep compliance & security tier output (#55) ──────────────────────
+                // Shown only when the audit ran with deep:true and the server returned the
+                // three-lens report. Everything here is ADVISORY — never a SOC-2 report or
+                // a penetration test. The disclaimer at the top of each lens makes this explicit.
+                if let Some(deep) = audited.as_ref().and_then(|a| a.deep.clone()) {
+                    div { class: "deep-tier-panel",
+                        p { class: "deep-tier-heading", "Deep compliance & security tier (ADVISORY)" }
+                        // Tier-level disclaimer — surfaced prominently before any findings.
+                        if !deep.disclaimer.is_empty() {
+                            p { class: "deep-tier-disclaimer", "{deep.disclaimer}" }
+                        } else {
+                            p { class: "deep-tier-disclaimer",
+                                "ADVISORY ONLY. This output is model-inferred from static code. \
+                                 It is not a SOC-2 report, not a certification, and not a penetration test. \
+                                 Controls that require organisational evidence (policies, HR, vendor contracts) \
+                                 cannot be assessed from code alone. A qualified professional must review and \
+                                 validate these findings before any compliance or security claim is made."
+                            }
+                        }
+                        for lens in deep.lenses.iter() {
+                            {
+                                let (heading, description) = match lens.lens.as_str() {
+                                    "soc2-gap"       => ("SOC-2 Readiness Gap Analysis",
+                                                          "Maps the repo's detectable practices against SOC-2 Common Criteria and reports gaps. \
+                                                           This is a gap analysis, not a SOC-2 report. \
+                                                           Controls needing organisational evidence are marked unknown."),
+                                    "deep-security"  => ("Deep Security Audit",
+                                                          "Authorization, authentication, sensitive-data handling, and injection paths beyond the \
+                                                           deterministic floor. Every finding is advisory — a human must validate each one."),
+                                    "threat-model"   => ("Threat Model",
+                                                          "Entry points, trust boundaries, sensitive-data paths, and STRIDE-flavoured threats with \
+                                                           mitigation directions. Model-inferred from the repo structure."),
+                                    other            => (other, ""),
+                                };
+                                let lens = lens.clone();
+                                rsx! {
+                                    div { class: "deep-lens", key: "{lens.lens}",
+                                        p { class: "deep-lens-heading", "{heading}" }
+                                        p { class: "deep-lens-desc", "{description}" }
+                                        if !lens.disclaimer.is_empty() {
+                                            p { class: "deep-lens-disclaimer", "{lens.disclaimer}" }
+                                        }
+                                        if !lens.summary.is_empty() {
+                                            p { class: "deep-lens-summary", "{lens.summary}" }
+                                        }
+                                        // SOC-2 gap table
+                                        if !lens.soc2_gaps.is_empty() {
+                                            div { class: "soc2-gap-table",
+                                                div { class: "soc2-gap-row header",
+                                                    span { class: "soc2-col-ctrl", "Control" }
+                                                    span { class: "soc2-col-title", "Title" }
+                                                    span { class: "soc2-col-status", "Status" }
+                                                    span { class: "soc2-col-obs", "Observed" }
+                                                    span { class: "soc2-col-gap", "Gap / Remediation" }
+                                                }
+                                                for (i, gap) in lens.soc2_gaps.iter().enumerate() {
+                                                    div { key: "{i}", class: "soc2-gap-row soc2-status-{gap.status}",
+                                                        span { class: "soc2-col-ctrl", "{gap.control}" }
+                                                        span { class: "soc2-col-title", "{gap.title}" }
+                                                        span { class: "soc2-col-status soc2-badge-{gap.status}", "{gap.status}" }
+                                                        span { class: "soc2-col-obs", "{gap.observed}" }
+                                                        span { class: "soc2-col-gap", "{gap.gap}" }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Free-text detail (deep-security + threat-model)
+                                        if !lens.detail.is_empty() {
+                                            pre { class: "deep-lens-detail", "{lens.detail}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
