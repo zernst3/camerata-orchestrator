@@ -3477,6 +3477,7 @@ fn estimate_audit_cost(
     audit_out: f64,
     calib_in: f64,
     calib_out: f64,
+    thorough: bool,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -3513,8 +3514,11 @@ fn estimate_audit_cost(
     // finding with a corrected/verified body — not a short verdict. So its output rides
     // with the full findings volume, ~1× the scan's output, not a fraction of it. The
     // earlier 0.3× factor was the main structural reason real runs came in over estimate. ──
-    let cal_in = scan_out;
-    let cal_out = scan_out;
+    // Thorough calibration (#51) runs the calibration verdict ~3× (multi-vote consensus), so its
+    // input + output both scale with the pass count. Default single-pass = 1×.
+    let cal_passes = if thorough { 3.0 } else { 1.0 };
+    let cal_in = scan_out * cal_passes;
+    let cal_out = scan_out * cal_passes;
 
     let dollars = ((scan_in * audit_in + scan_out * audit_out)
         + (cal_in * calib_in + cal_out * calib_out))
@@ -5987,7 +5991,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                         let (a_in, a_out) = price(&audit_model(), (3.0, 15.0));
                         let (c_in, c_out) = price(&calibration_model(), (a_in, a_out));
                         let sel = selected_count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out);
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough());
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
