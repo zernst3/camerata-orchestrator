@@ -31,13 +31,14 @@ use crate::onboard::Finding;
 /// every existing manifest (forcing one clean full scan after an upgrade).
 const MANIFEST_VERSION: u32 = 1;
 
-/// Fingerprint a file's content with the same stable FNV-1a hash the suppression baseline uses.
-/// Whitespace is collapsed so pure reformatting / re-indentation does NOT count as a change
-/// (consistent with how the baseline ratchet treats snippets), but any real edit to the code
-/// flips the fingerprint and forces a re-audit of that file.
+/// Fingerprint a file's EXACT content with the stable FNV-1a hash the suppression baseline uses.
+///
+/// Unlike the baseline's snippet fingerprint, this is byte-exact (no whitespace normalization):
+/// a cached finding carries a line number, and even a whitespace-only reformat shifts lines, so
+/// "unchanged" must mean byte-identical for carried findings to stay accurate. A reformatted file
+/// is therefore treated as changed and re-audited — the safe, correct trade.
 pub fn content_fingerprint(content: &str) -> String {
-    let norm = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    format!("{:016x}", crate::suppression::fnv1a(&norm))
+    format!("{:016x}", crate::suppression::fnv1a(content))
 }
 
 /// One project's incremental-scan manifest: every audited file's fingerprint, keyed by
@@ -277,16 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_whitespace_insensitive_but_content_sensitive() {
+    fn fingerprint_is_byte_exact() {
         assert_eq!(
             content_fingerprint("fn a() {}"),
+            content_fingerprint("fn a() {}"),
+            "identical content fingerprints identically"
+        );
+        // Byte-exact: even a whitespace-only change flips it, because a reformat shifts the
+        // line numbers carried findings depend on, so the file must be re-audited.
+        assert_ne!(
+            content_fingerprint("fn a() {}"),
             content_fingerprint("fn   a()   {}"),
-            "pure whitespace/indent changes must not flip the fingerprint"
+            "a whitespace reformat counts as changed (line numbers shift)"
         );
         assert_ne!(
             content_fingerprint("fn a() {}"),
             content_fingerprint("fn b() {}"),
-            "a real code edit must flip the fingerprint"
+            "a code edit flips the fingerprint"
         );
     }
 
