@@ -1644,6 +1644,31 @@ html, body {
 .chat-mode-btn:not(:last-child) { border-right: 1px solid var(--line); }
 .chat-mode-btn.active { background: var(--accent); color: #fff; }
 
+/* ---- Project-aware chat (#54) -------------------------------------------- */
+/*
+ * .chat-finding-banner: shows which specific finding the Project chat is focused on.
+ * Compact strip between the mode disclaimer and the message log.
+ *
+ * .ask-finding-btn: the "Ask about this finding" affordance that appears in the
+ * audit findings table, triggering the Project chat mode pre-seeded with the finding.
+ */
+.chat-finding-banner {
+  display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+  background: var(--accent-wash); border-bottom: 1px solid var(--accent-wash);
+  font-size: 11.5px; flex-wrap: wrap;
+}
+.chat-finding-label { color: var(--ink-faint); font-weight: 600; }
+.chat-finding-rule { font-weight: 700; color: var(--accent-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.chat-finding-loc { color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; }
+/* "Ask about this finding" button in findings tables */
+.ask-finding-btn {
+  border: 1px solid var(--line); background: var(--paper); color: var(--accent-ink);
+  font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px;
+  cursor: pointer; white-space: nowrap;
+  transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+.ask-finding-btn:hover { background: var(--accent-wash); border-color: var(--accent-ink); }
+
 /* ---- in-app terminal (issue #38) ------------------------------------------ */
 /*
  * Layout mirror of .chat-fab / .chat-panel, offset to the LEFT of the chat FAB
