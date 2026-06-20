@@ -381,6 +381,9 @@ pub fn parse_ai_findings(
                 enforcement: "structured".to_string(),
                 options: Vec::new(),
                 default_option: None,
+                // AI-discovered → AI-designed; un-grounded until the grounding pass.
+                verification: "draft".to_string(),
+                sources: Vec::new(),
                 decision_question: None,
                 decision_why: None,
                 scope: "repo-local".to_string(),

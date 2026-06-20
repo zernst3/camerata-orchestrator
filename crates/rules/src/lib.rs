@@ -126,6 +126,103 @@ impl std::fmt::Display for EnforcementKind {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Verification status / provenance (rule grounding ladder)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The provenance / verification ladder for a rule: how confident we are that
+/// the rule corresponds to a real, authoritative external standard rather than
+/// being something an AI merely *designed*.
+///
+/// This is the foundation for the grounding pass that maps every rule to its
+/// authoritative source (a published style guide, security standard, or a real
+/// established linter rule).
+///
+/// Ladder (strictness increasing):
+/// - `draft`    — AI-generated / designed, NOT yet checked against any external
+///   authority. There may be no [`RuleSource`] at all. **Not shippable** —
+///   draft rules are kept out of the demo'd / armed ruleset.
+/// - `grounded` — mapped to a cited authoritative source or a real, established
+///   linter rule: a URL + identifier is present in [`Rule::sources`].
+///   Machine-grounded; an automated grounding pass may emit this.
+/// - `verified` — a human (the maintainer) has confirmed the grounding is
+///   correct. **Only a human sets this** — no automated process may ever emit
+///   `verified`. It is the strongest assertion the corpus can make about a rule.
+///
+/// `serde(default)` resolves to [`Verification::Draft`], so every existing rule
+/// TOML (which predates this field) and any rule that omits `verification`
+/// loads as `Draft`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Verification {
+    /// AI-generated / designed; not yet checked against any external authority.
+    #[default]
+    Draft,
+    /// Mapped to a cited authoritative source or real linter rule (sources present).
+    Grounded,
+    /// A human maintainer has confirmed the grounding. Human-only; never automated.
+    Verified,
+}
+
+impl Verification {
+    /// The snake_case wire/TOML string for this status.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verification::Draft => "draft",
+            Verification::Grounded => "grounded",
+            Verification::Verified => "verified",
+        }
+    }
+
+    /// Parse a status from its snake_case wire/TOML string. Unknown → `None`.
+    pub fn from_tag(s: &str) -> Option<Self> {
+        match s {
+            "draft" => Some(Verification::Draft),
+            "grounded" => Some(Verification::Grounded),
+            "verified" => Some(Verification::Verified),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Verification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One authoritative source backing a rule's grounding.
+///
+/// A source is what moves a rule off the `draft` rung of the ladder: it points
+/// at the published standard or the real linter rule that the camerata rule
+/// mirrors.
+///
+/// In TOML these are `[[sources]]` array-of-tables blocks:
+///
+/// ```toml
+/// [[sources]]
+/// url = "https://google.github.io/styleguide/javaguide.html#s4.8.3.1-for-each"
+/// title = "Google Java Style Guide — Enhanced for statement"
+/// linter = "Checkstyle: FinalLocalVariable"
+///
+/// [[sources]]
+/// url = "https://errcheck.dev"
+/// title = "errcheck — unchecked errors"
+/// # linter omitted for a style-guide/doc-only source
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RuleSource {
+    /// Canonical URL of the source (style guide section, standard, linter docs).
+    pub url: String,
+    /// Human-readable title of the source.
+    pub title: String,
+    /// The enforcing tool + rule id when this source is a real linter rule
+    /// (e.g. `"golangci-lint: errcheck"`, `"Checkstyle: FinalLocalVariable"`).
+    /// `None` for a style-guide / documentation-only source that no tool enforces.
+    #[serde(default)]
+    pub linter: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Raw TOML shape (private; only the fields we need)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -153,6 +250,14 @@ struct RuleToml {
     /// The alternatives the architect chooses among (`[[option]]` blocks).
     #[serde(default, rename = "option")]
     options: Vec<OptionToml>,
+    /// Provenance / verification status. Absent → [`Verification::Draft`], so
+    /// every pre-existing rule TOML loads as `draft` (not yet grounded).
+    #[serde(default)]
+    verification: Verification,
+    /// Authoritative sources backing this rule (`[[sources]]` blocks). Absent →
+    /// empty.
+    #[serde(default)]
+    sources: Vec<RuleSource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,12 +324,39 @@ pub struct Rule {
     /// The default option id, when this rule adopts one. `None` means the
     /// architect MUST choose an alternative — there is no default to fall back on.
     pub default_option: Option<String>,
+    /// Provenance / verification status (the draft → grounded → verified ladder).
+    /// Defaults to [`Verification::Draft`] for any rule that omits the field.
+    pub verification: Verification,
+    /// Authoritative sources backing this rule's grounding. Empty for a `draft`
+    /// rule that has not yet been mapped to any external authority.
+    pub sources: Vec<RuleSource>,
 }
 
 impl Rule {
     /// Whether this rule has an adopted default option.
     pub fn has_default(&self) -> bool {
         self.default_option.is_some()
+    }
+
+    /// This rule's provenance / verification status.
+    pub fn verification(&self) -> Verification {
+        self.verification
+    }
+
+    /// Whether this rule is grounded in an authoritative source — i.e. its
+    /// status is `grounded` OR `verified` (verified implies grounded).
+    pub fn is_grounded(&self) -> bool {
+        matches!(
+            self.verification,
+            Verification::Grounded | Verification::Verified
+        )
+    }
+
+    /// Whether this rule is shippable — true ONLY for `grounded` or `verified`.
+    /// Used later to keep `draft` (un-grounded, AI-designed) rules out of the
+    /// demo'd / armed ruleset.
+    pub fn is_shippable(&self) -> bool {
+        self.is_grounded()
     }
 }
 
@@ -477,6 +609,8 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         decision_why,
         options,
         default_option,
+        verification: raw.verification,
+        sources: raw.sources,
     })
 }
 
@@ -706,6 +840,8 @@ mod tests {
             decision_why: None,
             options: Vec::new(),
             default_option: None,
+            verification: Verification::Draft,
+            sources: Vec::new(),
         }
     }
 
@@ -731,6 +867,131 @@ mod tests {
             rule.options.iter().any(|o| o.id == default_id),
             "the default option id resolves to a real option"
         );
+    }
+
+    // ── Verification / provenance schema ──────────────────────────────────────
+
+    /// Minimal raw-TOML deserialization target mirroring a corpus rule, used to
+    /// prove the new fields round-trip without touching the real corpus files.
+    fn parse_rule(toml_src: &str) -> Rule {
+        // Reuse the production parser by going through RuleToml + the same field
+        // wiring load_one uses. We deserialize RuleToml directly here because
+        // load_one is file-based; the field mapping is identical.
+        let raw: RuleToml = toml::from_str(toml_src).expect("rule TOML parses");
+        Rule {
+            id: RuleId(raw.id),
+            title: raw.title,
+            enforcement: raw.enforcement,
+            domain: raw.domain,
+            summary: String::new(),
+            decision_question: None,
+            decision_why: None,
+            options: Vec::new(),
+            default_option: None,
+            verification: raw.verification,
+            sources: raw.sources,
+        }
+    }
+
+    #[test]
+    fn grounded_rule_with_sources_round_trips() {
+        let src = r#"
+            id = "JAVA-FINAL-LOCAL-1"
+            title = "Local variables are final where possible"
+            enforcement = "structured"
+            domain = "java"
+            verification = "grounded"
+
+            [[sources]]
+            url = "https://google.github.io/styleguide/javaguide.html"
+            title = "Google Java Style Guide"
+            linter = "Checkstyle: FinalLocalVariable"
+
+            [[sources]]
+            url = "https://errcheck.dev"
+            title = "errcheck docs"
+        "#;
+        let rule = parse_rule(src);
+        assert_eq!(rule.verification(), Verification::Grounded);
+        assert_eq!(rule.sources.len(), 2);
+        assert_eq!(
+            rule.sources[0].linter.as_deref(),
+            Some("Checkstyle: FinalLocalVariable")
+        );
+        assert_eq!(rule.sources[0].title, "Google Java Style Guide");
+        // The second source is doc-only: no linter.
+        assert_eq!(rule.sources[1].linter, None);
+        assert!(rule.is_grounded());
+        assert!(rule.is_shippable());
+    }
+
+    #[test]
+    fn rule_without_provenance_fields_defaults_to_draft() {
+        let src = r#"
+            id = "RULE-NO-PROV-1"
+            title = "A rule that predates the provenance schema"
+            enforcement = "prose"
+            domain = "*"
+        "#;
+        let rule = parse_rule(src);
+        assert_eq!(rule.verification(), Verification::Draft);
+        assert!(rule.sources.is_empty());
+        assert!(!rule.is_grounded());
+        assert!(!rule.is_shippable());
+    }
+
+    #[test]
+    fn is_shippable_only_for_grounded_or_verified() {
+        let mut r = make_rule("R-SHIP-1", "rust", EnforcementKind::Structured);
+        // Default Draft → not shippable.
+        assert_eq!(r.verification(), Verification::Draft);
+        assert!(!r.is_shippable());
+        assert!(!r.is_grounded());
+
+        r.verification = Verification::Grounded;
+        assert!(r.is_grounded());
+        assert!(r.is_shippable());
+
+        r.verification = Verification::Verified;
+        assert!(r.is_grounded());
+        assert!(r.is_shippable());
+    }
+
+    #[test]
+    fn verification_str_round_trip() {
+        for v in [
+            Verification::Draft,
+            Verification::Grounded,
+            Verification::Verified,
+        ] {
+            assert_eq!(Verification::from_tag(v.as_str()), Some(v), "round-trip {v}");
+        }
+        assert_eq!(Verification::from_tag("nonsense"), None);
+        // Display matches the wire string.
+        assert_eq!(Verification::Grounded.to_string(), "grounded");
+    }
+
+    #[test]
+    fn verification_default_is_draft() {
+        assert_eq!(Verification::default(), Verification::Draft);
+    }
+
+    #[tokio::test]
+    async fn full_corpus_loads_with_provenance_defaults() {
+        // Backstop: the entire bundled corpus still loads after adding the
+        // additive provenance fields, and every rule has a verification status
+        // (defaulting to Draft for the existing un-grounded corpus).
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        assert!(set.len() >= 50, "expected >= 50 rules, got {}", set.len());
+        for rule in set.iter() {
+            // Accessor is callable on every rule; nothing panics.
+            let _ = rule.verification();
+            let _ = rule.is_shippable();
+        }
     }
 
     fn populated_set() -> RuleSet {

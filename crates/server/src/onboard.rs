@@ -73,6 +73,21 @@ pub struct RuleOptionView {
     pub why: String,
 }
 
+/// One authoritative source backing a rule's grounding, mirrored from
+/// [`camerata_rules::RuleSource`] for the wire/UI. Lets the UI link out to the
+/// standard or linter rule a proposed rule is grounded in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuleSourceView {
+    /// Canonical URL of the source (style-guide section, standard, linter docs).
+    pub url: String,
+    /// Human-readable title of the source.
+    pub title: String,
+    /// Enforcing tool + rule id when this is a real linter rule; `None` for a
+    /// style-guide / documentation-only source.
+    #[serde(default)]
+    pub linter: Option<String>,
+}
+
 /// One rule proposed for the starter ruleset, classified by SCOPE and PLACEMENT so
 /// brownfielding decides, up front, where each rule and its mechanical gate live.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -95,6 +110,16 @@ pub struct ProposedRule {
     /// The default option id, or `None` when the architect MUST choose one.
     #[serde(default)]
     pub default_option: Option<String>,
+    /// Provenance / verification status: `draft` | `grounded` | `verified`
+    /// (the grounding ladder from camerata-rules). `draft` = AI-designed, not
+    /// yet grounded (not shippable); `grounded` = mapped to a cited source /
+    /// real linter rule; `verified` = a human confirmed it. Defaults to `draft`
+    /// so un-grounded rules are visibly so in the UI. See
+    /// `docs/decisions/2026-06-20_rule_provenance_schema.md`.
+    pub verification: String,
+    /// Authoritative sources backing the rule's grounding (empty for `draft`).
+    #[serde(default)]
+    pub sources: Vec<RuleSourceView>,
     /// The decision this rule frames (`[decision].question`) — what the architect is choosing
     /// between. None for rules with no decision block (content/security rules).
     #[serde(default)]
@@ -277,6 +302,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             enforcement: "mechanical".to_string(),
             options: Vec::new(),
             default_option: None,
+            verification: "draft".to_string(),
+            sources: Vec::new(),
             decision_question: None,
             decision_why: None,
             scope: "repo-local".to_string(),
@@ -302,6 +329,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             enforcement: "structured".to_string(),
             options: Vec::new(),
             default_option: None,
+            verification: "draft".to_string(),
+            sources: Vec::new(),
             decision_question: None,
             decision_why: None,
             scope: "cross-repo".to_string(),
@@ -322,6 +351,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         enforcement: "mechanical".to_string(),
         options: Vec::new(),
         default_option: None,
+        verification: "draft".to_string(),
+        sources: Vec::new(),
         decision_question: None,
         decision_why: None,
         scope: "process".to_string(),
@@ -775,6 +806,15 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                     "Guidance in AGENTS.md, reviewed at PR (prose; no mechanical gate)"
                 }
             };
+            let sources = r
+                .sources
+                .iter()
+                .map(|s| RuleSourceView {
+                    url: s.url.clone(),
+                    title: s.title.clone(),
+                    linter: s.linter.clone(),
+                })
+                .collect();
             ProposedRule {
                 id: r.id.0.clone(),
                 title: r.title.clone(),
@@ -782,6 +822,8 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 enforcement: enforcement.to_string(),
                 options,
                 default_option: r.default_option.clone(),
+                verification: r.verification().to_string(),
+                sources,
                 decision_question: r.decision_question.clone(),
                 decision_why: r.decision_why.clone(),
                 scope: "repo-local".to_string(),
