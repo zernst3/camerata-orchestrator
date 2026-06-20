@@ -1,0 +1,31 @@
+id = "JAVA-SPRING-CONSTRUCTOR-INJECTION-1"
+title = "Dependencies are injected via constructor parameters and stored in final fields; @Autowired field injection is forbidden"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a Checkstyle rule or Semgrep pattern that flags @Autowired annotations on instance fields (as opposed to constructors). Conformance holds when all Spring bean dependencies are declared as constructor parameters, assigned to final fields, and no @Autowired appears on a field declaration. Single-constructor beans in Spring 4.3+ are auto-wired without requiring @Autowired on the constructor at all."
+
+[decision]
+question = "How are dependencies injected into Spring beans?"
+default = "constructor-injection-final-fields"
+why = "Constructor injection makes every dependency explicit in the class's public contract: the constructor signature is the complete list of what the class requires. Dependencies are assigned to final fields, which means they cannot be null after construction and cannot be reassigned, making the class effectively immutable with respect to its collaborators. Field injection via @Autowired hides dependencies behind private mutable fields that are populated via reflection after construction: the class appears to have a no-arg constructor from the outside, its dependencies are invisible until runtime introspection, and the fields must be non-final (which allows reassignment, however unintentional). Testing is the practical difference: a class with constructor injection is tested by calling new MyService(mockRepository, mockEmailService) with no Spring container, no reflection, and no test framework wiring. A class with @Autowired fields requires @SpringBootTest or ReflectionTestUtils.setField, both of which couple the test to the Spring container or to reflection. Circular dependencies are also detectable earlier with constructor injection: Spring detects a cycle at startup when it cannot construct A (which requires B) because it cannot construct B (which requires A); with field injection, the cycle is only detected later or not at all if proxies paper over it."
+
+[[option]]
+id = "constructor-injection-final-fields"
+label = "All dependencies as constructor parameters; fields are private final; no @Autowired on fields"
+directive = "Every Spring bean class declares its dependencies as constructor parameters. Each parameter is assigned to a private final field in the constructor body. No @Autowired annotation appears on an instance field. For classes with a single constructor, the @Autowired annotation on the constructor itself is omitted (Spring auto-wires it). @Autowired on a constructor with multiple constructors is permitted when the intent is to disambiguate. @RequiredArgsConstructor from Lombok is an acceptable shorthand when the project uses Lombok."
+why = "The adopted default. Constructor injection exposes dependencies explicitly, enables final fields, makes testing trivial without a container, and surfaces circular dependency cycles at startup."
+
+[[option]]
+id = "field-injection-autowired"
+label = "@Autowired on instance fields"
+directive = "Dependencies are declared as instance fields annotated with @Autowired. Spring uses reflection to populate them after instantiation via the no-arg constructor."
+why = "Hides dependencies from the class's public contract, requires mutable non-final fields, makes testing require a Spring container or reflection, and is officially marked as not recommended by Spring since Spring Framework 5. Forbidden in this project."
+
+[[option]]
+id = "setter-injection"
+label = "Setter injection via @Autowired setter methods"
+directive = "Dependencies are declared as private fields and exposed via public setter methods annotated with @Autowired. Spring calls the setters after instantiation."
+why = "Makes dependencies optional by default (setters may not be called), allows reassignment after construction, and is more verbose than constructor injection. Acceptable only for optional dependencies that have a sensible default; not the general injection style."

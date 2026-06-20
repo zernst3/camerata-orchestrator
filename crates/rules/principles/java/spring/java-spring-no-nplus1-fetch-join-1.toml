@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-NO-NPLUS1-FETCH-JOIN-1"
+title = "Spring Data JPA queries load associations via fetch joins or @EntityGraph; no N+1 from default LAZY traversal in loops"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Spring Data JPA queries load associations via fetch joins or @EntityGraph; no N+1 from default LAZY traversal in loops?"
+default = "fetch-join-or-entity-graph"
+why = "JPA's default for @OneToMany and @ManyToMany associations is LAZY loading: the collection is not fetched until it is accessed. EAGER loading fetches the collection on every query whether the caller needs it or not, producing joins the caller did not request and degrading performance for queries that only need the parent. The N+1 problem emerges when code fetches N parent entities and then iterates over them accessing a LAZY collection on each: JPA issues one SELECT per parent to load its collection, producing N+1 queries total (one for the parents plus one per parent for the children). The solution is not EAGER by default (that over-fetches) but intentional fetch join or @EntityGraph at the query site for queries that need the association. A JPQL fetch join (SELECT o FROM Order o JOIN FETCH o.items) or an @EntityGraph annotation on the repository method loads the association in the same query, eliminating the per-entity round-trips. For queries that do not need the association, LAZY is correct and no join is added. The discipline is to decide at the repository method level which associations the caller needs and load them intentionally, not to set EAGER globally and accept over-fetching, and not to traverse LAZY associations in loops without an explicit fetch strategy."
+
+[[option]]
+id = "fetch-join-or-entity-graph"
+label = "LAZY default on all associations; fetch joins or @EntityGraph on repository methods that need them"
+directive = "All @OneToMany, @ManyToMany, and @ManyToOne associations default to FetchType.LAZY (the default for @OneToMany and @ManyToMany; must be explicit for @ManyToOne which defaults to EAGER). Repository methods that need an association loaded declare a JPQL fetch join (JOIN FETCH) or carry @EntityGraph(attributePaths = {'...'}). Service or domain code does not traverse a LAZY association in a loop without having loaded it via a fetch join or EntityGraph in the originating query. EAGER as a default FetchType on any association is forbidden."
+why = "The adopted default. LAZY default prevents over-fetching; explicit fetch joins and EntityGraphs load associations in one query for the callers that need them, eliminating N+1 round-trips."
+
+[[option]]
+id = "eager-globally"
+label = "FetchType.EAGER on all associations"
+directive = "All associations are annotated with FetchType.EAGER, loading every relationship on every query regardless of whether the caller needs it."
+why = "Eliminates N+1 by eliminating lazy loading; over-fetches on every query that only needs the parent, producing unnecessary joins and data transfer. Also creates Cartesian product issues when multiple EAGER collections are present on the same entity."
+
+[[option]]
+id = "lazy-with-open-session-in-view"
+label = "LAZY defaults with Open Session in View (OSIV) enabled to allow traversal in the view layer"
+directive = "LAZY defaults are kept; OSIV (spring.jpa.open-in-view=true, the Spring Boot default) keeps the JPA session open through the view/controller layer, allowing lazy associations to load transparently when serialized or accessed in the controller."
+why = "Masks N+1 queries behind HTTP serialization: the Hibernate session stays open, associations load silently during serialization, and profiling is required to detect the extra queries. OSIV is disabled in this project (spring.jpa.open-in-view=false); repositories must load what the caller needs explicitly."

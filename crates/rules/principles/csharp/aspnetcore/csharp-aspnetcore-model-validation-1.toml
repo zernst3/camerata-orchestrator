@@ -1,0 +1,31 @@
+id = "CSHARP-ASPNETCORE-MODEL-VALIDATION-1"
+title = "[ApiController] automatic 400 responses are active; validation errors never reach business logic"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by requiring [ApiController] on every controller class (or its base class) and forbidding manual ModelState.IsValid guards that replace the automatic response. Conformance holds when all controllers carry [ApiController] and no route handler contains an explicit if (!ModelState.IsValid) return BadRequest() guard that the attribute already renders redundant."
+
+[decision]
+question = "How are incoming request model validation errors handled before business logic runs?"
+default = "apicontroller-auto-400"
+why = "ASP.NET Core's [ApiController] attribute connects the model-binding pipeline's ModelState to an automatic 400 Bad Request response: when the model binder populates a request DTO and the validation annotations (Required, Range, MaxLength, etc.) are violated, the framework rejects the request before the action body executes. Without this attribute, the action body runs with an invalid ModelState, and only a manual ModelState.IsValid check prevents malformed data from reaching business logic. The manual guard is a code smell in two directions: it repeats the same pattern in every controller that forgets the attribute, and its absence is invisible (the action simply proceeds with invalid data). [ApiController] makes the guard structural and unconditional: no route handler can receive an invalid model because the framework rejects it at the binding layer. The validation annotations on the DTO serve both as documentation of the expected shape and as the single source of enforcement, at the layer closest to the network boundary."
+
+[[option]]
+id = "apicontroller-auto-400"
+label = "[ApiController] on every controller; automatic 400 on invalid ModelState"
+directive = "Every controller class carries the [ApiController] attribute (or inherits from a base class that does). Request DTOs declare Data Annotation or FluentValidation constraints that express the valid input shape. Manual ModelState.IsValid guards inside action methods are forbidden — the attribute makes them redundant and their presence signals that [ApiController] is missing. Validation errors return a RFC 7807 problem-details 400 response automatically without controller code."
+why = "The adopted default. [ApiController] enforces model validity structurally at the framework layer; no action body runs against an invalid model, and no per-action guard is needed."
+
+[[option]]
+id = "manual-modelstate-guards"
+label = "Manual ModelState.IsValid checks in each action method"
+directive = "Controllers do not carry [ApiController]. Each action method that accepts a model parameter checks ModelState.IsValid at the top of its body and returns BadRequest(ModelState) when false, before proceeding to business logic."
+why = "Works but requires consistent repetition in every action; the pattern is forgotten or omitted under time pressure, and the consequence is silent processing of malformed data rather than a build-time or early-runtime signal."
+
+[[option]]
+id = "no-model-validation"
+label = "No framework-level validation; services validate inputs themselves"
+directive = "Request parameters are accepted without Data Annotations or ModelState checks. Service methods validate their inputs and throw domain exceptions on invalid data, which the error handler maps to 400 responses."
+why = "Pushes validation inward, away from the HTTP boundary. The API surface no longer describes its own constraints; tooling cannot generate client-side validators from the schema; and invalid data travels deeper into the stack before rejection."

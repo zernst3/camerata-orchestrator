@@ -1,0 +1,24 @@
+id = "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1"
+title = "Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP?"
+default = "thin-controllers-service-layer"
+why = "A controller action's job is protocol translation: read the validated request, delegate to a service that owns the domain rules and data access, and map the service's result or error onto an HTTP response. When business rules, conditional logic, or data-access calls live directly in controller actions, three problems follow. The logic is only reachable through an HTTP request, so it cannot be unit-tested without wiring up an HTTP context, spinning up the framework, or using integration-test infrastructure. When the same rule is needed in a background job, a CLI command, or a second endpoint, it is copied into a new location, and the two copies drift out of sync. And the controller now changes for two unrelated reasons: a change in the HTTP contract and a change in the domain rule, violating single-responsibility. Thin controllers with a service layer invert this: the HTTP mapping changes independently from the rule, the rule can be tested without the framework, and the rule can be reused without copying. This is the same principle that governs the Express and Rust layers of the Agora stack; the boundary between protocol and domain is a structural rule, not a style preference."
+
+[[option]]
+id = "thin-controllers-service-layer"
+label = "Controllers translate HTTP to service calls; all business logic lives in a service layer"
+directive = "Controller actions and Minimal API endpoint handlers are limited to: reading validated input from the request, calling one service method, and returning an IActionResult (or typed result) that maps the service's success or error. Business rules, conditional logic, validation beyond schema constraints, and data-access calls do not appear inside controllers or endpoint lambdas. Service classes own domain rules; repository classes own data access. A controller method body longer than ~10 lines is a signal that logic has leaked into the controller."
+why = "The adopted default. Controllers that translate protocol to service calls are independently testable, reusable across entry points, and insulated from domain changes."
+
+[[option]]
+id = "fat-controllers-inline-logic"
+label = "Business logic and data access inline in controller actions"
+directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
+why = "A defensible alternative the project considered and did not adopt as the default. Inline logic is reachable only through HTTP, is not reusable across entry points, and conflates protocol concerns with domain concerns in a single method."

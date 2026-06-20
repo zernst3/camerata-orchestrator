@@ -1,0 +1,31 @@
+id = "CSHARP-ASPNETCORE-ASYNC-ACTIONS-1"
+title = "All I/O-bound controller actions and endpoint handlers are async; no sync-over-async blocking"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Roslyn analyzers (AsyncFixer, Microsoft.VisualStudio.Threading.Analyzers) that flag synchronous action methods whose bodies call async code via .Result or .Wait(). Conformance holds when all actions that perform I/O are declared async Task<IActionResult> (or async Task<T> for Minimal API handlers) and no .Result or .Wait() appears on a Task inside the request pipeline."
+
+[decision]
+question = "How are I/O-bound operations performed inside ASP.NET Core action methods and endpoint handlers?"
+default = "async-task-actions"
+why = "ASP.NET Core is built on a thread-pool model. Each concurrent request consumes one thread-pool thread while its handler runs synchronously. When an action performs I/O (database, HTTP, file) synchronously, that thread blocks for the entire duration of the I/O, waiting for the result. Under load, blocking threads exhaust the pool faster than I/O completes, and new requests queue waiting for a thread. The classical symptom is a server that handles low concurrency fine and collapses under moderate load with no CPU pressure and a saturated thread pool. Async actions return the thread to the pool during the I/O wait and reclaim a thread only when the result is ready, decoupling concurrency from thread count. The failure mode of sync-over-async (.Result, .Wait()) is worse than pure sync: it consumes a thread pool thread for the entire I/O duration AND can deadlock when ASP.NET's synchronization context attempts to resume on the same blocked thread. Making all I/O-bound actions async Task is therefore both a throughput decision and a correctness decision."
+
+[[option]]
+id = "async-task-actions"
+label = "All I/O-bound actions are async Task<IActionResult> or async Task<T>; await at every I/O call"
+directive = "Every controller action or Minimal API endpoint handler that performs I/O (database access, HTTP calls, file I/O) is declared async Task<IActionResult> (MVC) or async Task<T> (Minimal API). All awaitable calls inside the handler are awaited. ConfigureAwait(false) is used on library-internal async calls to avoid unnecessary context capture. .Result, .Wait(), and GetAwaiter().GetResult() on Tasks are forbidden inside action methods and endpoint handlers. CPU-bound work that does not involve I/O may use synchronous implementations; I/O-bound work may not."
+why = "The adopted default. Async actions release the thread-pool thread during I/O wait, allowing the server to handle many concurrent requests with a bounded thread count, and avoid the deadlock risk of sync-over-async in ASP.NET's synchronization context."
+
+[[option]]
+id = "sync-actions-blocking"
+label = "Synchronous actions that call async code via .Result or .Wait()"
+directive = "Actions are declared void or T (not Task) and call async service methods synchronously via .Result or .GetAwaiter().GetResult(). The calling thread blocks until the I/O completes."
+why = "Exhausts thread-pool threads under load, degrading throughput; can deadlock in contexts that capture the synchronization context. Only acceptable at the true top of a console application's Main where no synchronization context exists."
+
+[[option]]
+id = "sync-actions-no-async-dependencies"
+label = "Synchronous actions that call only synchronous service methods"
+directive = "Actions are declared synchronously and service methods they call are also synchronous; async is introduced only at the data-access layer and wrapped synchronously before crossing the service boundary."
+why = "Avoids async complexity at the cost of blocking threads for every I/O call; scales poorly beyond low concurrency. Acceptable for truly CPU-only endpoints with no I/O dependency."

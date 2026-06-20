@@ -1,0 +1,31 @@
+id = "CSHARP-EFCORE-PARAMETERIZED-LINQ-1"
+title = "LINQ queries pass values as parameters; string interpolation into raw SQL is forbidden"
+tag = "stack"
+domain = "csharp:efcore"
+layer = "library"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a Roslyn analyzer or Semgrep rule that flags string interpolation inside FromSqlRaw, ExecuteSqlRaw, and Database.ExecuteSqlRaw calls. Conformance holds when all raw SQL calls use FromSqlInterpolated / ExecuteSqlInterpolated (which parameterize the FormattableString) or pass SqlParameter objects to FromSqlRaw / ExecuteSqlRaw. A string interpolation expression inside FromSqlRaw is a forbidden pattern and fails the build."
+
+[decision]
+question = "How are user-controlled values passed into EF Core queries, including raw SQL escapes?"
+default = "linq-parameters-and-interpolated-sql"
+why = "EF Core's LINQ provider translates C# expressions into parameterized SQL by default: values in Where predicates, OrderBy keys, and LINQ projections are bound as ADO.NET parameters, never concatenated into the SQL string. SQL injection via the LINQ API is not possible when the LINQ provider generates the SQL. The risk appears at the raw SQL escape hatch: FromSqlRaw and ExecuteSqlRaw accept a plain string. If a developer writes FromSqlRaw($'SELECT * FROM Users WHERE Name = {name}') with C# string interpolation, the interpolated string is evaluated before FromSqlRaw receives it, producing a concatenated SQL string with the variable value embedded. EF Core receives an already-interpolated string and cannot parameterize it. The fix is FromSqlInterpolated($'SELECT * FROM Users WHERE Name = {name}'), which accepts a FormattableString and extracts the format arguments as parameters — visually identical but semantically safe. The mechanical enforcement rule bans the unsafe variant at the pattern level so the distinction does not rely on developer recall."
+
+[[option]]
+id = "linq-parameters-and-interpolated-sql"
+label = "LINQ for queries; FromSqlInterpolated or SqlParameter for raw SQL"
+directive = "All data filtering, ordering, and projection uses the LINQ provider (Where, Select, OrderBy, etc.), which generates parameterized SQL automatically. When raw SQL is necessary, FromSqlInterpolated (FormattableString) and ExecuteSqlInterpolated are used instead of their Raw counterparts, so format arguments are automatically bound as parameters. If FromSqlRaw or ExecuteSqlRaw is used for a query that accepts no user input, a comment confirms the SQL string contains no user-controlled values. String interpolation into FromSqlRaw or ExecuteSqlRaw with any variable derived from request input is forbidden."
+why = "The adopted default. LINQ parameterizes automatically; FromSqlInterpolated extends the same guarantee to raw SQL via FormattableString parameter extraction."
+
+[[option]]
+id = "sqlparameter-explicit"
+label = "Raw SQL with explicit SqlParameter objects for user values"
+directive = "Raw SQL queries use FromSqlRaw with explicit SqlParameter or NpgsqlParameter objects for each user-controlled value. No string interpolation or concatenation of user values into the SQL string."
+why = "Equivalent safety to FromSqlInterpolated; more verbose and error-prone because each parameter must be named and matched manually, but acceptable when FormattableString interpolation is not available or convenient."
+
+[[option]]
+id = "string-concatenation-raw-sql"
+label = "String concatenation or interpolation of user values into raw SQL"
+directive = "Raw SQL queries are assembled via string interpolation or concatenation of user-provided values, passed to FromSqlRaw or ExecuteSqlRaw as a pre-built string."
+why = "Produces SQL injection vulnerabilities whenever a user-controlled value reaches the concatenation. Forbidden."

@@ -1,0 +1,30 @@
+id = "CSHARP-EFCORE-ASNOTRACKING-1"
+title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
+tag = "stack"
+domain = "csharp:aspnetcore"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated?"
+default = "asnotracking-for-read-only"
+why = "By default, EF Core attaches every entity returned by a query to the DbContext's change tracker. The change tracker holds a snapshot of the original values, compares the current state to the snapshot on SaveChanges, and generates UPDATE statements for changed properties. For a query whose result is only being read (returned as a DTO, rendered in a view, written to a response), this tracking overhead is pure waste: a snapshot is allocated and never used, and the change tracker grows with every entity returned. Under load, a request handler that reads 50 entities for a list page allocates tracking overhead for all 50, only to discard them when the DbContext is disposed at request end. AsNoTracking() opts out of this: returned entities are not attached to the change tracker, allocation is lower, query execution is faster (no snapshot construction), and the DbContext consumes less memory per request. The discipline is to decide at the query site: if the entity will be passed to SaveChanges after modification, omit AsNoTracking; if the entity is read and discarded, add AsNoTracking. A useful heuristic is that repository methods named GetXxx or FindXxx return AsNoTracking results; repository methods named UpdateXxx or DeleteXxx first fetch with tracking."
+
+[[option]]
+id = "asnotracking-for-read-only"
+label = "AsNoTracking on all read-only queries; tracked queries only when SaveChanges follows"
+directive = "Every LINQ query whose result is not subsequently passed to SaveChanges calls .AsNoTracking() before execution. Repository method naming encodes the tracking intent: Get/Find/List methods return AsNoTracking results; methods that load an entity for mutation (Update, Delete, Patch) fetch with tracking (no AsNoTracking). The global default tracking behavior is not changed (AsNoTrackingWithIdentityResolution is not set globally) so that tracked queries remain the intentional opt-in for write paths. Callers do not modify AsNoTracking results and expect SaveChanges to persist the change."
+why = "The adopted default. Read-only queries gain lower memory use, faster execution, and smaller DbContext state; tracked queries remain available for the write path that needs them."
+
+[[option]]
+id = "global-asnotracking-default"
+label = "AsNoTracking set globally as the default query behavior"
+directive = "DbContext.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking is set in the DbContext constructor or OnConfiguring. All queries are non-tracking by default. Write paths call .AsTracking() explicitly when they need to track an entity for mutation."
+why = "Eliminates the per-query AsNoTracking call; the trade-off is that write paths require an explicit AsTracking opt-in that is easy to forget, causing SaveChanges to not detect changes made to the returned entity."
+
+[[option]]
+id = "always-track"
+label = "All queries tracked; AsNoTracking never used"
+directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
+why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."

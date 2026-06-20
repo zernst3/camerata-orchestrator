@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-METHOD-SECURITY-1"
+title = "Protected service methods carry @PreAuthorize; authorization is not re-implemented in every controller"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: Protected service methods carry @PreAuthorize; authorization is not re-implemented in every controller"
+default = "preauthorize-on-service-methods"
+why = "Spring Security's @PreAuthorize('hasRole(...)') and @PreAuthorize('hasAuthority(...)') annotations (enabled via @EnableMethodSecurity) place authorization checks inside the Spring AOP proxy that wraps the bean. The check runs before the method body executes, and if the current SecurityContext does not satisfy the SpEL expression, Spring throws AccessDeniedException before any business logic runs. Placing @PreAuthorize on service methods (not controller methods) has a structural advantage: the service method is protected regardless of how it is called. A controller that calls the service method gets the authorization check via AOP. A background job, a scheduled task, or a CLI command that calls the same service method gets the same check. A controller that manually checks authentication and then calls the service does not need to: the service enforces its own invariant. Placing authorization checks only in controllers (via SecurityContextHolder introspection or manual role checks) means every new entry point to the same service method must remember to replicate the check. Omitting it from one entry point silently bypasses the protection."
+
+[[option]]
+id = "preauthorize-on-service-methods"
+label = "@PreAuthorize on service methods that require specific roles or permissions"
+directive = "@EnableMethodSecurity(prePostEnabled = true) is active. Service methods that require specific roles or permissions carry @PreAuthorize('hasRole(\"ROLE_ADMIN\")') or @PreAuthorize('hasAuthority(\"permission:name\")') annotations. Controllers do not perform manual role checks (SecurityContextHolder.getContext().getAuthentication().getAuthorities() inspection) as a substitute for @PreAuthorize on the service. @PostAuthorize and @PostFilter are used where the authorization decision depends on the returned value. @Secured is not used (it is less expressive than @PreAuthorize's SpEL)."
+why = "The adopted default. @PreAuthorize on service methods protects every entry point to the method, not only the HTTP handler that was wired at the time the annotation was added."
+
+[[option]]
+id = "preauthorize-on-controller-methods"
+label = "@PreAuthorize on @RequestMapping methods in controllers only"
+directive = "@PreAuthorize is applied to controller action methods rather than service methods. Service methods carry no authorization annotations. A background job or alternative entry point that calls the service method gets no authorization check unless the developer explicitly adds @PreAuthorize to that entry point as well."
+why = "Simpler when all callers are HTTP controllers; fails silently when the same service method is called from a new entry point (scheduled task, message listener, integration test) that bypasses the controller-level check."
+
+[[option]]
+id = "manual-role-check-in-controller"
+label = "Manual SecurityContextHolder role checks in each controller action"
+directive = "Controllers check authorization manually by introspecting SecurityContextHolder.getContext().getAuthentication().getAuthorities() and returning ResponseEntity.status(403) when the required authority is absent. No @PreAuthorize or @EnableMethodSecurity."
+why = "Repeats the same pattern in every controller action that needs it, is not enforced at non-HTTP entry points, and produces inconsistent 403 response bodies compared to Spring Security's AccessDeniedException handler."

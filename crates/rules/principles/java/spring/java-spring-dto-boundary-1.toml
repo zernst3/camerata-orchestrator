@@ -1,0 +1,30 @@
+id = "JAVA-SPRING-DTO-BOUNDARY-1"
+title = "DTOs cross the HTTP boundary; JPA entities are never exposed directly in request or response bodies"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: DTOs cross the HTTP boundary; JPA entities are never exposed directly in request or response bodies?"
+default = "dtos-at-http-boundary"
+why = "JPA entities are persistence-layer objects: they carry annotations (@Entity, @OneToMany, @Column, @JsonIgnore workarounds), bidirectional relationship fields that cause infinite recursion during JSON serialization, version fields, lazy-loaded collections that trigger queries when the serializer accesses them outside a transaction, and internal state that the API contract never intended to expose. Exposing an entity directly as a @ResponseBody object couples the API contract to the persistence model: adding a column to the database table changes the API response shape, renaming a relationship changes the JSON field name, and adding an audit field exposes it to all API consumers. Removing a field from the response requires @JsonIgnore, which is a leaky abstraction where the persistence model controls the serialization contract. DTOs (plain Java records or classes) represent what the API promises: they contain exactly the fields the API consumer needs, no more and no less, and their shape is independent of the persistence model. The mapping between entity and DTO (a mapper class or MapStruct-generated code) is the explicit, auditable contract between the two layers. This also eliminates the Jackson BidirectionalRelationship serialization problem and the LazyInitializationException that occurs when Jackson accesses a lazy collection after the transaction has closed."
+
+[[option]]
+id = "dtos-at-http-boundary"
+label = "Request and response bodies are DTOs; entities are never serialized directly"
+directive = "All @RequestMapping and @RestController methods accept request bodies as DTO types (plain Java classes or records with Jackson annotations) and return DTO types (or ResponseEntity<DtoType>). JPA @Entity types do not appear as method parameters annotated with @RequestBody or as return types that will be serialized to JSON. Mapping between entities and DTOs is performed in the service layer or via a dedicated mapper component (MapStruct or hand-written). @JsonIgnore and @JsonManagedReference/@JsonBackReference on entity fields are forbidden as a substitute for proper DTO separation."
+why = "The adopted default. DTOs decouple the API contract from the persistence model: the response shape is controlled explicitly, serialization is predictable, and schema changes do not silently alter the API contract."
+
+[[option]]
+id = "entities-as-api-objects"
+label = "JPA entities used directly as request and response bodies"
+directive = "@RequestBody and return types in controller methods are JPA @Entity classes. Jackson serializes and deserializes them directly. @JsonIgnore suppresses fields that should not appear in the response."
+why = "Couples the API contract to the database schema, causes Jackson serialization errors on bidirectional relationships, risks LazyInitializationException when Jackson accesses lazy collections outside a transaction, and exposes internal persistence fields to API consumers."
+
+[[option]]
+id = "response-entity-map-inline"
+label = "Inline mapping from entity to ResponseEntity inside the controller"
+directive = "Controller actions perform the entity-to-response mapping inline: they call repository or service methods that return entities, then build a response map or anonymous object from the entity fields inside the controller method."
+why = "Keeps mapping in the wrong layer (controllers own HTTP translation, not domain-to-presentation mapping), makes the mapping logic non-reusable across endpoints, and still avoids direct entity serialization. A dedicated mapper or DTO class is preferable."

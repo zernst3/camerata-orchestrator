@@ -1,0 +1,31 @@
+id = "JAVA-SPRING-VALID-REQUEST-VALIDATION-1"
+title = "@Valid (or @Validated) is applied to @RequestBody and @RequestParam parameters to trigger Bean Validation before the method body runs"
+tag = "stack"
+domain = "java:spring"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a Checkstyle or Semgrep rule that flags @RequestBody parameters in controller methods that are not also annotated with @Valid or @Validated. Conformance holds when every @RequestBody parameter carries @Valid and a global @ControllerAdvice handles MethodArgumentNotValidException to return a structured 400 response."
+
+[decision]
+question = "How is incoming request body and parameter data validated before business logic runs?"
+default = "valid-annotation-on-request-body"
+why = "Spring MVC's @RequestBody binds the request JSON to a Java object but does not validate it by default. Without @Valid, a request body that omits a required field, provides a value outside the expected range, or violates a format constraint is bound to a partially populated DTO and passed to the controller method body. The method then operates on data whose constraints it assumes but cannot verify. Adding @Valid (or @Validated for group-sequenced validation) to the @RequestBody parameter instructs Spring to run Bean Validation (Jakarta Validation / Hibernate Validator) on the bound object before the method body executes. Constraint violations throw MethodArgumentNotValidException, which a global @ControllerAdvice exception handler catches and translates into a structured 400 response. This places validation at the earliest possible point (the binding layer), prevents malformed data from reaching service logic, and centralizes the 400 response format in one handler rather than scattering validation checks across controller methods. The DTO's constraint annotations (@NotNull, @Size, @Email, @Pattern) serve as both runtime enforcement and documentation of the API contract."
+
+[[option]]
+id = "valid-annotation-on-request-body"
+label = "@Valid on every @RequestBody parameter; MethodArgumentNotValidException handled globally"
+directive = "Every controller method parameter annotated with @RequestBody also carries @Valid (or @Validated when validation groups are needed). DTO classes declare Bean Validation annotations (@NotNull, @NotBlank, @Size, @Min, @Max, @Email, @Pattern, etc.) on their fields. A @ControllerAdvice class handles MethodArgumentNotValidException and ConstraintViolationException, returning a structured 400 response body with field-level error details. Manual null checks or constraint checks inside the controller method body that duplicate Bean Validation constraints are forbidden; the validation framework handles them."
+why = "The adopted default. @Valid triggers Bean Validation at the binding layer before the method body runs, centralizes the 400 response format in one handler, and uses DTO annotations as self-documenting API constraints."
+
+[[option]]
+id = "manual-validation-in-controller"
+label = "Manual validation checks inside the controller method body"
+directive = "Controller methods inspect DTO fields manually (null checks, length checks, range checks) and return ResponseEntity.badRequest() when a constraint is violated. No @Valid annotation or Bean Validation annotations on DTOs."
+why = "Duplicates validation logic that Bean Validation provides declaratively, scatters the 400 response format across controller methods, and is inconsistently applied as the codebase grows."
+
+[[option]]
+id = "validation-in-service"
+label = "Validation in the service layer; controller passes through unvalidated input"
+directive = "Controller methods pass @RequestBody parameters to the service layer without @Valid. Service methods validate inputs and throw checked or unchecked exceptions on constraint violations. A global exception handler maps service validation exceptions to 400 responses."
+why = "Pushes validation inward, away from the HTTP boundary; the invalid object travels through the controller into the service before rejection. Validation in the service is appropriate for business-rule validation (is this email already registered?) but the wrong layer for input-shape validation (is this email field present and well-formed?)."

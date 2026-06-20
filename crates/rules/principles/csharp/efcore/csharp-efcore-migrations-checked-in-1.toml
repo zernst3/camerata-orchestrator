@@ -1,0 +1,30 @@
+id = "CSHARP-EFCORE-MIGRATIONS-CHECKED-IN-1"
+title = "EF Core migrations are checked into source control and applied as part of the deployment process"
+tag = "stack"
+domain = "csharp:efcore"
+layer = "library"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "What position does the project take on: EF Core migrations are checked into source control and applied as part of the deployment process?"
+default = "migrations-in-source-control"
+why = "EF Core's dotnet ef migrations add command generates a C# migration file and a snapshot of the current model. These files are the executable record of every schema change the application has made, in order. Excluding them from source control breaks the ability to reproduce schema history on a new database, breaks the ability to review schema changes in code review (a migration is code), and breaks coordinated deployment (the application binary expects a schema that the database will not have if migrations are not applied). Applying migrations at application startup (Database.Migrate() in Program.cs) is a common pattern but has a failure mode under horizontal scaling: two instances starting simultaneously both attempt to apply the same migration, producing locking contention or a double-apply error. Applying migrations as a pre-deploy step (a migration job, EF Bundles, or a CI/CD pipeline step that runs dotnet ef database update before the new binary is deployed) decouples schema changes from application startup and allows a single migration run per deployment. The EnsureCreated() method is a separate anti-pattern: it creates the schema from the current model snapshot without creating or tracking any migration, so subsequent migrations cannot be applied to a database that was created via EnsureCreated."
+
+[[option]]
+id = "migrations-in-source-control"
+label = "Migrations generated via dotnet ef migrations add, checked in, applied as a pre-deploy step"
+directive = "Schema changes are made by modifying the EF Core model (entities, relationships, configuration) and running dotnet ef migrations add <Name> to generate a migration file. The generated migration file and the updated model snapshot are committed to source control in the same PR as the model change they implement. Migrations are applied as a pre-deploy step (migration runner job, EF Bundle, or pipeline step), not inside Program.cs. Database.EnsureCreated() is forbidden in production code; it may appear only in test setup helpers that create in-memory or ephemeral databases."
+why = "The adopted default. Checked-in migrations are reviewable, reproducible, and deployable independently of application startup; a pre-deploy runner avoids startup-time migration races under horizontal scaling."
+
+[[option]]
+id = "migrate-on-startup"
+label = "Database.Migrate() called in Program.cs on every startup"
+directive = "context.Database.Migrate() (or equivalent) is called during application startup so the database schema is always brought to the latest migration when the process starts. Migrations are still checked into source control."
+why = "Simpler to configure than a separate deployment step; races under concurrent restarts can cause locking errors on the migration history table. Acceptable for single-instance deployments where startup races do not occur."
+
+[[option]]
+id = "ensure-created-no-migrations"
+label = "Database.EnsureCreated() instead of migrations"
+directive = "Database.EnsureCreated() is called at startup to create the schema from the current model if the database does not exist. No migration files are generated or committed."
+why = "Creates the database schema from the model snapshot without any migration history; subsequent schema changes require dropping and recreating the database or manual SQL, since no migration can be applied to a database created this way. Appropriate only for throw-away test databases."
