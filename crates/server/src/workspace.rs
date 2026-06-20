@@ -364,6 +364,133 @@ pub async fn apply_local_and_push(
 
 // ── Local git controls (issue #37) ───────────────────────────────────────────
 
+/// How far HEAD is ahead of and behind its upstream tracking branch.
+///
+/// Both counts are `None` when the branch has no upstream tracking ref (e.g. a
+/// freshly-created local branch that has never been pushed). Both are `Some(0)`
+/// when the branch is exactly in sync with its upstream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AheadBehind {
+    /// Commits on HEAD not yet on the upstream.
+    pub ahead: Option<u32>,
+    /// Commits on the upstream not yet on HEAD.
+    pub behind: Option<u32>,
+}
+
+/// Full inspection status for a repo's current HEAD — branch, dirty flag,
+/// ahead/behind counts, and a human-readable one-liner. Returned by
+/// [`git_status`] and surfaced in the cockpit's status bar for the repo.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepoGitStatus {
+    /// Current HEAD branch name (or `"HEAD"` when detached).
+    pub branch: String,
+    /// True when the working tree or index has uncommitted changes.
+    pub dirty: bool,
+    /// Counts relative to the upstream tracking branch.
+    pub sync: AheadBehind,
+    /// A concise human-readable summary of the above fields, suitable for a
+    /// single status-bar line.
+    pub detail: String,
+}
+
+/// Parse the raw output of `git rev-list --left-right --count HEAD...@{u}` into
+/// an `AheadBehind`. The format is two tab-separated integers: `<ahead>\t<behind>`.
+///
+/// Returns `AheadBehind { ahead: None, behind: None }` for any malformed or
+/// empty input (no upstream set, detached HEAD, new repo, etc.).
+/// Exported for unit tests.
+pub fn parse_ahead_behind(raw: &str) -> AheadBehind {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return AheadBehind::default();
+    }
+    let parts: Vec<&str> = raw.split('\t').collect();
+    if parts.len() != 2 {
+        return AheadBehind::default();
+    }
+    match (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+        (Ok(a), Ok(b)) => AheadBehind {
+            ahead: Some(a),
+            behind: Some(b),
+        },
+        _ => AheadBehind::default(),
+    }
+}
+
+/// Inspect the current HEAD of the working copy at `dir`: branch, dirty flag,
+/// and how many commits ahead/behind the tracking branch. Pure-ish — no network.
+///
+/// The ahead/behind query (`git rev-list --left-right --count HEAD...@{u}`)
+/// only reads what was fetched last time; call `pull_branch` / `clone_or_pull`
+/// to refresh the remote view first.
+pub async fn git_status(dir: &Path) -> anyhow::Result<RepoGitStatus> {
+    // 1. Current branch name.
+    let branch_out = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    let branch = if branch_out.status.success() {
+        String::from_utf8_lossy(&branch_out.stdout)
+            .trim()
+            .to_string()
+    } else {
+        anyhow::bail!("git rev-parse: {}", stderr_of(&branch_out));
+    };
+
+    // 2. Dirty flag: any output from `git status --porcelain` means uncommitted changes.
+    let dirty = git(Some(dir), &["status", "--porcelain"])
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    // 3. Ahead / behind the tracking branch (best-effort: no upstream → None counts).
+    let sync = {
+        let ab = git(
+            Some(dir),
+            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+        )
+        .await;
+        match ab {
+            Ok(o) if o.status.success() => {
+                parse_ahead_behind(&String::from_utf8_lossy(&o.stdout))
+            }
+            // No upstream set, detached HEAD, or empty repo — not an error.
+            _ => AheadBehind::default(),
+        }
+    };
+
+    // 4. Build the human-readable one-liner.
+    let detail = build_status_detail(&branch, dirty, &sync);
+
+    Ok(RepoGitStatus {
+        branch,
+        dirty,
+        sync,
+        detail,
+    })
+}
+
+/// Build a concise status-bar string from the inspection result components.
+/// Kept as a pure function so the UI can format the same data without calling git.
+pub fn build_status_detail(branch: &str, dirty: bool, sync: &AheadBehind) -> String {
+    let mut parts: Vec<String> = vec![format!("on {branch}")];
+    match (sync.ahead, sync.behind) {
+        (Some(a), Some(b)) => {
+            if a > 0 && b > 0 {
+                parts.push(format!("{a} ahead, {b} behind"));
+            } else if a > 0 {
+                parts.push(format!("{a} ahead"));
+            } else if b > 0 {
+                parts.push(format!("{b} behind"));
+            } else {
+                parts.push("in sync".to_string());
+            }
+        }
+        _ => {} // no upstream — say nothing about sync
+    }
+    if dirty {
+        parts.push("uncommitted changes".to_string());
+    }
+    parts.join(" · ")
+}
+
 /// A single commit in the log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Commit {
@@ -809,5 +936,110 @@ mod tests {
         assert!(st3.dirty);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Tests for parse_ahead_behind + build_status_detail (issue #37 addendum) ─
+
+    #[test]
+    fn parse_ahead_behind_clean_sync() {
+        // Both zero means in sync.
+        let ab = parse_ahead_behind("0\t0");
+        assert_eq!(ab.ahead, Some(0));
+        assert_eq!(ab.behind, Some(0));
+    }
+
+    #[test]
+    fn parse_ahead_behind_ahead_only() {
+        let ab = parse_ahead_behind("3\t0");
+        assert_eq!(ab.ahead, Some(3));
+        assert_eq!(ab.behind, Some(0));
+    }
+
+    #[test]
+    fn parse_ahead_behind_behind_only() {
+        let ab = parse_ahead_behind("0\t5");
+        assert_eq!(ab.ahead, Some(0));
+        assert_eq!(ab.behind, Some(5));
+    }
+
+    #[test]
+    fn parse_ahead_behind_both_diverged() {
+        let ab = parse_ahead_behind("2\t4");
+        assert_eq!(ab.ahead, Some(2));
+        assert_eq!(ab.behind, Some(4));
+    }
+
+    #[test]
+    fn parse_ahead_behind_empty_input_gives_none() {
+        // No upstream tracking branch: git exits non-zero, we get empty string.
+        let ab = parse_ahead_behind("");
+        assert_eq!(ab.ahead, None);
+        assert_eq!(ab.behind, None);
+    }
+
+    #[test]
+    fn parse_ahead_behind_malformed_gives_none() {
+        // Only one field (git ate the tab somehow) — no panic, just None.
+        let ab = parse_ahead_behind("3");
+        assert_eq!(ab.ahead, None);
+        assert_eq!(ab.behind, None);
+    }
+
+    #[test]
+    fn parse_ahead_behind_non_numeric_gives_none() {
+        let ab = parse_ahead_behind("a\tb");
+        assert_eq!(ab.ahead, None);
+        assert_eq!(ab.behind, None);
+    }
+
+    #[test]
+    fn parse_ahead_behind_strips_trailing_newline() {
+        // git appends a newline; we should still parse correctly.
+        let ab = parse_ahead_behind("1\t2\n");
+        assert_eq!(ab.ahead, Some(1));
+        assert_eq!(ab.behind, Some(2));
+    }
+
+    #[test]
+    fn build_status_detail_in_sync_clean() {
+        let sync = AheadBehind { ahead: Some(0), behind: Some(0) };
+        let s = build_status_detail("main", false, &sync);
+        assert_eq!(s, "on main · in sync");
+    }
+
+    #[test]
+    fn build_status_detail_dirty_ahead() {
+        let sync = AheadBehind { ahead: Some(2), behind: Some(0) };
+        let s = build_status_detail("feature/x", true, &sync);
+        assert_eq!(s, "on feature/x · 2 ahead · uncommitted changes");
+    }
+
+    #[test]
+    fn build_status_detail_behind_only() {
+        let sync = AheadBehind { ahead: Some(0), behind: Some(3) };
+        let s = build_status_detail("main", false, &sync);
+        assert_eq!(s, "on main · 3 behind");
+    }
+
+    #[test]
+    fn build_status_detail_diverged() {
+        let sync = AheadBehind { ahead: Some(1), behind: Some(2) };
+        let s = build_status_detail("fix/bug", false, &sync);
+        assert_eq!(s, "on fix/bug · 1 ahead, 2 behind");
+    }
+
+    #[test]
+    fn build_status_detail_no_upstream() {
+        // No upstream: ahead/behind are None — only branch + dirty mentioned.
+        let sync = AheadBehind::default();
+        let s = build_status_detail("local-branch", true, &sync);
+        assert_eq!(s, "on local-branch · uncommitted changes");
+    }
+
+    #[test]
+    fn build_status_detail_no_upstream_clean() {
+        let sync = AheadBehind::default();
+        let s = build_status_detail("local-branch", false, &sync);
+        assert_eq!(s, "on local-branch");
     }
 }

@@ -2115,6 +2115,15 @@ html, body {
 .git-commit-author { font-size: 11px; color: var(--ink-soft); }
 .git-commit-subject { grid-column: 1; grid-row: 2; font-size: 12.5px; color: var(--ink); line-height: 1.4; }
 .git-cherry-btn { grid-column: 2; grid-row: 1 / 3; align-self: center; font-size: 11px; padding: 4px 8px; white-space: nowrap; }
+/* Status bar: one-line summary at the top of the git panel showing branch + sync + dirty state. */
+.git-status-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 10px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--paper); }
+.git-status-detail { font-size: 12.5px; color: var(--ink-soft); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; flex: 1; min-width: 0; }
+/* Pill badges for sync state and dirty flag. */
+.git-status-badge { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.git-status-dirty  { background: #fdf3e3; color: #8a5a00; border: 1px solid #f2d68a; }
+.git-status-sync   { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+.git-status-ahead  { background: var(--accent-wash); color: var(--accent-ink); border: 1px solid #efd9d0; }
+.git-status-behind { background: #f3e8ff; color: #6a1b9a; border: 1px solid #ce93d8; }
 
 /* ---- Rules view: project rules table (T1) + corpus table (T2) ------------- */
 

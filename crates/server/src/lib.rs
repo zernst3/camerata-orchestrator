@@ -280,6 +280,7 @@ pub fn router(state: AppState) -> Router {
         // ── Local git controls (issue #37) ───────────────────────────────────
         .route("/api/projects/:id/git/branches", get(git_branches))
         .route("/api/projects/:id/git/log", get(git_log))
+        .route("/api/projects/:id/git/status", get(git_status_endpoint))
         .route("/api/projects/:id/git/checkout", post(git_checkout))
         .route("/api/projects/:id/git/commit", post(git_commit))
         .route("/api/projects/:id/git/push", post(git_push))
@@ -3209,6 +3210,31 @@ async fn git_branches(
         Ok(bl) => {
             Json(serde_json::json!({ "ok": true, "current": bl.current, "branches": bl.branches }))
         }
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+/// Full git status for a repo: branch, dirty flag, ahead/behind counts, and
+/// a human-readable detail string. Used by the cockpit's per-repo status bar.
+/// No network: ahead/behind reflects what was fetched locally.
+async fn git_status_endpoint(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<GitRepoQuery>,
+) -> Json<serde_json::Value> {
+    let dir = match resolve_git_dir(&state, &q.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::git_status(&dir).await {
+        Ok(st) => Json(serde_json::json!({
+            "ok":     true,
+            "branch": st.branch,
+            "dirty":  st.dirty,
+            "ahead":  st.sync.ahead,
+            "behind": st.sync.behind,
+            "detail": st.detail,
+        })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
 }
