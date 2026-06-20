@@ -62,6 +62,10 @@ camerata-intake = { path = "../intake" }
 camerata-rules = { path = "../rules" }
 # VCS-action gate configuration + bypass types (ProcessRuleConfig, build_rules, etc.).
 camerata-checks = { path = "../checks" }
+# The central, version-tracked SQLite artifact store: per-story decision records and
+# investigation notes are persisted here (ROUTE-A) for queryable, provenance-tracked
+# history instead of living inline on the UoW JSON.
+camerata-persistence = { path = "../persistence" }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

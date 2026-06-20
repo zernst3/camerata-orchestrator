@@ -729,6 +729,7 @@ dependencies = [
  "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
+ "camerata-persistence",
  "camerata-rules",
  "camerata-worktracker",
  "chrono",
