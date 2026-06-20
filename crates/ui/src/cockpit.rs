@@ -2391,9 +2391,9 @@ struct GateProbeView {
     #[serde(default)]
     go: bool,
     #[serde(default)]
-    layer1_forbidden_denied: bool,
+    layer1_denied: usize,
     #[serde(default)]
-    layer1_forbidden_reason: String,
+    layer1_total: usize,
     #[serde(default)]
     layer1_clean_allowed: bool,
     #[serde(default)]
@@ -2440,11 +2440,12 @@ fn GateSelfCheck() -> Element {
             }
             if let Some(r) = result() {
                 {
-                    let l1 = if r.layer1_forbidden_denied {
-                        format!("Layer 1: forbidden write DENIED {} · clean write {}", r.layer1_forbidden_reason, if r.layer1_clean_allowed { "allowed" } else { "DENIED (deny-all!)" })
-                    } else {
-                        "Layer 1: forbidden write ALLOWED — deny-before-execute NOT wired".to_string()
-                    };
+                    let l1 = format!(
+                        "Layer 1: deny-before-execute — {}/{} floor rules enforced · clean write {}",
+                        r.layer1_denied,
+                        r.layer1_total,
+                        if r.layer1_clean_allowed { "allowed" } else { "DENIED (deny-all!)" }
+                    );
                     let l2 = format!("Layer 2: bounced={}, revise resolved={}", r.layer2_bounced, r.layer2_clean);
                     let (badge, cls) = if r.go { ("GO", "gate-selfcheck-verdict go") } else { ("NO-GO", "gate-selfcheck-verdict nogo") };
                     rsx! {

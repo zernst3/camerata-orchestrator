@@ -1,20 +1,20 @@
 //! `gate-probe` — the #14 end-to-end gate-loop GO/NO-GO on a story, deterministic (no `claude`).
 //!
-//! This is the thesis-validating probe: it runs ONE story through BOTH gate layers with the REAL
-//! engine pieces and NO model call, then prints a single GO / NO-GO verdict.
+//! The thesis-validating probe, as a single runnable verdict. It runs ONE story through BOTH gate
+//! layers with the REAL engine and NO model call:
 //!
-//!   - LAYER 1 (deny-before-execute): the real [`camerata_gateway::GovernedGateway`] evaluates the
-//!     write the agent attempts. A forbidden write MUST be DENIED before it can touch disk; a
-//!     clean write MUST be ALLOWED (the gate is not deny-everything).
+//!   - LAYER 1 (deny-before-execute): the real [`camerata_gateway::GovernedGateway`] evaluates a
+//!     planted violation for EVERY enforced rule (the whole security floor) plus a clean control.
+//!     All violations must be DENIED before they can touch disk; the clean write must be ALLOWED.
 //!   - LAYER 2 (bounce-and-revise): the real [`camerata_core::FleetCoordinator`] runs the governed
 //!     stage; the post-task check flags a planted violation on the first pass, the stage BOUNCES,
-//!     and the revise pass resolves it. Proves the "run → deny/flag → bounce → fix → clean" loop
-//!     actually closes.
+//!     and the revise pass resolves it.
 //!
-//! Where the `acceptance` command proves Layer 1 in isolation and the coordinator unit tests prove
-//! Layer 2, THIS probe runs a story through the whole loop and reports one verdict. The LIVE proof
-//! (a real `claude -p` subprocess through the MCP gateway) is `live-demo`; this is its
-//! deterministic, CI-able stand-in — the engine-level go/no-go.
+//! GO iff the whole floor denied, the control allowed, and the loop bounced-and-resolved. Where
+//! `acceptance` proves a few layer-1 rules in isolation and the coordinator unit tests prove
+//! layer 2, THIS runs a story through the whole loop and reports one verdict. The LIVE proof (a
+//! real `claude -p` through the MCP gateway) is `live-demo`; this is its deterministic, CI-able
+//! stand-in — the engine-level go/no-go, surfaced in-app as the Governed Development self-check.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -57,8 +57,7 @@ impl AgentDriver for BounceThenCleanDriver {
 }
 
 /// A layer-2 check runner that flags a violation on the FIRST check (dirty), then reports clean —
-/// so the stage bounces once and the revise pass resolves it. (`gov1_rule()` stands in for the
-/// violated rule id; the coordinator only cares that the set is non-empty then empty.)
+/// so the stage bounces once and the revise pass resolves it.
 struct DirtyThenCleanChecks {
     checks: Mutex<usize>,
 }
@@ -83,49 +82,58 @@ impl CheckRunner for DirtyThenCleanChecks {
     }
 }
 
+/// One layer-1 planted-violation check: which floor rule it targets, and whether the gate denied it.
+#[derive(Debug, Clone)]
+pub struct Layer1Check {
+    /// Human label for the planted violation (e.g. "forbidden path", "hardcoded secret").
+    pub label: String,
+    /// Whether the gate denied it (every planted violation MUST be denied).
+    pub denied: bool,
+    /// The denial's "[RULE] reason", or the unexpected-allow note.
+    pub detail: String,
+}
+
 /// The probe's verdict across both gate layers.
 #[derive(Debug)]
 pub struct GateProbeResult {
     pub story: String,
-    /// LAYER 1 — the gate's verdict on the agent's attempted FORBIDDEN write (must be `Deny`).
-    pub layer1_forbidden: Decision,
-    /// LAYER 1 — the gate's verdict on a CLEAN write (must be `Allow`; the gate isn't deny-all).
-    pub layer1_clean: Decision,
+    /// LAYER 1 — one entry per planted floor violation; ALL must be `denied`.
+    pub layer1: Vec<Layer1Check>,
+    /// LAYER 1 — the gate's verdict on a CLEAN write (must be allowed; the gate isn't deny-all).
+    pub layer1_clean_allowed: bool,
     /// LAYER 2 — did the governed stage bounce-and-revise?
     pub layer2_bounced: bool,
     /// LAYER 2 — did the revise pass end clean (no residual violations)?
     pub layer2_clean: bool,
-    /// The number of agent passes the driver actually ran (1 initial + 1 revise = 2 on a bounce).
+    /// Agent passes the driver ran (1 initial + 1 revise = 2 on a bounce).
     pub agent_passes: usize,
 }
 
 impl GateProbeResult {
-    /// GO iff: the forbidden write was denied, the clean write allowed, AND the layer-2 loop
-    /// bounced once and resolved. Anything else is NO-GO (the gate is not fully wired).
+    /// How many planted floor violations the gate denied, and how many were planted.
+    pub fn layer1_denied_count(&self) -> usize {
+        self.layer1.iter().filter(|c| c.denied).count()
+    }
+    pub fn layer1_total(&self) -> usize {
+        self.layer1.len()
+    }
+
+    /// GO iff: EVERY planted floor violation was denied, the clean write was allowed, AND the
+    /// layer-2 loop bounced once and resolved. Anything else is NO-GO (the gate isn't fully wired).
     pub fn go(&self) -> bool {
-        self.layer1_denied()
-            && self.layer1_clean_allowed()
+        !self.layer1.is_empty()
+            && self.layer1.iter().all(|c| c.denied)
+            && self.layer1_clean_allowed
             && self.layer2_bounced
             && self.layer2_clean
     }
+}
 
-    /// LAYER 1 — was the agent's forbidden write denied? (Accessors so callers like the server's
-    /// JSON endpoint don't need to match on `Decision` directly.)
-    pub fn layer1_denied(&self) -> bool {
-        matches!(self.layer1_forbidden, Decision::Deny { .. })
-    }
-
-    /// LAYER 1 — the denial's "[RULE] reason" (empty when the forbidden write was NOT denied).
-    pub fn layer1_reason(&self) -> String {
-        match &self.layer1_forbidden {
-            Decision::Deny { rule, reason } => format!("[{}] {reason}", rule.0),
-            Decision::Allow => String::new(),
-        }
-    }
-
-    /// LAYER 1 — was the clean control write allowed?
-    pub fn layer1_clean_allowed(&self) -> bool {
-        matches!(self.layer1_clean, Decision::Allow)
+/// Build the `gated_write` tool-call for a planted (path, content).
+fn write_call(path: &str, content: &str) -> ToolCall {
+    ToolCall {
+        tool: "gated_write".to_string(),
+        input: serde_json::json!({ "path": path, "content": content }),
     }
 }
 
@@ -140,26 +148,59 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
     };
     let session = SessionId("gate-probe-session".to_string());
 
-    // ── LAYER 1: deny-before-execute, via the real gateway bound to the session/role. ──
+    // ── LAYER 1: deny-before-execute. One planted violation per enforced floor rule. ──
     let gateway = GovernedGateway::new().with_session(session.clone(), role.clone());
-    let forbidden = ToolCall {
-        tool: "gated_write".to_string(),
-        input: serde_json::json!({
-            "path": "crates/forbidden/leak.rs",
-            "content": "// agent tried to write here"
-        }),
-    };
-    let layer1_forbidden = gateway.evaluate(&session, &forbidden).await;
-    let clean = ToolCall {
-        tool: "gated_write".to_string(),
-        input: serde_json::json!({
-            "path": "crates/core/src/feature.rs",
-            "content": "pub fn feature() {}"
-        }),
-    };
-    let layer1_clean = gateway.evaluate(&session, &clean).await;
+    let planted: Vec<(&str, ToolCall)> = vec![
+        (
+            "forbidden path (GOV-1)",
+            write_call("crates/forbidden/leak.rs", "// agent tried to write here"),
+        ),
+        (
+            "path escape (SEC-NO-PATH-ESCAPE-1)",
+            write_call("crates/../../etc/cron.d/payload", "*/1 * * * * root sh -c id"),
+        ),
+        (
+            "hardcoded secret (SEC-NO-HARDCODED-SECRETS-1)",
+            write_call(
+                "crates/core/src/config.rs",
+                "let token = \"ghp_ABCDEFGHIJ1234567890abcdefghij12\";",
+            ),
+        ),
+        (
+            "raw SQL concat (SEC-NO-RAW-SQL-CONCAT-1)",
+            write_call(
+                "crates/core/src/db.rs",
+                "let q = format!(\"SELECT * FROM users WHERE id = {}\", id);",
+            ),
+        ),
+        (
+            "secret in URL (ARCH-NO-SECRETS-IN-URL-1)",
+            write_call(
+                "crates/core/src/api.rs",
+                "let endpoint = \"https://api.example.com/data?access_token=abc123def456ghi789\";",
+            ),
+        ),
+        (
+            "secret file (SEC-NO-SECRET-FILES-1)",
+            write_call("crates/core/.env", "API_SECRET=supersecretvalue"),
+        ),
+    ];
+    let mut layer1 = Vec::with_capacity(planted.len());
+    for (label, call) in &planted {
+        let (denied, detail) = match gateway.evaluate(&session, call).await {
+            Decision::Deny { rule, reason } => (true, format!("[{}] {reason}", rule.0)),
+            Decision::Allow => (false, "ALLOWED — this floor rule is not wired on writes".to_string()),
+        };
+        layer1.push(Layer1Check {
+            label: label.to_string(),
+            denied,
+            detail,
+        });
+    }
+    let clean = write_call("crates/core/src/feature.rs", "pub fn feature() {}");
+    let layer1_clean_allowed = matches!(gateway.evaluate(&session, &clean).await, Decision::Allow);
 
-    // ── LAYER 2: bounce-and-revise, via the real coordinator (dirty-then-clean ⇒ one bounce). ──
+    // ── LAYER 2: bounce-and-revise (dirty-then-clean ⇒ exactly one bounce that resolves). ──
     let driver = BounceThenCleanDriver::new();
     let checks = DirtyThenCleanChecks::new();
     let worktree = std::env::temp_dir().join(format!("camerata-gate-probe-{}", std::process::id()));
@@ -173,8 +214,8 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
 
     Ok(GateProbeResult {
         story,
-        layer1_forbidden,
-        layer1_clean,
+        layer1,
+        layer1_clean_allowed,
         layer2_bounced,
         layer2_clean,
         agent_passes,
@@ -188,16 +229,17 @@ mod tests {
     #[tokio::test]
     async fn gate_probe_is_go_end_to_end() {
         let r = run_gate_probe().await.expect("probe runs");
-        // LAYER 1: forbidden denied, clean allowed.
-        assert!(
-            matches!(r.layer1_forbidden, Decision::Deny { .. }),
-            "forbidden write must be denied: {:?}",
-            r.layer1_forbidden
+        // LAYER 1: the whole floor denied every planted violation.
+        assert!(r.layer1_total() >= 6, "all enforced floor rules are probed");
+        for c in &r.layer1 {
+            assert!(c.denied, "planted violation must be denied: {} — {}", c.label, c.detail);
+        }
+        assert_eq!(
+            r.layer1_denied_count(),
+            r.layer1_total(),
+            "every planted floor violation must be denied"
         );
-        assert!(
-            matches!(r.layer1_clean, Decision::Allow),
-            "clean write must be allowed"
-        );
+        assert!(r.layer1_clean_allowed, "clean write must be allowed");
         // LAYER 2: bounced once and resolved; the driver ran an initial + a revise pass.
         assert!(r.layer2_bounced, "the stage must bounce on the planted violation");
         assert!(r.layer2_clean, "the revise pass must resolve the violation");

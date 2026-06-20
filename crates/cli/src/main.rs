@@ -114,21 +114,20 @@ async fn run_gate_probe_cmd() -> anyhow::Result<()> {
     println!("== Camerata gate-loop probe (#14) — end-to-end, no claude ==");
     println!("story: {}", r.story);
     println!();
-    println!("LAYER 1 — deny-before-execute (real gateway):");
-    match &r.layer1_forbidden {
-        Decision::Deny { rule, reason } => {
-            println!("  agent's forbidden write -> DENIED [{}]: {}", rule.0, reason)
-        }
-        Decision::Allow => {
-            println!("  agent's forbidden write -> ALLOWED  (NO-GO — deny-before-execute not wired)")
-        }
+    println!(
+        "LAYER 1 — deny-before-execute (real gateway): {}/{} floor rules enforced",
+        r.layer1_denied_count(),
+        r.layer1_total()
+    );
+    for c in &r.layer1 {
+        let verdict = if c.denied { "DENIED" } else { "ALLOWED (NO-GO)" };
+        println!("  {:<44} -> {verdict}  {}", c.label, c.detail);
     }
-    match &r.layer1_clean {
-        Decision::Allow => println!("  clean write             -> ALLOWED  (expected)"),
-        Decision::Deny { rule, reason } => {
-            println!("  clean write             -> DENIED [{}]: {}  (NO-GO — gate is deny-all)", rule.0, reason)
-        }
-    }
+    println!(
+        "  clean control write{}-> {}",
+        " ".repeat(26),
+        if r.layer1_clean_allowed { "ALLOWED (expected)" } else { "DENIED (NO-GO — deny-all)" }
+    );
     println!();
     println!("LAYER 2 — bounce-and-revise (real coordinator):");
     println!(

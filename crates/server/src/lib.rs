@@ -1051,17 +1051,25 @@ struct DetectRepoReq {
 /// GO/NO-GO the Governed Development screen surfaces as an in-app gate self-check.
 async fn gate_probe() -> Json<serde_json::Value> {
     match camerata_fleet::gate_probe::run_gate_probe().await {
-        Ok(r) => Json(serde_json::json!({
-            "ok": true,
-            "go": r.go(),
-            "story": r.story,
-            "layer1_forbidden_denied": r.layer1_denied(),
-            "layer1_forbidden_reason": r.layer1_reason(),
-            "layer1_clean_allowed": r.layer1_clean_allowed(),
-            "layer2_bounced": r.layer2_bounced,
-            "layer2_clean": r.layer2_clean,
-            "agent_passes": r.agent_passes,
-        })),
+        Ok(r) => {
+            let checks: Vec<serde_json::Value> = r
+                .layer1
+                .iter()
+                .map(|c| serde_json::json!({ "label": c.label, "denied": c.denied, "detail": c.detail }))
+                .collect();
+            Json(serde_json::json!({
+                "ok": true,
+                "go": r.go(),
+                "story": r.story,
+                "layer1": checks,
+                "layer1_denied": r.layer1_denied_count(),
+                "layer1_total": r.layer1_total(),
+                "layer1_clean_allowed": r.layer1_clean_allowed,
+                "layer2_bounced": r.layer2_bounced,
+                "layer2_clean": r.layer2_clean,
+                "agent_passes": r.agent_passes,
+            }))
+        }
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
 }
