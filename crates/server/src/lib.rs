@@ -22,6 +22,7 @@ pub mod decompose;
 pub mod draft;
 pub mod escalation;
 pub mod eval;
+pub mod evidence;
 pub mod fix;
 pub mod github_issues;
 pub mod jobs;
