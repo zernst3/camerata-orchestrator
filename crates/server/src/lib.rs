@@ -270,6 +270,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/repo-health", get(project_repo_health))
         .route("/api/repo-path", post(set_repo_path))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
+        .route("/api/onboard/greenfield", post(onboard_greenfield))
         .route("/api/onboard/complete", post(onboard_complete))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
         .route("/api/onboard/ignore", post(onboard_ignore))
@@ -2731,6 +2732,126 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
+}
+
+// ── Greenfield scaffold handler ───────────────────────────────────────────────
+
+/// Request body for the greenfield scaffold endpoint.
+///
+/// The caller supplies the new repo's name (used as the commit label), the local
+/// path where the repo should be created, the resolved rules to bake in, and any
+/// custom rules from the active project. All fields are validated server-side
+/// before the blocking scaffold runs.
+#[derive(serde::Deserialize)]
+struct GreenfieldReq {
+    /// Human name / label for the new repo (used in the initial commit message).
+    /// Does NOT need to be an `owner/repo` — it can be a bare project name until
+    /// the user connects the remote. Required.
+    name: String,
+    /// Absolute path on disk where the new repo directory should be created.
+    /// The directory MUST NOT already exist; scaffold creates it. Required.
+    path: String,
+    /// The resolved rules to install (same shape as `ArmReq.rules`). Optional —
+    /// an empty list scaffolds just the git repo + an empty gate config.
+    #[serde(default)]
+    rules: Vec<crate::arm::ArmRule>,
+    /// Custom rules from the active project to carry into the emit. Optional.
+    #[serde(default)]
+    custom: Vec<crate::project::CustomRule>,
+}
+
+/// Greenfield onboarding: scaffold a NEW local git repo with governance baked in
+/// from commit zero. This is the counterpart to the brownfield apply flow: instead
+/// of writing governance files into an EXISTING repo, it CREATES the repo directory,
+/// emits the governance files (AGENTS.md / CONVENTIONS.md / .camerata/rules.json /
+/// CI workflow) using the same `arm_files_for_repo` primitive as apply, and commits
+/// them as the initial commit.
+///
+/// The handler does NOT push to GitHub — the new repo is local-only until the
+/// architect connects it to a remote. It marks the scaffolded repo as onboarded in
+/// the active project (creating one from the name if none is active).
+///
+/// The scaffold is a blocking operation (filesystem + git) and is run via
+/// `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+async fn onboard_greenfield(
+    State(state): State<AppState>,
+    Json(req): Json<GreenfieldReq>,
+) -> Json<serde_json::Value> {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "Name the new repo." }));
+    }
+    let path_str = req.path.trim().to_string();
+    if path_str.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "Choose a directory for the new repo." }));
+    }
+    let dest = std::path::PathBuf::from(&path_str);
+
+    // Resolve the repo-local rules (drop cross-repo / process: they're project-level,
+    // not written into any single repo's files). Clone the vecs so they are 'static
+    // and can be moved into the spawn_blocking closure.
+    let repo_local: Vec<crate::arm::ArmRule> = req
+        .rules
+        .into_iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .collect();
+    let custom: Vec<crate::project::CustomRule> = req.custom;
+    let name_clone = name.clone();
+
+    // Run the blocking scaffold (filesystem + git) off the async runtime.
+    // Move owned vecs (not refs) into the closure to satisfy the 'static bound.
+    let result = tokio::task::spawn_blocking(move || {
+        let rule_refs: Vec<&crate::arm::ArmRule> = repo_local.iter().collect();
+        let custom_refs: Vec<&crate::project::CustomRule> = custom.iter().collect();
+        crate::onboard::scaffold_greenfield_blocking(&dest, &rule_refs, &custom_refs, &name_clone)
+    })
+    .await;
+
+    let scaffold = match result {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return Json(serde_json::json!({ "ok": false, "message": format!("{e}") }));
+        }
+        Err(e) => {
+            return Json(serde_json::json!({ "ok": false, "message": format!("scaffold task: {e}") }));
+        }
+    };
+
+    // Mark the new repo as onboarded in the active project (creating one if needed
+    // so the name appears in the repos list and the onboarded badge lights up).
+    let repo_label = name.clone();
+    let pid = match state.projects.active() {
+        Some(p) => p.id,
+        None => match state.projects.create(&repo_label, vec![repo_label.clone()]) {
+            Some(p) => p.id,
+            None => {
+                // Project store unavailable — continue anyway; the scaffold itself succeeded.
+                return Json(serde_json::json!({
+                    "ok": true,
+                    "path": scaffold.path,
+                    "files_written": scaffold.files_written,
+                    "commit_sha": scaffold.commit_sha,
+                    "message": scaffold.message,
+                }));
+            }
+        },
+    };
+    state.projects.update(&pid, |p| {
+        p.mark_onboarded(&[repo_label.clone()]);
+    });
+
+    // Record the scaffolded dir as the repo's local path override so subsequent
+    // scan/apply operations resolve it correctly without a workspace root.
+    let path_clone = scaffold.path.clone();
+    state.settings.set_repo_path(&repo_label, Some(path_clone));
+
+    Json(serde_json::json!({
+        "ok": true,
+        "path": scaffold.path,
+        "files_written": scaffold.files_written,
+        "commit_sha": scaffold.commit_sha,
+        "message": scaffold.message,
+    }))
 }
 
 /// Classify the armed rules by scope and save them to the active project (creating
