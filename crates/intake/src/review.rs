@@ -406,7 +406,17 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         }
         let envelope: serde_json::Value =
             serde_json::from_slice(&out.stdout).map_err(ReviewError::ParseEnvelope)?;
-        let result_text = envelope["result"].as_str().unwrap_or_default();
+        // The `result` field must be a JSON string. A missing or non-string value
+        // means the CLI returned an unexpected envelope shape; surface that clearly
+        // rather than silently passing an empty string to parse_review (which
+        // would produce a confusing "no JSON object found" error instead).
+        let result_text = envelope["result"].as_str().ok_or_else(|| {
+            ReviewError::ParseReview(format!(
+                "`claude -p` envelope is missing the `result` string field; \
+                 got: {}",
+                truncate(&envelope.to_string(), 200)
+            ))
+        })?;
         Self::parse_review(result_text)
     }
 }
@@ -732,5 +742,61 @@ mod tests {
     fn parse_review_rejects_non_json() {
         let err = ClaudeRefinementReviewer::parse_review("nope").unwrap_err();
         assert!(matches!(err, ReviewError::ParseReview(_)));
+    }
+
+    // ─── envelope result-field extraction error paths ─────────────────────────
+    //
+    // These tests prove that a malformed or missing `result` field in the
+    // `claude -p` JSON envelope produces a typed ParseReview error with a helpful
+    // message instead of silently proceeding with an empty string.
+
+    #[test]
+    fn parse_review_rejects_empty_string() {
+        // An empty result string cannot contain a JSON object.
+        let err = ClaudeRefinementReviewer::parse_review("").unwrap_err();
+        assert!(
+            matches!(err, ReviewError::ParseReview(_)),
+            "empty result must yield ParseReview, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no JSON object"),
+            "error message must say no JSON object found: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_review_tolerates_missing_fields_because_all_are_optional() {
+        // RefinementReview has all fields optional (#[serde(default)]), so a JSON
+        // object with unknown keys parses to the zero-value review. This is intentional:
+        // the model may include extra keys we do not recognize, and we must not reject
+        // a review that is structurally valid.
+        let review =
+            ClaudeRefinementReviewer::parse_review(r#"{"totally_wrong": 42}"#).unwrap();
+        assert_eq!(review.confidence.value(), 0, "unrecognized keys yield zero confidence");
+        assert!(review.questions.is_empty());
+    }
+
+    #[test]
+    fn parse_review_rejects_plain_prose() {
+        // The model returned prose instead of JSON.
+        let err =
+            ClaudeRefinementReviewer::parse_review("I have reviewed the stories.").unwrap_err();
+        assert!(
+            matches!(err, ReviewError::ParseReview(_)),
+            "prose response must yield ParseReview, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_review_of_json_array_extracts_inner_object_if_present() {
+        // extract_json_object finds the first `{...}` span even inside an array; the
+        // inner object parses as a zero-value review. Document the behavior rather than
+        // asserting an error (a JSON array from the model is unexpected but not a panic).
+        let result =
+            ClaudeRefinementReviewer::parse_review(r#"[{"confidence":42}]"#);
+        // The inner `{"confidence":42}` is extracted and parsed (all other fields default).
+        let review = result.expect("inner object inside array should parse");
+        assert_eq!(review.confidence.value(), 42);
     }
 }

@@ -731,7 +731,17 @@ impl LeadEngineer for ClaudeLeadEngineer {
 
         let envelope: serde_json::Value =
             serde_json::from_slice(&out.stdout).map_err(LeadEngineerError::ParseEnvelope)?;
-        let result_text = envelope["result"].as_str().unwrap_or_default();
+        // The `result` field must be a JSON string. A missing or non-string value
+        // means the CLI returned an unexpected envelope shape; surface that clearly
+        // rather than silently passing an empty string to parse_response (which
+        // would produce a confusing "no JSON object found" error instead).
+        let result_text = envelope["result"].as_str().ok_or_else(|| {
+            LeadEngineerError::ParsePlan(format!(
+                "`claude -p` envelope is missing the `result` string field; \
+                 got: {}",
+                truncate(&envelope.to_string(), 200)
+            ))
+        })?;
         Self::parse_response(result_text)
     }
 }
@@ -1031,5 +1041,94 @@ mod tests {
         assert_eq!(response.resolved_count(), 1);
         assert_eq!(response.open_count(), 1);
         assert!(!response.checklist_complete());
+    }
+
+    // ─── envelope result-field extraction error paths ─────────────────────────
+    //
+    // These tests prove that a malformed or missing `result` field in the
+    // `claude -p` JSON envelope produces a typed ParsePlan error with a helpful
+    // message instead of silently proceeding with an empty string.
+
+    #[test]
+    fn parse_response_rejects_empty_string() {
+        // An empty result string cannot contain a JSON object.
+        let err = ClaudeLeadEngineer::parse_response("").unwrap_err();
+        assert!(
+            matches!(err, LeadEngineerError::ParsePlan(_)),
+            "empty result must yield ParsePlan, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no JSON object"),
+            "error message must say no JSON object found: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_response_rejects_structurally_invalid_json() {
+        // The model returned JSON that cannot be deserialized into ModelOutput.
+        let err = ClaudeLeadEngineer::parse_response(r#"{"not_a_plan": true}"#).unwrap_err();
+        // Should fail at the serde step (missing required fields like app_name).
+        assert!(
+            matches!(err, LeadEngineerError::ParsePlan(_)),
+            "invalid model output must yield ParsePlan, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_response_rejects_clarification_with_no_questions() {
+        // needs_clarification=true but questions=[]: the model violated its contract.
+        let raw = r#"{
+            "app_name": "x",
+            "summary": "y",
+            "needs_clarification": true,
+            "questions": [],
+            "checklist": [],
+            "confidence": 30,
+            "suggestions": [],
+            "verdict": {"verdict": "proceed"},
+            "tasks": []
+        }"#;
+        let err = ClaudeLeadEngineer::parse_response(raw).unwrap_err();
+        assert!(
+            matches!(err, LeadEngineerError::ParsePlan(_)),
+            "clarification with no questions must yield ParsePlan: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no questions"),
+            "error must mention missing questions: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_response_rejects_proceed_verdict_with_zero_tasks_and_no_clarification() {
+        // proceed verdict + no clarification + empty tasks is a model contract violation.
+        // The code path: needs_clarification=false AND tasks.is_empty() -> enters the
+        // clarification branch but questions=[] -> error "no questions". Then the
+        // `parse_plan` back-compat path also finds an empty task list and errors
+        // "zero tasks". Either error is a ParsePlan.
+        let raw = r#"{
+            "app_name": "x",
+            "summary": "y",
+            "needs_clarification": false,
+            "questions": [],
+            "checklist": [],
+            "confidence": 85,
+            "suggestions": [],
+            "verdict": {"verdict": "proceed"},
+            "tasks": []
+        }"#;
+        let err = ClaudeLeadEngineer::parse_response(raw).unwrap_err();
+        assert!(
+            matches!(err, LeadEngineerError::ParsePlan(_)),
+            "proceed + zero tasks + no clarification must yield ParsePlan: {err:?}"
+        );
+        // The model returned zero tasks (empty plan); the error must name the problem.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tasks") || msg.contains("questions") || msg.contains("plan"),
+            "error must identify the model contract violation: {msg}"
+        );
     }
 }
