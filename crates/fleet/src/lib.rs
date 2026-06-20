@@ -279,10 +279,27 @@ pub struct BuildOutcome {
 /// here (the agents make the model calls behind the injected drivers).
 ///
 /// The crate name used for the generated worktree is `camerata_app`.
+///
+/// Uses the default loop-guard ceiling of `1` bounce-and-revise pass per stage.
+/// To raise it, call [`build_from_plan_with_iterations`].
 pub async fn build_from_plan(
     plan: &Plan,
     root: &Path,
     gateway_bin: &Path,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_iterations(plan, root, gateway_bin, 1, on_event).await
+}
+
+/// Like [`build_from_plan`], but caps each stage's bounce-and-revise loop at
+/// `max_iterations` passes (the loop guard, #29). `1` reproduces the default
+/// single-bounce behaviour exactly; higher values let a stuck stage retry the
+/// revise pass before its residual violations are surfaced for human review.
+pub async fn build_from_plan_with_iterations(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    max_iterations: usize,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
@@ -335,7 +352,7 @@ pub async fn build_from_plan(
     // ── Run the governed fleet with the REAL RustCheckRunner ─────────────────
     let checks = RustCheckRunner::new();
     let fleet = FleetCoordinator::new(&checks, &worktree);
-    let report = fleet.run(&stages).await?;
+    let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
     // ── Emit per-stage finished events ───────────────────────────────────────
     let mut all_agents_ran = true;

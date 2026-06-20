@@ -11,17 +11,22 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use camerata_fleet::{build_from_plan, locate_gateway_bin, BuildEvent};
+use camerata_fleet::{build_from_plan_with_iterations, locate_gateway_bin, BuildEvent};
 use camerata_intake::{Plan, PlanTask, TaskKind};
 
 use crate::run::{GateEvent, RunStatus, RunStore};
 
 /// Run a real governed fleet for a story and record its progress into the run.
+///
+/// `max_iterations` is the loop-guard ceiling (#29): the maximum bounce-and-revise
+/// passes a dirty stage may take before its residual violations are surfaced. It
+/// comes from the active project's setting (default `1`).
 pub async fn execute_live_run(
     store: RunStore,
     run_id: String,
     story_title: String,
     story_desc: String,
+    max_iterations: usize,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -63,7 +68,7 @@ pub async fn execute_live_run(
     let rid_cb = run_id.clone();
     let seq = AtomicUsize::new(0);
 
-    let result = build_from_plan(&plan, &root, &gateway_bin, &move |event| {
+    let result = build_from_plan_with_iterations(&plan, &root, &gateway_bin, max_iterations, &move |event| {
         let n = seq.fetch_add(1, Ordering::SeqCst) + 1;
         match event {
             BuildEvent::Scaffolding => store_cb.push_event(

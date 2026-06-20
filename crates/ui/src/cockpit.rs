@@ -101,6 +101,15 @@ struct ProjectView {
     /// Repos that have been onboarded (`owner/repo`). A repo not here is "not yet onboarded".
     #[serde(default)]
     onboarded: Vec<String>,
+    /// Max developer→checker bounce-and-revise iterations a stage may take before the
+    /// fleet stops the loop and raises the outstanding violations for human review (#29).
+    /// Defaults to 1.
+    #[serde(default = "default_max_iterations")]
+    max_iterations: usize,
+}
+
+fn default_max_iterations() -> usize {
+    1
 }
 
 async fn fetch_projects() -> Option<Vec<ProjectView>> {
@@ -139,6 +148,19 @@ async fn set_active_project(id: &str) -> bool {
     reqwest::Client::new()
         .post(format!("{}/api/projects/active", crate::BFF_URL))
         .json(&serde_json::json!({ "id": id }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Update a project's loop-guard ceiling (#29): the max developer→checker
+/// bounce-and-revise iterations a stage may take before the fleet stops and
+/// raises the outstanding violations for human review.
+async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/max-iterations", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "max_iterations": max_iterations }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -2463,6 +2485,110 @@ fn GateSelfCheck() -> Element {
     }
 }
 
+/// The loop-guard control (#29): adjust the active project's max developer→checker
+/// bounce-and-revise iterations. Reads the current value from the active project and
+/// writes it back via `POST /api/projects/:id/max-iterations`. On reaching the cap a
+/// dirty stage stops and surfaces its outstanding violations for human review; the
+/// shipped default is 1 (a single bounce).
+#[component]
+fn LoopGuardControl() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // Fetch the active project so we know the project id + current ceiling.
+    let active = use_resource(fetch_active_project);
+    // Local edit state, seeded once from the fetched value.
+    let mut value = use_signal(|| 1usize);
+    let mut seeded = use_signal(|| false);
+    let mut saving = use_signal(|| false);
+
+    let proj = active.read().clone().flatten();
+    if let Some(p) = &proj {
+        if !seeded() {
+            value.set(p.max_iterations.max(1));
+            seeded.set(true);
+        }
+    }
+
+    let Some(project) = proj else {
+        return rsx! {
+            div { class: "loop-guard",
+                span { class: "loop-guard-title", "Loop guard" }
+                span { class: "loop-guard-sub", "Create or select a project to configure the bounce-and-revise ceiling." }
+            }
+        };
+    };
+    let pid = project.id.clone();
+
+    rsx! {
+        div { class: "loop-guard",
+            div { class: "loop-guard-head",
+                span { class: "loop-guard-title", "Loop guard — max revise iterations" }
+                span { class: "loop-guard-sub",
+                    "How many developer→checker bounce-and-revise passes a dirty stage may take before the loop stops and the outstanding violations are raised for review. Default: 1."
+                }
+            }
+            div { class: "loop-guard-row",
+                button {
+                    class: "btn-edit-sm",
+                    disabled: value() <= 1 || saving(),
+                    onclick: move |_| {
+                        let v = value().saturating_sub(1).max(1);
+                        value.set(v);
+                    },
+                    "−"
+                }
+                input {
+                    class: "loop-guard-input",
+                    r#type: "number",
+                    min: "1",
+                    max: "20",
+                    value: "{value}",
+                    oninput: move |e| {
+                        if let Ok(n) = e.value().parse::<usize>() {
+                            value.set(n.clamp(1, 20));
+                        }
+                    },
+                }
+                button {
+                    class: "btn-edit-sm",
+                    disabled: value() >= 20 || saving(),
+                    onclick: move |_| {
+                        let v = (value() + 1).min(20);
+                        value.set(v);
+                    },
+                    "+"
+                }
+                button {
+                    class: "btn-edit-sm loop-guard-save",
+                    disabled: saving(),
+                    onclick: move |_| {
+                        let pid = pid.clone();
+                        let n = value();
+                        saving.set(true);
+                        spawn(async move {
+                            let ok = set_max_iterations(&pid, n).await;
+                            saving.set(false);
+                            if ok {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    &format!("Loop guard set to {n} iteration(s)."),
+                                );
+                            } else {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    "Could not update the loop guard.",
+                                );
+                            }
+                        });
+                    },
+                    if saving() { "Saving…" } else { "Save" }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn CockpitApp() -> Element {
     // Which cockpit view (control surface vs routines). Declared first so all hooks
@@ -2724,6 +2850,10 @@ pub fn CockpitApp() -> Element {
                             }
 
                             div { class: "stage-panel",
+                                // Loop-guard control (#29): adjust the project's max
+                                // bounce-and-revise iterations before a run.
+                                LoopGuardControl {}
+
                                 // Run control: start a governed run for this story and
                                 // poll it to completion, streaming the real gate verdicts.
                                 {

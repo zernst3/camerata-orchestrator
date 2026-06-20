@@ -2254,4 +2254,11 @@ html, body {
 .gate-selfcheck-verdict.go .gate-selfcheck-badge { color: #2f7d3f; }
 .gate-selfcheck-verdict.nogo .gate-selfcheck-badge { color: #c0392b; }
 .gate-selfcheck-lines { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--ink-soft); }
+.loop-guard { margin: 0 0 12px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.loop-guard-head { display: flex; flex-direction: column; gap: 2px; }
+.loop-guard-title { font-weight: 700; font-size: 13px; color: var(--ink); }
+.loop-guard-sub { font-size: 12px; color: var(--ink-soft); }
+.loop-guard-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.loop-guard-input { width: 64px; text-align: center; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 13px; }
+.loop-guard-save { margin-left: 4px; }
 "#;
