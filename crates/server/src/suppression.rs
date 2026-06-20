@@ -651,4 +651,247 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].rule_id, "B");
     }
+
+    #[test]
+    fn fingerprint_whitespace_insensitivity_edge_cases() {
+        // Edge case: various forms of whitespace (tabs, multiple spaces, newlines).
+        // Fingerprint should normalize all to single spaces.
+        let a = fingerprint("R", "let x  =  1;");
+        let b = fingerprint("R", "let x = 1;");
+        assert_eq!(a, b, "double spaces normalize");
+
+        let c = fingerprint("R", "fn\tfoo\t()\t{}\n");
+        let d = fingerprint("R", "fn foo () {}");
+        assert_eq!(c, d, "tabs and newlines normalize to spaces");
+
+        // Leading/trailing whitespace on the snippet is also collapsed.
+        let e = fingerprint("R", "   code   ");
+        let f = fingerprint("R", "code");
+        assert_eq!(e, f, "leading/trailing whitespace removed");
+    }
+
+    #[test]
+    fn classify_one_inline_waiver_without_reason_is_not_suppression() {
+        // Edge case: inline waiver with no reason should NOT suppress the finding.
+        // The finding itself stays active, and the waiver becomes a violation
+        // (CAM-WAIVER-NEEDS-REASON).
+        let waivers = vec![InlineWaiver {
+            rule_id: "SEC-X".into(),
+            reason: None, // no reason
+            ticket: None,
+            path: "a.rs".into(),
+            line: 5,
+        }];
+        let finding = f("SEC-X", "a.rs", 5, "bad code");
+        let status = classify_one(&finding, &waivers, &Baseline::default());
+        assert_eq!(
+            status, Status::Active,
+            "waiver without reason does NOT suppress"
+        );
+    }
+
+    #[test]
+    fn baseline_fingerprint_content_changes_invalidate_suppression() {
+        // Edge case: baseline matches by fingerprint. Any edit to the offending
+        // code (even one character) flips the fingerprint and un-baselines it.
+        let snippet_original = "let key = \"abc123\";";
+        let snippet_edited = "let key = \"abc124\";";
+
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "SEC-X".into(),
+                path: "a.rs".into(),
+                fingerprint: fingerprint("SEC-X", snippet_original),
+                reason: "pre-existing".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
+
+        // Original snippet is suppressed.
+        let finding_orig = f("SEC-X", "a.rs", 1, snippet_original);
+        assert_eq!(
+            classify_one(&finding_orig, &[], &baseline),
+            Status::SuppressedBaseline
+        );
+
+        // Edited snippet is NOT suppressed (ratchet tightens).
+        let finding_edited = f("SEC-X", "a.rs", 1, snippet_edited);
+        assert_eq!(
+            classify_one(&finding_edited, &[], &baseline),
+            Status::Active
+        );
+    }
+
+    #[test]
+    fn parse_inline_waivers_reason_with_multiple_commas() {
+        // Edge case: reason can contain commas; only the last comma-separated
+        // token that looks like a ticket is extracted.
+        let src = "code(); // camerata:allow R -- reason, part1, JIRA-99, part2\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        // The ticket finder looks for the first match, so it will be JIRA-99.
+        assert_eq!(w[0].ticket.as_deref(), Some("JIRA-99"));
+    }
+
+    #[test]
+    fn inline_waiver_line_numbering_is_1_based() {
+        // Edge case: line numbers in inline waivers should be 1-based (human-friendly),
+        // not 0-based.
+        let src = "// line 1\ncode(); // camerata:allow R -- ok\n// line 3\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].line, 2, "second line is line 2 (1-based)");
+    }
+
+    #[test]
+    fn stale_detection_ignores_reasonless_waivers() {
+        // Edge case: stale_inline should only flag REASONED waivers as stale.
+        // Reasonless waivers are violations in their own right, not "stale" suppressions.
+        let waivers = vec![
+            InlineWaiver {
+                rule_id: "R".into(),
+                reason: Some("valid".into()),
+                ticket: None,
+                path: "a.rs".into(),
+                line: 1,
+            },
+            InlineWaiver {
+                rule_id: "R".into(),
+                reason: None, // reasonless (a violation, not a suppression)
+                ticket: None,
+                path: "a.rs".into(),
+                line: 2,
+            },
+        ];
+        let findings: Vec<FindingRef> = vec![]; // no findings
+        let stale = stale_inline(&waivers, &findings);
+        // Only the reasoned waiver on line 1 should be flagged as stale.
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].line, 1);
+    }
+
+    #[test]
+    fn registry_excludes_reasonless_waivers_from_suppression_records() {
+        // Edge case: registry rolls up suppressions. Reasonless waivers should NOT
+        // appear in the registry (they're violations, not suppressions).
+        let waivers = vec![
+            InlineWaiver {
+                rule_id: "R1".into(),
+                reason: Some("ok".into()),
+                ticket: None,
+                path: "a.rs".into(),
+                line: 1,
+            },
+            InlineWaiver {
+                rule_id: "R2".into(),
+                reason: None, // excluded from registry
+                ticket: None,
+                path: "a.rs".into(),
+                line: 2,
+            },
+        ];
+        let baseline = Baseline::default();
+        let findings = vec![f("R1", "a.rs", 1, "x")];
+        let reg = registry(&waivers, &baseline, &findings);
+
+        // Only one record (the reasoned waiver).
+        assert_eq!(reg.len(), 1);
+        assert_eq!(reg[0].rule_id, "R1");
+    }
+
+    #[test]
+    fn ticket_extraction_with_mixed_case_and_formats() {
+        // Edge case: ticket IDs must have uppercase prefix + separator + digits.
+        // Mixed-case or invalid formats should not match.
+        let src = "code(); // camerata:allow R -- reason, lowercase-123\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        // lowercase-123 has a lowercase prefix, so it's not a valid ticket.
+        assert!(w[0].ticket.is_none());
+
+        // Valid uppercase version.
+        let src2 = "code(); // camerata:allow R -- reason, VALID-123\n";
+        let w2 = parse_inline_waivers("a.rs", src2);
+        assert_eq!(w2[0].ticket.as_deref(), Some("VALID-123"));
+    }
+
+    #[test]
+    fn baseline_match_by_content_not_line_number() {
+        // Edge case: baseline suppresses by fingerprint (content), not line number.
+        // A finding on a completely different line with the same snippet is still suppressed.
+        let snippet = "dangerous_api_call();";
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "API-X".into(),
+                path: "a.rs".into(),
+                fingerprint: fingerprint("API-X", snippet),
+                reason: "pre-existing".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
+
+        // Same snippet on line 1 is suppressed.
+        assert_eq!(
+            classify_one(&f("API-X", "a.rs", 1, snippet), &[], &baseline),
+            Status::SuppressedBaseline
+        );
+
+        // Same snippet on line 999 (file edited, lines shifted) is STILL suppressed.
+        assert_eq!(
+            classify_one(&f("API-X", "a.rs", 999, snippet), &[], &baseline),
+            Status::SuppressedBaseline
+        );
+    }
+
+    #[test]
+    fn classify_one_baseline_does_not_suppress_different_rule() {
+        // Edge case: baseline suppresses by rule ID + fingerprint. A baseline
+        // entry for SEC-X does NOT suppress a finding on SEC-Y, even with the same snippet.
+        let snippet = "x = 1;";
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "SEC-X".into(),
+                path: "a.rs".into(),
+                fingerprint: fingerprint("SEC-X", snippet),
+                reason: "ok".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
+
+        // Finding on different rule is NOT suppressed.
+        let finding = f("SEC-Y", "a.rs", 1, snippet);
+        assert_eq!(
+            classify_one(&finding, &[], &baseline),
+            Status::Active
+        );
+    }
+
+    #[test]
+    fn is_ticket_edge_cases() {
+        // Internal function, but worth verifying edge cases.
+        // Valid tickets: uppercase prefix, separator (- or #), digits.
+        assert!(is_ticket("JIRA-123"));
+        assert!(is_ticket("GH#99"));
+        assert!(is_ticket("A-1"));
+        assert!(is_ticket("ABCD#9999"));
+
+        // Invalid: lowercase prefix.
+        assert!(!is_ticket("jira-123"));
+        // Invalid: no separator.
+        assert!(!is_ticket("JIRA123"));
+        // Invalid: separator at boundary.
+        assert!(!is_ticket("-123"));
+        assert!(!is_ticket("JIRA-"));
+        // Invalid: non-digit after separator.
+        assert!(!is_ticket("JIRA-abc"));
+    }
 }

@@ -541,4 +541,152 @@ mod tests {
         store.clear("proj-1");
         assert!(store.get("proj-1").is_none(), "clear drops the manifest");
     }
+
+    #[test]
+    fn partition_with_mixed_unchanged_and_changed_in_same_repo() {
+        // Test edge case: some files unchanged, some changed in the same partition.
+        // This ensures the partition correctly splits the set rather than treating
+        // the whole repo as changed if ANY file changed.
+        let files = vec![
+            file("a.rs", "code a"),
+            file("b.rs", "code b"),
+            file("c.rs", "code c"),
+        ];
+        let mut b = ManifestBuilder::new();
+        b.record_repo(
+            "me/api",
+            &files,
+            &[
+                finding("me/api", "a.rs", "ARCH-1"),
+                finding("me/api", "b.rs", "ARCH-2"),
+                finding("me/api", "c.rs", "ARCH-3"),
+            ],
+        );
+        let prior = b.finish();
+
+        // b.rs changes; a.rs and c.rs are identical.
+        let next = vec![
+            file("a.rs", "code a"),
+            file("b.rs", "code b CHANGED"),
+            file("c.rs", "code c"),
+        ];
+        let p = partition(Some(&prior), "me/api", &next);
+
+        assert_eq!(p.changed.len(), 1, "only b.rs is re-audited");
+        assert_eq!(p.changed[0].0, "b.rs");
+        assert_eq!(p.unchanged_count, 2, "a.rs and c.rs are unchanged");
+        assert_eq!(p.carried.len(), 2, "two findings carried forward");
+        let carried_paths: std::collections::HashSet<String> =
+            p.carried.iter().map(|f| f.path.clone()).collect();
+        assert!(carried_paths.contains("a.rs"));
+        assert!(carried_paths.contains("c.rs"));
+        assert!(!carried_paths.contains("b.rs"));
+    }
+
+    #[test]
+    fn partition_with_empty_file_list() {
+        // Edge case: current working tree has no files (e.g. after deletion).
+        let prior_files = vec![file("a.rs", "x"), file("b.rs", "y")];
+        let mut b = ManifestBuilder::new();
+        b.record_repo(
+            "me/api",
+            &prior_files,
+            &[
+                finding("me/api", "a.rs", "R1"),
+                finding("me/api", "b.rs", "R2"),
+            ],
+        );
+        let prior = b.finish();
+
+        // No files remain.
+        let p = partition(Some(&prior), "me/api", &[]);
+
+        assert_eq!(p.changed.len(), 0);
+        assert_eq!(p.unchanged_count, 0);
+        assert!(p.carried.is_empty(), "no files, no carried findings");
+        assert_eq!(p.total(), 0);
+    }
+
+    #[test]
+    fn rules_fingerprint_handles_multiple_repos_per_rule() {
+        // Edge case: a single rule bound to multiple repos. Fingerprint must be stable
+        // regardless of input order and repo order within the binding.
+        let a = rules_fingerprint(
+            [("ARCH-1", &["me/api".to_string(), "me/web".to_string()][..])].into_iter(),
+        );
+        // Reverse repo order in the binding.
+        let b = rules_fingerprint(
+            [("ARCH-1", &["me/web".to_string(), "me/api".to_string()][..])].into_iter(),
+        );
+        assert_eq!(a, b, "fingerprint must be stable regardless of repo order");
+    }
+
+    #[test]
+    fn manifest_builder_round_trip_with_multiple_repos() {
+        // Edge case: manifest records multiple repos in a single scan. Each repo
+        // has its own file set and findings; ensure they're all preserved.
+        let files_api = vec![file("a.rs", "x"), file("b.rs", "y")];
+        let files_web = vec![file("c.ts", "z"), file("d.tsx", "w")];
+
+        let mut b = ManifestBuilder::new().with_rules_fingerprint("RULES-V1".to_string());
+        b.record_repo(
+            "me/api",
+            &files_api,
+            &[
+                finding("me/api", "a.rs", "RUST-1"),
+                finding("me/api", "b.rs", "RUST-2"),
+            ],
+        );
+        b.record_repo(
+            "me/web",
+            &files_web,
+            &[
+                finding("me/web", "c.ts", "REACT-1"),
+                finding("me/web", "d.tsx", "REACT-2"),
+            ],
+        );
+        let m = b.finish();
+
+        // Verify both repos are recorded.
+        assert_eq!(m.files.len(), 2);
+        assert_eq!(m.files["me/api"].len(), 2);
+        assert_eq!(m.files["me/web"].len(), 2);
+        // Verify findings are separated by repo.
+        assert_eq!(
+            m.findings.iter().filter(|f| f.repo == "me/api").count(),
+            2
+        );
+        assert_eq!(
+            m.findings.iter().filter(|f| f.repo == "me/web").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn partition_rejects_stale_version_manifest() {
+        // Edge case: version mismatch (e.g. upgrade happened). Should treat as no cache.
+        let files = vec![file("a.rs", "unchanged")];
+        let stale = ScanManifest {
+            version: 99, // bogus future version
+            rules_fingerprint: "".to_string(),
+            files: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "me/api".to_string(),
+                    {
+                        let mut inner = BTreeMap::new();
+                        inner.insert("a.rs".to_string(), content_fingerprint("unchanged"));
+                        inner
+                    },
+                );
+                m
+            },
+            findings: vec![],
+        };
+
+        let p = partition(Some(&stale), "me/api", &files);
+        assert_eq!(p.changed.len(), 1, "stale version forces full scan");
+        assert_eq!(p.unchanged_count, 0);
+        assert!(p.carried.is_empty());
+    }
 }

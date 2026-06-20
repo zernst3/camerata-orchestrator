@@ -319,4 +319,147 @@ mod tests {
         );
         assert_eq!(plan.full_chars, 1000);
     }
+
+    #[test]
+    fn rule_id_with_unusual_separators_and_casing() {
+        // Edge case: rule IDs can use dashes, underscores, or colons as separators.
+        // Ensure all variants are handled correctly and case-insensitively.
+        assert_eq!(
+            rule_scope("rust-something-1"),
+            Scope::Language("rust"),
+            "lowercase prefix with dashes"
+        );
+        assert_eq!(
+            rule_scope("RUST_SOMETHING_1"),
+            Scope::Language("rust"),
+            "uppercase prefix with underscores"
+        );
+        assert_eq!(
+            rule_scope("Rust:Something:1"),
+            Scope::Language("rust"),
+            "mixed case prefix with colons (should uppercase and match)"
+        );
+        assert_eq!(
+            rule_scope("RuSt-WeirdCase-1"),
+            Scope::Language("rust"),
+            "mixed case normalized to uppercase"
+        );
+    }
+
+    #[test]
+    fn polyglot_with_unknown_language_files() {
+        // Edge case: repo contains files in unknown languages (e.g., .md, .json, .sql).
+        // A RUST-* rule must still NOT match .sql or .md, but Scope::All must match all.
+        let files = vec![
+            f("a.rs", 100),
+            f("b.md", 50),
+            f("c.sql", 75),
+            f("d.json", 25),
+        ];
+
+        let rust_rule = vec![("RUST-1".to_string(), "d".to_string())];
+        let arch_rule = vec![("ARCH-1".to_string(), "d".to_string())];
+
+        // RUST-1 sees only the .rs file.
+        let plan1 = plan_routes(&rust_rule, &files);
+        assert_eq!(plan1.routed_chars, 100);
+
+        // ARCH-1 sees ALL files (even unknown languages).
+        let plan2 = plan_routes(&arch_rule, &files);
+        assert_eq!(plan2.routed_chars, 250); // 100 + 50 + 75 + 25
+
+        // Files_for_rule filters correctly.
+        let rust_files = files_for_rule("RUST-1", &files);
+        assert_eq!(rust_files.len(), 1);
+        assert_eq!(rust_files[0].0, "a.rs");
+
+        let arch_files = files_for_rule("ARCH-1", &files);
+        assert_eq!(arch_files.len(), 4);
+    }
+
+    #[test]
+    fn plan_routes_with_all_cross_cutting_set() {
+        // Edge case: all rules are cross-cutting (Scope::All). No language pruning.
+        // Saved fraction should be exactly 0.0.
+        let files = vec![f("a.rs", 200), f("b.py", 300)];
+        let rules = vec![
+            ("ARCH-1".to_string(), "d".to_string()),
+            ("SEC-1".to_string(), "d".to_string()),
+            ("API-1".to_string(), "d".to_string()),
+        ];
+        let plan = plan_routes(&rules, &files);
+
+        // Full: 3 rules × 500 chars = 1500.
+        assert_eq!(plan.full_chars, 1500);
+        // Routed: each rule sees all 500 chars = 1500.
+        assert_eq!(plan.routed_chars, 1500);
+        // No savings.
+        assert_eq!(plan.saved_fraction(), 0.0);
+        // Only one group (All scope).
+        assert_eq!(plan.groups.len(), 1);
+        assert_eq!(plan.groups[0].scope, Scope::All);
+        assert_eq!(plan.groups[0].rules.len(), 3);
+    }
+
+    #[test]
+    fn plan_routes_deterministic_group_ordering() {
+        // Edge case: multiple language-scoped groups should be ordered deterministically
+        // (languages alphabetically, then All last). This prevents flaky test output.
+        let files = vec![f("a.rs", 100), f("b.ts", 100), f("c.py", 100)];
+        let rules = vec![
+            ("REACT-1".to_string(), "d".to_string()), // web
+            ("ARCH-1".to_string(), "d".to_string()),  // All
+            ("PY-1".to_string(), "d".to_string()),    // python
+            ("RUST-1".to_string(), "d".to_string()),  // rust
+        ];
+        let plan = plan_routes(&rules, &files);
+
+        // Should have 4 groups (rust, python, web, All).
+        assert_eq!(plan.groups.len(), 4);
+
+        // Verify order: languages alphabetically (python, rust, web), then All.
+        match &plan.groups[0].scope {
+            Scope::Language(l) => assert_eq!(*l, "python"),
+            _ => panic!("first group should be python"),
+        }
+        match &plan.groups[1].scope {
+            Scope::Language(l) => assert_eq!(*l, "rust"),
+            _ => panic!("second group should be rust"),
+        }
+        match &plan.groups[2].scope {
+            Scope::Language(l) => assert_eq!(*l, "web"),
+            _ => panic!("third group should be web"),
+        }
+        assert_eq!(plan.groups[3].scope, Scope::All);
+    }
+
+    #[test]
+    fn empty_file_list_with_cross_cutting_rules() {
+        // Edge case: no files to audit, but cross-cutting rules. Should have 0 routed chars.
+        let files: Vec<(String, String)> = vec![];
+        let rules = vec![
+            ("ARCH-1".to_string(), "d".to_string()),
+            ("SEC-1".to_string(), "d".to_string()),
+        ];
+        let plan = plan_routes(&rules, &files);
+
+        assert_eq!(plan.full_chars, 0);
+        assert_eq!(plan.routed_chars, 0);
+        // Saved fraction on empty set should be 0.0 (safe default).
+        assert_eq!(plan.saved_fraction(), 0.0);
+    }
+
+    #[test]
+    fn rule_scope_detects_all_recognized_language_prefixes() {
+        // Spot check: ensure a sample of prefixes are recognized.
+        // Full list is in LANGUAGE_PREFIXES; this verifies the leading ones.
+        assert_eq!(rule_scope("SEAORM-QUERY-1"), Scope::Language("rust"));
+        assert_eq!(rule_scope("LEPTOS-COMPONENT-1"), Scope::Language("rust"));
+        assert_eq!(rule_scope("DJANGO-SETTINGS-1"), Scope::Language("python"));
+        assert_eq!(rule_scope("FASTAPI-ROUTE-1"), Scope::Language("python"));
+        assert_eq!(rule_scope("NEXTJS-LAYOUT-1"), Scope::Language("web"));
+        assert_eq!(rule_scope("ANGULAR-COMPONENT-1"), Scope::Language("web"));
+        assert_eq!(rule_scope("SPRING-BOOT-1"), Scope::Language("java"));
+        assert_eq!(rule_scope("DOTNET-ASYNC-1"), Scope::Language("csharp"));
+    }
 }
