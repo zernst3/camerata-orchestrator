@@ -33,6 +33,7 @@ pub mod llm;
 pub mod provider;
 pub mod routine;
 pub mod run;
+pub mod scan_cache;
 pub mod schedule;
 pub mod settings;
 pub mod suppression;

@@ -120,7 +120,9 @@ pub struct SuppressionRecord {
 
 /// A stable, dependency-free FNV-1a 64-bit hash. Stable across machines and Rust
 /// versions (unlike `DefaultHasher`), which a COMMITTED baseline file requires.
-fn fnv1a(s: &str) -> u64 {
+/// `pub(crate)` so the scan cache can fingerprint whole-file content with the same
+/// stable hash the suppression baseline uses.
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
         h ^= b as u64;
