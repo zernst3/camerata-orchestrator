@@ -1,0 +1,24 @@
+id = "PYTHON-NO-BLOCKING-IO-ASYNC-1"
+title = "Async handlers never call blocking I/O on the event loop"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is blocking I/O handled inside async functions?"
+default = "async-or-offload"
+why = "An `async def` shares one event-loop thread with every other coroutine in the process. A synchronous call inside it (a blocking DB driver, `requests.get`, `time.sleep`, a synchronous file read, or a CPU-bound loop) stalls the entire loop: every other in-flight request freezes until that call returns, collapsing the concurrency the async stack exists to provide. The fix is to use an async-native client for the I/O, or, when only a sync API exists, to offload the call to a thread or process pool (`asyncio.to_thread` / `run_in_executor`) so the loop stays free. Writing blocking calls directly in async handlers is the most common async-Python performance bug precisely because it works fine under one user and silently destroys throughput under load, with no error to point at."
+
+[[option]]
+id = "async-or-offload"
+label = "use async-native I/O or offload blocking calls off the loop"
+directive = "Inside any `async def` that runs on the event loop, all I/O uses async-native clients (an async DB driver, an async HTTP client, `asyncio.sleep`). When only a synchronous API is available, the blocking call is offloaded with `asyncio.to_thread` or a run-in-executor so it never runs on the loop thread. Blocking DB drivers, `requests`, `time.sleep`, and synchronous file I/O are forbidden directly inside async handlers."
+why = "The adopted default. Keeping the loop thread free preserves the concurrency the async stack is built to provide."
+
+[[option]]
+id = "blocking-in-async"
+label = "allow synchronous I/O directly in async handlers"
+directive = "Async handlers may call synchronous I/O directly when an async client is inconvenient, accepting that the call runs on the event-loop thread."
+why = "Simpler to write but stalls the entire event loop under load, collapsing throughput with no error to diagnose."

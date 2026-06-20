@@ -1,0 +1,24 @@
+id = "PYTHON-SERVICE-LAYER-1"
+title = "Business logic lives in a service layer, not in views or route handlers"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does business logic live relative to web views and route handlers?"
+default = "service-layer"
+why = "A Django view or a Flask/FastAPI route handler exists to translate HTTP into a call and a call's result back into HTTP. When business logic lives inside it, that logic becomes reachable only through the request cycle: it cannot be invoked from a management command, a background task, or another endpoint without faking a request, and it cannot be unit-tested without the web stack. Pushing the logic into a service layer that takes plain arguments and returns plain values or domain objects makes it callable from anywhere and testable in isolation, and it keeps the handler thin enough that what it does is obvious at a glance. Fat handlers also tend to duplicate the same rule across endpoints, because there is no shared place to put it; a service layer gives that rule one home. The handler stays responsible only for parsing input, calling the service, and shaping the response."
+
+[[option]]
+id = "service-layer"
+label = "keep handlers thin; business logic in a service layer"
+directive = "Views and route handlers only parse and validate input, call a service-layer function, and shape the response. All business rules, multi-step workflows, and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks, and other endpoints and unit-testable without the web stack."
+why = "The adopted default. A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
+
+[[option]]
+id = "logic-in-views"
+label = "put business logic directly in views/handlers"
+directive = "Business rules and persistence orchestration are written inside view functions or route handlers alongside the HTTP handling."
+why = "Ties the logic to the request cycle: it cannot be reused outside HTTP or unit-tested without the web stack, and rules get duplicated across endpoints."

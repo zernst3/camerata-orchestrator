@@ -1,0 +1,25 @@
+id = "PYTHON-ORM-EAGER-LOAD-1"
+title = "ORM relationships accessed in loops are eager-loaded; no N+1"
+tag = "stack"
+domain = "python"
+layer = "library"
+enforcement = "mechanical"
+default = true
+qualifies = "Prose check: a query-count assertion exercises each list-returning code path and fails when round-trips grow with result-set size. The realistic mechanism for SQLAlchemy is a per-test query counter (an `after_cursor_execute` event listener counting statements, or a strict-loading / `raiseload` mode that raises on lazy access) plus review for relationship access inside a loop. Conformance holds when such a query-count guard runs in CI and a lazy-loaded relationship accessed in a loop fails it; it fails when no per-path query-count check exists and N+1 patterns merge unnoticed."
+
+[decision]
+question = "How are related ORM rows loaded when iterating a result set?"
+default = "eager-load"
+why = "An ORM relationship configured for lazy loading issues a fresh query the first time each parent's attribute is touched. Inside a loop over N parents that means N additional queries on top of the one that fetched the list, the textbook N+1 pattern. It is invisible in a unit test with five rows and degrades by orders of magnitude as production data grows, surfacing only as latency. Declaring the load strategy explicitly (`selectinload` / `joinedload` in SQLAlchemy, `select_related` / `prefetch_related` in Django) collapses those N queries into one or two batched round-trips. Relying on lazy loading and hoping the data stays small is how N+1 ships; an explicit eager-load at the query site, plus a query-count guard in tests, prevents it structurally."
+
+[[option]]
+id = "eager-load"
+label = "eager-load related rows in batched queries"
+directive = "Any relationship traversed while iterating a collection is eager-loaded at the query site with a batching strategy (`selectinload` / `joinedload` for SQLAlchemy, `select_related` / `prefetch_related` for the Django ORM), so the related rows arrive in one or two queries regardless of result-set size. Iterating a list and touching a lazy relationship per item is banned. A query-count assertion guards the list-returning paths in CI."
+why = "The adopted default. Batched eager-loading keeps round-trips constant as data grows; N+1 access causes 10-100x slowdowns invisible at small sizes."
+
+[[option]]
+id = "lazy-load-default"
+label = "rely on lazy loading and per-item relationship access"
+directive = "Relationships keep the default lazy-load behavior, and code accesses related rows per item inside loops as needed."
+why = "Simpler at the call site but reintroduces N+1: one query per item, fine in tests, orders of magnitude slower in production."

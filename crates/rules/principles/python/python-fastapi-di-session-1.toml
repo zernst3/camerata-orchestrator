@@ -1,0 +1,30 @@
+id = "PYTHON-FASTAPI-DI-SESSION-1"
+title = "Database sessions are dependency-injected with a per-request lifecycle"
+tag = "stack"
+domain = "python:fastapi"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How do FastAPI path operations obtain a database session?"
+default = "inject-per-request-session"
+why = "A path operation that opens its own session, or pulls one from a module-level global, ties request handling to a specific session lifecycle and makes cleanup the handler's manual responsibility, so an early return or an exception leaks the connection back into the pool in a dirty state. FastAPI's dependency system solves exactly this: a `Depends`-injected session created by a generator dependency is opened before the handler runs and closed (and rolled back on error) when it finishes, for every request, automatically. It also makes the session trivially overridable in tests via `app.dependency_overrides`, so handlers can be exercised against a transactional test session without touching the real database. Constructing sessions inside handlers couples every handler to the engine and reinvents lifecycle management at each call site; a global session is worse still, because sessions are not safe to share across concurrent requests."
+
+[[option]]
+id = "inject-per-request-session"
+label = "inject a per-request session via Depends"
+directive = "Path operations receive their database session through a `Depends`-injected dependency that yields a session scoped to the single request and guarantees close (and rollback-on-error) afterward. Handlers never construct a session, open a connection, or read a module-level session global. The session dependency is overridable in tests through `app.dependency_overrides` so handlers run against a transactional test session."
+why = "The adopted default. A dependency-injected per-request session guarantees cleanup automatically and makes handlers testable in isolation."
+
+[[option]]
+id = "session-in-handler"
+label = "construct a session inside each handler"
+directive = "Each path operation opens and closes its own database session in the handler body, managing the lifecycle manually."
+why = "Couples every handler to the engine, reinvents lifecycle management per site, and leaks connections on early return or exception."
+
+[[option]]
+id = "global-session"
+label = "share a module-level global session"
+directive = "A single module-level session object is shared across requests and imported wherever a session is needed."
+why = "Sessions are not safe to share across concurrent requests; a global session produces cross-request data corruption under load."

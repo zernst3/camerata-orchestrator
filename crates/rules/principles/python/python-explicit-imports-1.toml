@@ -1,0 +1,24 @@
+id = "PYTHON-EXPLICIT-IMPORTS-1"
+title = "Imports are explicit and module boundaries are intentional"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "prose"
+default = true
+
+[decision]
+question = "How are imports and module boundaries managed?"
+default = "explicit-imports"
+why = "A wildcard `from module import *` pulls an unknown set of names into the current namespace, so a reader cannot tell where any given name came from, a static checker cannot resolve it reliably, and a new export in the source module can silently shadow a local name. Explicit imports name exactly what is used, which makes every symbol's origin obvious, keeps tooling accurate, and turns an unused import into a removable, lint-detectable fact. Beyond the import line, module boundaries are a design decision: a package should expose a deliberate public surface and keep its internals private (by convention via leading underscores and a curated `__init__`), so that what other modules depend on is intentional rather than whatever happened to be importable. This is philosophy, surfaced as agent context rather than a hard gate, because the right boundary is judgment, but the wildcard-import prohibition within it is concrete."
+
+[[option]]
+id = "explicit-imports"
+label = "explicit imports; intentional, curated module surface"
+directive = "Imports name the specific symbols (or the module) they use; `from module import *` is avoided. Each package exposes a deliberate public surface and keeps internals private by convention, so cross-module dependencies are on intended exports rather than on whatever is importable. Treat module boundaries as a design choice, not an accident of file layout."
+why = "The adopted default. Explicit imports keep symbol origins obvious and tooling accurate; a curated surface makes dependencies intentional."
+
+[[option]]
+id = "permissive-imports"
+label = "allow wildcard imports and implicit surface"
+directive = "Wildcard imports are permitted and modules expose whatever is defined at the top level as their de facto public surface."
+why = "Convenient but obscures where names come from, defeats static tooling, and lets new exports silently shadow local names."

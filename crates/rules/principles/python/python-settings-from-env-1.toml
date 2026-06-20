@@ -1,0 +1,30 @@
+id = "PYTHON-SETTINGS-FROM-ENV-1"
+title = "Configuration and secrets come from the environment, never hardcoded"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does the application read its configuration and secrets from?"
+default = "typed-settings-from-env"
+why = "A secret or environment-specific value written into a source file ships to every checkout, lands in version control history forever, and forces a code change plus redeploy to rotate. Reading configuration from the environment (validated once at startup through a typed settings object such as Pydantic Settings or an equivalent) keeps secrets out of the repository, lets the same artifact run in dev, staging, and prod with different values, and turns a missing or malformed setting into a clear startup failure rather than a None that surfaces deep in a request. Scattering raw `os.environ[...]` reads across the codebase works but loses the single validated boundary: each call site reinvents defaulting and type coercion, and a missing variable fails at first use instead of at boot. Hardcoding is the worst case: it is both a security leak and an operational rigidity."
+
+[[option]]
+id = "typed-settings-from-env"
+label = "load a typed settings object from the environment at startup"
+directive = "All configuration and secrets are read from environment variables (optionally via a local .env file that is gitignored) into a single typed settings object validated once at application startup. The settings object coerces and validates every value up front so a missing or malformed setting fails fast at boot. No secret, connection string, API key, or environment-specific value is written into source. Application code reads settings from this object, not from `os.environ` directly."
+why = "The adopted default. A validated settings boundary keeps secrets out of the repo, lets one artifact run everywhere, and fails fast on bad config."
+
+[[option]]
+id = "scattered-os-environ"
+label = "read os.environ directly at each call site"
+directive = "Configuration values are read with `os.environ` / `os.getenv` directly wherever they are needed, with per-site defaulting and coercion."
+why = "Keeps secrets out of source but loses the single validated boundary; each site reinvents defaulting and a missing var fails at first use, not boot."
+
+[[option]]
+id = "hardcoded-config"
+label = "hardcode configuration and secrets in source"
+directive = "Configuration values and secrets are written directly into Python source or committed config modules."
+why = "Both a security leak (secrets in VCS history) and operationally rigid (rotation or env changes require a code edit and redeploy)."

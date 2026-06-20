@@ -1,0 +1,31 @@
+id = "PYTHON-TYPE-HINTS-1"
+title = "Public functions carry type hints and a type checker runs in CI"
+tag = "stack"
+domain = "python"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a static type checker (mypy or pyright) configured at error severity in CI, with a coverage floor that fails when a public function signature is missing parameter or return annotations. Conformance holds when the type checker runs in CI in a strict-enough mode that an untyped public def fails the build; it fails when no type checker runs or it only warns."
+
+[decision]
+question = "Do public functions and methods carry type hints, checked by a static type checker in CI?"
+default = "annotate-and-check"
+why = "Python is gradually typed: annotations are optional at runtime, so an unchecked codebase silently accumulates wrong and missing types until a refactor or a None that should have been a value blows up far from its origin. Running a static type checker turns those latent mismatches into build failures at the point of the mistake, and the annotations themselves document each boundary's contract for both humans and the checker. Annotating without running a checker gives the documentation benefit but none of the enforcement, so the types drift out of sync with the code. Skipping annotations entirely keeps the source terser but forfeits every static guarantee and pushes type errors to runtime, often in production."
+
+[[option]]
+id = "annotate-and-check"
+label = "annotate public signatures and run a type checker in CI"
+directive = "Every public function and method declares parameter and return type hints, and a static type checker (mypy or pyright) runs in CI at error severity. New code must type-check clean; the checker's strictness floor only ratchets up. Internal helpers may omit annotations only where the checker can infer them, never to dodge a real type error."
+why = "The adopted default. A checked, annotated codebase turns type mismatches into build failures at their origin and keeps the annotations honest."
+
+[[option]]
+id = "annotate-without-checker"
+label = "annotate signatures but run no type checker"
+directive = "Type hints are written on public signatures for documentation, but no static type checker runs in CI to verify them."
+why = "Gives the documentation benefit but no enforcement, so the annotations drift out of sync with the code over time."
+
+[[option]]
+id = "no-type-hints"
+label = "omit type hints and rely on runtime behavior"
+directive = "Functions are written without type annotations, and type correctness is verified only by tests and at runtime."
+why = "Keeps the source terser but forfeits every static guarantee and pushes type errors to runtime, often in production."

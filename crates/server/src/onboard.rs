@@ -392,6 +392,15 @@ fn detect_frameworks(path: &str, content: &str, out: &mut std::collections::BTre
             if lc.contains("fastapi") {
                 add("FastAPI");
             }
+            // ORM / data layer and validation library — drive the python:* + sql rule
+            // domains. SQLAlchemy is the dominant Python ORM (session/scope misuse,
+            // N+1 via lazy loading); Pydantic is the typed-model boundary for FastAPI.
+            if lc.contains("sqlalchemy") {
+                add("SQLAlchemy");
+            }
+            if lc.contains("pydantic") {
+                add("Pydantic");
+            }
         }
         "go.mod" => add("Go modules"),
         "Cargo.toml" => {
@@ -540,6 +549,17 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("rust");
                 domains.insert("api-layer");
             }
+            // Python is overwhelmingly a backend/data-layer language: it gets its own
+            // `python` baseline domain (typing/idiom/web-API rules), the cross-language
+            // `api-layer` architecture rules, and the generic `sql` rules (raw-SQL-via-
+            // f-string is a textbook Python footgun the deterministic floor catches).
+            // Framework specifics (FastAPI/Django/Flask/SQLAlchemy) are added in the
+            // framework loop below as `python:*` child domains.
+            "Python" => {
+                domains.insert("python");
+                domains.insert("api-layer");
+                domains.insert("sql");
+            }
             // A repo with hand-written .sql files clearly has a SQL surface.
             "SQL" => {
                 domains.insert("sql");
@@ -596,8 +616,37 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("javascript:express");
                 domains.insert("api-layer");
             }
-            "Axum" | "Actix" | "FastAPI" | "Flask" | "Django" | "Rails" | "ASP.NET" => {
+            "Axum" | "Actix" | "Rails" | "ASP.NET" => {
                 domains.insert("api-layer");
+            }
+            // Python web frameworks map to their `python:*` child domain (which pulls in
+            // the `python` baseline via the child→parent expansion below) plus the
+            // cross-language `api-layer` rules. Each child domain holds the framework's
+            // own architectural rules (FastAPI dependency injection, Django service layer,
+            // etc.).
+            "FastAPI" => {
+                domains.insert("python:fastapi");
+                domains.insert("api-layer");
+            }
+            "Django" => {
+                domains.insert("python:django");
+                domains.insert("api-layer");
+            }
+            "Flask" => {
+                domains.insert("python:flask");
+                domains.insert("api-layer");
+            }
+            // SQLAlchemy is a Python data layer: it pulls in the `python` baseline plus
+            // the generic SQL + migration-hygiene rules (same shape as sqlx/Diesel).
+            "SQLAlchemy" => {
+                domains.insert("python");
+                domains.insert("sql");
+                domains.insert("ci-cd");
+            }
+            // Pydantic is the typed-model boundary library; its rules live in the
+            // `python` baseline domain.
+            "Pydantic" => {
+                domains.insert("python");
             }
             // Infrastructure-as-code tooling → the `iac` corpus domain.
             "Terraform" | "Terragrunt" | "Bicep" | "Pulumi" | "CloudFormation" => {
@@ -1517,6 +1566,57 @@ mod tests {
     }
 
     #[test]
+    fn detect_stack_recognizes_python_and_its_frameworks() {
+        // #48: a Python repo with a FastAPI + SQLAlchemy + Pydantic manifest is detected
+        // as the Python language plus those three frameworks (Pydantic / SQLAlchemy were
+        // previously undetected).
+        let files = vec![
+            ("app/main.py".to_string(), "def main(): ...\n".to_string()),
+            (
+                "requirements.txt".to_string(),
+                "fastapi==0.110\nsqlalchemy==2.0\npydantic==2.6\n".to_string(),
+            ),
+        ];
+        let stack = detect_stack("me/svc", &files);
+        assert!(
+            stack.languages.contains(&"Python".to_string()),
+            ".py maps to Python: {stack:?}"
+        );
+        for fw in ["FastAPI", "SQLAlchemy", "Pydantic"] {
+            assert!(
+                stack.frameworks.contains(&fw.to_string()),
+                "expected {fw} detected: {stack:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domains_for_stack_maps_python_fastapi_to_python_family() {
+        // #48: a Python + FastAPI + SQLAlchemy repo must surface the `python` baseline,
+        // the `python:fastapi` child domain, and the cross-language api-layer / sql
+        // domains — not just the generic api-layer fallback Python used to hit.
+        let s = RepoStack {
+            repo: "me/svc".into(),
+            languages: vec!["Python".into()],
+            frameworks: vec!["FastAPI".into(), "SQLAlchemy".into()],
+        };
+        let domains = domains_for_stack(&s);
+        for want in ["python", "python:fastapi", "api-layer", "sql"] {
+            assert!(
+                domains.contains(&want.to_string()),
+                "expected {want} in {domains:?}"
+            );
+        }
+        // The child→parent expansion must pull `python` in from `python:fastapi`.
+        assert!(
+            domains.contains(&"python".to_string()),
+            "child domain must pull in its parent: {domains:?}"
+        );
+        // A backend api-layer always implies the permissions rules.
+        assert!(domains.contains(&"permissions".to_string()), "{domains:?}");
+    }
+
+    #[test]
     fn code_ext_filter() {
         assert!(has_code_ext("src/main.rs"));
         assert!(has_code_ext("a/b/config.YAML"));
@@ -1573,6 +1673,26 @@ mod tests {
     fn audit_is_clean_on_clean_content() {
         let content = "fn add(a: i32, b: i32) -> i32 { a + b }\n// nothing to see here";
         assert!(audit_content("me/api", "src/math.rs", content).is_empty());
+    }
+
+    #[test]
+    fn audit_floor_flags_python_secret_and_fstring_sql() {
+        // #48 acceptance: the language-agnostic deterministic floor must fire on Python
+        // idioms — a hardcoded secret and a raw-SQL-via-f-string — on a .py fixture.
+        let secret_py = "import os\nTOKEN = \"ghp_0123456789012345678901234567890123456\"\n";
+        let sec = audit_content("me/svc", "app/config.py", secret_py);
+        assert!(
+            sec.iter().any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "Python hardcoded secret must be flagged: {sec:?}"
+        );
+
+        let sql_py =
+            "def get(uid):\n    cur.execute(f\"SELECT * FROM users WHERE id = {uid}\")\n";
+        let sql = audit_content("me/svc", "app/db.py", sql_py);
+        assert!(
+            sql.iter().any(|f| f.rule_id == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "Python f-string SQL must be flagged: {sql:?}"
+        );
     }
 
     #[test]
