@@ -136,6 +136,30 @@ impl Default for AdoLinkConfigView {
     }
 }
 
+/// Mirror of `camerata_checks::vcs_action::PrCoverage`.
+///
+/// Controls whether the commit-doc body/id rules also gate PR fields. Both flags
+/// default to `true` (server default); the UI toggles them explicitly so a `POST`
+/// that omits the `pr` block never silently resets them to `true` (BUG-2).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PrCoverageView {
+    /// Apply `PROCESS-COMMIT-DOC-1` to the PR body as well as the commit body.
+    #[serde(default = "yes")]
+    apply_body_rule: bool,
+    /// Apply `PROCESS-ADO-LINK-1` / story-id id rules to the PR title as well.
+    #[serde(default = "yes")]
+    apply_id_rule: bool,
+}
+
+impl Default for PrCoverageView {
+    fn default() -> Self {
+        Self {
+            apply_body_rule: true,
+            apply_id_rule: true,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct ProcessRuleConfigView {
     #[serde(default)]
@@ -146,6 +170,10 @@ struct ProcessRuleConfigView {
     branch_naming: BranchNamingConfigView,
     #[serde(default)]
     ado_link: AdoLinkConfigView,
+    /// PR-coverage toggles — must be round-tripped so a save never silently
+    /// overwrites a custom value with the server default (BUG-2).
+    #[serde(default)]
+    pr: PrCoverageView,
 }
 
 // ── BFF calls ─────────────────────────────────────────────────────────────────
@@ -585,6 +613,53 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
 
+            // ── PR coverage (BUG-2) ──────────────────────────────────────────
+            // Controls whether the commit-doc body and ADO/story-id rules also
+            // apply to PR bodies and PR titles. Both are ON by default (matches
+            // the server default). Exposing them in the UI prevents a round-trip
+            // from silently overwriting a custom value with the server default.
+            section { class: "vcs-settings-rule-section",
+                h3 { class: "vcs-settings-rule-title", "PR coverage" }
+                p { class: "vcs-settings-rule-desc",
+                    "Choose whether commit-body and story-id rules also gate \
+                     the PR description and PR title. Disabling either here \
+                     opts the project out of PR-level enforcement while keeping \
+                     the commit-level rules active."
+                }
+                label { class: "vcs-settings-toggle",
+                    input {
+                        r#type: "checkbox",
+                        checked: cfg.pr.apply_body_rule,
+                        onchange: {
+                            let mut config = config.clone();
+                            move |e: Event<FormData>| {
+                                let checked = e.value() == "true" || e.checked();
+                                if let Some(c) = config.write().as_mut() {
+                                    c.pr.apply_body_rule = checked;
+                                }
+                            }
+                        }
+                    }
+                    " Apply body rule to PR description (PROCESS-COMMIT-DOC-1)"
+                }
+                label { class: "vcs-settings-toggle",
+                    input {
+                        r#type: "checkbox",
+                        checked: cfg.pr.apply_id_rule,
+                        onchange: {
+                            let mut config = config.clone();
+                            move |e: Event<FormData>| {
+                                let checked = e.value() == "true" || e.checked();
+                                if let Some(c) = config.write().as_mut() {
+                                    c.pr.apply_id_rule = checked;
+                                }
+                            }
+                        }
+                    }
+                    " Apply id rule to PR title (PROCESS-ADO-LINK-1 / story-id)"
+                }
+            }
+
             // ── Save button ───────────────────────────────────────────────────
             div { class: "vcs-settings-actions",
                 button {
@@ -652,5 +727,88 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
         }
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── BUG-2 regression: PrCoverageView round-trips through serde ──────────────
+
+    /// Before BUG-2 fix: `ProcessRuleConfigView` did not include the `pr` field, so a
+    /// round-trip through serde (as happens in a POST /process-rule-config body) silently
+    /// dropped the field. The server deserialized the missing `pr` as `PrCoverage::default()`
+    /// (`apply_body_rule = true`, `apply_id_rule = true`), overwriting any custom value.
+    ///
+    /// After the fix: `pr: PrCoverageView` is included in `ProcessRuleConfigView` with
+    /// matching serde defaults, so a config with non-default PR coverage round-trips
+    /// correctly.
+    #[test]
+    fn bug2_pr_coverage_round_trips_through_serde() {
+        // A config with non-default PR coverage values.
+        let mut cfg = ProcessRuleConfigView::default();
+        cfg.pr.apply_body_rule = false;
+        cfg.pr.apply_id_rule = true;
+
+        // Serialize to JSON (what the UI sends to the server via POST).
+        let json = serde_json::to_string(&cfg).expect("must serialize");
+
+        // Verify the `pr` field is present in the JSON payload.
+        assert!(
+            json.contains("\"pr\""),
+            "BUG-2: serialized config must include the 'pr' field; got: {json}"
+        );
+        assert!(
+            json.contains("apply_body_rule"),
+            "BUG-2: serialized config must include 'apply_body_rule'; got: {json}"
+        );
+
+        // Deserialize back (what the server does when it receives the POST body).
+        let back: ProcessRuleConfigView = serde_json::from_str(&json).expect("must deserialize");
+
+        // The non-default value must survive the round-trip.
+        assert!(
+            !back.pr.apply_body_rule,
+            "BUG-2: apply_body_rule=false must survive a serde round-trip; \
+             got apply_body_rule=true (the bug: missing field deserialized as default=true)"
+        );
+        assert!(
+            back.pr.apply_id_rule,
+            "apply_id_rule=true must survive a serde round-trip"
+        );
+    }
+
+    /// Verify defaults: a freshly-deserialized config from an empty JSON object must
+    /// have both PR coverage flags `true` (matching the server default `PrCoverage::default()`).
+    #[test]
+    fn bug2_pr_coverage_defaults_to_true_true() {
+        let cfg: ProcessRuleConfigView = serde_json::from_str("{}").expect("empty obj must deser");
+        assert!(cfg.pr.apply_body_rule, "apply_body_rule must default to true");
+        assert!(cfg.pr.apply_id_rule, "apply_id_rule must default to true");
+    }
+
+    /// Verify that a `ProcessRuleConfigView` with explicit `pr` values serializes the
+    /// `pr` block at the top level (not nested inside another sub-object).
+    #[test]
+    fn bug2_pr_coverage_is_top_level_field_on_config() {
+        let cfg = ProcessRuleConfigView {
+            pr: PrCoverageView {
+                apply_body_rule: true,
+                apply_id_rule: false,
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // `pr` must be a top-level key with the two boolean sub-fields.
+        assert!(
+            v["pr"].is_object(),
+            "BUG-2: 'pr' must be a top-level object in the serialized config; got: {json}"
+        );
+        assert_eq!(v["pr"]["apply_body_rule"], true);
+        assert_eq!(v["pr"]["apply_id_rule"], false);
     }
 }
