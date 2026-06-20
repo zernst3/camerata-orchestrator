@@ -8,6 +8,7 @@ default = true
 
 [decision]
 question = "How do changes map to deploy environments?"
+default = "git-ref-environment-immutable-prod-tags"
 why = "Direct mapping reduces human error; immutable tags make a release always resolve to the same SHA (auditability/rollback). Selecting the deploy environment manually at deploy time reintroduces the human-error surface the ref-to-env mapping is designed to remove, since the same SHA can be deployed to the wrong environment by a slip. A trunk-based model with everything gated by feature flags is a legitimate alternative strategy but moves the safety surface entirely into the flag layer, where any flag-system outage or misconfiguration becomes a release-control failure."
 
 [[option]]

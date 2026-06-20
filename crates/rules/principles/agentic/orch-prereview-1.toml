@@ -9,6 +9,7 @@ qualifies = "Prose check (applies once the project adopts the AI-pre-review posi
 
 [decision]
 question = "How should AI-authored changes flow toward the human review gate?"
+default = "ai-pre-review-then-human-review"
 why = "Human reviewers are the scarcest resource in any AI-orchestrated workflow; if every routine output reaches them raw, the queue saturates and review quality drops. An AI reviewer reading against the codified commitments catches the common drift cases cheaply, so the human review pool sees a sharper, smaller queue. The review agent also acts as a forcing function on the codified commitments themselves: commitments that cannot be checked from the diff alone get surfaced and rewritten upstream, which strengthens the commitment library over time. Human-only review works at small scale but saturates the human review pool at AI-orchestrated throughput, where the volume of AI-authored changes routinely exceeds the human pool's capacity to review them carefully. Replacing the human merge gate with AI review entirely cuts the human bottleneck but cedes the final architectural call to a system that cannot be held accountable for the call, which is unacceptable for one-way-door changes regardless of model strength. Batching human review on a fixed cadence with no AI pre-review lets the queue grow faster than batches clear and becomes lossy at scale, because urgent items wait for the next batch and reviewers triage rather than read carefully when the queue is deep."
 
 [[option]]

@@ -8,6 +8,7 @@ default = true
 
 [decision]
 question = "How do release-line fixes get back to trunk?"
+default = "one-merge-commit-after-the-release-ships"
 why = "Per-fix mirroring creates hidden divergence (a fix lands on release, the cherry-pick to main is forgotten, trunk silently lacks it). Continuously cherry-picking each fix to trunk depends on every cherry-pick happening in lockstep with the release-branch fix; one missed cherry-pick produces a silent divergence that surfaces months later when trunk fails to reproduce a fix that everyone assumed had landed. A trunk-only model with no release branches avoids the divergence entirely but loses the stabilization surface release branches provide, so any bug found late in the release cycle has to be fixed against an actively-moving trunk."
 
 [[option]]
