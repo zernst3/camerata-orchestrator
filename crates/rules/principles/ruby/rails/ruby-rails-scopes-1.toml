@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-SCOPES-1"
+title = "Reusable query conditions are named scopes on the model, not ad-hoc where chains at call sites"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where do reusable query conditions live: as named scopes on the model, or as where-clause chains repeated at each call site?"
+default = "named-scopes-on-model"
+why = "An ad-hoc `.where(status: 'active', deleted_at: nil)` repeated in three controllers and two background jobs is the same condition expressed five times. When the definition changes — a new flag added, a column renamed — each call site must be found and updated. A named scope (`scope :active, -> { where(status: 'active').where(deleted_at: nil) }`) is the single definition that all call sites compose. Scopes also chain with other scopes, enabling composable query building (`User.active.admin.by_created_at`) rather than long repetitive where clauses. Default scopes (applied automatically to every query on the model) are a separate decision with tradeoffs around clarity and unexpected filtering."
+
+[[option]]
+id = "named-scopes-on-model"
+label = "named scopes on the model; call sites compose scope names"
+directive = "Query conditions that appear more than once, or that represent a business concept (e.g. `active`, `pending`, `visible_to(user)`), are defined as named scopes on the model using the `scope :name, -> { ... }` macro or a class method returning an ActiveRecord::Relation. Call sites compose scope names rather than repeating where-clause conditions. Ad-hoc `.where` chains at a call site are acceptable for one-off queries unique to that site, but any condition used in two or more places moves to a named scope."
+why = "The adopted default. Named scopes give query conditions a single authoritative definition on the model that all call sites compose, making changes to the condition a one-file edit."
+
+[[option]]
+id = "where-chains-at-call-site"
+label = "write where chains inline at each call site"
+directive = "Query conditions are written as `.where(...)` chains directly at each call site rather than extracted into named scopes."
+why = "Duplicates condition logic across call sites; a change to the condition requires finding and updating every site, and sites diverge over time."
+
+[[option]]
+id = "default-scope"
+label = "apply recurring conditions as a default scope on the model"
+directive = "Conditions that should apply to all queries for a model (e.g. soft-delete filter) are set via `default_scope { where(deleted_at: nil) }`."
+why = "Convenient for filters that must always apply but introduces invisible filtering that surprises callers who expect unfiltered results; `unscoped` must be remembered to escape it."

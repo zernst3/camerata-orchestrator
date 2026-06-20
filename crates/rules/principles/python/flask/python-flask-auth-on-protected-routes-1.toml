@@ -1,0 +1,30 @@
+id = "PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1"
+title = "Protected routes declare their authentication requirement explicitly via a decorator or Blueprint before_request hook"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How is authentication enforced on Flask routes that require a logged-in user or valid token?"
+default = "decorator-or-before-request-hook"
+why = "Flask applies no authentication to routes by default. A route that does not explicitly declare its authentication requirement is public. The failure mode is invisible: the route works correctly for authenticated users, and the missing check only surfaces when an attacker or a test calls the route without credentials. Flask-Login's `@login_required` decorator and JWT libraries' `@jwt_required()` decorator make the requirement visible at the route definition. A Blueprint-level `before_request` hook that enforces authentication on all routes in a blueprint eliminates per-route repetition for blueprint members, with explicit `@no_auth_required` opt-outs for public routes in the blueprint. Either pattern makes the authentication state an explicit code artifact reviewable in a PR rather than a runtime assumption."
+
+[[option]]
+id = "decorator-or-before-request-hook"
+label = "@login_required / @jwt_required on each route, or a Blueprint before_request hook"
+directive = "Every route that requires authentication declares it explicitly via `@login_required` (Flask-Login), `@jwt_required()` (Flask-JWT-Extended), or an equivalent auth decorator immediately before the route function. Alternatively, a Blueprint that groups protected routes registers a `before_request` hook that enforces authentication for all routes in the blueprint, with public sub-routes within the blueprint explicitly exempted. A route that lacks an auth decorator and is not registered under a Blueprint with a before_request auth hook is treated as unintentionally public and must be corrected. Authentication checks inside the route body (after business logic begins) are not sufficient."
+why = "The adopted default. Explicit decorators or Blueprint hooks make authentication requirements visible at the route definition and reviewable in code, rather than being a runtime assumption."
+
+[[option]]
+id = "manual-check-in-route-body"
+label = "check authentication inside the route function body"
+directive = "Route functions check `current_user.is_authenticated` or decode the token manually inside the function body before performing any protected action."
+why = "Moves the check away from the route declaration, making it easy to miss during review; a forgotten check silently makes the route public."
+
+[[option]]
+id = "no-auth-assumed-from-frontend"
+label = "assume only authenticated clients call protected routes"
+directive = "No authentication check is applied to protected routes; the application trusts that the frontend only calls protected routes after the user has logged in."
+why = "The server is the only enforcement point; the frontend's auth state is advisory, not authoritative; any caller with network access can invoke the route."

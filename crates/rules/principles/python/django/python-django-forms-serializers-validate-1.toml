@@ -1,0 +1,30 @@
+id = "PYTHON-DJANGO-FORMS-SERIALIZERS-VALIDATE-1"
+title = "Input validation runs through Forms or DRF Serializers before data reaches the model or service layer"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where is inbound HTTP request data validated and cleaned before use?"
+default = "forms-or-serializers"
+why = "Everything that arrives in `request.POST`, `request.data`, `request.GET`, or `request.FILES` is untyped, untrusted client-supplied input. Reaching into it directly and passing values to model constructors or service functions means the application operates on data whose shape it only assumed. Django Forms (`form.cleaned_data`) and DRF Serializers (`serializer.validated_data`) run a declared validation schema, convert strings to typed Python values, run field-level and cross-field validators, and reject invalid input with structured errors before any business logic runs. Validating in the view by hand (checking `if 'field' in request.data:`) duplicates what Forms and Serializers do, is error-prone, and produces no structured error response automatically."
+
+[[option]]
+id = "forms-or-serializers"
+label = "Form or Serializer validates and cleans all inbound data; view reads validated_data only"
+directive = "Every view that accepts state-changing input (POST, PUT, PATCH, DELETE with body) passes `request.data` (or `request.POST`) to a Form or DRF Serializer before any business logic. The view calls `form.is_valid()` or `serializer.is_valid(raise_exception=True)` and reads from `form.cleaned_data` or `serializer.validated_data`. Accessing `request.data['field']` or `request.POST.get('field')` directly and passing the raw string to a model or service without Form/Serializer validation is forbidden. Model-level validators and `full_clean()` are a complementary layer, not a substitute for the Form/Serializer boundary."
+why = "The adopted default. Forms and Serializers run a declared schema, produce typed cleaned values, and return structured error responses automatically; manual request-dict access duplicates this work incompletely."
+
+[[option]]
+id = "direct-request-data-access"
+label = "read request.data fields directly in the view"
+directive = "View functions access `request.data` or `request.POST` dictionary keys directly, validate fields with manual `if` checks, and pass the raw values to models or services."
+why = "Duplicates Form/Serializer work incompletely; misses type conversion, cross-field validation, and structured error responses; each validation gap is a potential bug."
+
+[[option]]
+id = "model-full-clean-only"
+label = "rely on model.full_clean() as the sole validation gate"
+directive = "Request data is passed directly to the model constructor; `full_clean()` is called before `save()` and any ValidationError is caught in the view."
+why = "Catches model-level constraint violations but provides no HTTP-layer validation, no structured error response shaping, and no type conversion from the string values in request data."

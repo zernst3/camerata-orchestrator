@@ -1,0 +1,30 @@
+id = "PYTHON-FLASK-ERROR-HANDLERS-1"
+title = "Structured error responses are provided by registered error handlers, not ad-hoc try/except in route functions"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How are exceptions and error conditions translated into HTTP responses in a Flask application?"
+default = "registered-error-handlers"
+why = "When an unhandled exception propagates out of a route function, Flask returns a generic HTML 500 page (in debug mode, a stack trace; in production, a plain error page). For an API that clients expect to receive JSON responses, a generic HTML page is an API contract violation. Ad-hoc `try/except` blocks in each route function produce inconsistent error shapes, duplicate handling code, and miss exceptions from service and model layers that propagate through the route. `@app.errorhandler(ExceptionClass)` and `@app.errorhandler(status_code)` are Flask's mechanism for registering centralized handlers that produce a consistent JSON error envelope for a given exception type or status code. A Blueprint-level `@bp.app_errorhandler` registration covers errors from all routes, not just those in the blueprint. The `@app.errorhandler(Exception)` catch-all is the backstop."
+
+[[option]]
+id = "registered-error-handlers"
+label = "register errorhandlers on the app or blueprint; route functions do not catch exceptions"
+directive = "Domain exceptions (e.g. `NotFoundError`, `ValidationError`, `AuthorizationError`) are raised from service functions and caught by registered `@app.errorhandler(ExceptionClass)` handlers that map them to JSON responses with the appropriate HTTP status code. HTTP status code handlers (`@app.errorhandler(404)`, `@app.errorhandler(500)`) are registered to produce JSON error envelopes consistent with the API's error shape. A catch-all `@app.errorhandler(Exception)` handler is registered as the backstop, logs the exception, and returns a 500 JSON envelope. Route functions do not catch exceptions for the purpose of producing error responses; they raise or allow exceptions to propagate. Ad-hoc `try/except` that reshapes an exception into a `jsonify(...)` response inside a route is the pattern to eliminate."
+why = "The adopted default. Centralized error handlers produce consistent error envelopes across all routes, eliminate per-route exception boilerplate, and make the error contract visible in one place."
+
+[[option]]
+id = "try-except-per-route"
+label = "wrap each route in try/except and return error responses manually"
+directive = "Each route function contains its own try/except blocks that catch expected exceptions and return jsonify error responses directly."
+why = "Duplicates error-handling logic across routes; each route has slightly different error shapes; unhandled exception types in one route produce HTML 500 while the same type in another produces JSON."
+
+[[option]]
+id = "flask-default-error-pages"
+label = "rely on Flask's default error pages for all unhandled exceptions"
+directive = "No error handlers are registered; Flask's default HTML error pages (404 page, 500 page) handle all exceptions."
+why = "Returns HTML to clients expecting JSON; leaks stack traces in debug mode; provides no structured error information for API clients."

@@ -1,0 +1,31 @@
+id = "PYTHON-FLASK-PARAMETERIZED-SQL-1"
+title = "Database queries use SQLAlchemy ORM or parameterized text() expressions; f-strings in SQL are forbidden"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()`, or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()`, or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
+
+[decision]
+question = "How are dynamic values placed into database queries in a Flask + SQLAlchemy application?"
+default = "orm-or-text-with-bindparams"
+why = "Flask itself is database-agnostic, but Flask applications almost always use SQLAlchemy (via Flask-SQLAlchemy) or direct DBAPI connections. SQLAlchemy's ORM query API (`.filter_by()`, `.filter(Model.col == value)`, `select()` with `.where()`) parameterizes values automatically. When raw SQL is necessary, SQLAlchemy's `text()` expression accepts `:named` bind parameters (`session.execute(text('SELECT * FROM t WHERE id = :id'), {'id': user_id})`), which the driver sends separately from the SQL grammar. Interpolating a value into the SQL string with an f-string, `%`-format, or `.format()` before passing to any execute call puts user-controlled text into the query grammar and is the canonical SQL injection vector."
+
+[[option]]
+id = "orm-or-text-with-bindparams"
+label = "SQLAlchemy ORM query API or text() with :named bind parameters"
+directive = "All database queries use the SQLAlchemy ORM query API (`.filter()`, `.filter_by()`, `select()` with `.where()`, etc.) or, when raw SQL is required, `sqlalchemy.text(sql_string)` with bind parameters passed as a dict (`:named` style) to `session.execute()` or `connection.execute()`. f-strings, `%`-formatting, `.format()`, and string concatenation inside any SQL string passed to an execute method are forbidden. Dynamic column or table names come from a fixed allow-list, never from request input."
+why = "The adopted default. The ORM parameterizes automatically; `text()` with bind parameters sends SQL and values separately so a value can never be parsed as SQL."
+
+[[option]]
+id = "f-string-in-sql"
+label = "build SQL strings with f-strings or % formatting"
+directive = "SQL strings are built by interpolating values via f-strings, `%`-formatting, or `.format()` before passing to an execute method."
+why = "The canonical SQL injection antipattern; every such site is a latent vulnerability regardless of how the value was obtained."
+
+[[option]]
+id = "stored-procedures-only"
+label = "move all parameterized logic into database stored procedures"
+directive = "Business logic involving dynamic SQL is pushed into stored procedures called from Python with only scalar arguments."
+why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex, and removes Python-level testability."

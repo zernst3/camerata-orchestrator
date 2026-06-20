@@ -1,0 +1,30 @@
+id = "PYTHON-DJANGO-CSRF-AUTH-1"
+title = "Protected views use the login_required decorator or LoginRequiredMixin; CSRF middleware stays enabled globally"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How are views protected from unauthenticated access and cross-site request forgery?"
+default = "login-required-plus-csrf-middleware"
+why = "Django includes `CsrfViewMiddleware` in the default `MIDDLEWARE` setting; it silently provides CSRF validation for every non-safe HTTP method on every view that uses a session. Removing it from `MIDDLEWARE` drops CSRF protection for the entire application. The `@csrf_exempt` decorator should be reserved for endpoints authenticated by non-cookie mechanisms (HMAC signatures, shared-secret webhooks). Authentication enforcement is orthogonal: Django makes no view require authentication by default, so every view that should be private must declare it explicitly. `@login_required` (function-based) and `LoginRequiredMixin` (class-based) redirect unauthenticated users to the login page; omitting them from a protected view silently makes it public."
+
+[[option]]
+id = "login-required-plus-csrf-middleware"
+label = "CsrfViewMiddleware globally; @login_required / LoginRequiredMixin on protected views"
+directive = "`django.middleware.csrf.CsrfViewMiddleware` remains in `MIDDLEWARE` and is not removed or bypassed globally. Views that require authentication use `@login_required` (FBV) or `LoginRequiredMixin` (CBV) explicitly. `@csrf_exempt` is permitted only on views authenticated exclusively by a non-cookie mechanism (HMAC signature, Bearer token with no session cookie) and must carry an inline comment identifying the authentication substitute. Any view that neither declares `@login_required` / `LoginRequiredMixin` nor is explicitly intended to be public must be treated as a missing gate and corrected."
+why = "The adopted default. CSRF middleware protects all cookie-session state-changing requests globally; explicit authentication decorators/mixins make the protected vs. public distinction visible in code."
+
+[[option]]
+id = "remove-csrf-middleware"
+label = "remove CsrfViewMiddleware from MIDDLEWARE"
+directive = "CSRF protection is disabled globally by removing `django.middleware.csrf.CsrfViewMiddleware` from `MIDDLEWARE`."
+why = "Removes CSRF defense for all cookie-based state changes; any authenticated state-changing request can be triggered from a cross-origin page."
+
+[[option]]
+id = "permission-classes-drf"
+label = "use DRF IsAuthenticated permission class on DRF viewsets"
+directive = "Django REST Framework viewsets declare `permission_classes = [IsAuthenticated]` (or set it globally in DEFAULT_PERMISSION_CLASSES) rather than using `@login_required` or `LoginRequiredMixin`."
+why = "The correct pattern for DRF API viewsets; equivalent protection for API endpoints that do not render HTML. Complementary to (not a replacement for) CSRF middleware when the API uses session-cookie auth."

@@ -1,0 +1,31 @@
+id = "RUBY-RAILS-STRONG-PARAMS-1"
+title = "Controllers use strong parameters to guard mass assignment"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the brakeman scanner (mass-assignment finding) and the Rails runtime: passing an unfiltered `params` hash to `.new`, `.create`, `.update`, or `.update_attributes` raises an ActiveModel::ForbiddenAttributesError in Rails 4+ when the Strong Parameters concern is active. Conformance holds when brakeman runs in CI and every controller action that accepts model attributes calls `.require(...)` and `.permit(...)` on params before passing them to the model; it fails when raw `params` or `params[:model]` is passed directly to a model method."
+
+[decision]
+question = "How does the project guard against mass-assignment vulnerabilities in controller actions?"
+default = "strong-params-permit"
+why = "Without explicit allowlisting, an attacker can POST any attribute — including privileged fields like `admin`, `role`, or `confirmed` — and have the ORM write it directly to the database. Strong Parameters moves the allowlist into the controller, the one place that already knows which fields a given action is allowed to receive. A class-level `attr_accessible` allow-list (the Rails 2/3 pattern) lives on the model, which cannot distinguish between a public form submission and an internal service call; the controller-level permit block can. Disabling the protection entirely is never the right call: no matter how trusted the frontend is, the server is the only enforcement point."
+
+[[option]]
+id = "strong-params-permit"
+label = "require + permit on every inbound params hash"
+directive = "Every controller action that writes model attributes calls `.require(:resource_name).permit(:field1, :field2, ...)` on the params object before passing the result to a model method. Nested attributes are nested inside `permit`. Passing `params`, `params[:model]`, or any unfiltered slice to `.new`, `.create`, `.update`, or `.update_attributes` is forbidden. A private helper method (e.g. `def user_params`) is the canonical place to define the permit block for a resource."
+why = "The adopted default. Strong Parameters moves the allowlist to the controller, where the action context is known, and raises at runtime if unfiltered params are passed to a model, making violations loud rather than silent."
+
+[[option]]
+id = "attr-accessible-on-model"
+label = "attr_accessible allowlist on the model class"
+directive = "Model classes declare `attr_accessible :field1, :field2` to limit which attributes can be set via mass assignment, rather than permitting fields in the controller."
+why = "The Rails 2/3 pattern; superseded in Rails 4+ by Strong Parameters. The model cannot distinguish a trusted internal call from an external form submission, so the allowlist is too broad or too narrow for every caller."
+
+[[option]]
+id = "no-mass-assignment-protection"
+label = "pass params directly to the model without filtering"
+directive = "Controller actions pass `params` or `params[:model]` directly to model methods without calling `.permit`."
+why = "Allows any attacker-controlled parameter to be written to the database; this is the original Rails mass-assignment vulnerability."

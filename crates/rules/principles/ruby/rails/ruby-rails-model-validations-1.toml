@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-MODEL-VALIDATIONS-1"
+title = "Data integrity rules are declared as model validations, not enforced only in controllers or views"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where are data integrity rules (required fields, format constraints, uniqueness) enforced?"
+default = "model-validations"
+why = "A Rails controller receives one HTTP request. A background job, a rake task, a Rails console command, and a data migration each bypass the controller entirely and call the model directly. Validating only in the controller means every non-HTTP write path is unguarded. Model-level validations (`validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }, uniqueness: true`) run before every `save` regardless of the caller, so the rule is enforced consistently across all write paths. Controller-level checks (checking `params[:email].present?` before building the object) are appropriate for HTTP-specific error messages but not as the sole guard on the data. Database-level constraints (NOT NULL, UNIQUE) are the deepest layer and should mirror the model validations for defense in depth, but are not sufficient alone because they fire after the application tries to write, returning a raw database error."
+
+[[option]]
+id = "model-validations"
+label = "validations declared on the model; database constraints mirror them"
+directive = "Data integrity rules (presence, length, format, numericality, inclusion, uniqueness, custom business rules) are declared as `validates` or `validate` calls on the ActiveRecord model class. Database constraints (NOT NULL, UNIQUE indexes, CHECK) mirror the model validations for defense in depth. Controller-level checks address HTTP-specific concerns (early 400 responses) but are not the sole or primary enforcement point. Writing data without model validations — using `.update_columns`, `update_all`, or `save(validate: false)` — requires an explicit comment justifying the bypass."
+why = "The adopted default. Model validations fire on every `save` call regardless of the entry point, so background jobs, rake tasks, and console writes all share the same guard."
+
+[[option]]
+id = "controller-validation-only"
+label = "validate input in the controller before passing to the model"
+directive = "Input rules are checked in the controller action (presence checks, format checks) rather than in `validates` declarations on the model."
+why = "Guards only the HTTP entry point; background jobs, rake tasks, migrations, and console commands bypass the controller entirely and write invalid data silently."
+
+[[option]]
+id = "database-constraints-only"
+label = "enforce integrity purely through database constraints"
+directive = "Integrity rules are expressed only as database-level constraints (NOT NULL, UNIQUE, CHECK); the application layer has no `validates` calls."
+why = "Catches violations at the deepest layer but returns raw database errors rather than user-friendly validation messages, and fires after an attempted write rather than before."

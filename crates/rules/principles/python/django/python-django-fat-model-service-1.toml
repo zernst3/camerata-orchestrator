@@ -1,0 +1,30 @@
+id = "PYTHON-DJANGO-FAT-MODEL-SERVICE-1"
+title = "Business logic lives in model methods or a service layer, not in views"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does business logic live in a Django application: in views, in model methods, or in a separate service layer?"
+default = "model-methods-or-service-layer"
+why = "A Django view (function-based or class-based) is a request-response adapter: it reads the request, calls into the application, and produces a response. When business rules accumulate in the view they become testable only through a full request cycle via the Django test client, unreachable from management commands or Celery tasks without faking a request, and duplicated across views that share a workflow. The Django community convention is the 'fat model / thin view' pattern: domain logic for a single model lives as model methods; cross-model orchestration that does not belong to one model lives in a service layer (`services/`, plain Python modules or classes with no HTTP dependencies). Views are thin: validate input via forms or serializers, call the model method or service function, map the result to a response."
+
+[[option]]
+id = "model-methods-or-service-layer"
+label = "thin views; logic in model methods (single-model) or service modules (cross-model)"
+directive = "Views (function-based or class-based) are limited to HTTP concerns: validate input with a Form or Serializer, call a model method or service function, return a response. Business rules that operate on a single model live as model methods. Business rules that coordinate multiple models, trigger async tasks, or send notifications live in a service module (`app/services.py` or `services/` package) that has no import dependency on Django's HTTP layer. Multi-step workflows, direct ORM calls for business-logic purposes, and external API calls inside a view function are the patterns to eliminate from the view layer."
+why = "The adopted default. Model methods and service modules are independently unit-testable and callable from management commands, Celery tasks, and shell sessions without the HTTP stack."
+
+[[option]]
+id = "fat-views"
+label = "put business logic directly in view functions or class-based view methods"
+directive = "View functions or CBV methods contain business rules, ORM queries for domain purposes, and cross-model coordination inline."
+why = "Ties logic to the HTTP stack; logic is unreachable from non-HTTP entry points without faking a request, and cannot be unit-tested without the web layer."
+
+[[option]]
+id = "fat-serializers"
+label = "push business logic into DRF serializer create/update methods"
+directive = "Business rules for create and update operations live in `Serializer.create()` and `Serializer.update()` methods of Django REST Framework serializers."
+why = "A common but problematic pattern: serializers are validation + serialization adapters, not a business logic layer; pushing orchestration into them creates the same testability and reuse problem as fat views."

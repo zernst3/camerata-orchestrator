@@ -1,0 +1,31 @@
+id = "PYTHON-FLASK-CONFIG-FROM-ENV-1"
+title = "Flask configuration is loaded from environment variables or config objects; no secrets appear in source files"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Gitleaks or Bandit (B105/B106/B107) scanning for secret-pattern string literals in config files and Python source. Conformance holds when the CI secret-scan gate runs and no committed file contains a pattern matching an API key, password, private key, or token; it fails when no secret-scan gate covers Flask config files."
+
+[decision]
+question = "How is Flask configuration (SECRET_KEY, database URI, API keys) provided to the application?"
+default = "env-vars-or-config-object-from-env"
+why = "Flask configuration is typically set on `app.config` from a Python config object or `app.config.from_envvar`. The `SECRET_KEY` setting, which Flask uses to sign session cookies, is a credential: if it is committed to source control, every session can be forged by anyone with repository access. Database URIs often embed passwords. API keys for external services are credentials. Any of these appearing as a string literal in a committed Python file enters git history permanently and is recoverable even after deletion. Loading config from environment variables (`os.environ.get('SECRET_KEY')`) or from a Python config class that reads environment variables keeps secrets outside the repository. A `.env` file for local development must be `.gitignore`d."
+
+[[option]]
+id = "env-vars-or-config-object-from-env"
+label = "config object reads all secrets from environment variables; no secret string literals in source"
+directive = "Flask configuration is applied via a config object (class-based config pattern) or `app.config.from_envvar()`; every sensitive field (SECRET_KEY, SQLALCHEMY_DATABASE_URI, API keys, MAIL_PASSWORD, OAuth secrets) is read from environment variables using `os.environ.get(...)` or equivalent. Config source files committed to git contain only the logic to read environment variables and non-sensitive defaults. A `.env` file for local development is listed in `.gitignore` and never committed. `app.config['SECRET_KEY'] = 'some-literal-string'` and equivalent direct assignments in any committed source file are forbidden."
+why = "The adopted default. Environment variables keep secrets out of the repository and git history; per-environment values are injected at deploy time."
+
+[[option]]
+id = "hardcoded-in-source"
+label = "set config values as string literals directly in Python source"
+directive = "Configuration including SECRET_KEY, database passwords, and API keys is set as string literals in `app.py`, `config.py`, or a blueprint's `__init__.py`."
+why = "Credentials enter git history permanently; anyone with repository access can read them; rotation requires a commit and redeployment."
+
+[[option]]
+id = "dotenv-committed"
+label = "use a committed .env file"
+directive = "Configuration is stored in a `.env` file that is version-controlled alongside the application and loaded with `python-dotenv`."
+why = "Equivalent to committing credentials; the `.env` pattern is safe only when the file is `.gitignore`d."

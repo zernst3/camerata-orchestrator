@@ -1,0 +1,30 @@
+id = "PYTHON-FLASK-SERVICE-LAYER-1"
+title = "Route handlers are thin; business logic lives in a service layer separate from the Flask HTTP layer"
+tag = "stack"
+domain = "python:flask"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does business logic live in a Flask application: in route handlers or in a service layer?"
+default = "service-layer"
+why = "A Flask route function is an HTTP adapter: its job is to extract input from the request, call into the application, and format the result as an HTTP response. When business rules, database queries, and external API calls accumulate inside route functions, the logic becomes testable only through the HTTP layer (via `app.test_client()`), unreachable from CLI commands or background workers without faking a request, and duplicated across routes that share workflow steps. A service layer — plain Python functions or classes that import no Flask request globals and accept plain arguments — puts logic in one place that is independently unit-testable with `pytest` and reusable from any entry point. The route function becomes: validate input, call service, format response."
+
+[[option]]
+id = "service-layer"
+label = "thin route handlers; business logic in service modules with no Flask dependency"
+directive = "Route handler functions are limited to HTTP concerns: extract and validate input (via schema), call a service function, and format the HTTP response (JSON serialization, status code). Business rules, database queries (ORM calls), cross-resource coordination, external API calls, email dispatch, and any logic reusable from a CLI or background task live in service modules (`services/`, `app/services.py`) that import no Flask request-context objects (`request`, `g`, `current_user`) and accept plain Python arguments. A route handler that contains an ORM query for a business purpose, a conditional business rule, or a direct external HTTP call without delegating to a service is the pattern to eliminate."
+why = "The adopted default. Service modules are independently unit-testable and callable from any entry point; route handlers stay focused on the HTTP contract."
+
+[[option]]
+id = "logic-in-route-handler"
+label = "put business logic inline in route handler functions"
+directive = "Route handler functions contain business rules, database queries, and external API calls inline alongside request parsing and response formatting."
+why = "Couples logic to the Flask request context; logic is testable only through the HTTP layer and is unreachable from non-HTTP entry points without faking a request."
+
+[[option]]
+id = "logic-in-models"
+label = "push all logic into SQLAlchemy model class methods"
+directive = "Business rules live as SQLAlchemy model class methods; route handlers call model methods directly."
+why = "Acceptable for single-model operations but creates God-object models when cross-model orchestration is pushed into one model's methods."

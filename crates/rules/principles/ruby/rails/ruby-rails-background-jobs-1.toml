@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-BACKGROUND-JOBS-1"
+title = "Slow or external work is offloaded to background jobs, not performed inline in a request"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "Where does work that is slow, external, or unreliable (email sending, image processing, external API calls, report generation) run?"
+default = "background-jobs"
+why = "A Rails request-response cycle has a finite timeout (commonly 30 seconds at the web server, shorter at load balancers or CDNs). Performing a slow operation — sending an email, resizing an image, calling a third-party API, generating a PDF — inline in a controller action blocks the Puma thread for the duration of that operation. Under traffic, blocked threads exhaust the pool and subsequent requests queue or time out. Failures in the external operation also bubble up as 500 errors to the user, who cannot retry safely and did not need to wait in the first place. Background jobs (via ActiveJob, Sidekiq, GoodJob, or Solid Queue) run the work outside the request cycle: the controller enqueues a job and returns immediately, and the worker executes the job with retries. The user gets a fast response; failures are retried without user involvement."
+
+[[option]]
+id = "background-jobs"
+label = "enqueue a job from the controller; worker runs the slow work"
+directive = "Any work estimated to take more than roughly 100ms, any external HTTP call, any email send, any file processing, and any operation that may fail transiently (rate limits, timeouts) is performed inside an ActiveJob subclass queued from the controller action. The controller enqueues the job and returns a 200/202 immediately. The job class is the single place that holds the slow logic. Inline email delivery (`deliver_now`) in a controller is acceptable only for synchronous one-off cases that have been explicitly approved; the default is `deliver_later`. Direct external API calls inside a controller action without a job wrapper are the pattern to eliminate."
+why = "The adopted default. Offloading slow work to a background job keeps request threads available, decouples user response time from external-system latency, and enables automatic retries on transient failure."
+
+[[option]]
+id = "inline-in-request"
+label = "perform slow work inline in the controller action"
+directive = "Email delivery, image processing, external API calls, and other slow operations run synchronously inside the request cycle before the response is sent."
+why = "Blocks the request thread for the duration of the operation, exhausts the thread pool under concurrent traffic, and surfaces external-system failures as user-facing 500 errors."
+
+[[option]]
+id = "thread-spawn"
+label = "spawn a background thread from the controller"
+directive = "Slow work is performed by spawning a new thread (`Thread.new { ... }`) inside the controller action, outside the request cycle."
+why = "Avoids blocking the request thread but bypasses the job queue's retry, observability, and backpressure mechanisms; unhandled errors in the spawned thread are swallowed silently."

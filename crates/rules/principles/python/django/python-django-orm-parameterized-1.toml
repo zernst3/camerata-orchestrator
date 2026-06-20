@@ -1,0 +1,31 @@
+id = "PYTHON-DJANGO-ORM-PARAMETERIZED-1"
+title = "Django ORM queries use parameters; raw SQL with f-strings or .extra() is forbidden"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) scanning for f-strings, `%`-formatting, `.format()`, or string concatenation feeding a value into `.raw(...)`, `.extra(...)`, or `cursor.execute(...)`. Conformance holds when the CI gate runs and any parameterized-via-interpolation SQL site fails; it fails when no SQL-injection lint covers Django-specific raw query APIs."
+
+[decision]
+question = "How are dynamic values placed into Django database queries, including raw and extra queries?"
+default = "orm-or-parameterized-raw"
+why = "Django's ORM (`.filter(name=value)`, `.annotate(...)`, `Q(...)`) constructs parameterized queries automatically; user-supplied values never touch the SQL grammar. When the ORM's query API cannot express a query and `.raw()` or `cursor.execute()` must be used, the same parameterization contract must hold: values are passed as the second argument (`cursor.execute('SELECT * FROM t WHERE name = %s', [name])`) and never interpolated into the SQL string. The `extra()` method's `where` argument is especially dangerous because it accepts raw SQL strings and is deprecated since Django 3.2 precisely because it is a common injection vector. An f-string inside `.raw()` or `.extra()` is indistinguishable from direct cursor interpolation and carries the same risk."
+
+[[option]]
+id = "orm-or-parameterized-raw"
+label = "ORM query API for all queries; parameterized args for unavoidable raw SQL"
+directive = "All database queries use the Django ORM query API (`.filter()`, `.exclude()`, `.annotate()`, `.aggregate()`, `Q(...)`, `F(...)`). When a query cannot be expressed through the ORM, `QuerySet.raw(sql, params=[...])` or `cursor.execute(sql, params=[...])` is used with values passed as the `params` list, never interpolated into the SQL string. `.extra()` is forbidden (deprecated and injection-prone). f-strings, `%`-formatting, `.format()`, and string concatenation inside any raw SQL string are forbidden. Column or table names that must be dynamic come from a fixed allow-list, never from request data."
+why = "The adopted default. The ORM parameterizes automatically; raw queries with explicit `params=` bind values separately from the SQL grammar, eliminating injection."
+
+[[option]]
+id = "raw-with-string-formatting"
+label = "use .raw() or cursor.execute() with string formatting for dynamic values"
+directive = "Dynamic values are embedded into raw SQL strings via f-strings, `%`-formatting, or `.format()` inside `.raw()` or `cursor.execute()`."
+why = "The canonical Django SQL injection antipattern; every such site is a latent vulnerability."
+
+[[option]]
+id = "extra-method"
+label = "use .extra() for complex filtering"
+directive = "Complex queries use `.extra(where=[...])` with values interpolated into the where strings."
+why = "Deprecated since Django 3.2 and injection-prone; replaced by `RawSQL`, `Window`, and other ORM constructs for complex cases."

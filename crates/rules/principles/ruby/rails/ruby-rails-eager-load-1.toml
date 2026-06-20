@@ -1,0 +1,30 @@
+id = "RUBY-RAILS-EAGER-LOAD-1"
+title = "N+1 queries are eliminated with includes or eager_load at the query site"
+tag = "stack"
+domain = "ruby:rails"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How does the project prevent N+1 queries when traversing ActiveRecord associations?"
+default = "includes-or-eager-load"
+why = "An N+1 query is the single most common Rails performance antipattern: load N records, then in a view or serializer touch `.association` on each one, firing one additional query per record. The result is N+1 round trips to the database for what could be two. ActiveRecord's `includes` chooses between preloading (two separate queries, IN clause) and eager_load (single LEFT OUTER JOIN) depending on the usage; `eager_load` forces the JOIN form when filtering on the association is needed. The Bullet gem makes N+1 sites visible during development. Lazy loading feels natural to write because it works silently on small datasets, but degrades linearly with record count in a way that is invisible until production scale."
+
+[[option]]
+id = "includes-or-eager-load"
+label = "includes or eager_load at the query site; Bullet in development"
+directive = "Any query whose result set will traverse an association must call `.includes(:association)` (or `.eager_load(:association)` when the association is also referenced in a WHERE or ORDER clause) at the point the collection is fetched. Adding `.includes` after seeing N+1 queries in logs or Bullet notifications is the minimum response. Bullet is enabled in development and test environments so unguarded association traversals raise or log warnings. Calling `.association` on each record in a loop, or rendering an association in a view or serializer without a corresponding `.includes` at the query site, is the antipattern to eliminate."
+why = "The adopted default. `includes` collapses N+1 round trips into one or two queries, and Bullet makes violations audible during development before they reach production."
+
+[[option]]
+id = "select-n-plus-1-accepted"
+label = "load associations lazily; accept N+1 queries"
+directive = "Associations are loaded on demand as each record is accessed, with no explicit `includes` or `eager_load`; N+1 queries are accepted as a consequence."
+why = "Correct for tiny datasets or one-off scripts; catastrophic for any endpoint whose result count is user-controlled."
+
+[[option]]
+id = "manual-sql-join"
+label = "write raw JOIN SQL to fetch associations"
+directive = "Associations are loaded by writing explicit SQL joins via `.joins` and selecting association columns manually, rather than using `includes` or `eager_load`."
+why = "Avoids N+1 but bypasses ActiveRecord association mapping; result columns must be mapped manually and the approach does not compose with the rest of the query API."

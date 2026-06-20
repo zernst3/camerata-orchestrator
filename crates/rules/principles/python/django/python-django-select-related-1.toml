@@ -1,0 +1,30 @@
+id = "PYTHON-DJANGO-SELECT-RELATED-1"
+title = "select_related and prefetch_related are used to avoid N+1 queries on related objects"
+tag = "stack"
+domain = "python:django"
+layer = "framework"
+enforcement = "structured"
+default = true
+
+[decision]
+question = "How are related model traversals in views and serializers prevented from firing N+1 queries?"
+default = "select-related-or-prefetch-related"
+why = "Django's lazy-loading default means that accessing `order.customer.name` inside a loop fires one query per loop iteration. A queryset that returns 100 orders and renders each `order.customer.name` fires 101 queries: one for the orders, then one per customer. `select_related` resolves ForeignKey and OneToOne traversals with a SQL JOIN in the same query; `prefetch_related` resolves ManyToMany and reverse ForeignKey traversals with a second batched query. The Django Debug Toolbar and `django-silk` make N+1 sites visible during development. The key discipline is adding the appropriate `select_related` or `prefetch_related` call at the queryset definition in the view or serializer, before the queryset is evaluated, not after traversal begins."
+
+[[option]]
+id = "select-related-or-prefetch-related"
+label = "select_related for FK/O2O; prefetch_related for M2M and reverse FK"
+directive = "Any view, viewset, or serializer that will traverse a ForeignKey or OneToOne relationship adds `.select_related('relation_name')` to the queryset before evaluation. Any view that will traverse a ManyToMany or reverse ForeignKey relationship adds `.prefetch_related('relation_name')`. Django Debug Toolbar or `nplusone` is enabled in development to surface unguarded traversals as warnings or errors. Accessing a related object attribute on each item in a queryset loop without a corresponding `select_related` or `prefetch_related` is the antipattern."
+why = "The adopted default. `select_related` collapses FK traversals into a single JOIN; `prefetch_related` batches reverse and M2M traversals into one additional query."
+
+[[option]]
+id = "lazy-loading-accepted"
+label = "access related objects on demand; accept N+1 queries"
+directive = "Related objects are accessed via attribute traversal as needed, with no `select_related` or `prefetch_related`; the resulting N+1 queries are accepted."
+why = "Correct for one-off scripts or tiny datasets; catastrophic for any view whose queryset size is user-controlled."
+
+[[option]]
+id = "only-and-values"
+label = "use .values() or .only() to fetch flat data and avoid relationship traversal"
+directive = "Related object data is fetched as flat values via `.values('relation__field')` or `.only('field')`, avoiding relationship traversal entirely."
+why = "Eliminates N+1 for read-only flat projections but cannot return model instances; composing with model methods or serializers that expect instances requires restructuring."
