@@ -207,6 +207,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
+        // VCS-gate process-rule configuration + auditable bypass (issue #65).
+        .route(
+            "/api/projects/:id/process-rule-config",
+            get(get_process_rule_config).post(set_process_rule_config_handler),
+        )
+        .route(
+            "/api/projects/:id/vcs-gate/bypass",
+            post(vcs_gate_bypass),
+        )
         .route("/api/provider", get(provider_info))
         .route("/api/connections", get(connections_status))
         .route("/api/notifications", get(notifications_feed))
@@ -1037,6 +1046,155 @@ async fn delete_custom_rule(
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── VCS-gate process-rule configuration + auditable bypass (issue #65) ────────
+
+/// `GET /api/projects/:id/process-rule-config` — read the project's current VCS-gate
+/// process-rule configuration.
+async fn get_process_rule_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.projects.get(&id) {
+        Some(p) => Json(serde_json::json!({
+            "ok": true,
+            "process_rule_config": p.process_rule_config,
+        })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// `POST /api/projects/:id/process-rule-config` — replace the project's VCS-gate
+/// process-rule configuration. The full [`ProcessRuleConfig`] document is expected
+/// in the request body (partial updates are not supported; send the full object).
+async fn set_process_rule_config_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(config): Json<camerata_checks::vcs_action::ProcessRuleConfig>,
+) -> Json<serde_json::Value> {
+    match state
+        .projects
+        .update(&id, |p| p.set_process_rule_config(config))
+    {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Request body for `POST /api/projects/:id/vcs-gate/bypass`.
+#[derive(serde::Deserialize)]
+struct VcsGateBypassReq {
+    /// The [`VcsAction`] to evaluate.
+    action: serde_json::Value,
+    /// Non-empty bypass reason. A missing or empty reason is rejected (the same
+    /// invariant as the suppression-waiver: a reason-less bypass is a hard error).
+    reason: String,
+}
+
+/// `POST /api/projects/:id/vcs-gate/bypass` — evaluate a VCS action with an
+/// auditable bypass.
+///
+/// Intended use: when Camerata's orchestration code knows that a specific action
+/// cannot satisfy the active process rules for a documented, legitimate reason
+/// (e.g. a machine-generated merge commit or a one-time onboarding branch), it
+/// calls this endpoint instead of the normal gate path. The caller supplies the
+/// action metadata AND a non-empty reason; the endpoint records the bypass so it
+/// is visible in the evidence trail.
+///
+/// - Empty or missing `reason` → `400 Bad Request` (bypass without justification
+///   is itself a gate violation).
+/// - Action already passes the gate → `200 ok: true, bypassed: false` (no bypass
+///   record produced; the action is clean).
+/// - Action fails + reason present → `200 ok: true, bypassed: true, record: {...}`.
+async fn vcs_gate_bypass(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<VcsGateBypassReq>,
+) -> Response {
+    use camerata_checks::vcs_action::{build_rules, gate_or_bypass, BypassRequest, GateOrBypassResult, VcsAction};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Reason-less bypass is rejected immediately (mirrors the suppression-waiver
+    // invariant; a bypass must be auditable or it is not a bypass at all).
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "bypass rejected: a non-empty reason is required \
+                            (mirror of the suppression-waiver invariant)"
+            })),
+        )
+            .into_response();
+    }
+
+    // Look up the project and build its live rule set.
+    let Some(project) = state.projects.get(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    };
+
+    let rules = build_rules(&project.process_rule_config);
+
+    // Parse the action from the request. We accept the same JSON shape as
+    // VcsAction's serde representation.
+    let action: VcsAction = match serde_json::from_value(req.action) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not parse action: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let bypass_req = BypassRequest { reason };
+    match gate_or_bypass(&rules, &action, Some(&bypass_req)) {
+        Ok(GateOrBypassResult::Passed) => {
+            Json(serde_json::json!({ "ok": true, "bypassed": false })).into_response()
+        }
+        Ok(GateOrBypassResult::Bypassed(record)) => Json(serde_json::json!({
+            "ok": true,
+            "bypassed": true,
+            "record": record,
+        }))
+        .into_response(),
+        Ok(GateOrBypassResult::Failed(violations)) => {
+            // Should be unreachable (bypass always converts Failed to Bypassed when
+            // the reason is non-empty), but handle it defensively.
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": "gate failed and bypass could not be applied",
+                    "violations": violations.iter().map(|v| &v.detail).collect::<Vec<_>>(),
+                })),
+            )
+                .into_response()
+        }
+        Err(_reason_required) => {
+            // Should be unreachable (we checked `reason.is_empty()` above), but
+            // handle it defensively.
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": "bypass rejected: reason must not be empty"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

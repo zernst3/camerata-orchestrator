@@ -90,6 +90,7 @@ mod tests {
                 balanced: "sonnet-custom".into(),
                 strongest: "opus-custom".into(),
             },
+            process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

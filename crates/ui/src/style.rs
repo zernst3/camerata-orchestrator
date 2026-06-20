@@ -2365,4 +2365,194 @@ html, body {
 .uow-provenance-val { font-size: 12px; color: var(--ink); }
 .uow-provenance-rules { font-size: 11px; color: var(--ink-soft); }
 .uow-signoff-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+
+/* ── VCS-gate process-rule settings panel (issue #65) ────────────────────── */
+.vcs-settings-panel {
+  padding: 24px 28px;
+  max-width: 760px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+}
+.vcs-settings-loading {
+  padding: 24px;
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.vcs-settings-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.vcs-settings-intro {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.vcs-settings-rule-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vcs-settings-rule-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.vcs-settings-rule-id {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  background: var(--accent-wash);
+  color: var(--accent-ink);
+  border-radius: var(--r-sm);
+  padding: 2px 6px;
+}
+.vcs-settings-opt-in-badge {
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--line-soft);
+  color: var(--ink-soft);
+  border-radius: var(--r-sm);
+  padding: 2px 6px;
+}
+.vcs-settings-rule-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.vcs-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+}
+.vcs-settings-tunables {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 6px;
+}
+.vcs-settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.vcs-settings-input {
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  width: 160px;
+  outline: none;
+  transition: border-color .15s var(--ease);
+}
+.vcs-settings-input:focus {
+  border-color: var(--accent);
+}
+.vcs-settings-input-wide {
+  width: 100%;
+  max-width: 520px;
+}
+.vcs-settings-select {
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
+  width: 220px;
+  outline: none;
+  cursor: pointer;
+}
+.vcs-settings-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+.vcs-settings-story-id-fmt {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--paper);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+}
+.vcs-settings-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+/* Bypass section */
+.vcs-settings-bypass-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vcs-settings-textarea {
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  width: 100%;
+  max-width: 520px;
+  min-height: 72px;
+  resize: vertical;
+  outline: none;
+  font-family: inherit;
+  transition: border-color .15s var(--ease);
+}
+.vcs-settings-textarea:focus {
+  border-color: var(--accent);
+}
+.vcs-settings-bypass-ok {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--good);
+}
+.vcs-settings-bypass-err {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #b3261e;
+}
+.vcs-settings-bypass-record {
+  margin: 4px 0 0;
+  font-size: 11px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
 "#;
