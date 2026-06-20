@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use camerata_agent::post_story_hook::{PostStoryHook, StoryCompletion};
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, RevisionOp,
 };
@@ -234,6 +235,17 @@ pub struct SignOff {
 /// …) and as the back-compat carrier for decisions; the store is the source of truth
 /// for decision history. The store handle is optional so tests and a no-data-dir launch
 /// keep working with the inline-decisions behaviour unchanged.
+///
+/// # Post-story documentation (PROC-STORY-DOCS-1)
+///
+/// When [`with_story_doc_hook`](Self::with_story_doc_hook) attaches a
+/// [`PostStoryHook`], the hook is called inside [`Self::sign_off`] after the sign-off
+/// is persisted. The [`camerata_agent::StoryDocEmitter`] implementation emits two
+/// DRAFT markdown files per story under `docs/<story-id>/` in the workspace root (for
+/// the `per-story-docs` convention, which is the PROC-STORY-DOCS-1 default). For all
+/// other conventions the hook is a no-op. Hook failures are non-fatal: the sign-off
+/// is already persisted when the hook runs, so a doc-write error only logs and never
+/// rolls back the sign-off.
 #[derive(Clone, Default)]
 pub struct UowStore {
     path: Option<Arc<PathBuf>>,
@@ -246,6 +258,18 @@ pub struct UowStore {
     /// can drive the async [`ArtifactStore`] calls. `None` when no artifact store is
     /// attached, or when no runtime was available at construction (defensive).
     runtime: Option<tokio::runtime::Handle>,
+    /// Optional post-story hook, called at the END of [`Self::sign_off`] after the
+    /// sign-off is persisted. The hook receives a [`StoryCompletion`] snapshot and
+    /// can emit documentation, trigger CI, post Slack messages, etc. Hook failures
+    /// are intentionally non-fatal (logged only) — the sign-off is already committed
+    /// by the time the hook fires. `None` disables the hook (the default).
+    post_story_hook: Option<Arc<dyn PostStoryHook>>,
+    /// The absolute workspace root passed to the post-story hook. When `None` (the
+    /// default), the hook receives a workspace root of the current directory
+    /// (`PathBuf::new()`), which will cause doc-write to fail gracefully unless the
+    /// hook itself handles the absence. Set via `with_workspace_root` or inferred
+    /// from the settings store by the caller.
+    workspace_root: Option<PathBuf>,
 }
 
 impl UowStore {
@@ -266,6 +290,8 @@ impl UowStore {
             mem: Arc::new(Mutex::new(mem)),
             artifacts: None,
             runtime: None,
+            post_story_hook: None,
+            workspace_root: None,
         }
     }
 
@@ -281,6 +307,32 @@ impl UowStore {
     pub fn with_artifacts(mut self, artifacts: Arc<dyn ArtifactStore>) -> Self {
         self.runtime = tokio::runtime::Handle::try_current().ok();
         self.artifacts = Some(artifacts);
+        self
+    }
+
+    /// Attach a [`PostStoryHook`] to be called at the END of [`Self::sign_off`]
+    /// (PROC-STORY-DOCS-1). The hook is invoked with a [`StoryCompletion`] snapshot
+    /// that includes the story id, decisions, run summary, and workspace root.
+    ///
+    /// Hook failures are non-fatal: the sign-off is already persisted by the time the
+    /// hook fires. A doc-write error is logged (to stderr in the current process) and
+    /// the sign-off result is returned unchanged.
+    ///
+    /// Builder form: returns a new handle sharing the same in-memory map + file path
+    /// as `self`.
+    pub fn with_story_doc_hook(mut self, hook: Arc<dyn PostStoryHook>) -> Self {
+        self.post_story_hook = Some(hook);
+        self
+    }
+
+    /// Set the workspace root passed to the post-story hook in [`Self::sign_off`].
+    ///
+    /// The workspace root is the ABSOLUTE path to the root of the repo being
+    /// governed. Documentation is written under `<workspace_root>/docs/<story_id>/`.
+    ///
+    /// Builder form: returns a new handle sharing the same in-memory map + file path.
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
         self
     }
 
@@ -500,7 +552,7 @@ impl UowStore {
             Some(n) => format!("Run {run_id} signed off by {by}: {n}"),
             None => format!("Run {run_id} signed off by {by}"),
         };
-        let updated = {
+        let mut updated = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
             let uow = map
                 .entry(story_id.to_string())
@@ -532,6 +584,70 @@ impl UowStore {
             uow.clone()
         };
         self.flush();
+
+        // ── Post-story documentation hook (PROC-STORY-DOCS-1) ────────────────
+        // The sign-off is already persisted above. The hook runs best-effort:
+        // a doc-write failure is logged to stderr but never propagates so the
+        // caller always receives the signed-off UoW regardless of hook outcome.
+        if let Some(hook) = &self.post_story_hook {
+            // Read the decision set THROUGH the artifact store (source of truth)
+            // so the hook receives the same view the gate used to approve the work.
+            let decisions = self.decisions_for(story_id);
+            // Derive a run summary from the most recent gate provenance stamped on
+            // the UoW. If no provenance exists yet, produce a minimal summary.
+            let run_summary = updated
+                .gate_provenance
+                .as_ref()
+                .map(|p| {
+                    format!(
+                        "Run {} completed (mode: {}): {} allowed, {} denied ({} bounces).",
+                        p.run_id, p.mode, p.allow_count, p.deny_count, p.total_bounces
+                    )
+                })
+                .unwrap_or_else(|| format!("Story {} signed off.", story_id));
+            let workspace_root = self
+                .workspace_root
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
+            let completion = StoryCompletion {
+                story_id: story_id.to_string(),
+                decisions,
+                run_summary,
+                workspace_root,
+                signed_off_at: updated
+                    .sign_off
+                    .as_ref()
+                    .map(|s| s.ts.clone())
+                    .unwrap_or_else(Self::now_rfc3339),
+            };
+            match hook.emit(&completion) {
+                Ok(files) if !files.is_empty() => {
+                    // Record the emitted file paths in the UoW history so the
+                    // architect can see where the drafts landed.
+                    let paths = files
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let summary = format!("Story docs emitted (DRAFT): {paths}");
+                    self.append_history(story_id, "story_docs", &summary);
+                    // Re-read after the history append so the returned UoW
+                    // reflects the doc-emit history entry.
+                    updated = self.get_or_create(story_id);
+                }
+                Ok(_) => {
+                    // No-op convention (e.g. living-central-docs): nothing to record.
+                }
+                Err(e) => {
+                    // Hook failure is non-fatal: the sign-off is already persisted.
+                    // Log to stderr and continue.
+                    eprintln!(
+                        "[camerata] post-story doc hook failed for {story_id}: {e:#}"
+                    );
+                }
+            }
+        }
+
         updated
     }
 
@@ -1357,5 +1473,191 @@ mod artifact_store_tests {
         let note = InvestigationArtifact::ai_authored("CAM-500", "x", Utc::now());
         assert!(store.set_investigation_note(&note).is_none());
         assert!(store.investigation_note_for("CAM-500").is_none());
+    }
+}
+
+// ── Post-story documentation hook tests (PROC-STORY-DOCS-1) ──────────────────
+//
+// These tests exercise the hook wiring inside `UowStore::sign_off`. They use a
+// real `StoryDocEmitter` backed by a temp directory so the file-write path is
+// exercised end-to-end. The UoW store is in-memory (no JSON file or SQLite).
+#[cfg(test)]
+mod post_story_hook_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use camerata_agent::post_story_hook::{DocConvention, StoryDocEmitter};
+    use camerata_worktracker::investigation::DecisionRecord;
+    use chrono::Utc;
+
+    fn approved_decision(story: &str, slug: &str) -> DecisionRecord {
+        DecisionRecord::ai_proposed(
+            story,
+            format!("{story}/decision/{slug}"),
+            "Some decision",
+            "A question?",
+            "Chosen rationale",
+            vec![],
+            Utc::now(),
+        )
+        .approve(Utc::now())
+    }
+
+    fn make_gate_prov(story: &str) -> GateProvenance {
+        GateProvenance {
+            run_id: "run-hook-1".to_string(),
+            mode: "scripted".to_string(),
+            allow_count: 2,
+            deny_count: 1,
+            total_bounces: 1,
+            rules_fired: vec!["SEC-NO-PATH-ESCAPE-1".to_string()],
+            recorded: Utc::now().to_rfc3339(),
+        }
+        // Use the story param only so the compiler doesn't warn about unused.
+        // The provenance is story-scoped by the caller context, not by this record.
+        .apply(story)
+    }
+
+    impl GateProvenance {
+        /// Helper: attach the provenance run_id suffix to make tests distinct (no
+        /// real mutation needed; purely for test uniqueness).
+        fn apply(self, story: &str) -> Self {
+            GateProvenance {
+                run_id: format!("{}-{story}", self.run_id),
+                ..self
+            }
+        }
+    }
+
+    #[test]
+    fn sign_off_with_hook_emits_docs_and_records_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::PerStoryDocs));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter.clone())
+            .with_workspace_root(dir.path().to_path_buf());
+
+        // Seed decisions so the hook gets real content.
+        store.set_decisions("CAM-H1", vec![approved_decision("CAM-H1", "auth")]);
+        // Attach gate provenance so the run_summary section is populated.
+        store.record_gate_provenance("CAM-H1", make_gate_prov("CAM-H1"));
+
+        let uow = store.sign_off("CAM-H1", "zach", "run-hook-1-CAM-H1", None);
+
+        // The doc files must exist on disk.
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-H1");
+        let guide = StoryDocEmitter::user_path(dir.path(), "CAM-H1");
+        assert!(tech.exists(), "technical doc must be written to disk");
+        assert!(guide.exists(), "user guide must be written to disk");
+
+        // The UoW history must record the doc emission.
+        assert!(
+            uow.history
+                .iter()
+                .any(|h| h.kind == "story_docs" && h.text.contains("CAM-H1")),
+            "story_docs history entry must record the emitted paths for CAM-H1"
+        );
+
+        // The sign-off itself must also be in the history.
+        assert!(
+            uow.history.iter().any(|h| h.kind == "sign_off"),
+            "sign_off history entry must still be present"
+        );
+    }
+
+    #[test]
+    fn sign_off_without_hook_does_not_emit_and_has_no_docs_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = UowStore::new(); // no hook attached
+
+        store.set_decisions("CAM-H2", vec![approved_decision("CAM-H2", "auth")]);
+        let uow = store.sign_off("CAM-H2", "zach", "run-1", None);
+
+        // No files must be created.
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-H2");
+        assert!(!tech.exists(), "no doc files without a hook");
+
+        // No story_docs history entry.
+        assert!(
+            !uow.history.iter().any(|h| h.kind == "story_docs"),
+            "no story_docs history without a hook"
+        );
+    }
+
+    #[test]
+    fn sign_off_with_noop_convention_records_no_docs_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::MechanicalMinimum));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-H3", vec![approved_decision("CAM-H3", "auth")]);
+        let uow = store.sign_off("CAM-H3", "zach", "run-1", None);
+
+        // No docs emitted for mechanical-minimum.
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-H3");
+        assert!(!tech.exists(), "mechanical-minimum must not emit files");
+
+        // No story_docs history entry for a no-op convention.
+        assert!(
+            !uow.history.iter().any(|h| h.kind == "story_docs"),
+            "no story_docs history for noop convention"
+        );
+    }
+
+    #[test]
+    fn sign_off_doc_emit_does_not_change_sign_off_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::PerStoryDocs));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-H4", vec![approved_decision("CAM-H4", "auth")]);
+        let uow = store.sign_off("CAM-H4", "zach", "run-42", Some("LGTM"));
+
+        // The sign-off must be present and correct regardless of the hook.
+        let so = uow.sign_off.expect("sign-off must be present");
+        assert_eq!(so.by, "zach");
+        assert_eq!(so.run_id, "run-42");
+        assert_eq!(so.note.as_deref(), Some("LGTM"));
+    }
+
+    #[test]
+    fn technical_doc_content_includes_decisions_and_run_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::PerStoryDocs));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions(
+            "CAM-H5",
+            vec![approved_decision("CAM-H5", "database-choice")],
+        );
+        // Attach a gate provenance to get a populated run summary.
+        store.record_gate_provenance(
+            "CAM-H5",
+            GateProvenance {
+                run_id: "run-h5".to_string(),
+                mode: "scripted".to_string(),
+                allow_count: 3,
+                deny_count: 0,
+                total_bounces: 0,
+                rules_fired: vec![],
+                recorded: Utc::now().to_rfc3339(),
+            },
+        );
+
+        store.sign_off("CAM-H5", "zach", "run-h5", None);
+
+        let content = std::fs::read_to_string(
+            StoryDocEmitter::technical_path(dir.path(), "CAM-H5"),
+        )
+        .unwrap();
+        assert!(content.contains("CAM-H5"), "story id in technical doc");
+        assert!(content.contains("Some decision"), "decision label in technical doc");
+        // Run summary derived from gate provenance.
+        assert!(content.contains("run-h5"), "run id in technical doc summary");
     }
 }

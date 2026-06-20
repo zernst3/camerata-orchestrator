@@ -10,9 +10,14 @@ workspace = true
 
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-worktracker = { path = "../worktracker" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+chrono = { version = "0.4", features = ["clock"] }
+
+[dev-dependencies]
+tempfile = "3"
