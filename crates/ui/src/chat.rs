@@ -46,7 +46,6 @@ struct Turn {
     text: String,
 }
 
-
 async fn fetch_models() -> Option<ModelsResp> {
     reqwest::get(format!("{}/api/models", crate::BFF_URL))
         .await
@@ -94,12 +93,24 @@ async fn fetch_rules_catalog() -> Option<String> {
     rules.sort_by(|a, b| (&a.domain, &a.id).cmp(&(&b.domain, &b.id)));
     let mut s = String::new();
     for r in &rules {
-        let domain = if r.domain.is_empty() { "general" } else { r.domain.as_str() };
-        let scope = if r.scope.is_empty() { "repo-local" } else { r.scope.as_str() };
+        let domain = if r.domain.is_empty() {
+            "general"
+        } else {
+            r.domain.as_str()
+        };
+        let scope = if r.scope.is_empty() {
+            "repo-local"
+        } else {
+            r.scope.as_str()
+        };
         s.push_str(&format!("- {} [{} · {}]: {}", r.id, domain, scope, r.title));
         if !r.options.is_empty() {
-            let labels: Vec<&str> =
-                r.options.iter().map(|o| o.label.as_str()).filter(|l| !l.is_empty()).collect();
+            let labels: Vec<&str> = r
+                .options
+                .iter()
+                .map(|o| o.label.as_str())
+                .filter(|l| !l.is_empty())
+                .collect();
             if !labels.is_empty() {
                 s.push_str(&format!("  (alternatives: {})", labels.join(" / ")));
             }
@@ -162,7 +173,9 @@ fn guide_system_prompt(rules_catalog: &str) -> String {
          \n\n=== CAMERATA USER GUIDE ===\n{USER_GUIDE}"
     );
     if !rules_catalog.trim().is_empty() {
-        p.push_str("\n\n=== CAMERATA RULES CATALOG (every governance rule, with domain · scope) ===\n");
+        p.push_str(
+            "\n\n=== CAMERATA RULES CATALOG (every governance rule, with domain · scope) ===\n",
+        );
         p.push_str(rules_catalog);
     }
     p
@@ -183,7 +196,10 @@ pub fn ChatBubble() -> Element {
             }
         }
     }
-    let backend = models.as_ref().map(|m| m.backend.clone()).unwrap_or_default();
+    let backend = models
+        .as_ref()
+        .map(|m| m.backend.clone())
+        .unwrap_or_default();
 
     let mut mode = use_signal(|| ChatMode::Research);
     let mut turns = use_signal(Vec::<Turn>::new);

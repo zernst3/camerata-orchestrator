@@ -23,12 +23,10 @@ use camerata_worktracker::{CanonicalStory, FeatureStatus};
 // Chorale (crates.io, headless table) backs the brownfield audit-findings and
 // proposed-rules tables — the surfaces where the data genuinely scales.
 use chorale_core::{
-    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind,
-    PaginationMode, RenderKind, RowId, TableState,
+    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
+    RenderKind, RowId, TableState,
 };
-use chorale_dioxus::{
-    use_table, RowCellRenderer, RowCellRenderers, RowClass, Table,
-};
+use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
 
 /// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
 /// filtered out server-side). The cockpit just renders what the BFF returns.
@@ -194,7 +192,11 @@ async fn fetch_reconcile(project_id: &str) -> Option<Vec<AppliedRuleView>> {
 /// Re-emit the project's ruleset (source of truth) into its repos — one PR per repo.
 async fn emit_project_rules(project_id: &str) -> Option<Vec<ArmResultView>> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/emit", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/emit",
+            crate::BFF_URL,
+            project_id
+        ))
         .send()
         .await
         .ok()?
@@ -210,7 +212,11 @@ async fn emit_project_rules(project_id: &str) -> Option<Vec<ArmResultView>> {
 /// Add or edit (by name) a custom rule on a project.
 async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/custom", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/custom",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "name": name, "body": body, "domain": domain }))
         .send()
         .await
@@ -221,7 +227,11 @@ async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str)
 /// Delete a custom rule by name (the only way a custom rule leaves a project).
 async fn delete_custom_rule(project_id: &str, name: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/custom/delete", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/custom/delete",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "name": name }))
         .send()
         .await
@@ -238,7 +248,11 @@ fn custom_columns() -> Vec<ColumnDef<CustomRuleView>> {
         .filter(FilterKind::Text)
         .initial_width(200.0),
         ColumnDef::new(ColumnId("domain"), "Domain", |c: &CustomRuleView| {
-            CellValue::Text(if c.domain.is_empty() { "*".to_string() } else { c.domain.clone() })
+            CellValue::Text(if c.domain.is_empty() {
+                "*".to_string()
+            } else {
+                c.domain.clone()
+            })
         })
         .sortable()
         .initial_width(150.0),
@@ -252,7 +266,11 @@ fn custom_columns() -> Vec<ColumnDef<CustomRuleView>> {
 /// The custom-rules editor: a chorale table of the project's custom rules grouped
 /// by domain, with selection -> delete. The add/edit form lives in the parent.
 #[component]
-fn CustomRulesTable(custom: Vec<CustomRuleView>, project_id: String, refresh: Signal<u32>) -> Element {
+fn CustomRulesTable(
+    custom: Vec<CustomRuleView>,
+    project_id: String,
+    refresh: Signal<u32>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Mint row ids ONCE per mount (see ProposedRulesTable): minting in the render body
     // re-ids every render and desyncs selection. The call site keys this component on the
@@ -296,7 +314,11 @@ fn CustomRulesTable(custom: Vec<CustomRuleView>, project_id: String, refresh: Si
 /// Import a ruleset JSON (upsert base rules; the server preserves custom).
 async fn import_ruleset(project_id: &str, json: String) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/ruleset", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/ruleset",
+            crate::BFF_URL,
+            project_id
+        ))
         .header("content-type", "application/json")
         .body(json)
         .send()
@@ -319,7 +341,11 @@ async fn fetch_corpus_rules() -> Option<Vec<ProposedRuleView>> {
 /// unchanged — callers must pass it through from the current project.
 async fn save_ruleset(project_id: &str, ruleset: serde_json::Value) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/ruleset", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/ruleset",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&ruleset)
         .send()
         .await
@@ -555,13 +581,17 @@ fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
 
 /// Which of the three lists a rule_id lives in (selections / cross_repo / process).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SelectionBucket { Selections, CrossRepo, Process }
+enum SelectionBucket {
+    Selections,
+    CrossRepo,
+    Process,
+}
 
 fn bucket_of(rule: &ProposedRuleView) -> SelectionBucket {
     match rule.scope.as_str() {
         "cross-repo" => SelectionBucket::CrossRepo,
-        "process"    => SelectionBucket::Process,
-        _            => SelectionBucket::Selections,
+        "process" => SelectionBucket::Process,
+        _ => SelectionBucket::Selections,
     }
 }
 
@@ -579,21 +609,30 @@ struct AppliedRuleRow {
 
 impl AppliedRuleRow {
     fn domain(&self) -> String {
-        self.corpus.as_ref().map(|r| r.domain.clone()).filter(|s| !s.is_empty()).unwrap_or_else(|| "general".to_string())
+        self.corpus
+            .as_ref()
+            .map(|r| r.domain.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "general".to_string())
     }
     fn title(&self) -> String {
-        self.corpus.as_ref().map(|r| r.title.clone()).unwrap_or_else(|| self.selection.rule_id.clone())
+        self.corpus
+            .as_ref()
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| self.selection.rule_id.clone())
     }
     fn scope_label(&self) -> &'static str {
         match self.bucket {
             SelectionBucket::Selections => "repo-local",
-            SelectionBucket::CrossRepo  => "cross-repo",
-            SelectionBucket::Process    => "process",
+            SelectionBucket::CrossRepo => "cross-repo",
+            SelectionBucket::Process => "process",
         }
     }
     fn chosen_label(&self) -> String {
         match (&self.selection.chosen_option, &self.corpus) {
-            (Some(oid), Some(rule)) => rule.options.iter()
+            (Some(oid), Some(rule)) => rule
+                .options
+                .iter()
                 .find(|o| &o.id == oid)
                 .map(|o| o.label.clone())
                 .unwrap_or_else(|| oid.clone()),
@@ -606,7 +645,7 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
     let scope_badges = BadgeVariantMap::new()
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
-        .with("process",    BadgeVariant::new("Process", "gray"));
+        .with("process", BadgeVariant::new("Process", "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &AppliedRuleRow| {
             CellValue::Text(r.domain())
@@ -630,7 +669,11 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
             if r.bucket != SelectionBucket::Selections {
                 CellValue::Text("all repos".to_string())
             } else {
-                CellValue::Text(if r.selection.repos.is_empty() { "\u{2014}".to_string() } else { r.selection.repos.join(", ") })
+                CellValue::Text(if r.selection.repos.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    r.selection.repos.join(", ")
+                })
             }
         })
         .filter(FilterKind::Text)
@@ -647,10 +690,14 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
     let scope_badges = BadgeVariantMap::new()
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
-        .with("process",    BadgeVariant::new("Process", "gray"));
+        .with("process", BadgeVariant::new("Process", "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &ProposedRuleView| {
-            CellValue::Text(if r.domain.is_empty() { "general".to_string() } else { r.domain.clone() })
+            CellValue::Text(if r.domain.is_empty() {
+                "general".to_string()
+            } else {
+                r.domain.clone()
+            })
         })
         .sortable()
         .filter(FilterKind::Text)
@@ -667,9 +714,17 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Badge(scope_badges))
         .initial_width(130.0),
-        ColumnDef::new(ColumnId("applied_to"), "Applied to", |r: &ProposedRuleView| {
-            CellValue::Text(if r.repos.is_empty() { String::new() } else { r.repos.join(", ") })
-        })
+        ColumnDef::new(
+            ColumnId("applied_to"),
+            "Applied to",
+            |r: &ProposedRuleView| {
+                CellValue::Text(if r.repos.is_empty() {
+                    String::new()
+                } else {
+                    r.repos.join(", ")
+                })
+            },
+        )
         .filter(FilterKind::Text)
         .initial_width(220.0),
     ]
@@ -686,7 +741,8 @@ fn ProjectRulesTable(
     corpus: Vec<ProposedRuleView>,
     refresh: Signal<u32>,
     /// Which repo Table 2 wants Table 1 to jump to (set by "Go to repo rule").
-    #[props(default)] goto_repo: Signal<Option<String>>,
+    #[props(default)]
+    goto_repo: Signal<Option<String>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
@@ -812,10 +868,18 @@ fn ProjectRulesTable(
             let pid = pid_opt.clone();
             spawn(async move {
                 if save_ruleset(&pid, body).await {
-                    crate::toast::push_toast(toasts_opt, crate::toast::ToastKind::Info, "Option saved.");
+                    crate::toast::push_toast(
+                        toasts_opt,
+                        crate::toast::ToastKind::Info,
+                        "Option saved.",
+                    );
                     refresh_opt += 1;
                 } else {
-                    crate::toast::push_toast(toasts_opt, crate::toast::ToastKind::Error, "Could not save the option choice.");
+                    crate::toast::push_toast(
+                        toasts_opt,
+                        crate::toast::ToastKind::Error,
+                        "Could not save the option choice.",
+                    );
                 }
             });
         }
@@ -927,29 +991,43 @@ fn AllRulesTable(
 
     // Build a map: rule_id -> Vec<repo> it's currently applied to.
     let applied_repos: std::collections::HashMap<String, Vec<String>> = {
-        let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        for sel in project.ruleset.selections.iter()
+        let mut m: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for sel in project
+            .ruleset
+            .selections
+            .iter()
             .chain(project.ruleset.cross_repo.iter())
             .chain(project.ruleset.process.iter())
         {
-            m.entry(sel.rule_id.clone()).or_default().extend(sel.repos.clone());
+            m.entry(sel.rule_id.clone())
+                .or_default()
+                .extend(sel.repos.clone());
         }
         m
     };
     // Annotate the corpus with its currently-applied repos for the table column.
-    let annotated: Vec<ProposedRuleView> = corpus.iter().map(|r| {
-        let mut rv = r.clone();
-        rv.repos = applied_repos.get(&r.id).cloned().unwrap_or_default();
-        // deduplicate
-        rv.repos.sort();
-        rv.repos.dedup();
-        rv
-    }).collect();
+    let annotated: Vec<ProposedRuleView> = corpus
+        .iter()
+        .map(|r| {
+            let mut rv = r.clone();
+            rv.repos = applied_repos.get(&r.id).cloned().unwrap_or_default();
+            // deduplicate
+            rv.repos.sort();
+            rv.repos.dedup();
+            rv
+        })
+        .collect();
 
     // Mint row ids ONCE per mount.
     let rows: Vec<(RowId, ProposedRuleView)> = use_hook({
         let annotated = annotated.clone();
-        move || annotated.iter().map(|r| (RowId::new(), r.clone())).collect()
+        move || {
+            annotated
+                .iter()
+                .map(|r| (RowId::new(), r.clone()))
+                .collect()
+        }
     });
     let id_map: std::collections::HashMap<RowId, ProposedRuleView> =
         rows.iter().map(|(id, r)| (*id, r.clone())).collect();
@@ -980,37 +1058,76 @@ fn AllRulesTable(
             // Scope + default option come from the corpus.
             let corpus_rule = corpus.iter().find(|r| r.id == rule_id).cloned();
             let default_opt = corpus_rule.as_ref().and_then(|r| r.default_option.clone());
-            let scope_bucket = corpus_rule.as_ref().map(bucket_of).unwrap_or(SelectionBucket::Selections);
+            let scope_bucket = corpus_rule
+                .as_ref()
+                .map(bucket_of)
+                .unwrap_or(SelectionBucket::Selections);
             match scope_bucket {
                 SelectionBucket::CrossRepo => {
-                    if let Some(sel) = p.ruleset.cross_repo.iter_mut().find(|s| s.rule_id == rule_id) {
-                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                    if let Some(sel) = p
+                        .ruleset
+                        .cross_repo
+                        .iter_mut()
+                        .find(|s| s.rule_id == rule_id)
+                    {
+                        if !sel.repos.contains(&repo) {
+                            sel.repos.push(repo.clone());
+                        }
                     } else {
-                        p.ruleset.cross_repo.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                        p.ruleset.cross_repo.push(RuleSelectionView {
+                            rule_id: rule_id.clone(),
+                            chosen_option: default_opt,
+                            repos: vec![repo.clone()],
+                        });
                     }
                 }
                 SelectionBucket::Process => {
                     if let Some(sel) = p.ruleset.process.iter_mut().find(|s| s.rule_id == rule_id) {
-                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                        if !sel.repos.contains(&repo) {
+                            sel.repos.push(repo.clone());
+                        }
                     } else {
-                        p.ruleset.process.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                        p.ruleset.process.push(RuleSelectionView {
+                            rule_id: rule_id.clone(),
+                            chosen_option: default_opt,
+                            repos: vec![repo.clone()],
+                        });
                     }
                 }
                 SelectionBucket::Selections => {
-                    if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == rule_id) {
-                        if !sel.repos.contains(&repo) { sel.repos.push(repo.clone()); }
+                    if let Some(sel) = p
+                        .ruleset
+                        .selections
+                        .iter_mut()
+                        .find(|s| s.rule_id == rule_id)
+                    {
+                        if !sel.repos.contains(&repo) {
+                            sel.repos.push(repo.clone());
+                        }
                     } else {
-                        p.ruleset.selections.push(RuleSelectionView { rule_id: rule_id.clone(), chosen_option: default_opt, repos: vec![repo.clone()] });
+                        p.ruleset.selections.push(RuleSelectionView {
+                            rule_id: rule_id.clone(),
+                            chosen_option: default_opt,
+                            repos: vec![repo.clone()],
+                        });
                     }
                 }
             }
             let body = build_ruleset_json(&p);
             spawn(async move {
                 if save_ruleset(&pid, body).await {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Added rule to {repo}."));
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        format!("Added rule to {repo}."),
+                    );
                     refresh_add += 1;
                 } else {
-                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not update the ruleset.");
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Could not update the ruleset.",
+                    );
                 }
             });
         }
@@ -1118,9 +1235,7 @@ fn AllRulesTable(
 /// After the user picks an option the caller's `on_option_picked` callback is invoked
 /// with `(rule_id, option_id)` so the parent can POST the updated ruleset.
 #[component]
-fn RulesDetailModalHost(
-    on_option_picked: EventHandler<(String, String)>,
-) -> Element {
+fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Element {
     let detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
     let Some(r) = detail_rule() else {
@@ -1236,7 +1351,8 @@ fn RulesView() -> Element {
     let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
     use_context_provider(|| detail_rule);
     // Shared context: the per-rule chosen option (rule id -> option id).
-    let chosen: Signal<std::collections::HashMap<String, String>> = use_signal(std::collections::HashMap::new);
+    let chosen: Signal<std::collections::HashMap<String, String>> =
+        use_signal(std::collections::HashMap::new);
     use_context_provider(|| chosen);
 
     // Signal from Table 2 to Table 1: "go to this repo".
@@ -1720,9 +1836,17 @@ async fn suggest_clarifications(story_id: &str) -> Vec<String> {
 }
 
 /// Record the answer to a clarification.
-async fn answer_clarification(cid: &str, answer: &str, answered_by: &str) -> Option<ClarificationView> {
+async fn answer_clarification(
+    cid: &str,
+    answer: &str,
+    answered_by: &str,
+) -> Option<ClarificationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/clarifications/{}/answer", crate::BFF_URL, cid))
+        .post(format!(
+            "{}/api/clarifications/{}/answer",
+            crate::BFF_URL,
+            cid
+        ))
         .json(&serde_json::json!({ "answer": answer, "answered_by": answered_by }))
         .send()
         .await
@@ -1744,7 +1868,11 @@ struct ProposedChildView {
 /// Propose the component children for a parent (not yet created).
 async fn fetch_proposal(story_id: &str) -> Option<Vec<ProposedChildView>> {
     reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/decompose", crate::BFF_URL, story_id))
+        .post(format!(
+            "{}/api/stories/{}/decompose",
+            crate::BFF_URL,
+            story_id
+        ))
         .send()
         .await
         .ok()?
@@ -1754,7 +1882,10 @@ async fn fetch_proposal(story_id: &str) -> Option<Vec<ProposedChildView>> {
 }
 
 /// Commit the edited children; returns the created child stories.
-async fn commit_children(story_id: &str, children: &[ProposedChildView]) -> Option<Vec<CanonicalStory>> {
+async fn commit_children(
+    story_id: &str,
+    children: &[ProposedChildView],
+) -> Option<Vec<CanonicalStory>> {
     reqwest::Client::new()
         .post(format!(
             "{}/api/stories/{}/decompose/commit",
@@ -1772,12 +1903,16 @@ async fn commit_children(story_id: &str, children: &[ProposedChildView]) -> Opti
 
 /// The committed children of a parent.
 async fn fetch_children(story_id: &str) -> Option<Vec<CanonicalStory>> {
-    reqwest::get(format!("{}/api/stories/{}/children", crate::BFF_URL, story_id))
-        .await
-        .ok()?
-        .json::<Vec<CanonicalStory>>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/stories/{}/children",
+        crate::BFF_URL,
+        story_id
+    ))
+    .await
+    .ok()?
+    .json::<Vec<CanonicalStory>>()
+    .await
+    .ok()
 }
 
 // ── Unit of Work (issue #39) ──────────────────────────────────────────────────
@@ -2058,7 +2193,10 @@ async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult 
             .and_then(|n| n.as_str())
             .unwrap_or("")
             .to_string();
-        ImportResult::Conflict { name, payload: payload.to_string() }
+        ImportResult::Conflict {
+            name,
+            payload: payload.to_string(),
+        }
     } else if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
         match serde_json::from_value::<ProjectView>(v.get("project").cloned().unwrap_or_default()) {
             Ok(p) => ImportResult::Imported(p),
@@ -3047,14 +3185,21 @@ struct Disposition {
 
 impl Default for Disposition {
     fn default() -> Self {
-        Self { state: TriageState::Unresolved, reason: String::new(), bucket: TechDebtBucket::Later }
+        Self {
+            state: TriageState::Unresolved,
+            reason: String::new(),
+            bucket: TechDebtBucket::Later,
+        }
     }
 }
 
 /// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
 /// so its disposition survives table switches and re-sorts.
 fn finding_key(f: &FindingView) -> String {
-    format!("{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}", f.repo, f.rule_id, f.path, f.line, f.snippet)
+    format!(
+        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
+        f.repo, f.rule_id, f.path, f.line, f.snippet
+    )
 }
 
 /// The disposition state for a finding (Unresolved when absent from the map).
@@ -3244,7 +3389,11 @@ impl CustomRuleView {
             decision_question: None,
             decision_why: None,
             scope: "repo-local".to_string(),
-            domain: if self.is_global() { "Custom Global".to_string() } else { "Custom".to_string() },
+            domain: if self.is_global() {
+                "Custom Global".to_string()
+            } else {
+                "Custom".to_string()
+            },
             repos,
             placement: "Guidance in AGENTS.md, reviewed at PR (custom · prose)".to_string(),
             finding_count: 0,
@@ -3505,7 +3654,8 @@ fn estimate_audit_cost(
     let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
 
     // ── Scan passes, priced at the AUDIT model ──
-    let scan_in = (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN;
+    let scan_in =
+        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN;
     let scan_out =
         OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
 
@@ -3592,13 +3742,17 @@ fn recommend_scan_mode(report: &ScanReportView) -> String {
 
 /// Poll an async audit job for progress + incremental findings + the final report.
 async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
-    reqwest::get(format!("{}/api/onboard/audit/job/{}", crate::BFF_URL, job_id))
-        .await
-        .ok()?
-        .json::<Option<JobStateView>>()
-        .await
-        .ok()
-        .flatten()
+    reqwest::get(format!(
+        "{}/api/onboard/audit/job/{}",
+        crate::BFF_URL,
+        job_id
+    ))
+    .await
+    .ok()?
+    .json::<Option<JobStateView>>()
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Drive an async audit job to completion: poll every ~1.5s, update progress + (on done) the
@@ -3680,7 +3834,11 @@ struct ArmResultView {
 
 /// Apply: write the selected rules onto a governance branch in each repo's LOCAL clone and
 /// push it to origin — NO pull request. The architect opens the PR separately.
-async fn apply_rules(rules: &[ArmRuleReq], custom: &[CustomRuleView], findings: &[FindingView]) -> Option<(bool, String, Vec<ArmResultView>)> {
+async fn apply_rules(
+    rules: &[ArmRuleReq],
+    custom: &[CustomRuleView],
+    findings: &[FindingView],
+) -> Option<(bool, String, Vec<ArmResultView>)> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/apply", crate::BFF_URL))
         .json(&serde_json::json!({ "rules": rules, "custom": custom, "findings": findings }))
@@ -3691,7 +3849,11 @@ async fn apply_rules(rules: &[ArmRuleReq], custom: &[CustomRuleView], findings: 
         .await
         .ok()?;
     let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-    let message = v.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    let message = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
     let results = v
         .get("results")
         .cloned()
@@ -3717,10 +3879,13 @@ async fn open_governance_pr(repos: &[String]) -> Option<Vec<ArmResultView>> {
     serde_json::from_value(v.get("results").cloned()?).ok()
 }
 
-
 /// Accept selected findings as tech debt: open a GitHub issue (the story). `title` lets the
 /// caller distinguish resolve-later from resolve-now; `None` uses the server default.
-async fn create_ticket(repo: &str, findings: &[FindingView], title: Option<&str>) -> Option<String> {
+async fn create_ticket(
+    repo: &str,
+    findings: &[FindingView],
+    title: Option<&str>,
+) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/onboard/ticket", crate::BFF_URL))
         .json(&serde_json::json!({ "repo": repo, "findings": findings, "title": title }))
@@ -3847,13 +4012,17 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         // The cell VALUE is just yes/no ("does this need review?") so the filter is a simple
         // two-option toggle, not a free-text box over every distinct reason. The visible chip +
         // reason are drawn by the row renderer (which reads f.detail), so the reason still shows.
-        ColumnDef::new(ColumnId("needs_review"), "Needs review", |f: &FindingView| {
-            CellValue::Text(if split_needs_review(&f.detail).1.is_some() {
-                "yes".to_string()
-            } else {
-                "no".to_string()
-            })
-        })
+        ColumnDef::new(
+            ColumnId("needs_review"),
+            "Needs review",
+            |f: &FindingView| {
+                CellValue::Text(if split_needs_review(&f.detail).1.is_some() {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                })
+            },
+        )
         .sortable()
         .filter(FilterKind::MultiSelect {
             options: vec!["yes".to_string(), "no".to_string()],
@@ -3934,13 +4103,17 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .initial_width(150.0),
         // Suggested = the rule's domain matched the scanned stack; the rest are the full
         // library, available to arm but not recommended for this stack.
-        ColumnDef::new(ColumnId("suggested"), "For this stack", |r: &ProposedRuleView| {
-            CellValue::Text(if r.recommended {
-                "suggested".to_string()
-            } else {
-                "available".to_string()
-            })
-        })
+        ColumnDef::new(
+            ColumnId("suggested"),
+            "For this stack",
+            |r: &ProposedRuleView| {
+                CellValue::Text(if r.recommended {
+                    "suggested".to_string()
+                } else {
+                    "available".to_string()
+                })
+            },
+        )
         .sortable()
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
@@ -3962,9 +4135,11 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .initial_width(130.0),
         // (The "Applies to" column was removed: the repo this ruleset is for is already
         // chosen in the "Repo ruleset" selector above the table, so per-row repo was redundant.)
-        ColumnDef::new(ColumnId("placement"), "Gate placement", |r: &ProposedRuleView| {
-            CellValue::Text(r.placement.clone())
-        })
+        ColumnDef::new(
+            ColumnId("placement"),
+            "Gate placement",
+            |r: &ProposedRuleView| CellValue::Text(r.placement.clone()),
+        )
         .initial_width(300.0),
         ColumnDef::new(ColumnId("kind"), "Kind", |r: &ProposedRuleView| {
             CellValue::Text(r.kind.clone())
@@ -4037,7 +4212,10 @@ fn FindingsTable(
     let mut detail_finding = use_context::<Signal<Option<FindingView>>>();
     let in_techdebt = triage_view == TriageState::TechDebt;
     let handle = use_table(move || {
-        TableState::new(rows.clone(), finding_columns(filter_repos.clone(), in_techdebt))
+        TableState::new(
+            rows.clone(),
+            finding_columns(filter_repos.clone(), in_techdebt),
+        )
     });
     // Subscribe to the disposition map so the bucket flag column re-renders when the architect
     // marks resolve-later/now (the renderer below captures this snapshot).
@@ -4069,7 +4247,6 @@ fn FindingsTable(
     let id_map_d = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
-
 
     // SECURITY findings (the deterministic floor — the only tier ranked "critical") get a
     // red full-row highlight so they're unmistakable beyond the badge text. This now uses
@@ -4106,8 +4283,8 @@ fn FindingsTable(
         // finding, followed by the specific reason. Blank when not flagged.
         m.insert(
             ColumnId("needs_review"),
-            std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
-                match split_needs_review(&f.detail).1 {
+            std::sync::Arc::new(
+                move |f: &FindingView, _val: &CellValue| match split_needs_review(&f.detail).1 {
                     Some(reason) => {
                         let reason = reason.clone();
                         rsx! {
@@ -4118,8 +4295,8 @@ fn FindingsTable(
                         }
                     }
                     None => rsx! {},
-                }
-            }) as RowCellRenderer<FindingView>,
+                },
+            ) as RowCellRenderer<FindingView>,
         );
         // Tech-debt bucket flag: reads the live disposition snapshot for this finding and
         // renders a "Later" / "Now" badge. Present only in the tech-debt view.
@@ -4128,7 +4305,10 @@ fn FindingsTable(
             m.insert(
                 ColumnId("bucket"),
                 std::sync::Arc::new(move |f: &FindingView, _val: &CellValue| {
-                    let bucket = snap.get(&finding_key(f)).map(|d| d.bucket).unwrap_or(TechDebtBucket::Later);
+                    let bucket = snap
+                        .get(&finding_key(f))
+                        .map(|d| d.bucket)
+                        .unwrap_or(TechDebtBucket::Later);
                     let (label, cls) = match bucket {
                         TechDebtBucket::Later => ("Later", "td-bucket later"),
                         TechDebtBucket::Now => ("Now", "td-bucket now"),
@@ -4328,7 +4508,6 @@ fn FindingsTable(
     }
 }
 
-
 /// Composite key for the per-repo "chosen alternative" map. Option choices are INDEPENDENT
 /// per repo: picking an alternative for a rule while viewing one repo must not change another
 /// repo's choice for the same rule. The NUL byte separates the parts (it can't appear in an
@@ -4369,7 +4548,10 @@ fn ProposedRulesTable(
     let all_by_id: std::collections::HashMap<String, ProposedRuleView> = if all_rules.is_empty() {
         rules.iter().map(|r| (r.id.clone(), r.clone())).collect()
     } else {
-        all_rules.iter().map(|r| (r.id.clone(), r.clone())).collect()
+        all_rules
+            .iter()
+            .map(|r| (r.id.clone(), r.clone()))
+            .collect()
     };
     // Mint the row ids ONCE and persist them. `RowId::new()` is random, so doing this
     // in the render body would generate fresh ids every re-render: the Table keeps the
@@ -4418,18 +4600,18 @@ fn ProposedRulesTable(
     };
     let mut domain_rows: std::collections::BTreeMap<String, Vec<RowId>> = Default::default();
     for (rid, p) in &rows {
-        let d = if p.domain.is_empty() { "general".to_string() } else { p.domain.clone() };
+        let d = if p.domain.is_empty() {
+            "general".to_string()
+        } else {
+            p.domain.clone()
+        };
         domain_rows.entry(d).or_default().push(*rid);
     }
     // Distinct domains (sorted, "general" for blank — matches the cell value) for the
     // Domain column's multi-select filter options.
     let domain_options: Vec<String> = domain_rows.keys().cloned().collect();
-    let handle = use_table(move || {
-        TableState::new(
-            rows.clone(),
-            rule_columns(domain_options.clone()),
-        )
-    });
+    let handle =
+        use_table(move || TableState::new(rows.clone(), rule_columns(domain_options.clone())));
     // The row-detail modal is hosted by ScanResults (OUTSIDE this table's subtree)
     // via a shared signal: a row click writes the rule here, ScanResults renders the
     // modal. Hosting the full-screen overlay outside the Table avoids a Dioxus-desktop
@@ -4489,7 +4671,11 @@ fn ProposedRulesTable(
     let arm_findings = findings;
     // Export the FULL cross-repo rule set (every repo's proposed rules), not just the
     // currently-viewed repo's subset, so the CSV stays lossless for a multi-repo scan.
-    let csv_rules = if all_rules.is_empty() { rules.clone() } else { all_rules.clone() };
+    let csv_rules = if all_rules.is_empty() {
+        rules.clone()
+    } else {
+        all_rules.clone()
+    };
 
     // Dedicated clones for the audit closure; the originals are consumed by the arm closure.
     let all_by_id_audit = all_by_id.clone();
@@ -4511,9 +4697,14 @@ fn ProposedRulesTable(
                     .get(&chosen_key(&cur_repo, &r.id))
                     .cloned()
                     .or_else(|| r.default_option.clone());
-                oid.and_then(|o| r.options.iter().find(|x| x.id == o).map(|x| x.directive.clone()))
-                    .filter(|s| !s.is_empty())
-                    .is_none()
+                oid.and_then(|o| {
+                    r.options
+                        .iter()
+                        .find(|x| x.id == o)
+                        .map(|x| x.directive.clone())
+                })
+                .filter(|s| !s.is_empty())
+                .is_none()
             })
             .map(|r| r.id.clone())
             .collect()
@@ -4537,7 +4728,10 @@ fn ProposedRulesTable(
             selected_rule_ids.iter().cloned().collect()
         } else {
             let mut map = repo_selection.peek().clone();
-            map.insert(view_repo.clone(), selected_rule_ids.iter().cloned().collect());
+            map.insert(
+                view_repo.clone(),
+                selected_rule_ids.iter().cloned().collect(),
+            );
             map.values().flatten().cloned().collect()
         };
         selected
@@ -4547,7 +4741,10 @@ fn ProposedRulesTable(
     };
     let has_unresolved = !unresolved_selected.is_empty();
     let unresolved_hint = if has_unresolved {
-        format!("Choose an alternative first for: {}", unresolved_selected.join(", "))
+        format!(
+            "Choose an alternative first for: {}",
+            unresolved_selected.join(", ")
+        )
     } else {
         String::new()
     };
@@ -5066,7 +5263,11 @@ enum RepoDetect {
     /// Derived `owner/repo` AND the local folder it lives in (recorded as the repo's path).
     /// `onboarded_in` names the project that already onboarded this repo, if any (#50): onboarding
     /// is one-time, so the caller blocks a re-onboard and routes the user to the workspace.
-    Found { repo: String, path: String, onboarded_in: Option<String> },
+    Found {
+        repo: String,
+        path: String,
+        onboarded_in: Option<String>,
+    },
     /// Couldn't derive one — carries a human reason for a toast.
     Failed(String),
 }
@@ -5146,8 +5347,16 @@ fn OnboardView(connection: Option<ProviderView>) -> Element {
         }
     });
 
-    let brownfield_cls = if path() == OnboardPath::Brownfield { "onboard-path on" } else { "onboard-path" };
-    let greenfield_cls = if path() == OnboardPath::Greenfield { "onboard-path on" } else { "onboard-path" };
+    let brownfield_cls = if path() == OnboardPath::Brownfield {
+        "onboard-path on"
+    } else {
+        "onboard-path"
+    };
+    let greenfield_cls = if path() == OnboardPath::Greenfield {
+        "onboard-path on"
+    } else {
+        "onboard-path"
+    };
 
     // The flow steps differ slightly by path; both are gated on a connection.
     let steps: &[(&str, &str)] = match path() {
@@ -5518,7 +5727,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                 .cloned()
                 .or_else(|| r.default_option.clone());
             let desc = picked
-                .and_then(|oid| r.options.iter().find(|o| o.id == oid).map(|o| o.directive.clone()))
+                .and_then(|oid| {
+                    r.options
+                        .iter()
+                        .find(|o| o.id == oid)
+                        .map(|o| o.directive.clone())
+                })
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| r.title.clone());
             (r.id.clone(), desc)
@@ -5614,7 +5828,9 @@ fn ScanResults(report: ScanReportView) -> Element {
             spawn(async move {
                 save_onboarding_draft(&draft).await;
                 // Stamp the local time so the UI can show "auto-saved at HH:MM:SS".
-                last_saved.set(Some(chrono::Local::now().format("%-I:%M:%S %p").to_string()));
+                last_saved.set(Some(
+                    chrono::Local::now().format("%-I:%M:%S %p").to_string(),
+                ));
             });
         });
     }
@@ -6335,7 +6551,11 @@ fn StagePanel(story: CanonicalStory, stage: usize) -> Element {
 fn LiveRunPanel(run: RunView) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
     let live = run.mode == "live";
-    let mode_label = if live { "live fleet" } else { "scripted · token-free" };
+    let mode_label = if live {
+        "live fleet"
+    } else {
+        "scripted · token-free"
+    };
     let sub = if live {
         "A real governed fleet (claude -p) under the gate. Stage and bounce events are reported as they happen."
     } else {
@@ -6496,8 +6716,7 @@ fn ClarifySection(story_id: String) -> Element {
     });
 
     let mut question = use_signal(|| {
-        "Should the CSV export include archived members, or only currently active ones?"
-            .to_string()
+        "Should the CSV export include archived members, or only currently active ones?".to_string()
     });
     let mut addressee = use_signal(|| "@maria-pm".to_string());
 
@@ -6618,7 +6837,11 @@ fn ClarificationCard(clar: ClarificationView, refresh: Signal<u32>) -> Element {
     let mut answer_text = use_signal(String::new);
     let open = clar.answer.is_none();
     let cid = clar.id.clone();
-    let cls = if open { "clar-card open" } else { "clar-card answered" };
+    let cls = if open {
+        "clar-card open"
+    } else {
+        "clar-card answered"
+    };
 
     rsx! {
         div { class: "{cls}",

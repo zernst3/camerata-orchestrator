@@ -737,8 +737,7 @@ impl InMemoryStoryStore {
                 id: "CAM-2".into(),
                 external_ref: None,
                 title: "Fix timezone handling in reminders".into(),
-                description: "Reminder emails fire in UTC instead of the org's local zone."
-                    .into(),
+                description: "Reminder emails fire in UTC instead of the org's local zone.".into(),
                 status: FeatureStatus::SignedOff,
                 created_by: "architect".into(),
                 targets: vec![],

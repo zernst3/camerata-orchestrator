@@ -254,7 +254,9 @@ mod wire_tests {
     /// the first connection and replies `200 {}`. Returns (base_url, JoinHandle
     /// yielding the captured request bytes as a String).
     async fn capture_one_request() -> (String, tokio::task::JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");

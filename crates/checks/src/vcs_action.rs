@@ -160,7 +160,11 @@ fn contains_ticket_ref(text: &str, prefix: &str) -> bool {
     let mut search_from = 0;
     while let Some(rel) = text[search_from..].find(&token) {
         let after = search_from + rel + token.len();
-        if text[after..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        if text[after..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
             return true;
         }
         search_from = after; // keep scanning past this `prefix#`
@@ -249,7 +253,10 @@ impl ProcessRule {
     pub fn branch_naming(prefixes: &[&str]) -> Self {
         Self {
             id: "PROCESS-BRANCH-NAMING-1".to_string(),
-            description: format!("Branch name must start with one of: {}", prefixes.join(", ")),
+            description: format!(
+                "Branch name must start with one of: {}",
+                prefixes.join(", ")
+            ),
             applies_to: vec![VcsTarget::BranchName],
             matcher: Matcher::StartsWithAny {
                 prefixes: prefixes.iter().map(|s| s.to_string()).collect(),
@@ -374,7 +381,10 @@ mod tests {
         let action = VcsAction::Commit {
             message: "add export\n\nrefs AB#1234".to_string(),
         };
-        assert!(gate(&rules, &action).is_err(), "subject lacks the reference");
+        assert!(
+            gate(&rules, &action).is_err(),
+            "subject lacks the reference"
+        );
     }
 
     #[test]
@@ -407,11 +417,30 @@ mod tests {
 
     #[test]
     fn branch_naming_enforced() {
-        let rules = [ProcessRule::branch_naming(&["feature/", "release/", "hotfix/"])];
-        assert!(gate(&rules, &VcsAction::Branch { name: "feature/login".into() }).is_ok());
-        assert!(gate(&rules, &VcsAction::Branch { name: "release/v1.2.0".into() }).is_ok());
-        let err = gate(&rules, &VcsAction::Branch { name: "my-random-branch".into() })
-            .expect_err("must refuse");
+        let rules = [ProcessRule::branch_naming(&[
+            "feature/", "release/", "hotfix/",
+        ])];
+        assert!(gate(
+            &rules,
+            &VcsAction::Branch {
+                name: "feature/login".into()
+            }
+        )
+        .is_ok());
+        assert!(gate(
+            &rules,
+            &VcsAction::Branch {
+                name: "release/v1.2.0".into()
+            }
+        )
+        .is_ok());
+        let err = gate(
+            &rules,
+            &VcsAction::Branch {
+                name: "my-random-branch".into(),
+            },
+        )
+        .expect_err("must refuse");
         assert_eq!(err[0].target, VcsTarget::BranchName);
     }
 

@@ -75,9 +75,7 @@ impl SettingsStore {
 
     /// The configured workspace root, if one is set and non-empty.
     pub fn workspace_root(&self) -> Option<String> {
-        self.get()
-            .workspace_root
-            .filter(|p| !p.trim().is_empty())
+        self.get().workspace_root.filter(|p| !p.trim().is_empty())
     }
 
     /// Set (or clear) the workspace root, persisting the change.
@@ -96,7 +94,11 @@ impl SettingsStore {
 
     /// The machine-local override path for `repo` (`owner/repo`), if one was set.
     pub fn repo_path(&self, repo: &str) -> Option<String> {
-        self.get().repo_paths.get(repo).cloned().filter(|p| !p.trim().is_empty())
+        self.get()
+            .repo_paths
+            .get(repo)
+            .cloned()
+            .filter(|p| !p.trim().is_empty())
     }
 
     /// Record (or clear, when `path` is empty) the machine-local override for `repo`.
@@ -125,7 +127,10 @@ mod tests {
         let store = SettingsStore::new();
         assert!(store.workspace_root().is_none());
         store.set_workspace_root(Some("/Users/me/Camerata".to_string()));
-        assert_eq!(store.workspace_root().as_deref(), Some("/Users/me/Camerata"));
+        assert_eq!(
+            store.workspace_root().as_deref(),
+            Some("/Users/me/Camerata")
+        );
         // Empty / whitespace clears it.
         store.set_workspace_root(Some("   ".to_string()));
         assert!(store.workspace_root().is_none());

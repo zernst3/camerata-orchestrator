@@ -59,8 +59,9 @@ pub async fn run_worktracker_live() -> anyhow::Result<()> {
 
     // 2. Post a clarifying question (a real comment on the issue).
     println!("\n[2/3] post_clarifying_questions…");
-    let questions =
-        ["Camerata live test: please ignore. Confirming the clarify-bridge round-trip.".to_string()];
+    let questions = [
+        "Camerata live test: please ignore. Confirming the clarify-bridge round-trip.".to_string(),
+    ];
     let comment_ref = provider
         .post_clarifying_questions(&reference, &questions)
         .await?;
@@ -69,7 +70,10 @@ pub async fn run_worktracker_live() -> anyhow::Result<()> {
     // 3. Poll for inbound events.
     println!("\n[3/3] poll (cursor=None)…");
     let (events, next_cursor) = provider.poll(None).await?;
-    println!("      {} event(s); next cursor: {next_cursor}", events.len());
+    println!(
+        "      {} event(s); next cursor: {next_cursor}",
+        events.len()
+    );
     for ev in events.iter().take(5) {
         println!("      - {:?} on {}", ev.kind, ev.reference.external_id);
     }

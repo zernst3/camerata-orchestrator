@@ -17,10 +17,25 @@ use chrono::{Datelike, NaiveDate, NaiveDateTime, Weekday};
 /// A parsed routine schedule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Schedule {
-    Daily { h: u32, m: u32 },
-    Weekly { days: Vec<Weekday>, h: u32, m: u32 },
-    Monthly { day: u32, h: u32, m: u32 },
-    Once { date: NaiveDate, h: u32, m: u32 },
+    Daily {
+        h: u32,
+        m: u32,
+    },
+    Weekly {
+        days: Vec<Weekday>,
+        h: u32,
+        m: u32,
+    },
+    Monthly {
+        day: u32,
+        h: u32,
+        m: u32,
+    },
+    Once {
+        date: NaiveDate,
+        h: u32,
+        m: u32,
+    },
     /// `manual` or anything we don't recognize: the scheduler never auto-fires it.
     Manual,
 }
@@ -29,7 +44,11 @@ fn parse_hm(s: &str) -> Option<(u32, u32)> {
     let (h, m) = s.split_once(':')?;
     let h: u32 = h.trim().parse().ok()?;
     let m: u32 = m.trim().parse().ok()?;
-    if h < 24 && m < 60 { Some((h, m)) } else { None }
+    if h < 24 && m < 60 {
+        Some((h, m))
+    } else {
+        None
+    }
 }
 
 fn parse_weekday(s: &str) -> Option<Weekday> {
@@ -96,7 +115,11 @@ pub fn parse(schedule: &str) -> Schedule {
 /// clamps to Feb 28/29 etc. rather than silently never firing.
 fn last_day_of_month(year: i32, month: u32) -> u32 {
     // First day of next month, minus one day.
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
     NaiveDate::from_ymd_opt(ny, nm, 1)
         .and_then(|d| d.pred_opt())
         .map(|d| d.day())
@@ -172,7 +195,10 @@ mod tests {
     use super::*;
 
     fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap()
+        NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, 0)
+            .unwrap()
     }
 
     #[test]
@@ -180,12 +206,27 @@ mod tests {
         assert_eq!(parse("daily 04:00"), Schedule::Daily { h: 4, m: 0 });
         assert_eq!(
             parse("weekly Mon,Wed 09:00"),
-            Schedule::Weekly { days: vec![Weekday::Mon, Weekday::Wed], h: 9, m: 0 }
+            Schedule::Weekly {
+                days: vec![Weekday::Mon, Weekday::Wed],
+                h: 9,
+                m: 0
+            }
         );
-        assert_eq!(parse("monthly day 15 09:30"), Schedule::Monthly { day: 15, h: 9, m: 30 });
+        assert_eq!(
+            parse("monthly day 15 09:30"),
+            Schedule::Monthly {
+                day: 15,
+                h: 9,
+                m: 30
+            }
+        );
         assert_eq!(
             parse("once 2026-06-20 14:00"),
-            Schedule::Once { date: NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(), h: 14, m: 0 }
+            Schedule::Once {
+                date: NaiveDate::from_ymd_opt(2026, 6, 20).unwrap(),
+                h: 14,
+                m: 0
+            }
         );
         // Unrecognized / malformed -> Manual (never auto-fires).
         assert_eq!(parse("manual"), Schedule::Manual);
@@ -217,11 +258,19 @@ mod tests {
         // Most recent slot is Wed 06-17 09:00; never fired -> due.
         assert!(is_due("weekly Mon,Wed 09:00", thu, None));
         // Fired at Wed's slot -> not due again until next Mon.
-        assert!(!is_due("weekly Mon,Wed 09:00", thu, Some(dt(2026, 6, 17, 9, 0))));
+        assert!(!is_due(
+            "weekly Mon,Wed 09:00",
+            thu,
+            Some(dt(2026, 6, 17, 9, 0))
+        ));
         // On Wed before the time -> most recent slot is Mon 06-15 09:00.
         let wed_early = dt(2026, 6, 17, 8, 0);
         assert!(is_due("weekly Mon,Wed 09:00", wed_early, None));
-        assert!(!is_due("weekly Mon,Wed 09:00", wed_early, Some(dt(2026, 6, 15, 9, 0))));
+        assert!(!is_due(
+            "weekly Mon,Wed 09:00",
+            wed_early,
+            Some(dt(2026, 6, 15, 9, 0))
+        ));
     }
 
     #[test]
@@ -229,7 +278,11 @@ mod tests {
         // day 31 in June (30 days) clamps to the 30th.
         let now = dt(2026, 6, 30, 12, 0);
         assert!(is_due("monthly day 31 09:00", now, None));
-        assert!(!is_due("monthly day 31 09:00", now, Some(dt(2026, 6, 30, 9, 0))));
+        assert!(!is_due(
+            "monthly day 31 09:00",
+            now,
+            Some(dt(2026, 6, 30, 9, 0))
+        ));
         // Mid-month before the (clamped) day -> previous month's slot.
         let mid = dt(2026, 6, 15, 12, 0);
         assert!(is_due("monthly day 31 09:00", mid, None)); // May 31 slot
@@ -240,12 +293,24 @@ mod tests {
         let target = NaiveDate::from_ymd_opt(2026, 6, 20).unwrap();
         let _ = target;
         // Before the time -> not due.
-        assert!(!is_due("once 2026-06-20 14:00", dt(2026, 6, 20, 13, 0), None));
+        assert!(!is_due(
+            "once 2026-06-20 14:00",
+            dt(2026, 6, 20, 13, 0),
+            None
+        ));
         // At/after the time, never fired -> due.
-        assert!(is_due("once 2026-06-20 14:00", dt(2026, 6, 20, 14, 0), None));
+        assert!(is_due(
+            "once 2026-06-20 14:00",
+            dt(2026, 6, 20, 14, 0),
+            None
+        ));
         assert!(is_due("once 2026-06-20 14:00", dt(2026, 6, 21, 9, 0), None));
         // Once fired, never again.
-        assert!(!is_due("once 2026-06-20 14:00", dt(2026, 6, 21, 9, 0), Some(dt(2026, 6, 20, 14, 0))));
+        assert!(!is_due(
+            "once 2026-06-20 14:00",
+            dt(2026, 6, 21, 9, 0),
+            Some(dt(2026, 6, 20, 14, 0))
+        ));
     }
 
     #[test]

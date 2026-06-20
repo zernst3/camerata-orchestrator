@@ -216,7 +216,10 @@ mod tests {
         assert_eq!(ui.status, FeatureStatus::Intake);
 
         let store = DecompositionStore::new();
-        store.record("CAM-1", vec!["CAM-1-ui".to_string(), "CAM-1-api".to_string()]);
+        store.record(
+            "CAM-1",
+            vec!["CAM-1-ui".to_string(), "CAM-1-api".to_string()],
+        );
         assert_eq!(store.children_of("CAM-1").len(), 2);
         assert!(store.children_of("CAM-9").is_empty());
     }

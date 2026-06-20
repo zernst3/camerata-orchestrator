@@ -635,7 +635,11 @@ impl<T: HttpTransport> WorkItemProvider for GithubProvider<T> {
         let url = Self::poll_url(&coord, cursor);
         let resp = self.transport.get(&url).await?;
         if resp.status < 200 || resp.status >= 300 {
-            anyhow::bail!("GitHub poll GET in {coord}: HTTP {} {}", resp.status, resp.body);
+            anyhow::bail!(
+                "GitHub poll GET in {coord}: HTTP {} {}",
+                resp.status,
+                resp.body
+            );
         }
 
         let mut events = parse_issues(&resp.body)?;
@@ -1573,8 +1577,12 @@ mod tests {
 
         // Each call hit its own repo's URL — proven by the recorded calls.
         let calls = provider.transport.recorded_calls();
-        assert!(calls.iter().any(|(_, u, _)| u.contains("/repos/orgA/repoA/issues/1")));
-        assert!(calls.iter().any(|(_, u, _)| u.contains("/repos/orgB/repoB/issues/2")));
+        assert!(calls
+            .iter()
+            .any(|(_, u, _)| u.contains("/repos/orgA/repoA/issues/1")));
+        assert!(calls
+            .iter()
+            .any(|(_, u, _)| u.contains("/repos/orgB/repoB/issues/2")));
     }
 
     #[tokio::test]
@@ -1601,12 +1609,19 @@ mod tests {
 
     #[tokio::test]
     async fn falls_back_to_default_repo_when_ref_has_no_container() {
-        let transport =
-            FakeTransport::new().on("GET", "/repos/myorg/my-project/issues/42", 200, SINGLE_ISSUE_JSON);
+        let transport = FakeTransport::new().on(
+            "GET",
+            "/repos/myorg/my-project/issues/42",
+            200,
+            SINGLE_ISSUE_JSON,
+        );
         let provider = GithubProvider::new(test_config(), transport);
 
         // github_ref() has container: None -> resolves to the default repo.
-        let story = provider.ingest_story(&github_ref("42")).await.expect("ingest");
+        let story = provider
+            .ingest_story(&github_ref("42"))
+            .await
+            .expect("ingest");
         assert_eq!(story.id, "42");
         let calls = provider.transport.recorded_calls();
         assert!(calls[0].1.contains("/repos/myorg/my-project/issues/42"));
@@ -1673,7 +1688,9 @@ mod tests {
         let (events, _) = provider.poll(None).await.expect("poll");
         assert_eq!(events.len(), 2);
         assert!(
-            events.iter().all(|e| e.reference.container.as_deref() == Some("myorg/my-project")),
+            events
+                .iter()
+                .all(|e| e.reference.container.as_deref() == Some("myorg/my-project")),
             "every polled event must carry the polled repo as its container"
         );
     }

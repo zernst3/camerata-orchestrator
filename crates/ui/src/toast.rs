@@ -165,12 +165,15 @@ struct NotificationsFeed {
 }
 
 async fn fetch_notifications(since: u64) -> Option<NotificationsFeed> {
-    reqwest::get(format!("{}/api/notifications?since={since}", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<NotificationsFeed>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/notifications?since={since}",
+        crate::BFF_URL
+    ))
+    .await
+    .ok()?
+    .json::<NotificationsFeed>()
+    .await
+    .ok()
 }
 
 /// Invisible component: drains the BFF notification feed on a cadence and pushes
@@ -252,7 +255,8 @@ pub fn ConnectionWatcher() -> Element {
                         match c.ok {
                             // Newly failing (first probe or a transition to failure).
                             Some(false) if prev_ok != Some(Some(false)) => {
-                                let detail = c.error.clone().unwrap_or_else(|| "unreachable".into());
+                                let detail =
+                                    c.error.clone().unwrap_or_else(|| "unreachable".into());
                                 push_toast(
                                     toasts,
                                     ToastKind::Error,

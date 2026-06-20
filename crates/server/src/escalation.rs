@@ -149,7 +149,11 @@ pub fn chat_system_prompt(esc: &Escalation) -> String {
         name = esc.routine_name,
         reason = esc.reason,
         stopped_for = esc.stopped_for,
-        raw = if esc.raw_context.is_empty() { "(none)" } else { esc.raw_context.as_str() },
+        raw = if esc.raw_context.is_empty() {
+            "(none)"
+        } else {
+            esc.raw_context.as_str()
+        },
     )
 }
 
@@ -271,16 +275,24 @@ impl EscalationStore {
     pub fn list_open(&self) -> Vec<Escalation> {
         self.items
             .lock()
-            .map(|g| g.iter().filter(|e| e.status == EscalationStatus::Open).cloned().collect())
+            .map(|g| {
+                g.iter()
+                    .filter(|e| e.status == EscalationStatus::Open)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// The open escalation for a routine, if one exists (a routine has at most one open
     /// review at a time — raising is deduped on this).
     pub fn open_for_routine(&self, routine_id: &str) -> Option<Escalation> {
-        self.items.lock().ok()?.iter().find(|e| {
-            e.routine_id == routine_id && e.status == EscalationStatus::Open
-        }).cloned()
+        self.items
+            .lock()
+            .ok()?
+            .iter()
+            .find(|e| e.routine_id == routine_id && e.status == EscalationStatus::Open)
+            .cloned()
     }
 
     /// One escalation by id.
@@ -408,7 +420,10 @@ mod tests {
         assert_eq!(resolved.status, EscalationStatus::Resolved);
         assert_eq!(resolved.human_answer.as_deref(), Some("Use Postgres"));
         let directive = resolved.translated_directive.expect("directive");
-        assert!(directive.contains("Use Postgres"), "answer carried into directive");
+        assert!(
+            directive.contains("Use Postgres"),
+            "answer carried into directive"
+        );
         assert!(directive.contains("Nightly"), "routine name in directive");
 
         // Now no open escalation for the routine; resolving again is a no-op None.

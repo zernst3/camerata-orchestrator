@@ -114,7 +114,10 @@ impl UowStore {
         } else {
             HashMap::new()
         };
-        Self { path: Some(Arc::new(path)), mem: Arc::new(Mutex::new(mem)) }
+        Self {
+            path: Some(Arc::new(path)),
+            mem: Arc::new(Mutex::new(mem)),
+        }
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
@@ -148,16 +151,23 @@ impl UowStore {
 
     /// All known UoWs, in arbitrary order.
     pub fn list(&self) -> Vec<UnitOfWork> {
-        self.mem.lock().expect("uow mutex poisoned").values().cloned().collect()
+        self.mem
+            .lock()
+            .expect("uow mutex poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Set the dev status for a story's UoW, creating it if needed.
     pub fn set_status(&self, story_id: &str, status: DevStatus) {
         let mut map = self.mem.lock().expect("uow mutex poisoned");
-        let uow = map.entry(story_id.to_string()).or_insert_with(|| UnitOfWork {
-            story_id: story_id.to_string(),
-            ..Default::default()
-        });
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork {
+                story_id: story_id.to_string(),
+                ..Default::default()
+            });
         uow.dev_status = status;
         uow.updated = Self::now_rfc3339();
         drop(map);
@@ -167,10 +177,12 @@ impl UowStore {
     /// Set (or clear) the branch for a story's UoW.
     pub fn set_branch(&self, story_id: &str, branch: Option<String>) {
         let mut map = self.mem.lock().expect("uow mutex poisoned");
-        let uow = map.entry(story_id.to_string()).or_insert_with(|| UnitOfWork {
-            story_id: story_id.to_string(),
-            ..Default::default()
-        });
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork {
+                story_id: story_id.to_string(),
+                ..Default::default()
+            });
         uow.branch = branch;
         uow.updated = Self::now_rfc3339();
         drop(map);
@@ -180,10 +192,12 @@ impl UowStore {
     /// Append an entry to the AI development history for a story's UoW.
     pub fn append_history(&self, story_id: &str, kind: &str, text: &str) {
         let mut map = self.mem.lock().expect("uow mutex poisoned");
-        let uow = map.entry(story_id.to_string()).or_insert_with(|| UnitOfWork {
-            story_id: story_id.to_string(),
-            ..Default::default()
-        });
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork {
+                story_id: story_id.to_string(),
+                ..Default::default()
+            });
         uow.history.push(HistoryEntry {
             ts: Self::now_rfc3339(),
             kind: kind.to_string(),
@@ -221,7 +235,10 @@ mod tests {
         store.get_or_create("CAM-2");
         let all = store.list();
         assert_eq!(all.len(), 2);
-        let cam1 = all.iter().find(|u| u.story_id == "CAM-1").expect("CAM-1 in list");
+        let cam1 = all
+            .iter()
+            .find(|u| u.story_id == "CAM-1")
+            .expect("CAM-1 in list");
         assert_eq!(cam1.dev_status, DevStatus::InProgress);
 
         // set_status to Done.
@@ -234,7 +251,10 @@ mod tests {
         let store = UowStore::new();
 
         store.set_branch("S-99", Some("feature/my-work".to_string()));
-        assert_eq!(store.get_or_create("S-99").branch.as_deref(), Some("feature/my-work"));
+        assert_eq!(
+            store.get_or_create("S-99").branch.as_deref(),
+            Some("feature/my-work")
+        );
 
         store.append_history("S-99", "run", "Governed run completed — 3 allow, 0 deny");
         let uow = store.get_or_create("S-99");

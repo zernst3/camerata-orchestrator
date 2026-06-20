@@ -260,7 +260,8 @@ mod tests {
     fn prepare_session_writes_both_files_and_wires_driver() {
         let dir =
             std::env::temp_dir().join(format!("camerata-session-test-{}", std::process::id()));
-        let spawn = prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
+        let spawn =
+            prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(

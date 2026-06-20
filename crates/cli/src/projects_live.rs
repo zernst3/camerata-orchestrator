@@ -67,7 +67,12 @@ pub async fn run_projects_live() -> anyhow::Result<()> {
 
     for (i, s) in stories.iter().enumerate() {
         let source = match s.external_ref.as_ref() {
-            Some(r) => format!("{:?} {} in {}", r.provider, r.external_id, r.container.as_deref().unwrap_or("?")),
+            Some(r) => format!(
+                "{:?} {} in {}",
+                r.provider,
+                r.external_id,
+                r.container.as_deref().unwrap_or("?")
+            ),
             None => "draft (board-only)".to_string(),
         };
         let targets = if s.targets.is_empty() {

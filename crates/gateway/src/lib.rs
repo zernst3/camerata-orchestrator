@@ -327,9 +327,7 @@ fn arm_sec_no_secret_files_1(path: &str, _content: &str) -> Result<(), String> {
         &["example", "sample", "template", "dist", "defaults", "tpl"];
     let is_env = lower == ".env"
         || (lower.starts_with(".env.")
-            && !ENV_TEMPLATE_SUFFIXES
-                .iter()
-                .any(|suf| lower.ends_with(suf)));
+            && !ENV_TEMPLATE_SUFFIXES.iter().any(|suf| lower.ends_with(suf)));
 
     // Private-key / keystore file extensions.
     const KEY_EXTS: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".asc"];
@@ -674,7 +672,10 @@ mod tests {
             \x20               AND EXTRACT(YEAR FROM date) = {year}\",\n\
             \x20            user_id = user_id.value(),\n        );";
         let lines = content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", content);
-        assert!(!lines.is_empty(), "multi-line named-arg SQL format! must be caught");
+        assert!(
+            !lines.is_empty(),
+            "multi-line named-arg SQL format! must be caught"
+        );
     }
 
     #[test]
@@ -682,7 +683,10 @@ mod tests {
         // A provider-agnostic key (no ghp_/sk-/AKIA prefix) assigned to a *_KEY const.
         let content = "const FALLBACK_FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";";
         let d = arm_sec_no_hardcoded_secrets_1("", content);
-        assert!(d.is_err(), "a long opaque literal on a *_KEY const must be flagged");
+        assert!(
+            d.is_err(),
+            "a long opaque literal on a *_KEY const must be flagged"
+        );
     }
 
     #[test]
@@ -690,16 +694,24 @@ mod tests {
         // A Dioxus `select {}` (no opening string quote) must NOT match.
         assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "rsx! { select {} }").is_empty());
         // A SQL keyword as an identifier/method (no quote) must NOT match.
-        assert!(content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "let selected = items.select(|x| x);").is_empty());
+        assert!(content_match_lines(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "let selected = items.select(|x| x);"
+        )
+        .is_empty());
         // The real plant (full statement shape + interpolation) STILL matches.
-        assert!(!content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", "format!(\"SELECT x WHERE id = {id}\")").is_empty());
+        assert!(!content_match_lines(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "format!(\"SELECT x WHERE id = {id}\")"
+        )
+        .is_empty());
 
         // Regression: bare "Select"/"Selection" in rsx text must NOT match (the dogfooding
         // false positives on rust-chorale, a frontend lib with zero SQL).
         for s in [
-            r#"rsx! { "Selection: {count} row(s)" }"#,   // "Selection" + interpolation, no SQL clause
-            r#"button { "Select page" }"#,               // a button label
-            r#"h1 { "Selection example" }"#,             // a heading
+            r#"rsx! { "Selection: {count} row(s)" }"#, // "Selection" + interpolation, no SQL clause
+            r#"button { "Select page" }"#,             // a button label
+            r#"h1 { "Selection example" }"#,           // a heading
             r#"let selected = view.get(); rsx!{ "{selected} chosen" }"#, // keyword-ish + interp, no clause
         ] {
             assert!(
@@ -718,18 +730,35 @@ mod tests {
     #[test]
     fn secrets_precision_guards_paths_and_hyphenated_names() {
         // A file PATH literal on a token-named var (has `/`) must NOT match.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "let token_path = \"src/some/very/long/path.rs\";").is_ok());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "let token_path = \"src/some/very/long/path.rs\";"
+        )
+        .is_ok());
         // A hyphenated secret NAME (a reference, not a value) must NOT match.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "let k = \"plaid-access-token-item-1\";").is_ok());
+        assert!(
+            arm_sec_no_hardcoded_secrets_1("", "let k = \"plaid-access-token-item-1\";").is_ok()
+        );
         // The real bare key (24+ contiguous alphanumeric) STILL matches.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";").is_err());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "const FINNHUB_KEY: &str = \"c8r9v2aad3i9q1m4f7g0bv8s5p2qk1n7\";"
+        )
+        .is_err());
     }
 
     #[test]
     fn secrets_does_not_flag_short_or_namelike_constants() {
         // A header NAME / env-var NAME on a secret-ish const is not a secret VALUE.
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const TOKEN_HEADER: &str = \"X-Finnhub-Token\";").is_ok());
-        assert!(arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";").is_ok());
+        assert!(arm_sec_no_hardcoded_secrets_1(
+            "",
+            "const TOKEN_HEADER: &str = \"X-Finnhub-Token\";"
+        )
+        .is_ok());
+        assert!(
+            arm_sec_no_hardcoded_secrets_1("", "const API_KEY_ENV: &str = \"FINNHUB_KEY\";")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -737,7 +766,10 @@ mod tests {
         // The plant: a format string with no literal http(s):// but a `?…&token={…}`.
         let content = "format!(\"{base}?symbol={symbol}&token={token}\")";
         let d = arm_arch_no_secrets_in_url_1("", content);
-        assert!(d.is_err(), "a templated URL query with a token param must be flagged");
+        assert!(
+            d.is_err(),
+            "a templated URL query with a token param must be flagged"
+        );
         // And the literal-scheme case still works.
         assert!(arm_arch_no_secrets_in_url_1("", "https://api.x.com/q?api_key=abc123").is_err());
         // A bare `&token=` with no query start is NOT flagged (avoids form-body FPs).
@@ -763,7 +795,10 @@ mod tests {
             ".npmrc",
         ] {
             assert!(
-                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                matches!(
+                    evaluate_call(&subset, &write_call(p)),
+                    Decision::Deny { .. }
+                ),
                 "expected DENY for {p}"
             );
         }

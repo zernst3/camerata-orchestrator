@@ -214,15 +214,24 @@ fn scripted_agents() -> [ScriptedAgent; 2] {
             role: "Frontend engineer",
             task: "Wire the member-export action in the UI and its export config.",
             steps: &[
-                (0, "Write a workspace-relative payload file (attempted path-escape)"),
-                (1, "Write crates/api/src/export_config.rs (attempted hardcoded token)"),
+                (
+                    0,
+                    "Write a workspace-relative payload file (attempted path-escape)",
+                ),
+                (
+                    1,
+                    "Write crates/api/src/export_config.rs (attempted hardcoded token)",
+                ),
             ],
         },
         ScriptedAgent {
             session_id: "backend-1",
             role: "Backend engineer",
             task: "Implement the members-repository export method.",
-            steps: &[(2, "Write crates/api/src/members_repo.rs (repository method)")],
+            steps: &[(
+                2,
+                "Write crates/api/src/members_repo.rs (repository method)",
+            )],
         },
     ]
 }
@@ -286,7 +295,11 @@ pub async fn execute_run(store: RunStore, transcripts: TranscriptStore, run_id: 
             .steps
             .iter()
             .any(|(i, _)| events.get(*i).map(|e| e.verdict == "deny").unwrap_or(false));
-        transcripts.set_status(&run_id, a.session_id, if blocked { "blocked" } else { "done" });
+        transcripts.set_status(
+            &run_id,
+            a.session_id,
+            if blocked { "blocked" } else { "done" },
+        );
     }
 
     store.set_status(&run_id, RunStatus::Gating, false);
@@ -310,7 +323,10 @@ mod tests {
 
         // The hardcoded secret is denied by the real secrets rule.
         assert_eq!(events[1].verdict, "deny");
-        assert_eq!(events[1].rule.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
+        assert_eq!(
+            events[1].rule.as_deref(),
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        );
 
         // The clean write is allowed.
         assert_eq!(events[2].verdict, "allow");
@@ -347,7 +363,10 @@ mod tests {
         // (which hit two denials) is blocked, the backend (clean) is done.
         let agents = transcripts.get(&id);
         assert_eq!(agents.len(), 2);
-        let fe = agents.iter().find(|a| a.session_id == "frontend-1").unwrap();
+        let fe = agents
+            .iter()
+            .find(|a| a.session_id == "frontend-1")
+            .unwrap();
         assert!(fe.prompt.contains("CAM-1"));
         assert!(fe.output.contains("GATE DENIED"));
         assert_eq!(fe.status, "blocked");

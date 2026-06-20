@@ -250,7 +250,10 @@ pub const REASONLESS_RULE_ID: &str = "CAM-WAIVER-NEEDS-REASON";
 
 /// Inline waivers that match NO current finding — dead directives masking future
 /// violations. (Only reasoned waivers can be "covering" something, so we check those.)
-pub fn stale_inline<'a>(inline: &'a [InlineWaiver], findings: &[FindingRef]) -> Vec<&'a InlineWaiver> {
+pub fn stale_inline<'a>(
+    inline: &'a [InlineWaiver],
+    findings: &[FindingRef],
+) -> Vec<&'a InlineWaiver> {
     inline
         .iter()
         .filter(|w| w.reason.is_some())
@@ -260,14 +263,17 @@ pub fn stale_inline<'a>(inline: &'a [InlineWaiver], findings: &[FindingRef]) -> 
 
 /// Baseline entries whose fingerprint matches no current finding — resolved/moved debt
 /// whose suppression should be removed.
-pub fn stale_baseline<'a>(baseline: &'a Baseline, findings: &[FindingRef]) -> Vec<&'a BaselineEntry> {
+pub fn stale_baseline<'a>(
+    baseline: &'a Baseline,
+    findings: &[FindingRef],
+) -> Vec<&'a BaselineEntry> {
     baseline
         .entries
         .iter()
         .filter(|e| {
-            !findings
-                .iter()
-                .any(|f| f.rule_id == e.rule_id && fingerprint(&f.rule_id, &f.snippet) == e.fingerprint)
+            !findings.iter().any(|f| {
+                f.rule_id == e.rule_id && fingerprint(&f.rule_id, &f.snippet) == e.fingerprint
+            })
         })
         .collect()
 }
@@ -346,7 +352,10 @@ mod tests {
         let w = parse_inline_waivers("a.rs", src);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
-        assert_eq!(w[0].reason.as_deref(), Some("public sandbox value, JIRA-123"));
+        assert_eq!(
+            w[0].reason.as_deref(),
+            Some("public sandbox value, JIRA-123")
+        );
         assert_eq!(w[0].ticket.as_deref(), Some("JIRA-123"));
         assert_eq!(w[0].line, 1);
     }
@@ -360,22 +369,41 @@ mod tests {
         assert_eq!(reasonless_waivers(&w).len(), 1);
         // It does NOT suppress a matching finding (invalid waiver).
         let finding = f("SEC-X", "a.rs", 1, "bad()");
-        assert_eq!(classify_one(&finding, &w, &Baseline::default()), Status::Active);
+        assert_eq!(
+            classify_one(&finding, &w, &Baseline::default()),
+            Status::Active
+        );
     }
 
     #[test]
     fn inline_suppresses_same_line_or_line_above() {
-        let waivers = vec![
-            InlineWaiver { rule_id: "R".into(), reason: Some("ok".into()), ticket: None, path: "a.rs".into(), line: 5 },
-        ];
+        let waivers = vec![InlineWaiver {
+            rule_id: "R".into(),
+            reason: Some("ok".into()),
+            ticket: None,
+            path: "a.rs".into(),
+            line: 5,
+        }];
         // trailing (same line)
-        assert_eq!(classify_one(&f("R", "a.rs", 5, "x"), &waivers, &Baseline::default()), Status::SuppressedInline);
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 5, "x"), &waivers, &Baseline::default()),
+            Status::SuppressedInline
+        );
         // comment directly above (finding on line 6)
-        assert_eq!(classify_one(&f("R", "a.rs", 6, "x"), &waivers, &Baseline::default()), Status::SuppressedInline);
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 6, "x"), &waivers, &Baseline::default()),
+            Status::SuppressedInline
+        );
         // unrelated line is NOT suppressed
-        assert_eq!(classify_one(&f("R", "a.rs", 9, "x"), &waivers, &Baseline::default()), Status::Active);
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 9, "x"), &waivers, &Baseline::default()),
+            Status::Active
+        );
         // different rule is NOT suppressed
-        assert_eq!(classify_one(&f("OTHER", "a.rs", 5, "x"), &waivers, &Baseline::default()), Status::Active);
+        assert_eq!(
+            classify_one(&f("OTHER", "a.rs", 5, "x"), &waivers, &Baseline::default()),
+            Status::Active
+        );
     }
 
     #[test]
@@ -394,32 +422,70 @@ mod tests {
             }],
         };
         // Same offending content (even on a drifted line) is suppressed.
-        assert_eq!(classify_one(&f("SEC-X", "a.rs", 99, snippet), &[], &baseline), Status::SuppressedBaseline);
+        assert_eq!(
+            classify_one(&f("SEC-X", "a.rs", 99, snippet), &[], &baseline),
+            Status::SuppressedBaseline
+        );
         // Edited offending content is NEW -> active (the ratchet tightens).
-        assert_eq!(classify_one(&f("SEC-X", "a.rs", 99, "let token = \"new\";"), &[], &baseline), Status::Active);
+        assert_eq!(
+            classify_one(
+                &f("SEC-X", "a.rs", 99, "let token = \"new\";"),
+                &[],
+                &baseline
+            ),
+            Status::Active
+        );
     }
 
     #[test]
     fn stale_suppressions_are_detected() {
         // An inline waiver covering nothing (the violation was fixed) is stale.
-        let waivers = vec![InlineWaiver { rule_id: "R".into(), reason: Some("x".into()), ticket: None, path: "a.rs".into(), line: 5 }];
+        let waivers = vec![InlineWaiver {
+            rule_id: "R".into(),
+            reason: Some("x".into()),
+            ticket: None,
+            path: "a.rs".into(),
+            line: 5,
+        }];
         let findings: Vec<FindingRef> = vec![]; // no live violation
         assert_eq!(stale_inline(&waivers, &findings).len(), 1);
         // A baseline entry with no matching finding is stale.
-        let baseline = Baseline { entries: vec![BaselineEntry {
-            rule_id: "R".into(), path: "a.rs".into(), fingerprint: fingerprint("R", "gone"),
-            reason: "x".into(), accepted_by: "z".into(), accepted_at: "t".into(), kind: "baseline".into(), ticket: None,
-        }]};
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "R".into(),
+                path: "a.rs".into(),
+                fingerprint: fingerprint("R", "gone"),
+                reason: "x".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
         assert_eq!(stale_baseline(&baseline, &findings).len(), 1);
     }
 
     #[test]
     fn registry_rolls_up_inline_and_baseline_with_stale_flags() {
-        let waivers = vec![InlineWaiver { rule_id: "R".into(), reason: Some("x".into()), ticket: Some("AB-9".into()), path: "a.rs".into(), line: 5 }];
-        let baseline = Baseline { entries: vec![BaselineEntry {
-            rule_id: "S".into(), path: "b.rs".into(), fingerprint: fingerprint("S", "live"),
-            reason: "debt".into(), accepted_by: "z".into(), accepted_at: "t".into(), kind: "baseline".into(), ticket: None,
-        }]};
+        let waivers = vec![InlineWaiver {
+            rule_id: "R".into(),
+            reason: Some("x".into()),
+            ticket: Some("AB-9".into()),
+            path: "a.rs".into(),
+            line: 5,
+        }];
+        let baseline = Baseline {
+            entries: vec![BaselineEntry {
+                rule_id: "S".into(),
+                path: "b.rs".into(),
+                fingerprint: fingerprint("S", "live"),
+                reason: "debt".into(),
+                accepted_by: "z".into(),
+                accepted_at: "t".into(),
+                kind: "baseline".into(),
+                ticket: None,
+            }],
+        };
         // The baseline entry matches a live finding; the inline one does not.
         let findings = vec![f("S", "b.rs", 3, "live")];
         let reg = registry(&waivers, &baseline, &findings);

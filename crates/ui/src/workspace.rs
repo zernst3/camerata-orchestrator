@@ -91,17 +91,25 @@ async fn fetch_active_project() -> Option<ProjectLite> {
 }
 
 async fn fetch_checkout(project_id: &str) -> Option<Vec<RepoCheckout>> {
-    reqwest::get(format!("{}/api/projects/{}/checkout", crate::BFF_URL, project_id))
-        .await
-        .ok()?
-        .json::<Vec<RepoCheckout>>()
-        .await
-        .ok()
+    reqwest::get(format!(
+        "{}/api/projects/{}/checkout",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json::<Vec<RepoCheckout>>()
+    .await
+    .ok()
 }
 
 async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/checkout", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/checkout",
+            crate::BFF_URL,
+            project_id
+        ))
         .send()
         .await
         .ok()?
@@ -112,7 +120,11 @@ async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
 
 async fn start_branch(project_id: &str, repo: &str, branch: &str) -> Option<RepoCheckout> {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/branch", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/branch",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
         .send()
         .await
@@ -125,7 +137,11 @@ async fn start_branch(project_id: &str, repo: &str, branch: &str) -> Option<Repo
 /// Returns the PR URL on success.
 async fn ship(project_id: &str, repo: &str, branch: &str, title: &str) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/ship", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/ship",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch, "title": title, "body": "" }))
         .send()
         .await
@@ -181,9 +197,18 @@ async fn api_git_log(project_id: &str, repo: &str, limit: usize) -> Vec<CommitRo
         .unwrap_or_default()
 }
 
-async fn api_git_checkout(project_id: &str, repo: &str, branch: &str, create: bool) -> (bool, String) {
+async fn api_git_checkout(
+    project_id: &str,
+    repo: &str,
+    branch: &str,
+    create: bool,
+) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/git/checkout", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/git/checkout",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch, "create": create }))
         .send()
         .await
@@ -193,13 +218,21 @@ async fn api_git_checkout(project_id: &str, repo: &str, branch: &str, create: bo
         None => return (false, "network error".to_string()),
     };
     let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let msg = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
     (ok, msg)
 }
 
 async fn api_git_commit(project_id: &str, repo: &str, message: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/git/commit", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/git/commit",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "message": message }))
         .send()
         .await
@@ -220,7 +253,11 @@ async fn api_git_commit(project_id: &str, repo: &str, message: &str) -> (bool, S
 
 async fn api_git_push(project_id: &str, repo: &str, branch: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/git/push", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/git/push",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
         .send()
         .await
@@ -230,13 +267,21 @@ async fn api_git_push(project_id: &str, repo: &str, branch: &str) -> (bool, Stri
         None => return (false, "network error".to_string()),
     };
     let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let msg = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
     (ok, msg)
 }
 
 async fn api_git_pull(project_id: &str, repo: &str, branch: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/git/pull", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/git/pull",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
         .send()
         .await
@@ -257,7 +302,11 @@ async fn api_git_pull(project_id: &str, repo: &str, branch: &str) -> (bool, Stri
 
 async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/git/cherry-pick", crate::BFF_URL, project_id))
+        .post(format!(
+            "{}/api/projects/{}/git/cherry-pick",
+            crate::BFF_URL,
+            project_id
+        ))
         .json(&serde_json::json!({ "repo": repo, "sha": sha }))
         .send()
         .await
@@ -582,11 +631,7 @@ fn GitPanel(repo: String, project_id: String) -> Element {
         async move { api_git_log(&pid, &rp, 30).await }
     });
 
-    let branch_list = branches_res
-        .read()
-        .clone()
-        .flatten()
-        .unwrap_or_default();
+    let branch_list = branches_res.read().clone().flatten().unwrap_or_default();
     let commits: Vec<CommitRow> = log_res
         .read()
         .as_ref()
