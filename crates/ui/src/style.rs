@@ -2241,4 +2241,17 @@ html, body {
   display: flex; flex-direction: column; gap: 8px;
   margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line);
 }
+
+/* Gate self-check (#14): in-app end-to-end gate-loop GO/NO-GO. */
+.gate-selfcheck { margin: 10px 16px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.gate-selfcheck-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gate-selfcheck-title { font-weight: 700; font-size: 13px; color: var(--ink); }
+.gate-selfcheck-sub { font-size: 12px; color: var(--ink-soft); margin-right: auto; }
+.gate-selfcheck-verdict { display: flex; align-items: flex-start; gap: 10px; margin-top: 9px; padding: 8px 11px; border-radius: 8px; }
+.gate-selfcheck-verdict.go { background: rgba(60, 138, 76, 0.10); border: 1px solid rgba(60, 138, 76, 0.4); }
+.gate-selfcheck-verdict.nogo { background: rgba(212, 51, 43, 0.08); border: 1px solid rgba(212, 51, 43, 0.45); }
+.gate-selfcheck-badge { font-weight: 800; font-size: 13px; letter-spacing: .02em; }
+.gate-selfcheck-verdict.go .gate-selfcheck-badge { color: #2f7d3f; }
+.gate-selfcheck-verdict.nogo .gate-selfcheck-badge { color: #c0392b; }
+.gate-selfcheck-lines { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--ink-soft); }
 "#;

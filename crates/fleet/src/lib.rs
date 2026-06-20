@@ -22,6 +22,8 @@ use camerata_intake::{Plan, PlanTask, TaskKind};
 use camerata_rules::role_from_corpus;
 pub use camerata_rules::DEFAULT_CORPUS_PATH;
 
+pub mod gate_probe;
+
 // ─── Corpus / domain constants ────────────────────────────────────────────────
 
 /// Domains the fleet roles are scoped to in the corpus selection. The code the

@@ -2385,6 +2385,83 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
     }
 }
 
+/// The `/api/gate-probe` result (#14): the end-to-end gate-loop go/no-go.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct GateProbeView {
+    #[serde(default)]
+    go: bool,
+    #[serde(default)]
+    layer1_forbidden_denied: bool,
+    #[serde(default)]
+    layer1_forbidden_reason: String,
+    #[serde(default)]
+    layer1_clean_allowed: bool,
+    #[serde(default)]
+    layer2_bounced: bool,
+    #[serde(default)]
+    layer2_clean: bool,
+}
+
+async fn fetch_gate_probe() -> Option<GateProbeView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/gate-probe", crate::BFF_URL))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
+/// In-app gate self-check (#14): runs the deterministic end-to-end gate-loop probe and shows a
+/// GO/NO-GO — deny-before-execute denied a forbidden write, and the bounce-and-revise loop
+/// resolved a planted violation. The thesis, verifiable in one click (no model, no network out).
+#[component]
+fn GateSelfCheck() -> Element {
+    let mut running = use_signal(|| false);
+    let mut result = use_signal(|| Option::<GateProbeView>::None);
+    rsx! {
+        div { class: "gate-selfcheck",
+            div { class: "gate-selfcheck-head",
+                span { class: "gate-selfcheck-title", "Gate self-check" }
+                span { class: "gate-selfcheck-sub", "Deny-before-execute + bounce-and-revise, end to end — deterministic, no model." }
+                button {
+                    class: "btn-edit-sm",
+                    disabled: running(),
+                    onclick: move |_| {
+                        running.set(true);
+                        spawn(async move {
+                            result.set(fetch_gate_probe().await);
+                            running.set(false);
+                        });
+                    },
+                    if running() { "Running…" } else { "Run gate self-check" }
+                }
+            }
+            if let Some(r) = result() {
+                {
+                    let l1 = if r.layer1_forbidden_denied {
+                        format!("Layer 1: forbidden write DENIED {} · clean write {}", r.layer1_forbidden_reason, if r.layer1_clean_allowed { "allowed" } else { "DENIED (deny-all!)" })
+                    } else {
+                        "Layer 1: forbidden write ALLOWED — deny-before-execute NOT wired".to_string()
+                    };
+                    let l2 = format!("Layer 2: bounced={}, revise resolved={}", r.layer2_bounced, r.layer2_clean);
+                    let (badge, cls) = if r.go { ("GO", "gate-selfcheck-verdict go") } else { ("NO-GO", "gate-selfcheck-verdict nogo") };
+                    rsx! {
+                        div { class: "{cls}",
+                            span { class: "gate-selfcheck-badge", "{badge}" }
+                            div { class: "gate-selfcheck-lines",
+                                span { "{l1}" }
+                                span { "{l2}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn CockpitApp() -> Element {
     // Which cockpit view (control surface vs routines). Declared first so all hooks
@@ -2547,6 +2624,7 @@ pub fn CockpitApp() -> Element {
                 div { class: "cockpit",
                     CockpitNav { view }
                     CockpitTopBar { story: current.clone(), connection: conn.clone() }
+                    GateSelfCheck {}
 
                     div { class: "cockpit-body",
                         // ── LEFT: story spine (from /api/stories) + NEEDS YOU queue ──
