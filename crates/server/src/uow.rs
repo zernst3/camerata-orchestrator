@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+use camerata_worktracker::investigation::DecisionRecord;
+
+use crate::lifecycle::{TransitionError, UowStage};
+
 // ── domain types ─────────────────────────────────────────────────────────────
 
 /// The dev lifecycle status for a story's Unit of Work. Shown ALONGSIDE the
@@ -70,6 +74,32 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
+/// The durable gate provenance persisted onto a UoW after a governed run finishes.
+///
+/// [`crate::run::RunProvenance`] is the live, derived-on-read summary of a run; this
+/// is the FROZEN copy stamped onto the UoW so the governed-development record survives
+/// even if the in-memory run is gone (the `RunStore` is in-memory, the UoW persists).
+/// It is the honest accounting an architect reviews at QA before signing off.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct GateProvenance {
+    /// The run this provenance came from.
+    pub run_id: String,
+    /// "scripted" (token-free, real-gate verdicts) or "live".
+    pub mode: String,
+    /// How many gate verdicts allowed a write.
+    pub allow_count: usize,
+    /// How many gate verdicts denied a write.
+    pub deny_count: usize,
+    /// Total bounces the gate sent back (== `deny_count`; named for the architect-
+    /// facing vocabulary).
+    pub total_bounces: usize,
+    /// The distinct rule ids that actually fired a denial, in first-seen order.
+    #[serde(default)]
+    pub rules_fired: Vec<String>,
+    /// RFC 3339 timestamp of when this provenance was stamped onto the UoW.
+    pub recorded: String,
+}
+
 /// The Unit of Work for one story. Keyed by `story_id`.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct UnitOfWork {
@@ -82,9 +112,30 @@ pub struct UnitOfWork {
     /// The dev-side status, orthogonal to the tracker story status.
     #[serde(default)]
     pub dev_status: DevStatus,
+    /// The precise governed-development lifecycle stage (Pillar 2). Orthogonal to
+    /// `dev_status` (which is the coarse badge): this drives the no-code-first gate
+    /// and the QA gate. Defaults to [`UowStage::Intake`]. Mutated ONLY through the
+    /// transition methods on [`UowStore`], which run the pure state machine in
+    /// [`crate::lifecycle`].
+    #[serde(default)]
+    pub stage: UowStage,
+    /// The structured decision records surfaced during this story's investigation.
+    ///
+    /// These are persisted here on the UoW as an additive home: the cross-crate
+    /// `ArtifactStore`-backed persistence for investigation artifacts is ROUTE-A
+    /// (a public-API change routed to the human; see the decision doc). Until that
+    /// lands, the governed-dev loop needs SOMEWHERE durable to read the decision
+    /// state from to enforce the gate, and the UoW is the natural per-story home.
+    #[serde(default)]
+    pub decisions: Vec<DecisionRecord>,
     /// The ordered AI development history: every governed run, note, and action.
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    /// The frozen gate provenance from the most recent completed governed run, if any.
+    /// Stamped by [`UowStore::record_gate_provenance`] when a run finishes; the durable
+    /// record the architect reviews at QA. `None` until a run has completed.
+    #[serde(default)]
+    pub gate_provenance: Option<GateProvenance>,
     /// The architect's sign-off on this story's governed work (issue #21), if any.
     /// `None` until an architect explicitly signs the run off. Persisted so the
     /// sign-off survives sessions and is visible alongside the dev status.
@@ -259,10 +310,159 @@ impl UowStore {
                     ..Default::default()
                 });
             uow.sign_off = Some(sign_off);
+            // Advance the lifecycle stage to SignedOff when the UoW is at AwaitingQa
+            // (the legal point). Sign-off is the explicit, never-automatic QA gate; if
+            // the stage is somewhere else (e.g. a manual sign-off before the stage was
+            // driven there) we still record the sign-off but leave the stage, since the
+            // pure state machine forbids the jump and we never fabricate a transition.
+            if let Ok(next) = uow.stage.sign_off() {
+                let from = uow.stage;
+                uow.stage = next;
+                uow.history.push(HistoryEntry {
+                    ts: now.clone(),
+                    kind: "stage".to_string(),
+                    text: format!("Stage advanced: {} → {}", from.label(), next.label()),
+                });
+            }
             uow.history.push(HistoryEntry {
                 ts: now.clone(),
                 kind: "sign_off".to_string(),
                 text: history_text,
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    // ── lifecycle (Pillar 2) ────────────────────────────────────────────────────
+
+    /// Replace the full set of decision records for a story's UoW. Used when the
+    /// investigation phase surfaces (or the architect approves/rejects) decisions; the
+    /// governed-dev gate reads these to decide whether development may start.
+    pub fn set_decisions(&self, story_id: &str, decisions: Vec<DecisionRecord>) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.decisions = decisions;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Apply a pure stage transition to a story's UoW, persisting the new stage and
+    /// appending a `stage` history entry on success. On failure the UoW is unchanged
+    /// and the [`TransitionError`] is returned so the caller can surface exactly why
+    /// the move was blocked.
+    ///
+    /// `transition` is the pure function from the current [`UowStage`] to the next one
+    /// (e.g. `|s| s.begin_investigation()`), so all the rule enforcement lives in
+    /// [`crate::lifecycle`] and this method only owns the persistence + history.
+    fn apply_transition<F>(
+        &self,
+        story_id: &str,
+        transition: F,
+    ) -> Result<UnitOfWork, TransitionError>
+    where
+        F: FnOnce(UowStage) -> Result<UowStage, TransitionError>,
+    {
+        let now = Self::now_rfc3339();
+        let result = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            match transition(uow.stage) {
+                Ok(next) => {
+                    let from = uow.stage;
+                    uow.stage = next;
+                    uow.history.push(HistoryEntry {
+                        ts: now.clone(),
+                        kind: "stage".to_string(),
+                        text: format!("Stage advanced: {} → {}", from.label(), next.label()),
+                    });
+                    uow.updated = now;
+                    Ok(uow.clone())
+                }
+                Err(e) => Err(e),
+            }
+        };
+        if result.is_ok() {
+            self.flush();
+        }
+        result
+    }
+
+    /// Intake → Investigating. See [`UowStage::begin_investigation`].
+    pub fn begin_investigation(&self, story_id: &str) -> Result<UnitOfWork, TransitionError> {
+        self.apply_transition(story_id, |s| s.begin_investigation())
+    }
+
+    /// Investigating → DecisionsApproved, gated by the UoW's current decision records.
+    /// See [`UowStage::approve_decisions`].
+    pub fn approve_decisions(&self, story_id: &str) -> Result<UnitOfWork, TransitionError> {
+        // Snapshot the decisions under the lock-free clone path; the transition then
+        // re-locks. Cloning is cheap relative to correctness, and keeps the gate check
+        // reading the same persisted decisions the API exposes.
+        let decisions = self.get_or_create(story_id).decisions;
+        self.apply_transition(story_id, |s| s.approve_decisions(&decisions))
+    }
+
+    /// DecisionsApproved → Development, re-checking the decision gate. See
+    /// [`UowStage::start_development`]. Returns the [`TransitionError`] (so the run
+    /// start can block + surface why) when the gate is not satisfied.
+    pub fn start_development(&self, story_id: &str) -> Result<UnitOfWork, TransitionError> {
+        let decisions = self.get_or_create(story_id).decisions;
+        self.apply_transition(story_id, |s| s.start_development(&decisions))
+    }
+
+    /// Development → AwaitingQa. See [`UowStage::finish_development`].
+    pub fn finish_development(&self, story_id: &str) -> Result<UnitOfWork, TransitionError> {
+        self.apply_transition(story_id, |s| s.finish_development())
+    }
+
+    /// Stamp the frozen gate provenance from a completed run onto a story's UoW and
+    /// append a `provenance` history entry. The durable QA-review record (the in-memory
+    /// run may be gone; this survives). Does NOT change the stage — call
+    /// [`Self::finish_development`] for that.
+    pub fn record_gate_provenance(
+        &self,
+        story_id: &str,
+        provenance: GateProvenance,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let summary = format!(
+            "Gate provenance recorded for {}: {} allowed, {} denied ({} bounces).",
+            provenance.run_id,
+            provenance.allow_count,
+            provenance.deny_count,
+            provenance.total_bounces
+        );
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.gate_provenance = Some(provenance);
+            uow.history.push(HistoryEntry {
+                ts: now.clone(),
+                kind: "provenance".to_string(),
+                text: summary,
             });
             uow.updated = now;
             uow.clone()
@@ -351,5 +551,147 @@ mod tests {
         // Persisted: a fresh get reflects it.
         let again = store.get_or_create("CAM-21");
         assert!(again.sign_off.is_some());
+    }
+
+    // ── lifecycle (Pillar 2) ────────────────────────────────────────────────────
+
+    use camerata_worktracker::investigation::DecisionRecord;
+    use chrono::Utc;
+
+    fn approved_decision(story: &str, slug: &str) -> DecisionRecord {
+        DecisionRecord::ai_proposed(
+            story,
+            format!("{story}/decision/{slug}"),
+            "Decision",
+            "Question?",
+            "Rationale",
+            vec![],
+            Utc::now(),
+        )
+        .approve(Utc::now())
+    }
+
+    fn pending_decision(story: &str, slug: &str) -> DecisionRecord {
+        DecisionRecord::ai_proposed(
+            story,
+            format!("{story}/decision/{slug}"),
+            "Decision",
+            "Question?",
+            "Rationale",
+            vec![],
+            Utc::now(),
+        )
+    }
+
+    #[test]
+    fn new_uow_starts_at_intake_stage() {
+        let store = UowStore::new();
+        assert_eq!(store.get_or_create("S-1").stage, UowStage::Intake);
+    }
+
+    #[test]
+    fn begin_investigation_advances_and_records_history() {
+        let store = UowStore::new();
+        let uow = store.begin_investigation("S-1").expect("ok from intake");
+        assert_eq!(uow.stage, UowStage::Investigating);
+        assert!(uow.history.iter().any(|h| h.kind == "stage"));
+
+        // Repeating from the wrong stage errors and leaves the stage unchanged.
+        let err = store.begin_investigation("S-1").unwrap_err();
+        assert!(matches!(err, TransitionError::WrongStage { .. }));
+        assert_eq!(store.get_or_create("S-1").stage, UowStage::Investigating);
+    }
+
+    #[test]
+    fn approve_decisions_blocks_until_all_decisions_approved() {
+        let store = UowStore::new();
+        store.begin_investigation("S-2").unwrap();
+
+        // No decisions: blocked.
+        let err = store.approve_decisions("S-2").unwrap_err();
+        assert!(matches!(
+            err,
+            TransitionError::DecisionsNotApproved { total: 0, .. }
+        ));
+
+        // One pending: still blocked.
+        store.set_decisions("S-2", vec![pending_decision("S-2", "a")]);
+        assert!(store.approve_decisions("S-2").is_err());
+        assert_eq!(store.get_or_create("S-2").stage, UowStage::Investigating);
+
+        // All approved: advances.
+        store.set_decisions("S-2", vec![approved_decision("S-2", "a")]);
+        let uow = store.approve_decisions("S-2").expect("gate satisfied");
+        assert_eq!(uow.stage, UowStage::DecisionsApproved);
+    }
+
+    #[test]
+    fn start_development_gate_rechecks_decisions() {
+        let store = UowStore::new();
+        store.begin_investigation("S-3").unwrap();
+        store.set_decisions("S-3", vec![approved_decision("S-3", "a")]);
+        store.approve_decisions("S-3").unwrap();
+
+        // The decisions are re-opened after approval: start_development must re-block.
+        store.set_decisions("S-3", vec![pending_decision("S-3", "a")]);
+        let err = store.start_development("S-3").unwrap_err();
+        assert!(matches!(err, TransitionError::DecisionsNotApproved { .. }));
+        assert_eq!(store.get_or_create("S-3").stage, UowStage::DecisionsApproved);
+
+        // Re-approve and the gate opens.
+        store.set_decisions("S-3", vec![approved_decision("S-3", "a")]);
+        let uow = store.start_development("S-3").expect("gate satisfied");
+        assert_eq!(uow.stage, UowStage::Development);
+    }
+
+    #[test]
+    fn record_gate_provenance_persists_and_does_not_change_stage() {
+        let store = UowStore::new();
+        store.begin_investigation("S-4").unwrap();
+        store.set_decisions("S-4", vec![approved_decision("S-4", "a")]);
+        store.approve_decisions("S-4").unwrap();
+        store.start_development("S-4").unwrap();
+
+        let prov = GateProvenance {
+            run_id: "run-9".to_string(),
+            mode: "scripted".to_string(),
+            allow_count: 1,
+            deny_count: 2,
+            total_bounces: 2,
+            rules_fired: vec!["SEC-NO-PATH-ESCAPE-1".to_string()],
+            recorded: String::new(),
+        };
+        let uow = store.record_gate_provenance("S-4", prov);
+        let stamped = uow.gate_provenance.expect("provenance stamped");
+        assert_eq!(stamped.run_id, "run-9");
+        assert_eq!(stamped.deny_count, 2);
+        // Stage is unchanged by recording provenance.
+        assert_eq!(store.get_or_create("S-4").stage, UowStage::Development);
+        assert!(uow.history.iter().any(|h| h.kind == "provenance"));
+    }
+
+    #[test]
+    fn full_lifecycle_through_sign_off_advances_stage() {
+        let store = UowStore::new();
+        store.begin_investigation("S-5").unwrap();
+        store.set_decisions("S-5", vec![approved_decision("S-5", "a")]);
+        store.approve_decisions("S-5").unwrap();
+        store.start_development("S-5").unwrap();
+        store.finish_development("S-5").unwrap();
+        assert_eq!(store.get_or_create("S-5").stage, UowStage::AwaitingQa);
+
+        // Sign-off advances to SignedOff (the explicit gate from AwaitingQa).
+        let uow = store.sign_off("S-5", "zach", "run-1", None);
+        assert_eq!(uow.stage, UowStage::SignedOff);
+        assert!(uow.sign_off.is_some());
+    }
+
+    #[test]
+    fn sign_off_from_wrong_stage_records_but_leaves_stage() {
+        let store = UowStore::new();
+        // UoW at Intake: sign-off is recorded but the stage cannot legally jump.
+        let uow = store.sign_off("S-6", "zach", "run-1", None);
+        assert!(uow.sign_off.is_some());
+        assert_eq!(uow.stage, UowStage::Intake);
     }
 }

@@ -25,6 +25,7 @@ pub mod eval;
 pub mod fix;
 pub mod github_issues;
 pub mod jobs;
+pub mod lifecycle;
 pub mod live_fleet;
 pub mod llm;
 pub mod notify;
@@ -287,6 +288,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
         .route("/api/uow/:story_id/history", post(uow_append_history))
+        // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
+        .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
+        .route(
+            "/api/uow/:story_id/begin-investigation",
+            post(uow_begin_investigation),
+        )
+        .route(
+            "/api/uow/:story_id/approve-decisions",
+            post(uow_approve_decisions),
+        )
         // ── In-app terminal (issue #38) ───────────────────────────────────────
         // Each connection spawns a PTY-backed shell; multiple tabs = multiple ws
         // connections. No AppState needed — the handler is fully self-contained.
@@ -394,12 +405,85 @@ async fn start_run(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     req: Option<Json<StartRunReq>>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let model = req
         .and_then(|Json(r)| r.model)
         .filter(|m| !m.trim().is_empty());
+
+    // The no-code-first gate (Pillar 2): a governed run cannot start until every
+    // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
+    // We block + surface exactly why, rather than silently starting a run that the
+    // architect did not gate. The check reads the persisted decisions on the UoW.
+    if let Err(reason) = ensure_development_gate(&state, &story_id) {
+        let body = Json(serde_json::json!({
+            "error": "development gate not satisfied",
+            "reason": reason,
+            "story_id": story_id,
+        }));
+        return (StatusCode::CONFLICT, body).into_response();
+    }
+
     let (run_id, mode) = start_governed_run(&state, &story_id, model).await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
+        .into_response()
+}
+
+/// Enforce the no-code-first gate for a story before a governed run may start.
+///
+/// Returns `Ok(())` when development is permitted, or `Err(reason)` with a human-
+/// readable explanation when it is blocked. The gate is the structural decision check
+/// (`decisions_approved_for_development`): at least one decision exists and every
+/// decision is `Approved`.
+///
+/// As a side effect, when the gate IS satisfied it best-effort drives the UoW's
+/// lifecycle stage forward to `Development` (Investigating → DecisionsApproved →
+/// Development as needed), so the persisted stage reflects that a governed run is now
+/// underway. The forward drive is best-effort: a UoW already past these stages is left
+/// as-is, never moved backward.
+fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), String> {
+    use camerata_worktracker::investigation::decisions_approved_for_development;
+    use crate::lifecycle::UowStage;
+
+    let uow = state.uow.get_or_create(story_id);
+
+    if !decisions_approved_for_development(&uow.decisions) {
+        let unapproved = uow.decisions.iter().filter(|d| d.needs_review()).count();
+        let reason = if uow.decisions.is_empty() {
+            "No decisions have been recorded for this story yet. The investigation \
+             must surface at least one decision and the architect must approve it \
+             before any code is written."
+                .to_string()
+        } else {
+            format!(
+                "{unapproved} of {} decision(s) still need the architect's approval. \
+                 Every decision must be approved before a governed run can start.",
+                uow.decisions.len()
+            )
+        };
+        return Err(reason);
+    }
+
+    // Gate satisfied — drive the lifecycle stage forward to Development, stepping
+    // through any intermediate stages. Each step is best-effort: a transition that is
+    // illegal from the current stage (because the UoW is already further along, or was
+    // never moved off Intake) is simply skipped, never forced.
+    match uow.stage {
+        UowStage::Intake => {
+            let _ = state.uow.begin_investigation(story_id);
+            let _ = state.uow.approve_decisions(story_id);
+            let _ = state.uow.start_development(story_id);
+        }
+        UowStage::Investigating => {
+            let _ = state.uow.approve_decisions(story_id);
+            let _ = state.uow.start_development(story_id);
+        }
+        UowStage::DecisionsApproved => {
+            let _ = state.uow.start_development(story_id);
+        }
+        // Already at/after Development: leave the stage as-is.
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Start a governed run for a story through the ONE pipeline every development task
@@ -445,7 +529,65 @@ async fn start_governed_run(
         let transcripts = state.transcripts.clone();
         tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
+
+    // Provenance-stamping watcher (Pillar 2): once the run reaches its terminal
+    // (`done`) state, freeze the gate provenance onto the story's UoW and advance the
+    // lifecycle stage Development → AwaitingQa. This persists the honest accounting an
+    // architect reviews at QA, and survives the in-memory RunStore being lost. Runs as
+    // its own task so the run executor stays unaware of the UoW (keeps the layers thin).
+    {
+        let runs = state.runs.clone();
+        let uow = state.uow.clone();
+        let watch_id = run_id.clone();
+        let watch_story = story_id.to_string();
+        tokio::spawn(async move {
+            stamp_provenance_when_done(runs, uow, watch_id, watch_story).await;
+        });
+    }
+
     (run_id, mode)
+}
+
+/// Poll a run until it reports `done`, then freeze its gate provenance onto the story's
+/// UoW and advance the lifecycle stage to `AwaitingQa`. Bounded poll loop so a never-
+/// completing run (e.g. a wedged live fleet) can't leak the task forever.
+async fn stamp_provenance_when_done(
+    runs: RunStore,
+    uow: crate::uow::UowStore,
+    run_id: String,
+    story_id: String,
+) {
+    // Up to ~5 minutes of 500ms polls. The scripted path finishes in a few seconds;
+    // the live path is operator-driven and may legitimately take longer, but we cap to
+    // avoid an unbounded task. If it times out, no provenance is stamped (the architect
+    // can still read the live run + sign off; the durable copy is best-effort).
+    const MAX_POLLS: usize = 600;
+    for _ in 0..MAX_POLLS {
+        if let Some(run) = runs.get(&run_id) {
+            if run.done {
+                let rules = camerata_gateway::enforced_gate_rules();
+                let prov = run_provenance(&run, &rules);
+                let frozen = crate::uow::GateProvenance {
+                    run_id: prov.run_id.clone(),
+                    mode: prov.mode.clone(),
+                    allow_count: prov.allow_count,
+                    deny_count: prov.deny_count,
+                    total_bounces: prov.total_bounces,
+                    rules_fired: prov.rules_fired.clone(),
+                    recorded: chrono::Utc::now().to_rfc3339(),
+                };
+                uow.record_gate_provenance(&story_id, frozen);
+                // Advance Development → AwaitingQa (best-effort: only legal from
+                // Development; a UoW elsewhere is left as-is, never forced).
+                let _ = uow.finish_development(&story_id);
+                return;
+            }
+        } else {
+            // The run vanished from the store; nothing to stamp.
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// The current state of a run: its status plus the real gate verdicts so far.
@@ -3262,6 +3404,55 @@ async fn uow_append_history(
     Json(state.uow.get_or_create(&story_id))
 }
 
+/// Replace the full set of decision records on a story's UoW. The governed-dev gate
+/// reads these to decide whether a run may start; the cockpit posts them when the
+/// investigation surfaces (or the architect resolves) decisions. Body is the JSON
+/// array of `DecisionRecord`s (the same shape `camerata-worktracker` serializes).
+async fn uow_set_decisions(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(decisions): Json<Vec<camerata_worktracker::investigation::DecisionRecord>>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(state.uow.set_decisions(&story_id, decisions))
+}
+
+/// Helper: map a lifecycle [`crate::lifecycle::TransitionError`] to a 409 CONFLICT with
+/// its human-readable message, so the cockpit surfaces exactly why a stage move was
+/// blocked instead of a generic 500.
+fn transition_response(
+    result: Result<crate::uow::UnitOfWork, crate::lifecycle::TransitionError>,
+) -> Response {
+    match result {
+        Ok(uow) => Json(uow).into_response(),
+        Err(err) => {
+            let body = Json(serde_json::json!({
+                "error": "lifecycle transition blocked",
+                "reason": err.message(),
+                "detail": err,
+            }));
+            (StatusCode::CONFLICT, body).into_response()
+        }
+    }
+}
+
+/// Drive the UoW Intake → Investigating (Pillar 2). 409 if the UoW is not at Intake.
+async fn uow_begin_investigation(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Response {
+    transition_response(state.uow.begin_investigation(&story_id))
+}
+
+/// Drive the UoW Investigating → DecisionsApproved (Pillar 2), gated by the story's
+/// decision records. 409 (with the precise reason) if the gate is not satisfied or the
+/// UoW is at the wrong stage.
+async fn uow_approve_decisions(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Response {
+    transition_response(state.uow.approve_decisions(&story_id))
+}
+
 // ── error type ──────────────────────────────────────────────────────────────
 
 /// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
@@ -3516,5 +3707,120 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["issues"].as_array().unwrap().len(), 0);
         assert!(json["message"].is_string());
+    }
+
+    // ── Pillar 2: the no-code-first gate wired into run start ────────────────────
+
+    fn approved_decision_json(story: &str) -> serde_json::Value {
+        use camerata_worktracker::investigation::DecisionRecord;
+        let d = DecisionRecord::ai_proposed(
+            story,
+            format!("{story}/decision/a"),
+            "Decision",
+            "Question?",
+            "Rationale",
+            vec![],
+            chrono::Utc::now(),
+        )
+        .approve(chrono::Utc::now());
+        serde_json::to_value(vec![d]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn start_run_is_blocked_until_decisions_are_approved() {
+        let state = AppState::seeded();
+        let story = "GATE-1";
+        let app = router(state.clone());
+
+        // No decisions recorded → the run is blocked with a 409 carrying the reason.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert!(json["reason"].as_str().unwrap().contains("No decisions"));
+
+        // The UoW stage did NOT advance (still Intake — no code was let through).
+        assert_eq!(state.uow.get_or_create(story).stage, lifecycle::UowStage::Intake);
+    }
+
+    #[tokio::test]
+    async fn start_run_proceeds_once_decisions_are_approved() {
+        let state = AppState::seeded();
+        let story = "GATE-2";
+
+        // Record an approved decision via the decisions endpoint.
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/decisions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(approved_decision_json(story).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Now the run starts (scripted path, token-free).
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["run_id"].is_string());
+
+        // The gate side-effect drove the lifecycle stage forward to Development.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Development
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_decisions_endpoint_409s_when_gate_unsatisfied() {
+        let state = AppState::seeded();
+        let story = "GATE-3";
+
+        // Move to Investigating first.
+        state.uow.begin_investigation(story).unwrap();
+
+        // approve-decisions with no decisions on the UoW → 409 with a precise reason.
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/approve-decisions"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert!(json["reason"].is_string());
+        // Stage unchanged.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Investigating
+        );
     }
 }

@@ -1835,21 +1835,54 @@ struct RunGateEvent {
     detail: String,
 }
 
-/// Start a governed run for a story; returns the run id.
+/// The outcome of attempting to start a governed run. The no-code-first gate (Pillar 2)
+/// can BLOCK the start with a precise reason (server 409), which the cockpit surfaces as
+/// a toast instead of silently doing nothing.
+enum StartRunOutcome {
+    /// The run started; carries its id for polling.
+    Started(String),
+    /// The development gate blocked the start; carries the server's reason.
+    Blocked(String),
+    /// Transport / decode failure.
+    Failed,
+}
+
+/// Start a governed run for a story.
+///
+/// Returns [`StartRunOutcome::Started`] with the run id on success, or
+/// [`StartRunOutcome::Blocked`] (with the gate's reason) when the no-code-first gate
+/// refuses the start because the story's decisions are not all approved.
 ///
 /// `model` is forwarded to every `claude -p` agent in the live-fleet path
 /// (`CAMERATA_LIVE_BUILD=1`). For the token-free scripted path the model is
 /// accepted but ignored server-side. Passing an empty string is equivalent to
 /// passing `None` (server falls back to CLI default).
-async fn start_run(story_id: &str, model: &str) -> Option<String> {
+async fn start_run(story_id: &str, model: &str) -> StartRunOutcome {
     let mut req =
         reqwest::Client::new().post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id));
     if !model.trim().is_empty() {
         req = req.json(&serde_json::json!({ "model": model }));
     }
-    let resp = req.send().await.ok()?;
-    let v: serde_json::Value = resp.json().await.ok()?;
-    v.get("run_id")?.as_str().map(|s| s.to_string())
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(_) => return StartRunOutcome::Failed,
+    };
+    if resp.status().as_u16() == 409 {
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "The development gate blocked this run.".to_string());
+        return StartRunOutcome::Blocked(reason);
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return StartRunOutcome::Failed;
+    };
+    match v.get("run_id").and_then(|r| r.as_str()) {
+        Some(id) => StartRunOutcome::Started(id.to_string()),
+        None => StartRunOutcome::Failed,
+    }
 }
 
 /// Fetch the current state of a run.
@@ -2119,12 +2152,67 @@ impl DevStatus {
     }
 }
 
+/// The governed-development lifecycle stage of a Unit of Work (Pillar 2). Mirrors
+/// `camerata_server::lifecycle::UowStage`; orthogonal to (and richer than) `DevStatus`.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+enum UowStage {
+    #[default]
+    Intake,
+    Investigating,
+    DecisionsApproved,
+    Development,
+    AwaitingQa,
+    SignedOff,
+}
+
+impl UowStage {
+    /// A short display label for the lifecycle strip.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Intake => "Intake",
+            Self::Investigating => "Investigating",
+            Self::DecisionsApproved => "Decisions approved",
+            Self::Development => "Development",
+            Self::AwaitingQa => "Awaiting QA",
+            Self::SignedOff => "Signed off",
+        }
+    }
+
+    /// Monotonic ordinal (0 = Intake .. 5 = SignedOff), for "has reached" comparisons.
+    fn ordinal(self) -> usize {
+        match self {
+            Self::Intake => 0,
+            Self::Investigating => 1,
+            Self::DecisionsApproved => 2,
+            Self::Development => 3,
+            Self::AwaitingQa => 4,
+            Self::SignedOff => 5,
+        }
+    }
+}
+
 /// A single entry in the AI development history.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct HistoryEntryView {
     ts: String,
     kind: String,
     text: String,
+}
+
+/// The frozen gate provenance stamped onto a UoW after a governed run finishes.
+/// Mirrors `camerata_server::uow::GateProvenance`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct GateProvenanceView {
+    run_id: String,
+    mode: String,
+    allow_count: usize,
+    deny_count: usize,
+    total_bounces: usize,
+    #[serde(default)]
+    rules_fired: Vec<String>,
+    #[serde(default)]
+    recorded: String,
 }
 
 /// An architect's sign-off on a story's governed run (issue #21).
@@ -2145,8 +2233,14 @@ struct UowView {
     branch: Option<String>,
     #[serde(default)]
     dev_status: DevStatus,
+    /// The governed-development lifecycle stage (Pillar 2).
+    #[serde(default)]
+    stage: UowStage,
     #[serde(default)]
     history: Vec<HistoryEntryView>,
+    /// The frozen gate provenance from the most recent completed run, if any.
+    #[serde(default)]
+    gate_provenance: Option<GateProvenanceView>,
     #[serde(default)]
     sign_off: Option<SignOffView>,
     #[serde(default)]
@@ -2185,6 +2279,40 @@ async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<UowView> {
         .json::<UowView>()
         .await
         .ok()
+}
+
+/// The outcome of a lifecycle transition POST. `Ok` carries the updated UoW; `Blocked`
+/// carries the server's human-readable reason (a 409); `Failed` is a transport error.
+enum TransitionOutcome {
+    /// The transition succeeded; the panel re-fetches the updated UoW via the refresh
+    /// tick, so the updated body is not carried here.
+    Ok,
+    Blocked(String),
+    Failed,
+}
+
+/// POST a lifecycle transition (`begin-investigation` / `approve-decisions`) and map the
+/// response: 2xx → the updated UoW, 409 → the block reason, anything else → Failed.
+async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome {
+    let url = format!("{}/api/uow/{}/{}", crate::BFF_URL, story_id, action);
+    let resp = match reqwest::Client::new().post(url).send().await {
+        Ok(r) => r,
+        Err(_) => return TransitionOutcome::Failed,
+    };
+    if resp.status().is_success() {
+        TransitionOutcome::Ok
+    } else if resp.status().as_u16() == 409 {
+        // The server returns { "reason": "<why>" } for a blocked transition.
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "Transition blocked.".to_string());
+        TransitionOutcome::Blocked(reason)
+    } else {
+        TransitionOutcome::Failed
+    }
 }
 
 /// Map a canonical status to a short label + a badge CSS modifier.
@@ -2990,6 +3118,9 @@ fn LoopGuardControl() -> Element {
 
 #[component]
 pub fn CockpitApp() -> Element {
+    // Toast surface for transient feedback (e.g. a blocked governed run telling the
+    // architect exactly which decisions still need approval).
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Which cockpit view (control surface vs routines). Declared first so all hooks
     // below run unconditionally in a stable order regardless of the view.
     let mut view = use_signal(|| CockpitView::Stories);
@@ -3289,17 +3420,39 @@ pub fn CockpitApp() -> Element {
                                                 onclick: move |_| {
                                                     let sid = sid.clone();
                                                     let md = run_model();
+                                                    let mut uow_refresh = uow_refresh;
+                                                    let toasts = toasts;
                                                     spawn(async move {
-                                                        if let Some(rid) = start_run(&sid, &md).await {
-                                                            loop {
-                                                                if let Some(rv) = fetch_run(&rid).await {
-                                                                    let done = rv.done;
-                                                                    active_run.set(Some(rv));
-                                                                    if done {
-                                                                        break;
+                                                        match start_run(&sid, &md).await {
+                                                            StartRunOutcome::Started(rid) => {
+                                                                loop {
+                                                                    if let Some(rv) = fetch_run(&rid).await {
+                                                                        let done = rv.done;
+                                                                        active_run.set(Some(rv));
+                                                                        if done {
+                                                                            // The run finished: the server's provenance watcher
+                                                                            // stamps the UoW and advances the stage; bump the
+                                                                            // refresh tick so the UoW panel reflects it.
+                                                                            uow_refresh += 1;
+                                                                            break;
+                                                                        }
                                                                     }
+                                                                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                                                                 }
-                                                                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                                                            }
+                                                            StartRunOutcome::Blocked(reason) => {
+                                                                crate::toast::push_toast(
+                                                                    toasts,
+                                                                    crate::toast::ToastKind::Warning,
+                                                                    reason,
+                                                                );
+                                                            }
+                                                            StartRunOutcome::Failed => {
+                                                                crate::toast::push_toast(
+                                                                    toasts,
+                                                                    crate::toast::ToastKind::Warning,
+                                                                    "Could not start the governed run.".to_string(),
+                                                                );
                                                             }
                                                         }
                                                     });
@@ -7322,6 +7475,107 @@ fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> Element {
 ///
 /// NOTE: branch + history are designed to be auto-populated by the governed run
 /// (Pillar 2). They are settable via the API endpoints; the UI shows them here.
+/// The governed-development lifecycle strip + early-stage transition controls
+/// (Pillar 2). Renders the six-stage progression with the current stage highlighted,
+/// and exposes the two architect-driven forward transitions whose preconditions this
+/// UI can satisfy directly:
+///
+/// - **Begin investigation** (Intake → Investigating).
+/// - **Approve decisions** (Investigating → DecisionsApproved), which the server gates
+///   on the story's decision records and 409s (with a precise reason) if not all are
+///   approved.
+///
+/// The later stages are driven by the engine, not buttons here: `Development` and
+/// `Awaiting QA` are set by the gated run (and its provenance watcher), and
+/// `SignedOff` by the explicit sign-off action in [`RunProvenancePanel`]. A blocked
+/// transition raises a toast carrying the server's reason so the architect sees
+/// exactly what is missing.
+#[component]
+fn UowLifecycleStrip(story_id: String, stage: UowStage, uow_refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // The full ordered progression, rendered as a strip with the reached stages lit.
+    const STAGES: &[UowStage] = &[
+        UowStage::Intake,
+        UowStage::Investigating,
+        UowStage::DecisionsApproved,
+        UowStage::Development,
+        UowStage::AwaitingQa,
+        UowStage::SignedOff,
+    ];
+
+    // Drive a forward transition: POST, then either bump the refresh tick (success) or
+    // toast the server's block/failure reason. Spawned from a button's onclick.
+    async fn drive(
+        story_id: String,
+        action: &'static str,
+        mut uow_refresh: Signal<u32>,
+        toasts: Signal<Vec<crate::toast::Toast>>,
+    ) {
+        match post_uow_transition(&story_id, action).await {
+            TransitionOutcome::Ok => {
+                uow_refresh += 1;
+            }
+            TransitionOutcome::Blocked(reason) => {
+                crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, reason);
+            }
+            TransitionOutcome::Failed => {
+                crate::toast::push_toast(
+                    toasts,
+                    crate::toast::ToastKind::Warning,
+                    "Could not advance the lifecycle stage.".to_string(),
+                );
+            }
+        }
+    }
+
+    let sid_begin = story_id.clone();
+    let sid_approve = story_id.clone();
+
+    rsx! {
+        div { class: "uow-lifecycle",
+            span { class: "uow-field-label", "Lifecycle" }
+            div { class: "uow-lifecycle-strip",
+                for s in STAGES.iter().copied() {
+                    {
+                        let reached = s.ordinal() <= stage.ordinal();
+                        let current = s == stage;
+                        let mut cls = String::from("uow-stage-pip");
+                        if reached { cls.push_str(" reached"); }
+                        if current { cls.push_str(" current"); }
+                        rsx! {
+                            span { class: "{cls}", title: "{s.label()}", "{s.label()}" }
+                        }
+                    }
+                }
+            }
+            // The two architect-driven forward transitions, each enabled only at the
+            // stage it applies to (the server enforces this too; disabling here just
+            // avoids a guaranteed-409 click).
+            div { class: "uow-lifecycle-actions",
+                button {
+                    class: "uow-stage-btn",
+                    disabled: stage != UowStage::Intake,
+                    onclick: move |_| {
+                        let sid = sid_begin.clone();
+                        spawn(drive(sid, "begin-investigation", uow_refresh, toasts));
+                    },
+                    "Begin investigation"
+                }
+                button {
+                    class: "uow-stage-btn",
+                    disabled: stage != UowStage::Investigating,
+                    onclick: move |_| {
+                        let sid = sid_approve.clone();
+                        spawn(drive(sid, "approve-decisions", uow_refresh, toasts));
+                    },
+                    "Approve decisions"
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -7336,9 +7590,11 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
 
     let uow = uow_data.read().clone().flatten();
     let dev_status = uow.as_ref().map(|u| u.dev_status).unwrap_or_default();
+    let stage = uow.as_ref().map(|u| u.stage).unwrap_or_default();
     let branch = uow.as_ref().and_then(|u| u.branch.clone());
     let history = uow.as_ref().map(|u| u.history.clone()).unwrap_or_default();
     let sign_off = uow.as_ref().and_then(|u| u.sign_off.clone());
+    let gate_provenance = uow.as_ref().and_then(|u| u.gate_provenance.clone());
 
     // The three status options for the segmented control.
     const STATUS_OPTS: &[DevStatus] = &[DevStatus::New, DevStatus::InProgress, DevStatus::Done];
@@ -7346,6 +7602,14 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
     rsx! {
         div { class: "uow-panel",
             p { class: "uow-panel-h", "UNIT OF WORK" }
+
+            // ── Governed-development lifecycle (Pillar 2) ──────────────────────
+            // A read-out of the enforced stage progression plus the buttons that
+            // drive the early transitions (begin investigation, approve decisions).
+            // Later stages (Development, Awaiting QA, Signed off) are driven by the
+            // gated run and the sign-off action below, so they are shown but not
+            // clickable here — the engine drives them, not free navigation.
+            UowLifecycleStrip { story_id: story_id.clone(), stage, uow_refresh }
 
             // ── Dev status: 3-state segmented control ──────────────────────────
             div { class: "uow-status-row",
@@ -7392,6 +7656,23 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
                     span { class: "uow-branch-val", "{b}" }
                 } else {
                     span { class: "uow-branch-none", "not set" }
+                }
+            }
+
+            // ── Frozen gate provenance (Pillar 2): the durable QA-review record ─
+            // Stamped onto the UoW when a governed run finishes, so the honest gate
+            // accounting survives even after the in-memory run is gone.
+            if let Some(ref p) = gate_provenance {
+                div { class: "uow-provenance",
+                    span { class: "uow-field-label", "Gate provenance" }
+                    span { class: "uow-provenance-val",
+                        "run {p.run_id} ({p.mode}) — {p.allow_count} allowed, {p.deny_count} denied ({p.total_bounces} bounces)"
+                    }
+                    if !p.rules_fired.is_empty() {
+                        span { class: "uow-provenance-rules",
+                            "Bounced: {p.rules_fired.join(\", \")}"
+                        }
+                    }
                 }
             }
 
