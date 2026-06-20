@@ -13,6 +13,47 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
+/// The lifecycle status of a routine, persisted alongside it (issue #43).
+///
+/// This is the AUTONOMY-PLANE status the dashboard surfaces as a badge: a routine sits
+/// `Idle` until the scheduler (or a manual run) drives it `Running`; a completed run lands
+/// `Done`; a run the gate blocked lands `BlockedNeedsReview` (and raises an escalation a
+/// human resolves); an errored run lands `Failed`. Resolving the escalation returns the
+/// routine to `Idle` so the next slot can run it.
+///
+/// Distinct from [`RoutineRunSummary::outcome`] (which describes the gate VERDICTS of the
+/// last run): a run can complete with denies recorded yet still be `BlockedNeedsReview`
+/// because those denies need a human decision before it can proceed.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineStatus {
+    /// Provisioned and waiting for its next scheduled slot (or a manual run). The default
+    /// for routines persisted before this field existed, so they rehydrate sensibly.
+    #[default]
+    Idle,
+    /// A run is in flight right now.
+    Running,
+    /// The last run was blocked by the gate and an escalation is awaiting human review.
+    BlockedNeedsReview,
+    /// The last run completed without anything needing human review.
+    Done,
+    /// The last run errored out (not a gate denial — an actual failure to run).
+    Failed,
+}
+
+impl RoutineStatus {
+    /// A short, stable wire/label string (also what `serde` serializes via `snake_case`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoutineStatus::Idle => "idle",
+            RoutineStatus::Running => "running",
+            RoutineStatus::BlockedNeedsReview => "blocked_needs_review",
+            RoutineStatus::Done => "done",
+            RoutineStatus::Failed => "failed",
+        }
+    }
+}
+
 /// The outcome summary of a routine's last run: real counts from the gate script.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RoutineRunSummary {
@@ -70,6 +111,11 @@ pub struct Routine {
     /// with a sensible model.
     #[serde(default = "default_model")]
     pub model: String,
+    /// The routine's lifecycle status (issue #43): the autonomy-plane state the dashboard
+    /// badges. Defaults to `Idle` so routines persisted before this field rehydrate as
+    /// ready-to-run rather than absent.
+    #[serde(default)]
+    pub status: RoutineStatus,
 }
 
 fn default_true() -> bool {
@@ -234,6 +280,7 @@ impl RoutineStore {
                 last_fired: None,
                 project_id: None,
                 model: default_model(),
+                status: RoutineStatus::Idle,
             }
         };
         let seed = vec![
@@ -296,6 +343,7 @@ impl RoutineStore {
             last_fired: None,
             project_id: req.project_id.clone(),
             model: resolve_model(&req.model),
+            status: RoutineStatus::Idle,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -328,6 +376,7 @@ impl RoutineStore {
             last_fired: None,
             project_id: Some(project_id.to_string()),
             model: resolve_model(&req.model),
+            status: RoutineStatus::Idle,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -425,6 +474,19 @@ impl RoutineStore {
         Some(updated)
     }
 
+    /// Set a routine's lifecycle status explicitly (issue #43). Used to drive a routine
+    /// `Running` at the start of a run and to return it to `Idle` once a human resolves the
+    /// escalation that blocked it. Returns the updated routine, or `None` for an unknown id.
+    pub fn set_status(&self, id: &str, status: RoutineStatus) -> Option<Routine> {
+        let mut guard = self.items.lock().ok()?;
+        let r = guard.iter_mut().find(|r| r.id == id)?;
+        r.status = status;
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
     /// Record that the scheduler fired this routine at `ts` (RFC3339), so the same slot
     /// isn't fired again on the next tick. Separate from `run_now`'s summary so the
     /// scheduler can stamp the fire even when it drives the run itself.
@@ -464,6 +526,14 @@ impl RoutineStore {
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
         r.last_run = Some(summary);
+        // Drive the lifecycle status from the run (issue #43): a run the gate blocked needs
+        // a human, so it lands `BlockedNeedsReview` (the escalation hook then raises the
+        // review); an unblocked run lands `Done`.
+        r.status = if denies > 0 {
+            RoutineStatus::BlockedNeedsReview
+        } else {
+            RoutineStatus::Done
+        };
         let updated = r.clone();
         drop(guard);
         self.flush();
@@ -659,6 +729,66 @@ mod tests {
         assert_eq!(store.replace_for_project("p1", &reqs[..1]), 1);
         assert_eq!(store.list_for_project("p1").len(), 1);
         assert_eq!(store.list().len(), 2, "global + one project routine");
+    }
+
+    #[test]
+    fn run_now_sets_lifecycle_status_and_set_status_resets() {
+        let store = RoutineStore::seeded();
+        // A fresh routine starts Idle.
+        assert_eq!(store.list()[0].status, RoutineStatus::Idle);
+
+        // The scripted gate denies (2 denies) -> the run lands BlockedNeedsReview.
+        let ran = store.run_now("rt-1").unwrap();
+        assert_eq!(ran.status, RoutineStatus::BlockedNeedsReview);
+
+        // Resolving the block returns the routine to Idle so the next slot can run.
+        let reset = store.set_status("rt-1", RoutineStatus::Idle).unwrap();
+        assert_eq!(reset.status, RoutineStatus::Idle);
+        // set_status on an unknown id is a no-op None.
+        assert!(store.set_status("nope", RoutineStatus::Done).is_none());
+    }
+
+    #[test]
+    fn status_persists_and_back_compat_defaults_to_idle() {
+        let path =
+            std::env::temp_dir().join("camerata-routine-status-persist-test.json");
+        let _ = std::fs::remove_file(&path);
+
+        // Persist a routine in the BlockedNeedsReview state.
+        {
+            let store = RoutineStore::at(path.clone());
+            store.create(&CreateRoutineReq {
+                name: "Nightly".into(),
+                schedule: "daily 04:00".into(),
+                intent: "scan".into(),
+                prompt: String::new(),
+                scope: "read-only".into(),
+                project_id: None,
+                model: None,
+            });
+            store.run_now("rt-1").unwrap(); // -> BlockedNeedsReview, flushed
+        }
+        // Rehydrate: the status survives the reload.
+        {
+            let store = RoutineStore::at(path.clone());
+            assert_eq!(store.list()[0].status, RoutineStatus::BlockedNeedsReview);
+        }
+
+        // Back-compat: a routine JSON WITHOUT a `status` field rehydrates as Idle.
+        {
+            let legacy = r#"[{"id":"rt-9","name":"Legacy","schedule":"daily 09:00",
+                "intent":"x","prompt":"p","scope":"read-only","enabled":true,
+                "last_run":null}]"#;
+            std::fs::write(&path, legacy).unwrap();
+            let store = RoutineStore::at(path.clone());
+            let r = &store.list()[0];
+            assert_eq!(r.status, RoutineStatus::Idle, "missing status -> Idle default");
+            // Other absent optional fields also defaulted (provisioned true, model set).
+            assert!(r.provisioned);
+            assert!(!r.model.is_empty());
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

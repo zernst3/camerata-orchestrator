@@ -1471,6 +1471,30 @@ html, body {
 .routine-row.off { opacity: .55; }
 .routine-name { display: flex; flex-direction: column; gap: 3px; }
 .routine-title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+/* Title + lifecycle status badge on one line (issue #43). */
+.routine-title-row { display: flex; align-items: center; gap: 8px; }
+.routine-status-badge {
+  padding: 1px 7px; border-radius: 999px;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em;
+  text-transform: uppercase; border: 1px solid var(--line);
+  color: var(--ink-soft); background: var(--surface-2, transparent);
+}
+.routine-status-badge.idle { color: var(--ink-faint); }
+.routine-status-badge.running {
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.routine-status-badge.done {
+  color: #2f8f5b;
+  background: color-mix(in srgb, #2f8f5b 12%, transparent);
+  border-color: color-mix(in srgb, #2f8f5b 30%, transparent);
+}
+.routine-status-badge.failed, .routine-status-badge.blocked {
+  color: #b4452f;
+  background: color-mix(in srgb, #b4452f 12%, transparent);
+  border-color: color-mix(in srgb, #b4452f 30%, transparent);
+}
 .routine-prompt { font-size: 12px; color: var(--ink-soft); line-height: 1.35; }
 .routine-sched { font-size: 12.5px; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .routine-scope { font-size: 12px; color: var(--ink-soft); }

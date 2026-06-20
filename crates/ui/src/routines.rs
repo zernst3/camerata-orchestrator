@@ -124,6 +124,27 @@ struct RoutineView {
     /// The model the routine's agent runs on (id from `/api/models`).
     #[serde(default)]
     model: String,
+    /// The routine's lifecycle status (issue #43): `idle` | `running` |
+    /// `blocked_needs_review` | `done` | `failed`. Defaults to `idle` so older BFFs that
+    /// don't send it render a sensible badge.
+    #[serde(default = "default_status")]
+    status: String,
+}
+
+fn default_status() -> String {
+    "idle".to_string()
+}
+
+/// Map a routine status wire string to a short badge label + a CSS modifier class.
+/// Unknown values fall back to the idle styling so a new server status never renders blank.
+fn status_badge(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "running" => ("Running", "running"),
+        "blocked_needs_review" => ("Blocked", "blocked"),
+        "done" => ("Done", "done"),
+        "failed" => ("Failed", "failed"),
+        _ => ("Idle", "idle"),
+    }
 }
 
 /// One model the routine form's picker offers (`GET /api/models`).
@@ -558,7 +579,21 @@ pub fn RoutineDashboard() -> Element {
                             // panel can sit outside the grid as a full-width sibling.
                             div { class: "{row_cls}",
                                 div { class: "routine-name",
-                                    span { class: "routine-title", "{r.name}" }
+                                    div { class: "routine-title-row",
+                                        span { class: "routine-title", "{r.name}" }
+                                        // Lifecycle status badge (issue #43). When the
+                                        // routine is blocked the dedicated review pill below
+                                        // is the actionable affordance, so suppress the
+                                        // duplicate "Blocked" badge here.
+                                        if !is_blocked {
+                                            {
+                                                let (label, modifier) = status_badge(&r.status);
+                                                rsx! {
+                                                    span { class: "routine-status-badge {modifier}", "{label}" }
+                                                }
+                                            }
+                                        }
+                                    }
                                     span { class: "routine-prompt", "{r.intent}" }
                                     // Blocked pill: clicking toggles the inline review panel.
                                     if is_blocked {
