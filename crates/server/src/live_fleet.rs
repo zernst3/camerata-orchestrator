@@ -11,17 +11,22 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use camerata_fleet::{build_from_plan, locate_gateway_bin, BuildEvent};
+use camerata_fleet::{locate_gateway_bin, BuildEvent};
 use camerata_intake::{Plan, PlanTask, TaskKind};
 
 use crate::run::{GateEvent, RunStatus, RunStore};
 
 /// Run a real governed fleet for a story and record its progress into the run.
+///
+/// `model` pins the model id for every `claude -p` agent in the fleet. `None`
+/// means each agent uses the CLI's default — the same behaviour as before the
+/// model-selector feature.
 pub async fn execute_live_run(
     store: RunStore,
     run_id: String,
     story_title: String,
     story_desc: String,
+    model: Option<String>,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -63,7 +68,7 @@ pub async fn execute_live_run(
     let rid_cb = run_id.clone();
     let seq = AtomicUsize::new(0);
 
-    let result = build_from_plan(&plan, &root, &gateway_bin, &move |event| {
+    let result = camerata_fleet::build_from_plan_with_model(&plan, &root, &gateway_bin, model.as_deref(), &move |event| {
         let n = seq.fetch_add(1, Ordering::SeqCst) + 1;
         match event {
             BuildEvent::Scaffolding => store_cb.push_event(

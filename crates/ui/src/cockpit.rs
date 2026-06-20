@@ -1615,12 +1615,18 @@ struct RunGateEvent {
 }
 
 /// Start a governed run for a story; returns the run id.
-async fn start_run(story_id: &str) -> Option<String> {
-    let resp = reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id))
-        .send()
-        .await
-        .ok()?;
+///
+/// `model` is forwarded to every `claude -p` agent in the live-fleet path
+/// (`CAMERATA_LIVE_BUILD=1`). For the token-free scripted path the model is
+/// accepted but ignored server-side. Passing an empty string is equivalent to
+/// passing `None` (server falls back to CLI default).
+async fn start_run(story_id: &str, model: &str) -> Option<String> {
+    let mut req = reqwest::Client::new()
+        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id));
+    if !model.trim().is_empty() {
+        req = req.json(&serde_json::json!({ "model": model }));
+    }
+    let resp = req.send().await.ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
     v.get("run_id")?.as_str().map(|s| s.to_string())
 }
@@ -2517,6 +2523,19 @@ pub fn CockpitApp() -> Element {
     // The live run for the selected story, if one has been started. Polled to
     // completion; its gate events are REAL verdicts from the BFF run engine.
     let mut active_run = use_signal(|| Option::<RunView>::None);
+    // Model the operator pins for governed-fleet runs (`CAMERATA_LIVE_BUILD=1`).
+    // Seeded from the /api/models default; harmlessly forwarded for the scripted
+    // path too so the UI state is consistent regardless of build mode.
+    let run_models_res = use_resource(fetch_audit_models);
+    let mut run_model = use_signal(String::new);
+    {
+        let resp = run_models_res.read().clone().flatten();
+        if run_model().is_empty() {
+            if let Some(m) = resp {
+                run_model.set(m.default.clone());
+            }
+        }
+    }
 
     // A shared refresh tick: bumped whenever a clarification is posted or answered,
     // so both the NEEDS YOU queue here and the per-story thread refetch together.
@@ -2728,27 +2747,50 @@ pub fn CockpitApp() -> Element {
                                 // poll it to completion, streaming the real gate verdicts.
                                 {
                                     let sid = current.id.clone();
+                                    // Snapshot the run-model catalog for the picker.
+                                    let run_models_snap = run_models_res.read().clone().flatten();
                                     rsx! {
-                                        button {
-                                            class: "btn-run",
-                                            onclick: move |_| {
-                                                let sid = sid.clone();
-                                                spawn(async move {
-                                                    if let Some(rid) = start_run(&sid).await {
-                                                        loop {
-                                                            if let Some(rv) = fetch_run(&rid).await {
-                                                                let done = rv.done;
-                                                                active_run.set(Some(rv));
-                                                                if done {
-                                                                    break;
+                                        div { class: "run-control-row",
+                                            button {
+                                                class: "btn-run",
+                                                onclick: move |_| {
+                                                    let sid = sid.clone();
+                                                    let md = run_model();
+                                                    spawn(async move {
+                                                        if let Some(rid) = start_run(&sid, &md).await {
+                                                            loop {
+                                                                if let Some(rv) = fetch_run(&rid).await {
+                                                                    let done = rv.done;
+                                                                    active_run.set(Some(rv));
+                                                                    if done {
+                                                                        break;
+                                                                    }
                                                                 }
+                                                                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                                                             }
-                                                            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                                                        }
+                                                    });
+                                                },
+                                                "▶ Run this story (governed)"
+                                            }
+                                            // Model picker: shown whenever the catalog has loaded.
+                                            // In scripted mode (default) the model is accepted but
+                                            // ignored server-side; in live-fleet mode it pins the
+                                            // model for every claude -p agent.
+                                            if let Some(m) = run_models_snap {
+                                                select {
+                                                    class: "run-model-select",
+                                                    value: "{run_model}",
+                                                    onchange: move |e| run_model.set(e.value()),
+                                                    for opt in m.models.iter() {
+                                                        option {
+                                                            value: "{opt.id}",
+                                                            selected: run_model() == opt.id,
+                                                            "{opt.label}"
                                                         }
                                                     }
-                                                });
-                                            },
-                                            "▶ Run this story (governed)"
+                                                }
+                                            }
                                         }
                                     }
                                 }
