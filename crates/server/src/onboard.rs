@@ -175,6 +175,12 @@ pub struct ScanReport {
     /// backend reported it. Drives the actual-vs-estimated readout. None on a Phase-1 scan.
     #[serde(default)]
     pub actual_usage: Option<crate::ai_audit::ActualUsage>,
+    /// The OPT-IN deep compliance & security tier output (#55): SOC-2 gap analysis + deep
+    /// security audit + threat model. `None` unless the audit request set `deep` — the
+    /// standard scan never populates this. Everything inside is ADVISORY + model-inferred
+    /// (#62); the tier carries its own honesty disclaimer.
+    #[serde(default)]
+    pub deep: Option<crate::ai_audit::DeepReport>,
 }
 
 impl ScanReport {
@@ -191,6 +197,7 @@ impl ScanReport {
             proposed_rules: Vec::new(),
             gated: true,
             actual_usage: None,
+            deep: None,
             message: Some(
                 "Connect GitHub (set CAMERATA_GITHUB_TOKEN) so Camerata can read the repo(s)."
                     .to_string(),
@@ -820,6 +827,7 @@ pub fn build_report(
         gated: false,
         message: None,
         actual_usage: None,
+        deep: None,
     }
 }
 
@@ -1418,6 +1426,12 @@ pub async fn audit_repos(
     // (no cache, or the user forced it). Returned alongside the report is the FRESH manifest to
     // persist, so the next scan can go incremental.
     incremental_prior: Option<&crate::scan_cache::ScanManifest>,
+    // OPT-IN deep compliance & security tier (#55). When true, AFTER the standard audit the
+    // three deep lenses (SOC-2 gap analysis, deep security audit, threat model) run over each
+    // repo on the same model; their output is attached to the report's `deep` field. ADVISORY
+    // + model-inferred (#62). When false the behavior is unchanged — the most expensive tier
+    // never runs by default.
+    deep: bool,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
@@ -1433,6 +1447,10 @@ pub async fn audit_repos(
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // When the deep tier is on, the WHOLE file set per repo is captured here (the deep lenses
+    // read the full repo, not just the incrementally-changed files) and run after the standard
+    // audit completes. Empty / unused when `deep` is false.
+    let mut deep_inputs: Vec<(String, Vec<(String, String)>)> = Vec::new();
     let llm = crate::llm::Llm::from_env();
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
@@ -1488,6 +1506,11 @@ pub async fn audit_repos(
                 excluded_noise: _,
             }) => {
                 files_total += files.len();
+                // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
+                // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
+                if deep {
+                    deep_inputs.push((spec.to_string(), files.clone()));
+                }
                 stacks.push(detect_stack(spec, &files));
                 // Deterministic security floor (always-on, every repo): ENFORCED findings.
                 // This is the non-deselectable critical floor, so it is NOT repo-scoped —
@@ -1574,12 +1597,101 @@ pub async fn audit_repos(
         }
     }
 
+    // ── OPT-IN deep compliance & security tier (#55) ──────────────────────────────────
+    // Runs AFTER the standard audit, only when requested. Each repo gets the three lenses;
+    // results are merged into one tier-level report and attached. Spend folds into the same
+    // meter (so the actual-vs-estimated readout includes the deep tier). It is the most
+    // expensive tier — that is why it is opt-in and never default (#62).
+    let deep_report = if deep && !deep_inputs.is_empty() {
+        let mut per_repo = Vec::new();
+        for (spec, files) in &deep_inputs {
+            let dr = crate::ai_audit::run_deep_tier(
+                &llm,
+                spec,
+                files,
+                model,
+                mode,
+                feedback,
+                Some(&meter),
+            )
+            .await;
+            per_repo.push(dr);
+        }
+        Some(merge_deep_reports(per_repo))
+    } else {
+        None
+    };
+
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     report.actual_usage = Some(meter.snapshot());
+    report.deep = deep_report;
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
     (report, manifest_builder.finish())
+}
+
+/// Merge the per-repo deep-tier reports into ONE tier-level [`crate::ai_audit::DeepReport`].
+/// The three lenses keep their identity across repos: every repo's SOC-2 gaps fold into the
+/// single SOC-2 lens result, every repo's security findings into the security lens, etc., so
+/// the consumer sees three lens results (not three-per-repo). The advisory envelope + honesty
+/// disclaimer are preserved. Lens errors are concatenated so a repo that failed a lens is
+/// visible rather than silently dropped.
+fn merge_deep_reports(
+    reports: Vec<crate::ai_audit::DeepReport>,
+) -> crate::ai_audit::DeepReport {
+    use crate::ai_audit::{DeepLens, DeepLensResult, DeepReport, DEEP_ADVISORY_DISCLAIMER};
+    let mut soc2 = DeepLensResult::merged_empty(DeepLens::Soc2Gap);
+    let mut security = DeepLensResult::merged_empty(DeepLens::DeepSecurity);
+    let mut threat = DeepLensResult::merged_empty(DeepLens::ThreatModel);
+    let mut summaries: (Vec<String>, Vec<String>, Vec<String>) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut errors: (Vec<String>, Vec<String>, Vec<String>) = (Vec::new(), Vec::new(), Vec::new());
+    for r in reports {
+        for lens in r.lenses {
+            match lens.lens.as_str() {
+                "soc2-gap" => {
+                    soc2.soc2_gaps.extend(lens.soc2_gaps);
+                    if !lens.summary.is_empty() {
+                        summaries.0.push(lens.summary);
+                    }
+                    if let Some(e) = lens.error {
+                        errors.0.push(e);
+                    }
+                }
+                "deep-security" => {
+                    security.security_findings.extend(lens.security_findings);
+                    if !lens.summary.is_empty() {
+                        summaries.1.push(lens.summary);
+                    }
+                    if let Some(e) = lens.error {
+                        errors.1.push(e);
+                    }
+                }
+                "threat-model" => {
+                    threat.threats.extend(lens.threats);
+                    if !lens.summary.is_empty() {
+                        summaries.2.push(lens.summary);
+                    }
+                    if let Some(e) = lens.error {
+                        errors.2.push(e);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    soc2.summary = summaries.0.join("\n\n");
+    security.summary = summaries.1.join("\n\n");
+    threat.summary = summaries.2.join("\n\n");
+    soc2.error = (!errors.0.is_empty()).then(|| errors.0.join(" · "));
+    security.error = (!errors.1.is_empty()).then(|| errors.1.join(" · "));
+    threat.error = (!errors.2.is_empty()).then(|| errors.2.join(" · "));
+    DeepReport {
+        lenses: vec![soc2, security, threat],
+        advisory: true,
+        disclaimer: DEEP_ADVISORY_DISCLAIMER.to_string(),
+    }
 }
 
 #[cfg(test)]
