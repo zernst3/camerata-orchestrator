@@ -11,6 +11,8 @@
 //!   [`CargoOutcome`], [`FLEET_DOMAINS`], [`DEFAULT_CORPUS_PATH`].
 //! - Stage-task helpers: [`stage_task_for`], [`describe_task_kind`].
 //! - The high-level runner: [`build_from_plan`], [`BuildEvent`], [`BuildOutcome`].
+//! - Model-tiering: [`tier`] module — [`tier::CapabilityBand`], [`tier::TierMap`],
+//!   [`tier::classify_task`], and [`build_from_plan_with_tier_map`].
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +25,7 @@ use camerata_rules::role_from_corpus;
 pub use camerata_rules::DEFAULT_CORPUS_PATH;
 
 pub mod gate_probe;
+pub mod tier;
 
 // ─── Corpus / domain constants ────────────────────────────────────────────────
 
@@ -455,6 +458,148 @@ pub async fn build_from_plan_with_model_and_iterations(
     })
 }
 
+// ─── build_from_plan_with_tier_map ───────────────────────────────────────────
+
+/// Run the governed fleet with PER-STAGE model resolution driven by `tier_map`
+/// (ORCH-MODEL-TIERING-1).
+///
+/// Each [`PlanTask`] is classified by [`tier::classify_task`] into a
+/// [`tier::CapabilityBand`]; the band is looked up in `tier_map` to get the
+/// concrete model id; that id is threaded into the stage's driver via
+/// `with_model(id)`. All stages get an individually-appropriate model rather
+/// than a single operator-wide choice.
+///
+/// The `max_iterations` loop-guard ceiling is passed through unchanged (same
+/// semantics as [`build_from_plan_with_model_and_iterations`]).
+///
+/// This function is ADDITIVE: the existing single-model entry points
+/// ([`build_from_plan`], [`build_from_plan_with_model`]) continue to work
+/// exactly as before. Callers that do not supply a [`tier::TierMap`] are
+/// unaffected.
+pub async fn build_from_plan_with_tier_map(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    tier_map: &tier::TierMap,
+    max_iterations: usize,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    let crate_name = "camerata_app";
+
+    // ── Scaffold the shared worktree ─────────────────────────────────────────
+    on_event(BuildEvent::Scaffolding);
+    let worktree = root.join("crate");
+    let _ = std::fs::remove_dir_all(root);
+    scaffold_crate(&worktree, crate_name)?;
+    let lib_path = worktree.join("src").join("lib.rs");
+    let lib_path_display = lib_path.display().to_string();
+
+    let total = plan.tasks.len();
+
+    // ── Build a governed role per plan task ──────────────────────────────────
+    let mut roles: Vec<Role> = Vec::with_capacity(total);
+    for (i, task) in plan.tasks.iter().enumerate() {
+        let role_name = format!("{}-{}", task.role, i + 1);
+        let role = governed_role(&role_name).await?;
+        roles.push(role);
+    }
+
+    // ── Per-session governed drivers ─────────────────────────────────────────
+    let mut spawns = Vec::with_capacity(total);
+    for (i, role) in roles.iter().enumerate() {
+        let session_dir = root.join(format!("session-{}", i + 1));
+        let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
+        spawns.push(spawn);
+    }
+
+    // Resolve the per-stage model id from the tier map BEFORE moving into the
+    // closure below (so we have all ids as owned Strings ahead of the borrow).
+    let per_stage_models: Vec<String> = plan
+        .tasks
+        .iter()
+        .map(|task| tier_map.model_for_task(task).to_string())
+        .collect();
+
+    let drivers: Vec<_> = spawns
+        .iter()
+        .enumerate()
+        .map(|(i, spawn)| {
+            spawn
+                .driver
+                .clone()
+                .with_worktree(&worktree)
+                .with_model(&per_stage_models[i])
+        })
+        .collect();
+
+    // ── Build the stage list ─────────────────────────────────────────────────
+    let mut stages: Vec<FleetStage> = Vec::with_capacity(total);
+    for (i, task) in plan.tasks.iter().enumerate() {
+        on_event(BuildEvent::StageStarted {
+            index: i,
+            total,
+            role: roles[i].name.clone(),
+            kind: task.kind.label().to_string(),
+        });
+        let stage_task = stage_task_for(task, &lib_path_display, i == 0);
+        stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
+    }
+
+    // ── Run the governed fleet with the REAL RustCheckRunner ─────────────────
+    let checks = RustCheckRunner::new();
+    let fleet = FleetCoordinator::new(&checks, &worktree);
+    let report = fleet.run_with_iterations(&stages, max_iterations).await?;
+
+    // ── Emit per-stage finished events ───────────────────────────────────────
+    let mut all_agents_ran = true;
+    for (i, stage) in report.stages.iter().enumerate() {
+        let r = &stage.report;
+        if r.initial_outcome.session_id.is_empty() {
+            all_agents_ran = false;
+        }
+        on_event(BuildEvent::StageFinished {
+            index: i,
+            total,
+            clean: r.final_violations.is_empty(),
+            bounced: r.bounced,
+            session_id: r.initial_outcome.session_id.clone(),
+        });
+    }
+
+    // ── Check what the gate actually wrote ───────────────────────────────────
+    let produced = std::fs::read_to_string(&lib_path).unwrap_or_default();
+    let wrote_through_gate =
+        lib_path.exists() && !produced.trim_start().starts_with("// placeholder");
+
+    // ── cargo build + cargo test ──────────────────────────────────────────────
+    on_event(BuildEvent::Verifying);
+    let build = run_cargo(&worktree, "build").await?;
+    let compiled = build.success;
+
+    let test = if compiled {
+        Some(run_cargo(&worktree, "test").await?)
+    } else {
+        None
+    };
+    let tests_passed = test.as_ref().map(|t| t.success).unwrap_or(false);
+
+    on_event(BuildEvent::Done {
+        compiled,
+        tests_passed,
+    });
+
+    Ok(BuildOutcome {
+        compiled,
+        tests_passed,
+        all_agents_ran,
+        wrote_through_gate,
+        total_bounces: report.total_bounces(),
+        fleet_clean: report.is_clean(),
+        produced_path: lib_path,
+        produced_bytes: produced.len(),
+    })
+}
+
 // ─── tests (ORCH-NEW-PATH-TESTS-1) ───────────────────────────────────────────
 
 #[cfg(test)]
@@ -622,5 +767,90 @@ mod tests {
         // functions are never called, so no I/O or infra is required.
         let _ = _check_none_compiles as fn(_, _, _);
         let _ = _check_some_compiles as fn(_, _, _);
+    }
+
+    // ── build_from_plan_with_tier_map (ORCH-MODEL-TIERING-1) ─────────────────
+
+    /// Compile-time / API-shape test: `build_from_plan_with_tier_map` accepts the
+    /// expected types. We don't run it (needs a live gateway + corpus); we just prove
+    /// the signature is callable with a default `TierMap`.
+    #[test]
+    fn build_from_plan_with_tier_map_signature_compiles() {
+        fn _check_signature(
+            plan: &camerata_intake::Plan,
+            root: &std::path::Path,
+            bin: &std::path::Path,
+        ) {
+            let tier_map = crate::tier::TierMap::default();
+            let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_tier_map(
+                    plan,
+                    root,
+                    bin,
+                    &tier_map,
+                    1,
+                    &|_| {},
+                ));
+        }
+        let _ = _check_signature as fn(_, _, _);
+    }
+
+    /// Verify that the tier map resolves per-task models correctly for a
+    /// representative plan (Backend -> Opus, Test -> Haiku, Database -> Sonnet,
+    /// Frontend -> Sonnet). This is a pure-logic test — no I/O needed.
+    #[test]
+    fn tier_map_resolves_correct_models_for_mixed_plan() {
+        use crate::tier::{CapabilityBand, TierMap, classify_task};
+        use camerata_intake::{Plan, PlanTask, TaskKind};
+
+        let tier_map = TierMap::default();
+        let plan = Plan {
+            app_name: "budget".to_string(),
+            summary: "budget app".to_string(),
+            tasks: vec![
+                PlanTask {
+                    role: "Implementer".to_string(),
+                    kind: TaskKind::Database,
+                    description: "schema".to_string(),
+                },
+                PlanTask {
+                    role: "Implementer".to_string(),
+                    kind: TaskKind::Backend,
+                    description: "domain types".to_string(),
+                },
+                PlanTask {
+                    role: "Implementer".to_string(),
+                    kind: TaskKind::Frontend,
+                    description: "list view".to_string(),
+                },
+                PlanTask {
+                    role: "Tester".to_string(),
+                    kind: TaskKind::Test,
+                    description: "unit tests".to_string(),
+                },
+            ],
+        };
+
+        let expected = [
+            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
+            (CapabilityBand::Strongest, "claude-opus-4-8"),
+            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
+            (CapabilityBand::Fast, "claude-haiku-4-5-20251001"),
+        ];
+
+        for (task, (expected_band, expected_model)) in plan.tasks.iter().zip(expected.iter()) {
+            let band = classify_task(task);
+            assert_eq!(
+                band, *expected_band,
+                "task '{}' ({:?}) wrong band",
+                task.description, task.kind
+            );
+            let model = tier_map.model_for_task(task);
+            assert_eq!(
+                model, *expected_model,
+                "task '{}' ({:?}) wrong model",
+                task.description, task.kind
+            );
+        }
     }
 }

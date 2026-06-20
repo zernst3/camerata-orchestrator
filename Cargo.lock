@@ -637,6 +637,7 @@ dependencies = [
  "camerata-gateway",
  "camerata-intake",
  "camerata-rules",
+ "serde",
  "serde_json",
  "tokio",
 ]
