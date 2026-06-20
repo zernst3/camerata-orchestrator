@@ -3,9 +3,14 @@ title = "The compiler runs in strict mode"
 tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by tsconfig.json with \"strict\": true (which enables strictNullChecks, noImplicitAny, strictFunctionTypes, and the rest of the strict family) and a tsc --noEmit type-check wired into the build/CI. Conformance holds when strict is on and the type-check is a required gate that fails the build on a type error; it fails when strict is off, individual strict flags are disabled, or tsc is not run in CI."
+qualifies = "Enforced by tsconfig.json with \"strict\": true (which enables strictNullChecks, noImplicitAny, strictFunctionTypes, and the rest of the strict family) and a tsc --noEmit type-check wired into the build/CI. Conformance holds when strict is on and the type-check is a required gate that fails the build on a type error; it fails when strict is off, individual strict flags are disabled, or tsc is not run in CI. No ESLint/linter rule enforces the presence of strict: true in tsconfig; enforcement is via the TypeScript compiler itself."
+verification = "grounded"
+
+[[sources]]
+url = "https://www.typescriptlang.org/tsconfig#strict"
+title = "TypeScript tsconfig reference — strict option"
 
 [decision]
 question = "What position does the project take on: The compiler runs in strict mode?"

@@ -6,6 +6,16 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the react-hooks/rules-of-hooks rule from eslint-plugin-react-hooks, which fails the lint step on a hook called conditionally, in a loop, after an early return, or from a plain (non-component, non-hook) function. Conformance holds when the rule is at error severity and a misplaced hook call fails the build; it fails when the plugin is not configured or the rule only warns."
+verification = "grounded"
+
+[[sources]]
+url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/rules-of-hooks"
+title = "React docs — rules-of-hooks lint rule"
+linter = "react-hooks: rules-of-hooks"
+
+[[sources]]
+url = "https://react.dev/reference/rules/rules-of-hooks"
+title = "React docs — Rules of Hooks"
 
 [decision]
 question = "What position does the project take on: Hooks are called only at the top level of components or other hooks?"

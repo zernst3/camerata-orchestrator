@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the type-aware @typescript-eslint/no-floating-promises rule (which requires parserOptions.project so the linter has type information), failing the lint step on any Promise-returning expression whose result is neither awaited, returned, nor passed to a handler. Conformance holds when the rule is at error severity with type information available and a floating promise fails the build; it fails when the rule is absent, type-aware linting is not configured, or the rule only warns."
+verification = "grounded"
+
+[[sources]]
+url = "https://typescript-eslint.io/rules/no-floating-promises"
+title = "typescript-eslint — @typescript-eslint/no-floating-promises rule"
+linter = "@typescript-eslint: no-floating-promises"
 
 [decision]
 question = "What position does the project take on: Every Promise is awaited, returned, or explicitly handled?"

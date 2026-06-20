@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the @typescript-eslint/no-explicit-any rule, which fails the lint step on an explicit any annotation. Conformance holds when the rule is at error severity and an any in the codebase fails the build; it fails when the rule is absent or only warns. A narrow, commented eslint-disable on a single line is the sanctioned escape valve where any is genuinely unavoidable."
+verification = "grounded"
+
+[[sources]]
+url = "https://typescript-eslint.io/rules/no-explicit-any"
+title = "typescript-eslint — @typescript-eslint/no-explicit-any rule"
+linter = "@typescript-eslint: no-explicit-any"
 
 [decision]
 question = "What position does the project take on: any is forbidden; unknown is the typed escape hatch at boundaries?"

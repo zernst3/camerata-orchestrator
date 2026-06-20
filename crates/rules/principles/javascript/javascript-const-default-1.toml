@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the ESLint prefer-const rule, which fails the lint step on any let that is never reassigned after initialization. Conformance holds when prefer-const is configured at error severity and a never-reassigned let fails the build; it fails when the rule is absent or only warns."
+verification = "grounded"
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/prefer-const"
+title = "ESLint prefer-const rule"
+linter = "eslint: prefer-const"
 
 [decision]
 question = "What position does the project take on: const is the default binding; let only when the binding is reassigned?"

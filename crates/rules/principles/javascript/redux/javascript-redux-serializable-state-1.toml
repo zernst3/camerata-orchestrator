@@ -3,9 +3,18 @@ title = "Only plain serializable values live in the store and in actions"
 tag = "stack"
 domain = "javascript:redux"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by Redux Toolkit's serializableCheck middleware (on by default under configureStore in development), which throws when a non-serializable value is placed in the state tree or carried in an action payload. Conformance holds when configureStore is used and the serializability check is left enabled; it fails when the check is globally disabled or the store is assembled without it."
+qualifies = "Enforced by Redux Toolkit's serializableCheck middleware (on by default under configureStore in development), which logs a console error when a non-serializable value is placed in the state tree or carried in an action payload. Conformance holds when configureStore is used and the serializability check is left enabled; it fails when the check is globally disabled or the store is assembled without it. No static ESLint rule enforces this at lint time; enforcement is runtime-only via RTK middleware."
+verification = "grounded"
+
+[[sources]]
+url = "https://redux.js.org/style-guide/#do-not-put-non-serializable-values-in-state-or-actions"
+title = "Redux Style Guide — Do Not Put Non-Serializable Values in State or Actions (Priority A: Essential)"
+
+[[sources]]
+url = "https://redux-toolkit.js.org/api/serializabilityMiddleware"
+title = "Redux Toolkit — Serializability Middleware"
 
 [decision]
 question = "What position does the project take on: Only plain serializable values live in the store and in actions?"

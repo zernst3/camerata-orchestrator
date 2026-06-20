@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the @typescript-eslint/no-non-null-assertion rule, which fails the lint step on any postfix ! non-null assertion. Conformance holds when the rule is at error severity and a ! assertion fails the build; it fails when the rule is absent or only warns. A rare, genuinely-justified assertion is isolated behind a single commented lint-disable carrying the proof of why the value cannot be null."
+verification = "grounded"
+
+[[sources]]
+url = "https://typescript-eslint.io/rules/no-non-null-assertion"
+title = "typescript-eslint — @typescript-eslint/no-non-null-assertion rule"
+linter = "@typescript-eslint: no-non-null-assertion"
 
 [decision]
 question = "What position does the project take on: The non-null assertion operator (!) is forbidden; narrow instead?"

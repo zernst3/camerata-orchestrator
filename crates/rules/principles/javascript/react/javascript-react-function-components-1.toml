@@ -5,6 +5,11 @@ domain = "javascript:react"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://react.dev/reference/react/Component"
+title = "React docs — Component (class): 'We recommend defining components as functions instead of classes'"
 
 [decision]
 question = "What position does the project take on: Components are functions using hooks, not classes?"

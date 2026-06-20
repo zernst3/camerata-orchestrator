@@ -6,6 +6,16 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the react-hooks/exhaustive-deps rule from eslint-plugin-react-hooks, which fails the lint step when a useEffect / useCallback / useMemo dependency array omits a reactive value the body references. Conformance holds when the rule is at error severity and a missing dependency fails the build; it fails when the plugin is absent, the rule only warns, or dependencies are suppressed wholesale with a blanket lint-disable."
+verification = "grounded"
+
+[[sources]]
+url = "https://react.dev/reference/eslint-plugin-react-hooks/lints/exhaustive-deps"
+title = "React docs — exhaustive-deps lint rule"
+linter = "react-hooks: exhaustive-deps"
+
+[[sources]]
+url = "https://react.dev/learn/synchronizing-with-effects#step-2-specify-the-effect-dependencies"
+title = "React docs — Synchronizing with Effects: specify the effect dependencies"
 
 [decision]
 question = "What position does the project take on: Effect and memo dependency arrays list every reactive value the body reads?"

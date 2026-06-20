@@ -5,6 +5,11 @@ domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://redux.js.org/style-guide/#use-redux-toolkit-for-writing-redux-logic"
+title = "Redux Style Guide — Use Redux Toolkit for Writing Redux Logic (Priority B: Strongly Recommended)"
 
 [decision]
 question = "What position does the project take on: State is built with Redux Toolkit, not hand-rolled action types and switch reducers?"

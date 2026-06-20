@@ -5,6 +5,11 @@ domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://redux.js.org/style-guide/#do-not-mutate-state"
+title = "Redux Style Guide — Do Not Mutate State (Priority A: Essential)"
 
 [decision]
 question = "What position does the project take on: Reducers never mutate existing state; they produce a new state value?"
