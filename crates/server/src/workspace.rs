@@ -324,16 +324,28 @@ pub async fn apply_local_and_push(
             .await
             .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
     }
-    // Stage + commit. A no-op re-apply (identical files) leaves nothing to commit — tolerate it.
-    let add = git(Some(dir), &["add", "-A"]).await?;
+    // Stage + commit ONLY the governance files we just wrote. NEVER `git add -A` here: that
+    // would sweep the architect's unrelated in-flight work (untracked or modified files already
+    // in the clone) onto this Camerata-MANAGED branch and force-push it. We stage the exact
+    // files by pathspec AND restrict the commit to the same pathspecs, so even pre-staged
+    // unrelated changes are excluded. A no-op re-apply (identical files) leaves nothing to commit.
+    let rels: Vec<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
+    let mut add_args: Vec<&str> = vec!["add", "--"];
+    add_args.extend_from_slice(&rels);
+    let add = git(Some(dir), &add_args).await?;
     if !add.status.success() {
         anyhow::bail!("git add: {}", stderr_of(&add));
     }
-    let commit = git(Some(dir), &["commit", "-m", commit_msg]).await?;
+    let mut commit_args: Vec<&str> = vec!["commit", "-m", commit_msg, "--"];
+    commit_args.extend_from_slice(&rels);
+    let commit = git(Some(dir), &commit_args).await?;
     if !commit.status.success() {
         let err = stderr_of(&commit);
         let out = String::from_utf8_lossy(&commit.stdout);
-        let nothing = err.contains("nothing to commit") || out.contains("nothing to commit");
+        let nothing = err.contains("nothing to commit")
+            || out.contains("nothing to commit")
+            || err.contains("no changes added")
+            || out.contains("no changes added");
         if !nothing {
             anyhow::bail!("git commit: {err}");
         }
