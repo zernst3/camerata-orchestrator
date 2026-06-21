@@ -570,6 +570,22 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
     findings
 }
 
+/// The `<lang>:testing` corpus domain for a detected language, if one exists. Idiomatic
+/// testing conventions apply to any repo in that language, so they are suggested whenever
+/// that language is present (every codebase has tests).
+fn testing_domain_for_language(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "JavaScript" | "TypeScript" => "javascript:testing",
+        "Rust" => "rust:testing",
+        "Python" => "python:testing",
+        "Go" => "go:testing",
+        "Java" => "java:testing",
+        "C#" => "csharp:testing",
+        "Ruby" => "ruby:testing",
+        _ => return None,
+    })
+}
+
 /// The corpus domains ONE repo's stack maps to. Used to bind each rule to only the
 /// repos whose domain it applies to (minimum domains per repo).
 fn domains_for_stack(s: &RepoStack) -> Vec<String> {
@@ -618,6 +634,10 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             _ => {
                 domains.insert("api-layer");
             }
+        }
+        // Suggest the language's idiomatic testing corpus whenever the language is present.
+        if let Some(t) = testing_domain_for_language(lang) {
+            domains.insert(t);
         }
     }
     for fw in &s.frameworks {
@@ -722,6 +742,9 @@ fn domains_for_stack(s: &RepoStack) -> Vec<String> {
     if domains.contains("api-layer") {
         domains.insert("permissions");
     }
+    // Universal testing principles (the test pyramid, AAA, determinism, etc.) apply to EVERY
+    // repo, so the cross-language `testing` domain is always suggested.
+    domains.insert("testing");
     // A child domain ALWAYS implies its parent: recommending `javascript:next` without
     // `javascript` is incoherent (the framework rules sit on top of the language baseline)
     // and reads as a bug in the UI (child ticked, parent not). Add the primary component of
