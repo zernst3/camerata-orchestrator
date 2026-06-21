@@ -32,4 +32,4 @@ why = "React identifies hook state by call order, so a hook inside a condition, 
 id = "hooks-may-be-called-conditionally-or-inside-loop"
 label = "hooks may be called conditionally or inside loops …"
 directive = "hooks may be called conditionally or inside loops and branches when the component only needs the state in some cases, rather than always calling every hook unconditionally at the top level in a fixed order"
-why = "A defensible alternative the project considered."
+why = "Calling hooks conditionally or inside loops changes the hook call order between renders, so React silently associates state from one hook with the slot allocated for another. The failure does not throw at the offending line; it manifests as corrupted, drifting component state that is extremely hard to trace back to the conditional call. A component that only needs state sometimes must still call the hook unconditionally at the top level and put the condition inside or around the value it returns."

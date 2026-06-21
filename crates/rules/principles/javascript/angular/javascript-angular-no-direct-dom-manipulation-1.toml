@@ -30,4 +30,4 @@ why = "Property bindings and Renderer2 keep Angular's model and the DOM in sync,
 id = "direct-dom-manipulation-using-documentqueryselec"
 label = "direct DOM manipulation using document.querySelector …"
 directive = "direct DOM manipulation is performed using document.querySelector, .innerHTML, .style, and .className assignments to modify the DOM without going through Angular's rendering system"
-why = "A defensible alternative the project considered."
+why = "Direct DOM manipulation via document.querySelector, .innerHTML, or .style bypasses Angular's rendering system, creating a mismatch between the Angular model and the actual DOM: when change detection runs, Angular may overwrite the direct change, causing state/view divergence. Direct manipulation also makes server-side rendering impossible and breaks the component in non-browser environments (web workers, Angular Universal), which limits rendering targets and deployment options."

@@ -30,4 +30,4 @@ why = "Thin controllers keep transport concerns separate from domain logic, enab
 id = "controllers-contain-business-logic"
 label = "Controllers contain business logic and data access"
 directive = "Controllers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the controller, rather than delegating to a separate service or repository layer."
-why = "A defensible alternative the project considered."
+why = "Business logic and data access inline in a controller are reachable only through an HTTP request, so the logic cannot be unit-tested or reused by a scheduled job, a CLI command, or another route without spinning up the web layer. The same rule duplicated in a second controller that needs it drifts out of sync, and the controller mixes transport concerns with domain concerns so that a change to either touches code that does both."

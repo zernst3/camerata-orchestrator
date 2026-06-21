@@ -31,4 +31,4 @@ why = "Simple templates are readable, testable, and performant. Logic belongs in
 id = "templates-contain-complex-logic-ternary-operators"
 label = "templates contain complex logic, ternary operators, …"
 directive = "templates contain conditionals, method calls, computations, and complex logic expressions inline, without moving them to component properties or methods"
-why = "A defensible alternative the project considered."
+why = "Complex logic inline in templates runs on every change-detection cycle, potentially wasting performance, and cannot be unit-tested the way component class code can. Ternary operators, AND/OR chains, and method calls with side effects scattered through the template become difficult to read and fragile to change: a template change can have unexpected side effects because the logic is mixed with the rendering declarations rather than isolated in a testable component property."

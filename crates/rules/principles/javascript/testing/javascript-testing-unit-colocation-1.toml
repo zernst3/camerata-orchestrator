@@ -33,4 +33,4 @@ why = "Co-location makes navigation trivial, keeps renames synchronised, and mak
 id = "unit-test-files-live-in-remote-tests-tree"
 label = "Unit test files live in a top-level tests/ or __tests__/ tree that mirrors the source tree"
 directive = "All test files are placed in a parallel tests/ directory that mirrors the src/ directory structure (e.g. tests/services/user.test.ts for src/services/user.ts). No test files appear next to source files."
-why = "A defensible alternative the project considered. Keeps the src/ tree free of test files, which some teams prefer for publication."
+why = "A top-level tests/ tree that mirrors src/ keeps the source directory free of test files, which some teams prefer when publishing packages or when tooling that processes src/ should not encounter test files. The cost is that every rename or move of a source file requires a parallel rename in the remote tree, the mapping between a source file and its test file requires mental translation, and a source file without a test is not visually obvious without a tool-assisted coverage report."

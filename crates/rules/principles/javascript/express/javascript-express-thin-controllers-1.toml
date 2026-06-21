@@ -26,4 +26,4 @@ why = "Logic and data access inline in a handler can only be reached through an 
 id = "route-handlers-contain-business-logic-and-direct"
 label = "route handlers contain business logic and direct database …"
 directive = "route handlers contain business logic and direct database access inline, handling validation, rules, and data access together in the route, rather than delegating to a separate service or repository layer"
-why = "A defensible alternative the project considered."
+why = "Business logic and database queries inline in a route handler are reachable only through an HTTP request, so the logic cannot be unit-tested or reused by a background job or another route without spinning up the web layer, and a rule duplicated into a second handler drifts out of sync. The handler mixes transport concerns with domain concerns so that a change to either touches code that does both."

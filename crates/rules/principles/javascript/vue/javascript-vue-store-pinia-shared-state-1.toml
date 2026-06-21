@@ -30,4 +30,4 @@ why = "Pinia stores avoid prop drilling and make shared state reactive across co
 id = "prop-drilling-for-shared-state"
 label = "Pass shared state through props"
 directive = "Shared state is passed from a parent component to children as props, and children that need to modify it emit events back to the parent. All intermediate components in the tree receive and pass along the props."
-why = "A defensible alternative the project considered."
+why = "Passing shared state through props requires every intermediate component in the tree to accept and forward props it does not use, coupling them to the data shape. As the component tree grows, adding a new piece of shared state requires threading the prop through every intermediate layer, making the intermediate components fragile to changes in the data shape and cluttering their interfaces with concerns that belong to a distant ancestor or descendant."

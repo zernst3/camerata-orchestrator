@@ -33,4 +33,4 @@ why = "Disabled tests accumulate as hidden technical debt; the lint gate forces 
 id = "disabled-tests-are-allowed-with-a-tracking-comment"
 label = "Disabled tests are allowed when accompanied by a tracking issue comment"
 directive = "Disabled tests (test.skip, xtest, etc.) are allowed provided each one has an inline comment with a tracking issue URL. jest/no-disabled-tests is set to warn rather than error so the lint step does not fail."
-why = "A defensible alternative the project considered."
+why = "Allowing disabled tests with a tracking comment means the comment is the only enforcement: the test still does not run, the tracked issue may close without the test being restored, and the longer the test sits disabled the more likely the tested behavior has changed so the test no longer reflects reality even if re-enabled. warn-level jest/no-disabled-tests lets disabled tests accumulate indefinitely while appearing to have a process; the issue tracker and the commit log become the only record that a safety net was removed."

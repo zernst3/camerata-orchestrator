@@ -26,4 +26,4 @@ why = "Reactive forms make form state and logic explicit, auditable, and testabl
 id = "all-forms-use-template-driven-two-way-bindings-wi"
 label = "all forms use template-driven two-way bindings with …"
 directive = "all forms are created using ngModel and two-way bindings, with form state managed implicitly in the template via ngForm and validation directives"
-why = "A defensible alternative the project considered."
+why = "Template-driven forms bind form state to template directives (ngModel, ngForm), making form logic implicit and scattered across the template. As forms grow in complexity with conditional fields, dynamic validation, or cross-field validators, the template becomes unreadable and the form state is hidden behind two-way bindings that are difficult to test without rendering. Template-driven forms are acceptable for trivial single-field cases, but for anything beyond that they accumulate complexity in the wrong place."

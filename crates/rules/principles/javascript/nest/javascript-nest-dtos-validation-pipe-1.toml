@@ -30,4 +30,4 @@ why = "DTOs and ValidationPipe centralize input validation and ensure consistenc
 id = "manual-validation-in-controllers"
 label = "Manually validate in controllers"
 directive = "Controllers receive raw request data and manually check the shape, types, and constraints before processing."
-why = "A defensible alternative the project considered."
+why = "Manually validating the request shape inside each controller method duplicates the same type and constraint checks across every route, with each controller responsible for remembering all validation rules for its inputs. This approach is inconsistent across routes (different controllers format errors differently), verbose, and untested by default since the validation is buried in imperative code rather than declared in a DTO that the framework validates automatically."

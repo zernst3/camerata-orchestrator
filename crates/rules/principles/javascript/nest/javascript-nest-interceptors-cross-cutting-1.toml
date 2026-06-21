@@ -26,4 +26,4 @@ why = "Interceptors centralize cross-cutting logic and ensure consistent applica
 id = "cross-cutting-logic-in-controllers"
 label = "Implement cross-cutting logic in controllers"
 directive = "Each controller method handles logging, tracing, error handling, and response transformation explicitly."
-why = "A defensible alternative the project considered."
+why = "Implementing logging, tracing, and response transformation directly in each controller method duplicates the same cross-cutting concerns across every route: a developer adding a new endpoint must remember to include the logging call, and a change to the log format or tracing strategy requires updating every controller method individually. This approach produces inconsistent telemetry, clutters controller code with concerns unrelated to business logic, and scales poorly as the number of routes grows."

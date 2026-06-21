@@ -26,4 +26,4 @@ why = "Request fields are untrusted client-controlled input; validating against 
 id = "request-fields-are-read-directly-and-passed-down"
 label = "request fields are read directly and passed downstream …"
 directive = "request fields are read directly from req.body, req.params, and req.query and passed downstream on the assumption the client sent the expected shape, rather than validating and parsing input against a schema at the boundary"
-why = "A defensible alternative the project considered."
+why = "Reading request fields directly and passing them downstream assumes the client sent the expected shape, but the server's clients are not only its own frontend: a missing field becomes undefined flowing into a query, a string arrives where a number was expected, or a hostile payload reaches a database. The failure surfaces as a 500 or a successful operation on malformed data rather than a clean 400 at the boundary, and the assumption cannot be enforced anywhere past the point where it was skipped."

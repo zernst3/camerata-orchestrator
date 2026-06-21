@@ -31,4 +31,4 @@ why = "Persistence, action replay, time-travel debugging, and the devtools all s
 id = "non-serializable-values-such-as-dates-class-inst"
 label = "non-serializable values such as Dates, class instances, …"
 directive = "non-serializable values such as Dates, class instances, Maps, or Promises are stored directly in the state tree or action payloads when convenient, rather than keeping only plain serializable projections in the store"
-why = "A defensible alternative the project considered."
+why = "Storing non-serializable values such as Dates, class instances, Maps, or Promises directly in the state tree trades local convenience for the loss of whole-store capabilities: persistence drops or corrupts the value, devtools cannot render it, and action replay produces a different state than the original run. The breakage is silent in development and only surfaces when persisting, replaying, or inspecting state in the devtools."
