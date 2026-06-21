@@ -29,10 +29,10 @@ why = "Two-part calculus."
 id = "the-more-terse-of-two-correct-implementations-is"
 label = "the more terse of two correct implementations is preferred …"
 directive = "the more terse of two correct implementations is preferred by default, on the pre-AI principle that less code is less to maintain"
-why = "A defensible alternative the project considered."
+why = "The terseness-default is the pre-AI position whose calculus inverts as soon as AI writes the boilerplate: the maintenance tax it was protecting against has been amortized away, so the more explicit version now wins without cost."
 
 [[option]]
 id = "the-more-defensive-of-two-correct-implementation"
 label = "the more defensive of two correct implementations is always …"
 directive = "the more defensive of two correct implementations is always preferred, regardless of whether a specific failure mode justifies the added complexity"
-why = "A defensible alternative the project considered."
+why = "Always-defensive over-engineers low-stakes code, hardens fully-encapsulated internals with no real attack surface, and accumulates the false-complexity tax that the named-threat rule exists to prevent."

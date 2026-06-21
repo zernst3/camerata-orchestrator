@@ -21,10 +21,10 @@ why = "Centralizing validation at one tier eliminates the defensive re-validatio
 id = "every-layer-controller-service-repository-re-val"
 label = "every layer (controller, service, repository) re-validates every input it …"
 directive = "every layer (controller, service, repository) re-validates every input it receives, with no canonical boundary that owns the validation pass"
-why = "A defensible alternative the project considered."
+why = "Re-validating at every layer hurts performance and lets layers diverge: each layer's checks evolve independently, so they eventually disagree on what counts as valid."
 
 [[option]]
 id = "no-validation-step-runs-at-the-controller-bounda"
 label = "no validation step runs at the controller boundary; the …"
 directive = "no validation step runs at the controller boundary; the request is parsed into typed values minimally and bad data is detected when the database or external service rejects it"
-why = "A defensible alternative the project considered."
+why = "Trusting incoming data and failing late produces vague errors far from the source; the request may have already partially succeeded before the failure surfaces, leaving inconsistent state behind."

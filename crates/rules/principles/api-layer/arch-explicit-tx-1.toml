@@ -21,16 +21,16 @@ why = "Making the transaction handle an explicit parameter makes the unit-of-wor
 id = "the-transaction-handle-is-held-in-thread-local-o"
 label = "the transaction handle is held in thread-local or request-scoped …"
 directive = "the transaction handle is held in thread-local or request-scoped ambient state, and repositories read it implicitly at call time rather than receiving it as a parameter"
-why = "A defensible alternative the project considered."
+why = "Ambient transaction context works fine for the synchronous request-response shape but becomes a leading source of bugs in async, concurrent, or background-job code where the context can travel separately from the call stack."
 
 [[option]]
 id = "transactions-are-opened-by-framework-level-annot"
 label = "transactions are opened by framework-level annotations or decorators (such …"
 directive = "transactions are opened by framework-level annotations or decorators (such as @Transactional or equivalent) that wrap service methods, rather than by explicit calls in the service body"
-why = "A defensible alternative the project considered."
+why = "Framework-injected transactions hide the boundary at the call site; subtle bugs arise from annotation precedence, propagation modes, and self-invocation defeats that a reviewer cannot see from the method body alone."
 
 [[option]]
 id = "each-repository-call-opens-and-commits-its-own-s"
 label = "each repository call opens and commits its own short …"
 directive = "each repository call opens and commits its own short transaction internally, and the service layer does not coordinate any cross-repository unit of work"
-why = "A defensible alternative the project considered."
+why = "Per-call short transactions give no unit-of-work guarantee across related writes; partial failure leaves the database in an inconsistent state with no atomic rollback path."

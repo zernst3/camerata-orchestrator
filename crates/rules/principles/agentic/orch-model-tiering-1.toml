@@ -30,10 +30,10 @@ why = "Top-tier judgment where it matters (data-model-shaping calls), cheap thro
 id = "top-for-everything"
 label = "top-for-everything"
 directive = "every step of the autonomous run uses the top-tier model, regardless of whether the step is bulk mechanical work or a genuinely new decision"
-why = "A defensible alternative the project considered."
+why = "Running the top model for everything multiplies cost without changing human-escalation outcomes, since the bulk of agentic work is applying documented rules where a cheaper model produces the same result."
 
 [[option]]
 id = "cheap-for-everything"
 label = "cheap-for-everything"
 directive = "every step of the autonomous run uses the cheaper model, regardless of whether the step is bulk mechanical work or a one-way-door decision"
-why = "A defensible alternative the project considered."
+why = "Saving cost on the bulk is correct, but a cheaper model can confidently produce a structurally wrong answer on the rare hard call and ship it past the clear-winner test, which is the failure mode tiering exists to prevent."

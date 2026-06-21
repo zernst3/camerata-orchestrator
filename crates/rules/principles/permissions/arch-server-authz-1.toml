@@ -27,4 +27,4 @@ why = "UI can't drift from server enforcement when both read the same server-com
 id = "the-ui-inspects-raw-permission-codes-or-role-mem"
 label = "the UI inspects raw permission codes or role membership …"
 directive = "the UI inspects raw permission codes or role membership on the client and re-implements the authorization decision in browser code, rather than gating on server-computed permission flags carried by each resource response"
-why = "A defensible alternative the project considered."
+why = "Client-side permission introspection lets the UI drift from server enforcement because the two evolve independently and eventually disagree; it also leaks the project's RBAC internals to the browser, where they become part of the public attack surface."

@@ -26,4 +26,4 @@ why = "The logical extension of 'a missing permission is a config task': the cod
 id = "the-ui-renders-every-action-regardless-of-the-cu"
 label = "the UI renders every action regardless of the current …"
 directive = "the UI renders every action regardless of the current user's permissions, and unauthorized clicks are caught at the endpoint with a 403 response that drives the user to an error page"
-why = "A defensible alternative the project considered."
+why = "Rendering every action and relying on the endpoint to reject unauthorized attempts produces a 403 then error-page redirect on click; that redirect is a poor user experience and reveals which capabilities exist without granting them."

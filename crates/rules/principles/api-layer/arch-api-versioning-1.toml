@@ -21,16 +21,16 @@ why = "Versioning in the URL is the most discoverable and toolable scheme: a cur
 id = "the-api-version-is-selected-by-a-request-header"
 label = "the API version is selected by a request header …"
 directive = "the API version is selected by a request header (such as Accept: application/vnd.api.v2+json) rather than appearing in the URL path"
-why = "A defensible alternative the project considered."
+why = "Header-based versioning is less discoverable than URL versioning, and the failure mode is subtle: clients that forget or mis-set the header silently land on the wrong version."
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
 label = "the API has no version segment at all and …"
 directive = "the API has no version segment at all and evolves in place, with each change applying to all current clients"
-why = "A defensible alternative the project considered."
+why = "Evolving without versioning turns every change into a potential breaking change for some client; cross-team coordination becomes the bottleneck on every shipping decision."
 
 [[option]]
 id = "the-api-exposes-multiple-representations-of-each"
 label = "the API exposes multiple representations of each resource and …"
 directive = "the API exposes multiple representations of each resource and clients negotiate version through a content-negotiation handshake"
-why = "A defensible alternative the project considered."
+why = "Content negotiation is powerful but heavy, and most teams underuse the machinery they paid for; few clients implement it correctly, so the protocol adds complexity without reliably delivering the version-isolation benefit."

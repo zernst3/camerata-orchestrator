@@ -26,16 +26,16 @@ why = "Precedent is a reality-check; an 'obvious' call with no prior example is 
 id = "the-agent-treats-obvious-feeling-calls-as-settle"
 label = "the agent treats obvious-feeling calls as settled regardless of …"
 directive = "the agent treats obvious-feeling calls as settled regardless of whether precedent exists for the choice, and proceeds to apply the answer"
-why = "A defensible alternative the project considered."
+why = "Treating obvious-feeling calls as settled ignores that a call may feel obvious precisely because it is the most-blogged answer, which is exactly the miscalibration that decoupling from precedent is meant to catch."
 
 [[option]]
 id = "the-agent-applies-the-obvious-feeling-answer-imm"
 label = "the agent applies the obvious-feeling answer immediately and surfaces …"
 directive = "the agent applies the obvious-feeling answer immediately and surfaces a flag for asynchronous human review after the artifact has shipped"
-why = "A defensible alternative the project considered."
+why = "Shipping then flagging hedges in the wrong direction: the change is in place before the reviewer sees it, and 'good enough' tends to revert to the default once it has shipped once."
 
 [[option]]
 id = "the-agent-searches-for-analogies-in-adjacent-cod"
 label = "the agent searches for analogies in adjacent codebases or …"
 directive = "the agent searches for analogies in adjacent codebases or upstream libraries and proceeds autonomously if any analogy is found, only pausing when no analogy at all exists"
-why = "A defensible alternative the project considered."
+why = "Finding an analogy elsewhere is not a replacement for the pause, because a weak analogy can be worse than admitting none exists, and the absence of an analogy is itself the signal the rule wants to act on."

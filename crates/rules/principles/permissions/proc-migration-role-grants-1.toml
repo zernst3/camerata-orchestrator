@@ -26,16 +26,16 @@ why = "A permission with no grants is a no-op."
 id = "migrations-that-introduce-a-new-permission-write"
 label = "migrations that introduce a new permission write only the …"
 directive = "migrations that introduce a new permission write only the permission row; granting that permission to roles is deferred to a runtime configuration tool or admin UI"
-why = "A defensible alternative the project considered."
+why = "Deferring grants to a configuration tool creates a permanent gap whenever the tool does not cover the role in question, or when the role's grants were never meant to be runtime-managed in the first place."
 
 [[option]]
 id = "the-permission-row-and-its-role-permission-grant"
 label = "the permission row and its role-permission grants ship in …"
 directive = "the permission row and its role-permission grants ship in separate migrations, deployed in sequence, with no requirement that both apply in the same atomic change"
-why = "A defensible alternative the project considered."
+why = "Splitting across migrations leaves a window where the permission exists with no grants; any deploy that lands the first migration without the second is partially broken."
 
 [[option]]
 id = "the-permission-row-is-added-in-a-migration-and-t"
 label = "the permission row is added in a migration and …"
 directive = "the permission row is added in a migration and the role-permission grants are written by a seed script that lives outside the migration system and runs separately during deploy"
-why = "A defensible alternative the project considered."
+why = "An external seed script lets the script and the migration drift independently, and rollbacks become incoherent across the two systems."

@@ -26,10 +26,10 @@ why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) 
 id = "hand-maintained-files-are-allowed-to-grow-withou"
 label = "hand-maintained files are allowed to grow without a human-reading …"
 directive = "hand-maintained files are allowed to grow without a human-reading size guideline, and their size is whatever they end up at"
-why = "A defensible alternative the project considered."
+why = "Allowing unbounded growth fails the human-comprehension axis the rule exists to protect: AI happily extends files, but humans reviewing or debugging those files bog down and lose orientation as they grow."
 
 [[option]]
 id = "the-human-reading-size-guideline-applies-to-auto"
 label = "the human-reading size guideline applies to auto-generated files (schema …"
 directive = "the human-reading size guideline applies to auto-generated files (schema dumps, ORM-emitted models, lockfiles) at the same threshold as hand-maintained files"
-why = "A defensible alternative the project considered."
+why = "Applying the size guideline to auto-generated files forces useless splits in files no person hand-edits and that tooling rewrites wholesale anyway, adding churn with no human-comprehension benefit."

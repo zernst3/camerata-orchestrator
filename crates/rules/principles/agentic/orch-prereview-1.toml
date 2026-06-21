@@ -25,16 +25,16 @@ why = "Human reviewers are the scarcest resource in any AI-orchestrated workflow
 id = "ai-pre-review-then-human-review"
 label = "AI pre-review then human review"
 directive = "Code changes authored by autonomous agents pass through an AI review step. A reviewer agent reads the diff against the project's codified architectural commitments and either approves the change, requests specific changes, or escalates the change as out of scope. The human review queue contains only changes the reviewer agent has cleared or has explicitly flagged for human attention. The reviewer step is wired into the change pipeline (a pre-merge hook, a CI job, a bot on the pull request, or equivalent) such that the change cannot reach the human merge gate without an approval status from the reviewer agent."
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "An AI pre-review step catches common drift cases cheaply so the human review pool sees a sharper, smaller queue; the review agent also acts as a forcing function that surfaces commitments that cannot be checked from the diff alone, strengthening the commitment library over time."
 
 [[option]]
 id = "human-only-review"
 label = "human-only review"
 directive = "AI-authored changes flow directly to the human review queue with no AI reviewer step in between"
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Human-only review works at small scale but saturates the human review pool at AI-orchestrated throughput, where the volume of AI-authored changes routinely exceeds the human pool's capacity to review each one carefully."
 
 [[option]]
 id = "ai-review-replaces-human-review"
 label = "AI review replaces human review"
 directive = "the AI reviewer replaces the human merge gate entirely; the AI reviewer's approval is the final word and changes merge without a human approval step"
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Replacing the human merge gate with AI review entirely cedes the final architectural call to a system that cannot be held accountable for the call, which is unacceptable for one-way-door changes regardless of model strength."

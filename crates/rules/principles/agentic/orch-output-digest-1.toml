@@ -26,10 +26,10 @@ why = "Signal-to-noise: one clean ranked digest is read; N direct pings get mute
 id = "per-routine-direct-notifications"
 label = "per-routine direct notifications"
 directive = "each autonomous routine sends its own direct notification on its own cadence, with no consolidator step in between"
-why = "A defensible alternative the project considered."
+why = "Per-routine notifications are noisier by construction: each routine fires on its own cadence and priority, and the human ends up either filtering manually or muting everything once the noise crosses the attention threshold."
 
 [[option]]
 id = "batch-everything"
 label = "batch everything"
 directive = "all autonomous-routine output is batched into one consolidated stream with no ranking or prioritization, and critical items wait for the next batch alongside routine output"
-why = "A defensible alternative the project considered."
+why = "Batching without prioritization preserves volume control but loses urgency: critical items sit in the same queue as routine output, and routine output drowns the signal that needed to break through."

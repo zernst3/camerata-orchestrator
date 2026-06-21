@@ -26,4 +26,4 @@ why = "Forcing authors to make the concurrency analysis visible and required cat
 id = "prs-touching-shared-mutable-state-are-reviewed-w"
 label = "PRs touching shared mutable state are reviewed without a …"
 directive = "PRs touching shared mutable state are reviewed without a required template section calling out the locking strategy or concurrency testing; the concurrency story is left to whatever the author chooses to include in the description"
-why = "A defensible alternative the project considered."
+why = "Without a required template section, the concurrency story depends on whatever discipline the author and reviewer happen to bring to the diff that day; races slip through review by default precisely because nothing on the PR surface forces the analysis to be written down."

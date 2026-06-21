@@ -22,16 +22,16 @@ why = "Binary floating-point cannot represent most decimal fractions exactly."
 id = "monetary-and-quantity-values-are-represented-in"
 label = "monetary and quantity values are represented in code as …"
 directive = "monetary and quantity values are represented in code as binary floating-point (f64, double, Number) and stored as REAL or DOUBLE in the database"
-why = "A defensible alternative the project considered."
+why = "Using floating-point everywhere silently loses precision: the failure mode is wrong numbers that look right and only surface at reconciliation time, which is far more expensive than catching the type error up front."
 
 [[option]]
 id = "monetary-values-are-represented-in-code-as-integ"
 label = "monetary values are represented in code as integer-cents (or …"
 directive = "monetary values are represented in code as integer-cents (or minor-unit integers) rather than as the language's exact-decimal type"
-why = "A defensible alternative the project considered."
+why = "Integer-cents is workable for single-currency contexts but falls over when multiple currencies with different minor-unit conventions enter the picture, or when intermediate calculations need sub-cent precision."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-as"
 label = "monetary and quantity values are represented as strings throughout, …"
 directive = "monetary and quantity values are represented as strings throughout, and consumers parse and re-format them at each compute step"
-why = "A defensible alternative the project considered."
+why = "String representation gives up arithmetic at the type level and pushes the precision problem into every consumer who has to remember to parse and round consistently."

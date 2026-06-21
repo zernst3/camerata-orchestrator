@@ -26,4 +26,4 @@ why = "Decisions made only in conversation evaporate; agents cannot cite them an
 id = "decisions-accumulate-in-conversation-as-they-are"
 label = "decisions accumulate in conversation as they are made and …"
 directive = "decisions accumulate in conversation as they are made and are written to durable artifacts in a documentation pass later, batched by week, sprint, or feature shipment"
-why = "A defensible alternative the project considered."
+why = "Batching documentation into a later pass reliably causes drift and re-litigation: memory fades faster than the documentation pass arrives, so subsequent work silently re-derives or contradicts decisions before the batch is ever written."

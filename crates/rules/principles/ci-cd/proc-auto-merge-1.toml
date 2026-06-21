@@ -19,10 +19,10 @@ why = "Tight bot PRs don't need human judgment; conventions + CI cover the safet
 id = "tight-single-purpose-convention-following-non-ha"
 label = "tight, single-purpose, convention-following, non-hard-guard PRs on green CI"
 directive = "PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard areas, add no new conventions, and pass CI + automated review → auto-merge (tagged). Frees human review for judgment-heavy PRs."
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Tight bot PRs do not need human judgment; conventions and CI already cover their safety surface, and routing them through manual review consumes reviewer attention on changes whose correctness is already guaranteed."
 
 [[option]]
 id = "require-human-review-on-everything"
 label = "require human review on everything"
 directive = "every pull request including tight bot-authored ones requires explicit human review of the diff before it can merge, with no auto-merge path"
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Requiring human review on everything is safer but loses the throughput benefit of letting cheap mechanical changes through; reviewer attention gets consumed by changes whose correctness is already guaranteed by conventions and CI."

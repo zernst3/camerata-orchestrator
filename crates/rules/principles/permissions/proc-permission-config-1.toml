@@ -26,10 +26,10 @@ why = "The two failure modes look identical to the person filing the report ('I 
 id = "every-access-gap-is-treated-as-a-code-change-acc"
 label = "every access gap is treated as a code change; …"
 directive = "every access gap is treated as a code change; access reports flow into engineering and result in a PR and a deploy regardless of whether the underlying permission already exists"
-why = "A defensible alternative the project considered."
+why = "Treating every access gap as a code change multiplies handoffs: every config-only issue gets a PR and a deploy when a single grant would have sufficed."
 
 [[option]]
 id = "every-access-gap-is-treated-as-a-configuration-c"
 label = "every access gap is treated as a configuration change; …"
 directive = "every access gap is treated as a configuration change; access reports flow into role configuration regardless of whether the underlying permission actually exists in the schema"
-why = "A defensible alternative the project considered."
+why = "Treating every access gap as configuration overlooks undefined permissions: ad-hoc grants get added without the schema or code to back them, drifting from the system's actual model."

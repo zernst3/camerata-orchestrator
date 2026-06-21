@@ -26,10 +26,10 @@ why = "False positives are recoverable."
 id = "default-to-precision-opt-specific-signals-into-b"
 label = "default to precision, opt specific signals into broader recall"
 directive = "detection signals in autonomous routines default to precision tuning: only strong-tier signals trigger a pause, weaker borderline cases pass without halting, and missed real issues are accepted as the cost of fewer interruptions"
-why = "A defensible alternative the project considered."
+why = "Defaulting to precision is defensible when the routine has very high opportunity cost from pauses, but it is risky when missed issues compound silently across subsequent runs, which is exactly the dynamic the recall-default exists to prevent."
 
 [[option]]
 id = "no-tuning-accept-default-signal-sensitivity"
 label = "no tuning, accept default signal sensitivity"
 directive = "detection signals in autonomous routines are not tuned at all; the routine accepts whatever recall and precision the detection step naturally produces with no per-signal calibration"
-why = "A defensible alternative the project considered."
+why = "No tuning works at small scale but becomes unworkable as routine volume grows: the un-tuned mix produces neither reliable catching power nor a predictable noise floor."

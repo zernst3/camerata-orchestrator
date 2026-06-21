@@ -26,10 +26,10 @@ why = "Routine work should flow; reserve the halt for decisions that truly block
 id = "hard-pause-on-everything"
 label = "hard-pause on everything"
 directive = "the routine hard-pauses on every flagged item, regardless of whether it falls in a hard-guard area"
-why = "A defensible alternative the project considered."
+why = "Hard-pausing on everything produces constant halts that drain the forward-progress value the routine exists to create, and trains the human reviewer to glance and dismiss rather than read carefully."
 
 [[option]]
 id = "never-pause"
 label = "never pause"
 directive = "the routine never pauses on any flagged item; everything is logged and the routine continues unconditionally"
-why = "A defensible alternative the project considered."
+why = "Never pausing accepts dangerous drift: items that should have blocked the routine accumulate silently, and the absence of any halt signal removes the rule's relief valve entirely."
