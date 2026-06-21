@@ -265,23 +265,38 @@ Camerata surfaces two update signals:
 
 When a new version of Camerata is available, a **banner appears at the top of the UI** with the release notes and an "Update" button. This is a one-click reminder, not an auto-update.
 
-### Applied-rule drift
+### External drift signals (distinct from verification)
 
-The **Rules** view runs a continuous **health check** on applied rules. Any rule that was applied to a repo but is no longer in the project's ruleset is flagged as **"Needs re-check"** with an amber badge. This happens when:
-- A rule was deleted from the corpus (rare; the corpus is stable).
-- The project's ruleset was edited and the rule was deselected.
-- A repo was exported/imported and the ruleset drifted between machines.
+Camerata watches for changes that originate OUTSIDE your ruleset. These are separate from the
+verification ladder below: they concern a rule's presence and version relative to the corpus and your
+local clones, not whether its verification is still trustworthy.
 
-The Rules view also shows **verification badges** on every rule:
+- **Repo path health check** (issue #33): the Rules view shows, per repo, whether its recorded local
+  path still resolves to a git checkout, and lets you re-resolve a broken one.
+- **Update detection**: an app-update banner appears when a newer Camerata release is available, and the
+  Rules view can surface when a rule you have already APPLIED to a repo has since changed upstream in the
+  corpus, so you can review and re-apply the new version.
+
+### Verification badges
+
+Every rule carries a provenance badge. These are **read-only in the app**: the `verified` tier is set only
+by the maintainer-side verifier tool, never from the product.
 
 | Badge | Meaning |
 |---|---|
-| ✓ **Verified** (green) | A human explicitly approved this rule; gold standard |
-| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel** — open the rule and read the **Sources** section (a rule may cite several). |
-| **Draft** (gray, italic) | AI-generated rule not yet grounded; advisory only |
-| **Needs re-check** (amber) | Was verified but its source drifted; review before relying on it |
+| ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. |
+| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). |
+| **Draft** (gray, italic) | AI-generated rule, not yet grounded. Advisory only, and never auto-recommended during onboarding. |
+| **Needs re-check** (amber) | A rule that was **verified**, but a source or linter VERSION it was verified against has since drifted. Review it before continuing to rely on it. |
 
-To **update a rule** when drift is detected: click the amber "Needs re-check" badge, review the rule's rationale and source, and either **re-verify** it (mark it trusted) or **delete** it from the ruleset. The Rules view will regenerate the affected repos' `.camerata/AGENTS.md` and `CONVENTIONS.md` on the next emit.
+**On "Needs re-check" — the detection is designed but not yet automatic.** A verified rule's `[verified]`
+record stores the exact source/linter versions it was checked against (`against = [...]`). A
+`demote_if_stale` pass compares those to the current versions and demotes `verified` to `needs_recheck` on
+any drift, reporting which entries drifted. That pass is **not yet wired to a live version feed**, so this
+state is not produced automatically today: it is the designed demotion path, pending an activation
+mechanism (a source/linter version registry plus a scheduled or at-launch pass). Re-verification is always
+a deliberate maintainer act done with the repo-side verifier tool (which lands as a reviewed PR), not from
+inside the app.
 
 ---
 
