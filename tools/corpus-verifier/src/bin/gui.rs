@@ -8,15 +8,16 @@
 //!
 //! Dioxus 0.7 / desktop, matching `crates/ui`'s family version.
 //!
-//! NOTE: the GUI always runs through the [`corpus_verifier::DryRunVcs`] seam in
-//! this build — it edits the TOML locally and reports the planned PR URL without
-//! pushing a branch or opening a real PR. (Flipping to the real `GitVcs` is a
-//! one-line swap once the tool is exercised for real; kept dry while building.)
+//! Each view has a "Dry run" checkbox (ON by default, preview-first): checked, it
+//! runs through [`corpus_verifier::DryRunVcs`] (edits the TOML locally + reports the
+//! planned PR URL without pushing); unchecked, it runs the real
+//! [`corpus_verifier::GitVcs`] path (branch -> push -> `gh pr create --base main`).
 
 use dioxus::prelude::*;
 
 use corpus_verifier::{
     corpus_dir, list_grounded, self_source, today, verified_block_preview, verify_one, DryRunVcs,
+    GitVcs,
     GroundedRow,
 };
 
@@ -128,6 +129,8 @@ fn VerifyForm(row: GroundedRow) -> Element {
     let at = use_signal(today);
     let against = use_signal(|| row.primary_source.clone().unwrap_or_default());
     let mut result = use_signal(|| Option::<Result<String, String>>::None);
+    // Preview-first: dry-run is ON by default; uncheck to fire the real branch -> PR.
+    let dry_run = use_signal(|| true);
 
     // The inline EXAMPLE of the [verified] block that will be written.
     let against_lines: Vec<String> = against()
@@ -143,14 +146,21 @@ fn VerifyForm(row: GroundedRow) -> Element {
         let by_v = by();
         let at_v = at();
         let against_v = against_lines.clone();
+        let dry_v = dry_run();
         spawn(async move {
-            // The GUI runs through the dry-run seam: edits TOML locally + reports
-            // the planned PR URL without pushing or opening a real PR.
-            let vcs = DryRunVcs::new();
-            let outcome =
-                verify_one(&corpus_dir(), &rule_id, &by_v, &at_v, against_v, &vcs).await;
+            // Dry-run edits the TOML locally and reports the planned PR without
+            // pushing; unchecking it fires the real branch -> push -> PR via GitVcs.
+            let outcome = if dry_v {
+                verify_one(&corpus_dir(), &rule_id, &by_v, &at_v, against_v, &DryRunVcs::new()).await
+            } else {
+                verify_one(&corpus_dir(), &rule_id, &by_v, &at_v, against_v, &GitVcs::new()).await
+            };
             result.set(Some(match outcome {
-                Ok(o) => Ok(o.pr_url),
+                Ok(o) => Ok(if dry_v {
+                    format!("Planned PR (dry-run): {}", o.pr_url)
+                } else {
+                    format!("PR opened: {}", o.pr_url)
+                }),
                 Err(e) => Err(e.to_string()),
             }));
         });
@@ -185,6 +195,14 @@ fn VerifyForm(row: GroundedRow) -> Element {
             "{preview}"
         }
 
+        label { style:"display:block; margin-top:8px;",
+            input {
+                r#type: "checkbox",
+                checked: dry_run(),
+                onchange: move |e| dry_run.clone().set(e.checked()),
+            }
+            " Dry run (preview only — uncheck to open a real PR into main)"
+        }
         button {
             style: "margin-top:8px; padding:8px 14px;",
             onclick: on_verify,
@@ -193,7 +211,7 @@ fn VerifyForm(row: GroundedRow) -> Element {
 
         match result() {
             Some(Ok(url)) => rsx! {
-                p { style:"color:#070; margin-top:12px;", "Verified (dry-run). Planned PR: {url}" }
+                p { style:"color:#070; margin-top:12px;", "{url}" }
             },
             Some(Err(e)) => rsx! {
                 p { style:"color:#b00; margin-top:12px;", "Error: {e}" }
@@ -209,21 +227,29 @@ fn BulkMetaView() -> Element {
     let by = use_signal(|| std::env::var("USER").unwrap_or_else(|_| "maintainer".to_owned()));
     let domain = use_signal(String::new); // empty => all meta domains
     let mut result = use_signal(|| Option::<Result<String, String>>::None);
+    let dry_run = use_signal(|| true);
 
     let on_run = move |_| {
         let by_v = by();
         let dom = domain();
+        let dry_v = dry_run();
         spawn(async move {
             let scope = if dom.trim().is_empty() {
                 None
             } else {
                 Some(dom.trim().to_owned())
             };
-            let vcs = DryRunVcs::new();
-            let outcome =
-                self_source(&corpus_dir(), scope.as_deref(), &by_v, &today(), &vcs).await;
+            let outcome = if dry_v {
+                self_source(&corpus_dir(), scope.as_deref(), &by_v, &today(), &DryRunVcs::new()).await
+            } else {
+                self_source(&corpus_dir(), scope.as_deref(), &by_v, &today(), &GitVcs::new()).await
+            };
             result.set(Some(match outcome {
-                Ok(o) => Ok(o.pr_url),
+                Ok(o) => Ok(if dry_v {
+                    format!("Planned PR (dry-run): {}", o.pr_url)
+                } else {
+                    format!("PR opened: {}", o.pr_url)
+                }),
                 Err(e) => Err(e.to_string()),
             }));
         });
@@ -249,6 +275,14 @@ fn BulkMetaView() -> Element {
             value: "{domain}",
             oninput: move |e| domain.clone().set(e.value()),
         }
+        label { style:"display:block; margin:8px 0;",
+            input {
+                r#type: "checkbox",
+                checked: dry_run(),
+                onchange: move |e| dry_run.clone().set(e.checked()),
+            }
+            " Dry run (preview only — uncheck to open a real PR into main)"
+        }
         button {
             style: "padding:8px 14px;",
             onclick: on_run,
@@ -256,7 +290,7 @@ fn BulkMetaView() -> Element {
         }
         match result() {
             Some(Ok(url)) => rsx! {
-                p { style:"color:#070; margin-top:12px;", "Self-sourced (dry-run). Planned PR: {url}" }
+                p { style:"color:#070; margin-top:12px;", "{url}" }
             },
             Some(Err(e)) => rsx! {
                 p { style:"color:#b00; margin-top:12px;", "Error: {e}" }
