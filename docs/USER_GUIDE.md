@@ -287,16 +287,14 @@ by the maintainer-side verifier tool, never from the product.
 | ✓ **Verified** (green) | A human explicitly approved this rule, via the maintainer verifier tool. The gold standard. |
 | **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel**: open the rule and read the **Sources** section (a rule may cite several). |
 | **Draft** (gray, italic) | AI-generated rule, not yet grounded. Advisory only, and never auto-recommended during onboarding. |
-| **Needs re-check** (amber) | A rule that was **verified**, but a source or linter VERSION it was verified against has since drifted. Review it before continuing to rely on it. |
 
-**On "Needs re-check" — the detection is designed but not yet automatic.** A verified rule's `[verified]`
-record stores the exact source/linter versions it was checked against (`against = [...]`). A
-`demote_if_stale` pass compares those to the current versions and demotes `verified` to `needs_recheck` on
-any drift, reporting which entries drifted. That pass is **not yet wired to a live version feed**, so this
-state is not produced automatically today: it is the designed demotion path, pending an activation
-mechanism (a source/linter version registry plus a scheduled or at-launch pass). Re-verification is always
-a deliberate maintainer act done with the repo-side verifier tool (which lands as a reviewed PR), not from
-inside the app.
+Re-verification is a deliberate maintainer act, done with the repo-side verifier tool (which lands as a
+reviewed PR), not from inside the app.
+
+> **Planned (not yet built):** detecting when a rule you have *applied* has since changed in the corpus
+> (because you updated Camerata to a version carrying a newer version of that rule), then offering a per-rule
+> "update to current version" diff so you decide whether to take it. It is informational and never
+> auto-updates an applied rule. Tracked in [#66](https://github.com/zernst3/camerata-orchestrator/issues/66).
 
 ---
 
