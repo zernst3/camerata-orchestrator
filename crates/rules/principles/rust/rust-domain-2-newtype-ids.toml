@@ -36,10 +36,10 @@ why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time."
 id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
 label = "every ID in the codebase is a bare Uuid, …"
 directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
-why = "A defensible alternative the project considered."
+why = "Loses the compile-time safety entirely: every ID becomes the same type and any function taking a UserId cheerfully accepts an OrganizationId or any other Uuid, turning wrong-ID-to-wrong-function bugs from compile errors into silent runtime mismatches."
 
 [[option]]
 id = "all-ids-use-a-single-generic-entityid-of-t-type"
 label = "all IDs use a single generic EntityId-of-T type parameterized …"
 directive = "all IDs use a single generic EntityId-of-T type parameterized on a phantom marker, rather than each ID being its own concrete newtype"
-why = "A defensible alternative the project considered."
+why = "Catches some bugs at compile time but has no runtime distinction: any code path that converts between representations (a JSON payload, a SQL row, a log line) collapses the phantom parameter and loses the guarantee at the boundary, leaving the same class of wrong-ID bugs visible only at runtime."

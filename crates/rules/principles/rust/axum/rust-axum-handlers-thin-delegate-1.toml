@@ -22,7 +22,7 @@ why = "Thin handlers keep transport concerns separate from domain logic, enable 
 id = "handlers-contain-business-logic-and-data-access"
 label = "Handlers contain business logic and data access inline"
 directive = "Handlers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
-why = "A defensible alternative the project considered."
+why = "Logic embedded in a handler is reachable only through an HTTP request, so it cannot be unit-tested or reused by a CLI or scheduled job without spinning up the web layer; the same rule duplicated in a second handler that needs it drifts out of sync; and the handler mixes transport concerns with domain concerns so a change to either touches code that does both."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/"

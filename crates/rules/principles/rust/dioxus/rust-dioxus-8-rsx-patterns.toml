@@ -22,19 +22,19 @@ why = "Native Rust control flow inside the template means contributors do not ha
 id = "iteration-in-templates-is-expressed-by-building"
 label = "iteration in templates is expressed by building a vector …"
 directive = "iteration in templates is expressed by building a vector of elements through an iterator chain and interpolating the vector, rather than using a native for expression inside the rsx macro"
-why = "A defensible alternative the project considered."
+why = "Harder to read than a direct for expression: reviewers must mentally re-derive the loop structure from the iterator chain, and the intermediate vector allocation adds overhead for what a native for expression handles inline; it is reserved for cases that need iterator-style transformations the macro does not support."
 
 [[option]]
 id = "templates-are-rendered-as-concatenated-strings-t"
 label = "templates are rendered as concatenated strings that bypass the …"
 directive = "templates are rendered as concatenated strings that bypass the framework's diffing entirely, rather than going through the rsx macro and the virtual DOM"
-why = "A defensible alternative the project considered."
+why = "Loses every benefit of the virtual DOM: reactivity is gone, the framework cannot diff and update incrementally, and the resulting string injection is a potential XSS vector if any user-controlled content is included without explicit escaping."
 
 [[option]]
 id = "lists-rendered-in-templates-omit-the-key-attribu"
 label = "lists rendered in templates omit the key attribute on …"
 directive = "lists rendered in templates omit the key attribute on iterated children when the list looks stable in practice, rather than always supplying a stable key derived from the underlying data"
-why = "A defensible alternative the project considered."
+why = "Visually the list renders correctly without keys, but reorders silently rebuild every row's children, losing focus state, scroll position, and any in-progress input; the cost of finding and fixing this after launch is significantly higher than the cost of writing the key at the time of authoring."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/rsx"

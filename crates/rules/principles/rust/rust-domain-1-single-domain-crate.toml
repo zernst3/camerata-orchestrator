@@ -30,10 +30,10 @@ why = "At small/medium scale (tens of entities), no real bounded-context seams h
 id = "the-project-starts-with-a-separate-crate-per-bou"
 label = "the project starts with a separate crate per bounded …"
 directive = "the project starts with a separate crate per bounded context from day one, and bounded contexts live as sibling crates rather than as modules in a shared domain crate"
-why = "A defensible alternative the project considered."
+why = "Premature at small/medium scale: cyclic-dependency friction accumulates before any real bounded-context seam has emerged, and the cost is paid every day on crate-boundary refactors that would have been free inside a single module. The payoff comes only once the domain is large enough that a real seam demands it."
 
 [[option]]
 id = "the-project-keeps-a-single-domain-crate-but-does"
 label = "the project keeps a single domain crate but does …"
 directive = "the project keeps a single domain crate but does not subdivide it into modules by bounded context; all domain code lives in one flat module structure regardless of context"
-why = "A defensible alternative the project considered."
+why = "Fast to start but becomes a god-module as the entity count grows: the absence of any internal structure makes 'where does this go' a judgment call at every addition, and the resulting flat mass is hard to navigate past a few dozen entities."

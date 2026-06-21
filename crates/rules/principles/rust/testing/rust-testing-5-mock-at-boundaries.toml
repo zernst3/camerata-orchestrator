@@ -34,10 +34,10 @@ why = "The only idiomatic Rust substitution point at the type level is a trait. 
 id = "cfg-flag-seam-for-substitution"
 label = "Use a cfg feature flag to substitute a test implementation"
 directive = "The production struct is replaced at compile time by a test version selected via a #[cfg(feature = \"test-impl\")] flag rather than via a trait object or generic parameter."
-why = "A defensible alternative the project considered. Works for simple cases (e.g., swapping a clock) but does not compose, requires feature-flag cargo plumbing, and the substitution is compile-time-only not per-test."
+why = "Works for simple cases such as swapping a clock, but does not compose with multiple concurrent test scenarios: the substitution is compile-time-only so every test in the binary sees the same swapped implementation, not per-test variants; it also requires feature-flag cargo plumbing that inflates the Cargo.toml surface and can slow CI by requiring multiple compilation passes."
 
 [[option]]
 id = "integration-tests-over-real-deps"
 label = "Prefer integration tests against real dependencies over mocking"
 directive = "Avoid mocking entirely; test with real dependencies (a real database, real HTTP server, real file system) in integration tests."
-why = "A defensible alternative the project considered. Highest fidelity, but slow, requires environment setup, and is not suitable for fast feedback unit tests of business logic."
+why = "Highest fidelity and a valuable complement to unit tests, but slow: integration tests against real dependencies require environment setup (running database, network, external service), take seconds to minutes rather than milliseconds, and are not suitable as the primary feedback loop for iterating on business logic changes."

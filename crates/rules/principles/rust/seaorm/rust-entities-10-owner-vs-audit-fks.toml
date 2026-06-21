@@ -22,13 +22,13 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 id = "the-parent-entity-declares-a-reverse-has-many-va"
 label = "the parent entity declares a reverse has_many variant for …"
 directive = "the parent entity declares a reverse has_many variant for every audit FK pointing at it, alongside the variant for the owner FK"
-why = "A defensible alternative the project considered."
+why = "Bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities; the macro's coherence rule also caps find_related at one variant per pair, so additional variants require via_rel disambiguation that adds complexity without proportional benefit."
 
 [[option]]
 id = "the-entity-stores-its-audit-relationships-create"
 label = "the entity stores its audit relationships (created_by, modified_by) as …"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
-why = "A defensible alternative the project considered."
+why = "Gives the file a diet but loses compile-time FK validation entirely for those columns: referential bugs in audit data go from build-time errors to silent runtime mismatches where a deleted user leaves a dangling Uuid with no ORM-level enforcement."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"

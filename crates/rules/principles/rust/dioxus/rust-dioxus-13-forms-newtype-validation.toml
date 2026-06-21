@@ -21,16 +21,16 @@ why = "Duplicating validation rules between the domain layer and the UI is the l
 id = "form-validation-runs-through-a-declarative-valid"
 label = "form validation runs through a declarative validation library used …"
 directive = "form validation runs through a declarative validation library used in the UI alongside the domain newtypes, with the library carrying its own rule definitions for each field"
-why = "A defensible alternative the project considered."
+why = "Adds a runtime validation layer that competes with the domain newtypes: the two sources of truth can drift if both are authoritative, and the library's rule definitions are a second place to update whenever the domain constructor changes, reintroducing the synchronization risk the newtype approach was supposed to eliminate."
 
 [[option]]
 id = "each-form-component-re-implements-its-own-valida"
 label = "each form component re-implements its own validation logic inline …"
 directive = "each form component re-implements its own validation logic inline (regex, length checks, format helpers) rather than delegating to the domain newtype constructors"
-why = "A defensible alternative the project considered."
+why = "The exact failure mode this rule exists to prevent: the duplicated rule and the domain rule will eventually diverge, producing bugs of the shape 'the form let me submit but the backend rejected it,' which are frustrating to users and hard to trace because both sides look correct in isolation."
 
 [[option]]
 id = "form-fields-are-validated-only-on-the-server-the"
 label = "form fields are validated only on the server; the …"
 directive = "form fields are validated only on the server; the client submits whatever the user types and shows whatever error the server returns, with no client-side validation step"
-why = "A defensible alternative the project considered."
+why = "Correctness-equivalent but loses inline-error UX: users receive no feedback until they submit, and if naively implemented produces a server round-trip per field interaction that degrades perceived responsiveness compared to inline validation against the domain constructor."

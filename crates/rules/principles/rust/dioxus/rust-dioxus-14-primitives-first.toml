@@ -21,16 +21,16 @@ why = "Per-view reimplementation of common UI elements is the largest single sou
 id = "the-ui-is-organized-into-feature-folders-where-e"
 label = "the UI is organized into feature folders where each …"
 directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
-why = "A defensible alternative the project considered."
+why = "Produces visual drift across features: five views that each implement their own button slowly become five subtly different buttons, and design-system changes become a codebase-wide edit instead of a single-file change; automated agents in particular will inline a hand-rolled element rather than reach for a shared primitive unless one already exists."
 
 [[option]]
 id = "the-ui-adopts-a-pre-existing-third-party-compone"
 label = "the UI adopts a pre-existing third-party component library wholesale …"
 directive = "the UI adopts a pre-existing third-party component library wholesale and composes views directly from that library's components, rather than maintaining its own primitives"
-why = "A defensible alternative the project considered."
+why = "Loses the project's specific design vocabulary and constrains visual identity to whatever the library exposes: any design decision that falls outside the library's surface area requires either fighting the library's styles or forking its components, which is the maintenance burden the primitives layer was meant to avoid."
 
 [[option]]
 id = "the-ui-has-no-primitives-layer-views-inline-util"
 label = "the UI has no primitives layer; views inline utility …"
 directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
-why = "A defensible alternative the project considered."
+why = "Works for a ten-page product but produces unreadable churn at any larger scale: design-system changes become a codebase-wide search-and-replace, visual consistency degrades as each view independently interprets the design tokens, and reviewers cannot tell whether a button in a new view matches the intended design without comparing it to every other view."

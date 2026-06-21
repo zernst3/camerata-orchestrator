@@ -30,10 +30,10 @@ why = "Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical 
 id = "integration-tests-in-cfg-test-mod"
 label = "Integration tests in an inline #[cfg(test)] mod in lib.rs"
 directive = "Integration tests are placed in a #[cfg(test)] module inside src/lib.rs rather than in a separate tests/ directory."
-why = "A defensible alternative the project considered. Loses external-crate perspective and blurs the unit/integration distinction."
+why = "Loses the external-crate perspective that defines what an integration test is in Rust: a test in src/lib.rs can reach private items, which means it is not verifying the public API contract the way an external consumer would, and the unit/integration distinction becomes ambiguous to readers and tools."
 
 [[option]]
 id = "integration-tests-in-separate-crate"
 label = "Integration tests in a dedicated crate in the workspace"
 directive = "Integration tests live in a dedicated workspace member crate (e.g., crates/my-lib-tests) rather than in the conventional tests/ directory."
-why = "A defensible alternative the project considered. Valid for very large projects needing fine-grained dependency control; overkill at small/medium scale and diverges from cargo's built-in tests/ convention."
+why = "Valid for very large projects needing fine-grained dependency control over test dependencies, but overkill at small/medium scale: it adds a workspace member to maintain, diverges from cargo's built-in tests/ convention that contributors recognize immediately, and provides no structural benefit until the integration test surface is large enough to warrant its own dependency graph."

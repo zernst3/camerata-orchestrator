@@ -34,10 +34,10 @@ why = "Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical 
 id = "separate-unit-test-file-in-src"
 label = "Separate unit test file in src/ (e.g., src/foo_test.rs)"
 directive = "Unit tests live in a dedicated source file alongside the production code (e.g., src/foo_test.rs for src/foo.rs), included via a #[cfg(test)] mod foo_test; declaration."
-why = "A defensible alternative the project considered. Loses direct access to private items; diverges from ecosystem convention."
+why = "Loses direct access to private items without extra indirection: a separate file cannot use 'use super::*;' to reach non-pub items the way an inline module can, which either forces all tested items to be pub or adds a re-export layer that pollutes the production API surface."
 
 [[option]]
 id = "unit-tests-in-tests-dir"
 label = "Unit tests in the top-level tests/ directory"
 directive = "Unit tests live in the tests/ directory alongside integration tests, treating all tests as external crate consumers."
-why = "A defensible alternative the project considered. The tests/ directory is reserved by convention for integration tests; mixing unit tests there loses private-item access and is contrary to Rust Book guidance."
+why = "Contrary to Rust Book (Ch 11.3) guidance and ecosystem convention: the tests/ directory is reserved for integration tests that exercise only the public API, so mixing unit tests there loses private-item access and confuses readers who expect tests/ to contain external-crate-perspective tests only."

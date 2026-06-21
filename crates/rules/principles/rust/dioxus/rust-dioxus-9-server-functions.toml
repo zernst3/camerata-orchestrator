@@ -22,19 +22,19 @@ why = "A hand-rolled client crate doubles the surface that has to stay in sync (
 id = "server-to-client-calls-go-through-a-hand-rolled"
 label = "server-to-client calls go through a hand-rolled REST client crate …"
 directive = "server-to-client calls go through a hand-rolled REST client crate that the UI imports, with route definitions on the server and matching call sites in the client crate"
-why = "A defensible alternative the project considered."
+why = "Doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change: a renamed field or changed return type must be updated in two places rather than one."
 
 [[option]]
 id = "server-to-client-calls-go-through-a-typed-rpc-la"
 label = "server-to-client calls go through a typed RPC layer added …"
 directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc, or similar), rather than through the framework's server-function macro"
-why = "A defensible alternative the project considered."
+why = "Equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively: the generated stub types must stay in sync with the service definition, codegen adds a build step, and the project takes on the full surface of the RPC library's maintenance and upgrade cycle."
 
 [[option]]
 id = "the-server-exposes-a-graph-query-endpoint-with-c"
 label = "the server exposes a graph-query endpoint with client-side code …"
 directive = "the server exposes a graph-query endpoint with client-side code generation, and the UI fetches everything through generated query types rather than through per-operation server functions"
-why = "A defensible alternative the project considered."
+why = "Premature complexity for the common case: the project's data graph rarely warrants a graph-query layer from day one, and the upfront cost (schema definition, codegen tooling, query planning) rarely pays back until the UI has dozens of distinct read shapes that benefit from client-driven field selection."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/server_functions"

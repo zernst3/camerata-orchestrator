@@ -22,7 +22,7 @@ why = "Bounded channels prevent memory exhaustion and apply natural backpressure
 id = "use-unbounded-channels"
 label = "Use unbounded channels"
 directive = "Channels are created unbounded (e.g., tokio::sync::mpsc::unbounded_channel()) to avoid backpressure and allow senders to proceed without waiting."
-why = "A defensible alternative the project considered."
+why = "A fast sender can enqueue messages faster than a slow receiver processes them with no mechanism to slow down, causing the in-memory queue to grow without bound until memory is exhausted; the receiver has no way to signal that it is overwhelmed, so the only failure mode is an OOM crash rather than an explicit backpressure response."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html"

@@ -22,7 +22,7 @@ why = "Timeouts and limits protect against resource exhaustion and cascading fai
 id = "no-timeout-or-limit-configuration"
 label = "No timeout or limit configuration"
 directive = "The application does not configure request timeouts or body size limits, relying on the OS and network layer to eventually close connections."
-why = "A defensible alternative the project considered."
+why = "A single slow or malicious client can hold connections open indefinitely or send a gigabyte-sized request, exhausting server resources and denying service to other clients; without explicit limits, the OS and network layer have no application-level knowledge of what constitutes an acceptable request, so they provide no meaningful protection."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html"

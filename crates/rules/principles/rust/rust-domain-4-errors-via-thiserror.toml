@@ -34,10 +34,10 @@ why = "Typed errors give callers compile-time knowledge of failure modes and kee
 id = "the-workspace-defines-a-single-global-error-enum"
 label = "the workspace defines a single global error enum that …"
 directive = "the workspace defines a single global error enum that every layer shares, rather than a layer-specific thiserror enum at each crate boundary"
-why = "A defensible alternative the project considered."
+why = "Couples every layer to the same vocabulary and removes boundary discipline: the single enum's variants accumulate indefinitely as every layer's failure modes get pushed into a shared namespace, and callers cannot tell at a glance which layer produced a given variant."
 
 [[option]]
 id = "every-layer-uses-anyhow-for-its-error-type-rathe"
 label = "every layer uses anyhow for its error type, rather …"
 directive = "every layer uses anyhow for its error type, rather than reserving anyhow for the application-edge binaries and using typed thiserror enums in libraries"
-why = "A defensible alternative the project considered."
+why = "Loses typed failure information at boundaries: callers cannot match on specific failure modes, the type system stops helping with error handling, and every error becomes a type-erased trace that requires string inspection rather than exhaustive match."

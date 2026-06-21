@@ -22,13 +22,13 @@ why = "The compiler then enforces the hexagonal boundary at compile time: code p
 id = "the-seaorm-entity-models-derive-serialize-and-de"
 label = "the SeaORM entity Models derive Serialize and Deserialize and …"
 directive = "the SeaORM entity Models derive Serialize and Deserialize and can be JSON-encoded directly without going through an explicit DTO plus mapper"
-why = "A defensible alternative the project considered."
+why = "Removes the compile-time enforcement of the hexagonal boundary: code can JSON-encode a Model directly, so the separation between the persistence shape and the API shape is a convention rather than a compiler guarantee, and any code path that accidentally serializes a Model breaks the boundary without a build error."
 
 [[option]]
 id = "individual-entity-models-opt-in-to-deriving-seri"
 label = "individual entity Models opt in to deriving Serialize and …"
 directive = "individual entity Models opt in to deriving Serialize and Deserialize on a per-entity basis, while other entities remain non-serde"
-why = "A defensible alternative the project considered."
+why = "Moves the decision to the wrong level: whether a payload shape gets serialized is a per-endpoint DTO question, not a per-Model question, and the per-Model opt-in collapses those two decisions into one while still allowing individual entities to be serialized directly, which partially defeats the boundary the rule is paying for."
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"

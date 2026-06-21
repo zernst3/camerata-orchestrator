@@ -22,7 +22,7 @@ why = "Extractors enforce validation at the HTTP boundary, so the handler assume
 id = "validation-happens-inside-handlers-or-services"
 label = "validation happens inside handlers or services"
 directive = "Request data is extracted into a generic type in the handler, and validation (checking field presence, type correctness, constraints) happens inside the handler or is delegated to the service layer."
-why = "A defensible alternative the project considered."
+why = "Blurs the boundary between 'is the data shaped correctly?' and 'does business logic accept this data?': an invalid request still invokes the handler, so error paths must be written for all possible invalid states even when the application should reject them outright at the edge, and the validation logic risks being duplicated across the handler and service layer."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/index.html"

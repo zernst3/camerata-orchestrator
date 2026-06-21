@@ -30,22 +30,22 @@ why = "Per-function or per-aggregate error proliferation forces callers to handl
 id = "each-function-or-aggregate-defines-its-own-error"
 label = "each function or aggregate defines its own error enum, …"
 directive = "each function or aggregate defines its own error enum, so the crate's public surface exposes many small per-call error types rather than a small number of shared category enums"
-why = "A defensible alternative the project considered."
+why = "Forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling; the error surface grows linearly with the API surface, making refactors across aggregates a multi-type edit."
 
 [[option]]
 id = "the-crate-exposes-a-single-error-enum-that-mixes"
 label = "the crate exposes a single error enum that mixes …"
 directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into one enum per category"
-why = "A defensible alternative the project considered."
+why = "Collapses orthogonal concerns: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant string, the single enum's arms accumulate without bound as the crate grows, and match arms that handle only one failure category must either wildcard or exhaustively name unrelated variants."
 
 [[option]]
 id = "the-crate-re-exports-the-underlying-framework-s"
 label = "the crate re-exports the underlying framework's or driver's error …"
 directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned category enum at the boundary"
-why = "A defensible alternative the project considered."
+why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
 label = "the crate's public functions return Box of dyn Error …"
 directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
-why = "A defensible alternative the project considered."
+why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary."

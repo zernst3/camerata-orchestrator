@@ -22,7 +22,7 @@ why = "Version-controlled migrations keep schema changes paired with code and en
 id = "apply-migrations-manually"
 label = "Apply migrations manually"
 directive = "Database migrations are applied manually by a DBA or operations team before or after deployment, outside of the application startup process."
-why = "A defensible alternative the project considered."
+why = "Easy to miss: a code change that assumes a new schema can be deployed before the migration is applied, causing runtime failures in production; when migrations live outside version control, code review cannot verify that schema and code changes are paired, and the migration history exists only in the database rather than alongside the code that depends on it."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.migrate.html"

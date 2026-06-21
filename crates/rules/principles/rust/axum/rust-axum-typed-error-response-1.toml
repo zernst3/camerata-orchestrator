@@ -22,7 +22,7 @@ why = "Typed errors centralize error-to-HTTP mapping and keep handlers focused o
 id = "handlers-build-http-responses-directly"
 label = "Handlers build HTTP responses directly for errors"
 directive = "Each handler constructs StatusCode and response bodies directly when errors occur, mapping domain errors to HTTP responses inline in the handler code."
-why = "A defensible alternative the project considered."
+why = "The same error (for example, user not found) must be mapped to the same HTTP status in every handler that can fail in that way: duplication accumulates, mapping drift produces inconsistent API behavior, and handler code grows cluttered with response-construction logic rather than staying focused on business logic."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/response/index.html"

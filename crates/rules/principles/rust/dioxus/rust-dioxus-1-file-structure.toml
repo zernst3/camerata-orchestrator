@@ -21,16 +21,16 @@ why = "A predictable file-path-to-role mapping is the foundation every other UI 
 id = "the-ui-crate-is-organized-into-feature-folders-w"
 label = "the UI crate is organized into feature folders where …"
 directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services, and lib"
-why = "A defensible alternative the project considered."
+why = "Overkill for a single-app product and makes primitive reuse harder to discover: reusable primitives end up either duplicated across features or hidden inside whichever feature first authored them, so a contributor starting a new feature cannot easily tell what already exists."
 
 [[option]]
 id = "the-ui-crate-uses-a-flat-module-structure-with-e"
 label = "the UI crate uses a flat module structure with …"
 directive = "the UI crate uses a flat module structure with every file directly at the crate root, with no folder-level partitioning by role or feature"
-why = "A defensible alternative the project considered."
+why = "Fast to start but becomes unmaintainable past about fifty files: without folder-level partitioning, file role must be derived from naming each time the codebase is touched, and 'where does this go' becomes a judgment call rather than a rule."
 
 [[option]]
 id = "the-ui-crate-adopts-a-file-based-routing-convent"
 label = "the UI crate adopts a file-based routing convention under …"
 directive = "the UI crate adopts a file-based routing convention under a single src tree, with custom build scripts wiring the routes from the file layout rather than declaring routes through a central Routable enum"
-why = "A defensible alternative the project considered."
+why = "The framework does not provide file-based routing as a default, so this requires custom build scripts that add tooling debt without buying anything the role-based layout does not already give; any framework upgrade that touches routing can break the custom scripts unpredictably."

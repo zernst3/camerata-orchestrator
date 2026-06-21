@@ -22,19 +22,19 @@ why = "Makes drift detection a one-click trace: from the entity to the schema au
 id = "entity-files-carry-no-citation-of-the-source-of"
 label = "entity files carry no citation of the source-of-truth schema …"
 directive = "entity files carry no citation of the source-of-truth schema location, and the authority that defines the columns must be reverse-engineered when needed"
-why = "A defensible alternative the project considered."
+why = "Forces drift checks to be reverse-engineered each time: reviewers cannot tell at a glance which migration or schema doc defines the columns they are reading, so every drift investigation starts from scratch rather than from a direct link."
 
 [[option]]
 id = "the-source-of-truth-schema-citation-lives-in-a-s"
 label = "the source-of-truth schema citation lives in a separate docs/ …"
 directive = "the source-of-truth schema citation lives in a separate docs/ file or wiki page that lists the authority for each entity, rather than inside the entity file itself"
-why = "A defensible alternative the project considered."
+why = "Drifts from the entity over time: updates to one almost never propagate to the other, and the docs page eventually contradicts the code it was meant to document, which is worse than no citation at all because it actively misleads."
 
 [[option]]
 id = "the-source-of-truth-schema-authority-is-traced-t"
 label = "the source-of-truth schema authority is traced through git history …"
 directive = "the source-of-truth schema authority is traced through git history rather than recorded as a citation inside the entity file"
-why = "A defensible alternative the project considered."
+why = "Works for shallow histories but breaks down after a few migrations and stops working entirely after squash merges, rebases, or migration consolidations rewrite the history that the trace would have followed."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"

@@ -22,19 +22,19 @@ why = "A single-column unique annotation tells every reader, and every consumer 
 id = "one-column-on-the-entity-is-annotated-sea-orm-un"
 label = "one column on the entity is annotated #[sea_orm(unique)] to …"
 directive = "one column on the entity is annotated #[sea_orm(unique)] to communicate intent, even when the real uniqueness constraint in the database is composite or partial rather than single-column"
-why = "A defensible alternative the project considered."
+why = "Misleads every reader and every consumer of the entity's derived metadata: the annotation implies a single-column or unconditional uniqueness that the database does not enforce, and downstream code that relies on the annotation as a contract produces incorrect business logic (existence checks that assume uniqueness the DB does not guarantee for that column alone)."
 
 [[option]]
 id = "the-entity-carries-no-uniqueness-annotation-and"
 label = "the entity carries no uniqueness annotation and the rule …"
 directive = "the entity carries no uniqueness annotation and the rule waits for a future macro attribute that expresses composite or partial uniques"
-why = "A defensible alternative the project considered."
+why = "Not actionable today: the macro does not support composite or partial uniques and no roadmap signal suggests it is coming; waiting leaves the constraint undocumented in the entity indefinitely, which is the same outcome as omitting the citation entirely."
 
 [[option]]
 id = "the-composite-or-partial-uniqueness-constraint-i"
 label = "the composite or partial uniqueness constraint is dropped at …"
 directive = "the composite or partial uniqueness constraint is dropped at the database level and enforced exclusively in application code instead"
-why = "A defensible alternative the project considered."
+why = "A clear regression: the database loses the ability to reject duplicates atomically, race conditions across concurrent writers become a correctness bug rather than a constraint violation, and application-code enforcement is inherently racy without a SELECT-FOR-UPDATE or similar construct."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
