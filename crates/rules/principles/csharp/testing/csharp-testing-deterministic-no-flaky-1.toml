@@ -16,7 +16,7 @@ why = "A test that sometimes passes and sometimes fails (a 'flaky' test) is acti
 id = "deterministic-by-design"
 label = "inject clocks and random sources; no Thread.Sleep; no shared static mutable state; no file system or network in unit tests"
 directive = "DateTime.Now and DateTime.UtcNow are never read directly in production code that is unit-tested; instead, inject IClock or IDateTimeProvider and stub it in tests. Random is never used without a fixed seed in test helpers. Thread.Sleep and Task.Delay are never used inside unit tests; if timing behavior must be tested, use a virtual timer abstraction. Static mutable fields or properties shared across test classes are forbidden; use constructor injection and xUnit's per-test class instantiation for isolation. File system access and network calls are not allowed in unit tests; they belong in the IntegrationTests project."
-why = "The adopted default. Eliminates all known sources of flakiness at the design level."
+why = "Eliminates all known sources of flakiness at the design level."
 
 [[option]]
 id = "sleep-based-timing"

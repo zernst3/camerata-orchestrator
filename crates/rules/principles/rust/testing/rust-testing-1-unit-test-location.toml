@@ -28,16 +28,16 @@ why = "The Rust Book (Ch 11.3) and Rust By Example codify the inline #[cfg(test)
 id = "cfg-test-mod-tests-inline-in-source-file"
 label = "Inline #[cfg(test)] mod tests block in the same source file"
 directive = "Unit tests live in a #[cfg(test)] mod tests { ... } block at the bottom of the same .rs file as the code being tested. The module uses 'use super::*;' to bring production items (including private ones) into scope. No #[cfg(test)] annotation is required on individual #[test] functions — only the enclosing module needs it."
-why = "The adopted default. Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Colocating tests with code gives access to private items and matches ecosystem expectations."
+why = "Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Colocating tests with code gives access to private items and matches ecosystem expectations."
 
 [[option]]
 id = "separate-unit-test-file-in-src"
 label = "Separate unit test file in src/ (e.g., src/foo_test.rs)"
 directive = "Unit tests live in a dedicated source file alongside the production code (e.g., src/foo_test.rs for src/foo.rs), included via a #[cfg(test)] mod foo_test; declaration."
-why = "A defensible alternative the project considered and did not adopt as the default. Loses direct access to private items; diverges from ecosystem convention."
+why = "A defensible alternative the project considered. Loses direct access to private items; diverges from ecosystem convention."
 
 [[option]]
 id = "unit-tests-in-tests-dir"
 label = "Unit tests in the top-level tests/ directory"
 directive = "Unit tests live in the tests/ directory alongside integration tests, treating all tests as external crate consumers."
-why = "A defensible alternative the project considered and did not adopt as the default. The tests/ directory is reserved by convention for integration tests; mixing unit tests there loses private-item access and is contrary to Rust Book guidance."
+why = "A defensible alternative the project considered. The tests/ directory is reserved by convention for integration tests; mixing unit tests there loses private-item access and is contrary to Rust Book guidance."

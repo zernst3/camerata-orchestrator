@@ -28,10 +28,10 @@ why = "A test that asserts on internal implementation details — which private 
 id = "behavior-and-contracts"
 label = "Assert on observable behavior and public contracts only"
 directive = "Tests assert on the observable outputs and side-effects of the system under test — returned values, thrown/returned errors, published events, state visible through the public API — not on private fields, internal call counts, or private method invocations. Refactoring the implementation without changing the public behavior must leave the test suite green. Mocks and fakes are acceptable at collaboration boundaries (injected dependencies), not as spies on internal calls."
-why = "The adopted default. Behavior-coupled tests are refactor-safe; implementation-coupled tests create a maintenance tax that grows with every internal change."
+why = "Behavior-coupled tests are refactor-safe; implementation-coupled tests create a maintenance tax that grows with every internal change."
 
 [[option]]
 id = "whitebox-internal-assertions"
 label = "Assert on internal implementation details (white-box) for complete coverage"
 directive = "Tests verify internal call order, private field values, and implementation-specific side-effects to achieve fine-grained coverage of every execution path."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,7 +16,7 @@ why = "Arrange-Act-Assert (AAA) is a universal test-structure principle: set up 
 id = "aaa-with-let-before"
 label = "let/subject → before → it with one expect(); hooks placed before examples"
 directive = "Within each describe or context block, declarations appear in this order: (1) subject (the unit under test, using described_class when applicable); (2) let and let! blocks for lazy and eager Arrange data; (3) before(:each) / after(:each) hooks for imperative setup; (4) shared_examples_for or it_behaves_like; (5) it examples. Inside an it block, aim for one expect() or use aggregate_failures { } when multiple related assertions belong together. The it block describes the outcome, not the method call: it 'returns the signed token' do / expect(result).to be_a(String) / end. Use before(:all) only for truly class-level setup that cannot create state leakage (prefer before(:each) by default). rubocop-rspec cops RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, and RSpec/LeadingSubject enforce placement order."
-why = "The adopted default. Produces visually separable AAA phases, minimal duplication, and is enforceable by rubocop-rspec."
+why = "Produces visually separable AAA phases, minimal duplication, and is enforceable by rubocop-rspec."
 
 [[option]]
 id = "inline-setup"

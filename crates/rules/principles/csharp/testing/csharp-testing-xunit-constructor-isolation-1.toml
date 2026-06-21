@@ -16,7 +16,7 @@ why = "xUnit's design deliberately replaces [SetUp]/[TearDown] from NUnit/MSTest
 id = "constructor-dispose-then-fixture"
 label = "constructor for per-test setup; IDisposable/IAsyncLifetime for teardown; IClassFixture for expensive per-class shared state"
 directive = "Per-test dependencies are instantiated in the test class constructor and disposed in Dispose() or DisposeAsync(). The test class implements IDisposable or IAsyncLifetime (xUnit v2+) as needed. For expensive setup that should run once per test class (e.g., starting an in-process HTTP server), the setup logic is moved into a fixture class; the test class then implements IClassFixture<MyFixture> and receives the fixture via constructor injection. For state shared across multiple test classes, define a [CollectionDefinition] class implementing ICollectionFixture<T> and decorate consuming test classes with [Collection(\"name\")]. Never use static fields to hold test dependencies; always prefer the fixture mechanism."
-why = "The adopted default. Aligns with xUnit's design philosophy and prevents inter-test state contamination."
+why = "Aligns with xUnit's design philosophy and prevents inter-test state contamination."
 
 [[option]]
 id = "shared-constructor-setup"

@@ -16,7 +16,7 @@ why = "A test name is the first diagnostic signal when a build fails. A name lik
 id = "method-scenario-result"
 label = "MethodName_Scenario_ExpectedResult for methods; <ClassUnderTest>Tests for classes"
 directive = "Every [Fact] or [Theory] method follows the pattern MethodName_Scenario_ExpectedResult using PascalCase for each segment separated by underscores. Examples: Add_SingleNumber_ReturnsSameNumber; Checkout_WithNullCart_ThrowsArgumentNullException; GetUser_UserDoesNotExist_ReturnsNull. Test classes are named <ClassUnderTest>Tests (e.g., StringCalculatorTests, OrderServiceTests) and live in the same namespace as the class under test but in the test project. One test class per production class is the default structure."
-why = "The adopted default. Microsoft's official documentation demonstrates this pattern explicitly with before/after code examples."
+why = "Microsoft's official documentation demonstrates this pattern explicitly with before/after code examples."
 
 [[option]]
 id = "given-when-then"

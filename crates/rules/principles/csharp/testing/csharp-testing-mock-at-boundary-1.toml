@@ -16,7 +16,7 @@ why = "Mocking a class that contains real business logic defeats the purpose of 
 id = "mock-at-infrastructure-boundary"
 label = "mock only interface-based boundaries (repositories, HTTP clients, time providers); test production logic directly"
 directive = "Dependencies injected into a class under test via constructor injection are represented as interfaces. In test setup, create a Mock<IMyDependency> using Moq, configure it with .Setup(x => x.Method()).Returns(value), inject it, and call the real system under test. After the Act, use mock.Verify(...) only when the test specifically cares about the interaction (call count, argument values). Use stubs (Setup only, no Verify) when only the returned value matters. Never create a Mock<> of a production class that contains logic you are not trying to isolate; instantiate it directly instead. Introduce seam interfaces (IDateTimeProvider, IFileSystem) for non-injectable static calls that would otherwise create non-determinism."
-why = "The adopted default. Boundaries are the only correct place to inject test doubles; mocking internals produces tests that pass even when production logic is broken."
+why = "Boundaries are the only correct place to inject test doubles; mocking internals produces tests that pass even when production logic is broken."
 
 [[option]]
 id = "mock-concrete-classes"

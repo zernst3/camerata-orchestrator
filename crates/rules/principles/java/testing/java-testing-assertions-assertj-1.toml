@@ -26,7 +26,7 @@ linter = "PMD: UnitTestShouldIncludeAssert"
 id = "assertj-fluent"
 label = "AssertJ assertThat() fluent assertions"
 directive = "All assertions use AssertJ: import static org.assertj.core.api.Assertions.assertThat; (or BDDAssertions.then for BDD style). Never use org.junit.jupiter.api.Assertions.assertEquals, assertTrue, assertFalse, assertNull, or assertNotNull in new test code. For exception assertions, use assertThatThrownBy(() -> ...).isInstanceOf(X.class).hasMessageContaining('...'). For soft assertions (check all conditions before reporting), use SoftAssertions.assertSoftly(softly -> { ... })."
-why = "The adopted default. AssertJ failure messages are self-describing; the fluent API composes complex structural assertions without custom message strings."
+why = "AssertJ failure messages are self-describing; the fluent API composes complex structural assertions without custom message strings."
 
 [[option]]
 id = "junit-assertions"

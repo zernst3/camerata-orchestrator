@@ -32,16 +32,16 @@ why = "Rust enforces snake_case for function names via the built-in non_snake_ca
 id = "snake-case-scenario-description"
 label = "snake_case names that describe the scenario and expected outcome"
 directive = "Test function names use snake_case (enforced by rustc non_snake_case lint) and describe the scenario under test and the expected outcome, e.g., 'returns_none_when_key_absent', 'panics_on_empty_input', 'applies_discount_for_member_users'. Generic prefixes like 'test_' are allowed but the scenario suffix must still be meaningful. Module-level grouping (e.g., a nested mod for a specific function or struct) may shorten individual test names by providing shared context."
-why = "The adopted default. snake_case is mechanically enforced by the compiler; scenario-description names make cargo test failure output self-documenting."
+why = "snake_case is mechanically enforced by the compiler; scenario-description names make cargo test failure output self-documenting."
 
 [[option]]
 id = "test-prefix-then-function-name"
 label = "test_<function_name> pattern only"
 directive = "Test functions are named by prepending 'test_' to the function under test (e.g., 'test_add', 'test_greet'). No additional scenario description is required."
-why = "A defensible alternative the project considered and did not adopt as the default. Acceptable but produces uninformative failure output when a function has multiple test cases."
+why = "A defensible alternative the project considered. Acceptable but produces uninformative failure output when a function has multiple test cases."
 
 [[option]]
 id = "bdd-style-it-should-prefix"
 label = "BDD-style 'it_' or 'should_' prefix"
 directive = "Test functions are named with an 'it_' or 'should_' prefix in BDD style, e.g., 'it_returns_zero_for_empty_input', 'should_panic_when_key_absent'."
-why = "A defensible alternative the project considered and did not adopt as the default. Readable but not endorsed by The Rust Book; adds a prefix convention that is redundant in a test module where every function is already known to be a test."
+why = "A defensible alternative the project considered. Readable but not endorsed by The Rust Book; adds a prefix convention that is redundant in a test module where every function is already known to be a test."

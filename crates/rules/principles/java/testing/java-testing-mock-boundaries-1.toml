@@ -25,7 +25,7 @@ title = "Mockito Core Javadoc (latest) — mocking guidelines and anti-patterns"
 id = "mock-only-external-boundaries"
 label = "mock only interfaces/abstract types at system boundaries; use real instances for everything else"
 directive = "Use Mockito (mock(), @Mock, @ExtendWith(MockitoExtension.class)) only on interfaces or abstract types that represent external system boundaries: repository interfaces, HTTP client interfaces, message broker clients, Clock, SecureRandom, or any collaborator whose real implementation requires network/disk/external-process access. Use real instances for: collections, Strings, primitive wrappers, domain value objects, internal utility classes. Never mock a concrete class that the class under test owns or controls. Prefer constructor injection so mocks are easy to pass without reflection."
-why = "The adopted default. Mocks at boundaries make unit tests fast and deterministic; real instances for owned collaborators keep tests refactoring-safe."
+why = "Mocks at boundaries make unit tests fast and deterministic; real instances for owned collaborators keep tests refactoring-safe."
 
 [[option]]
 id = "mock-all-collaborators"

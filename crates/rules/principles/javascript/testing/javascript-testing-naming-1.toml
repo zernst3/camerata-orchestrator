@@ -31,10 +31,10 @@ why = "A test name is the first piece of information a developer reads when a te
 id = "test-names-describe-behaviour-no-duplicate-titles"
 label = "Test names describe observable behaviour in plain language; no duplicate titles within a suite"
 directive = "describe() blocks are named after the unit under test (a module, class, or function name: 'UserService', 'parseDate'). test() / it() blocks are named as present-tense descriptions of the expected behaviour ('returns an empty array when the input list is empty', 'throws InvalidInputError when the email is missing @'). Titles must be unique within their describe scope (enforced by jest/no-identical-title). Titles must be non-empty, non-boolean, and non-numeric (enforced by jest/valid-title). The word 'should' is omitted as redundant; 'it returns…' is preferred over 'it should return…'."
-why = "The adopted default. Unique, behaviour-descriptive names make failing CI output self-explanatory and eliminate the need to open the file to understand what broke."
+why = "Unique, behaviour-descriptive names make failing CI output self-explanatory and eliminate the need to open the file to understand what broke."
 
 [[option]]
 id = "test-names-are-free-form-no-convention-enforced"
 label = "Test names are free-form; no naming convention is enforced beyond uniqueness"
 directive = "Test titles are free-form. Only jest/no-identical-title is enforced to prevent duplicate names; content and style are left to the author."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

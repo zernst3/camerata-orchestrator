@@ -28,10 +28,10 @@ why = "A test whose name is `test1` or `testFoo` documents nothing when it fails
 id = "tests-as-living-documentation"
 label = "Tests are named and structured to serve as living documentation"
 directive = "Test names are complete sentences or structured phrases that describe the behavior being verified, not the method being called. Prefer patterns like `<unit>_<expected_behavior>_when_<condition>` or BDD-style `given_<state>_when_<action>_then_<outcome>`. The test body's Arrange section is minimal enough that a reader can scan the scenario in seconds. The full suite, read as a list of test names, should read as a readable specification of what the system does and does not do. Never name a test after the implementation detail it happens to exercise (e.g., `test_process_internal_queue`)."
-why = "The adopted default. A test suite whose names read as a spec is the only always-current documentation of system behavior; a suite of opaque names documents nothing when tests fail."
+why = "A test suite whose names read as a spec is the only always-current documentation of system behavior; a suite of opaque names documents nothing when tests fail."
 
 [[option]]
 id = "test-names-reflect-method-under-test"
 label = "Test names mirror the method under test (e.g. testProcessOrder)"
 directive = "Test names identify the method or class being called; the expected behavior is apparent from reading the test body."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

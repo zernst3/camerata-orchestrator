@@ -16,7 +16,7 @@ why = "A test suite that only passes when examples run in a fixed order has hidd
 id = "random-order-no-leakage"
 label = "config.order = :random; DatabaseCleaner or transactional fixtures; freeze time in time-sensitive specs"
 directive = "In spec_helper.rb or rails_helper.rb set: config.order = :random and Kernel.srand config.seed. Use database_cleaner-active_record (or Rails transactional fixtures with config.use_transactional_fixtures = true) to reset the database between examples. Wrap time-sensitive assertions with travel_to(Time.zone.now) { } or Timecop.freeze. Reset any global / class-level state modified during a spec in an after(:each) block. Never set a before(:all) block that creates persisted records without a matching cleanup. Use rspec --seed <N> to reproduce failures and rspec --bisect to isolate the minimal failing set. The rubocop-rspec cop RSpec/BeforeAfterAll warns when before(:all) is used."
-why = "The adopted default. Random order + DatabaseCleaner eliminates the two most common sources of flakiness."
+why = "Random order + DatabaseCleaner eliminates the two most common sources of flakiness."
 
 [[option]]
 id = "fixed-order-no-cleanup"

@@ -17,7 +17,7 @@ why = "pytest's fixture system is designed to replace both the manual setUp/tear
 id = "fixtures-in-conftest"
 label = "shared fixtures in conftest.py; teardown via yield"
 directive = "All reusable test setup is written as @pytest.fixture functions. Fixtures that are used by tests in more than one module are placed in a conftest.py file at the lowest directory level that contains all consuming tests. Directory-specific fixtures go in that directory's conftest.py; project-wide fixtures go in tests/conftest.py. Teardown code is placed after a yield in the fixture body (not in a try/finally or addfinalizer unless exceptional circumstances require it). Fixtures are scoped to function by default; set scope='module' or scope='session' only for expensive resources that are safe to share. Test functions name their fixtures as parameters; pytest injects the fixture return value automatically."
-why = "The adopted default. Explicit, modular, composable; teardown is guaranteed; no duplication; fixture scope controls sharing safely."
+why = "Explicit, modular, composable; teardown is guaranteed; no duplication; fixture scope controls sharing safely."
 
 [[option]]
 id = "setup-teardown-methods"

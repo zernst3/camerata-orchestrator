@@ -33,7 +33,7 @@ why = "Go's implicit interface satisfaction means any struct with the right meth
 id = "interface-mock-at-injection-point"
 label = "mock implements the interface; injected through the same constructor the production code uses"
 directive = "Each external dependency (database, HTTP client, email sender, cache) is expressed as a narrow interface in the consumer package. Tests create a mock struct implementing that interface — using testify/mock or a hand-written stub — and pass it to the function or constructor under test via the same parameter the production wiring uses. m.On('MethodName', args...).Return(values...) sets expectations. m.AssertExpectations(t) verifies all expected calls occurred."
-why = "The adopted default. No test-only code paths in production. Mocks are isolated to test files. Interface satisfaction is compile-time checked."
+why = "No test-only code paths in production. Mocks are isolated to test files. Interface satisfaction is compile-time checked."
 
 [[option]]
 id = "global-variable-swap"

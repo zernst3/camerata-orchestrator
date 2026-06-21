@@ -17,7 +17,7 @@ why = "pytest's own anatomy documentation names the four phases of a test: Arran
 id = "aaa-one-act"
 label = "Arrange-Act-Assert with a single act per test"
 directive = "Each test function body is organized in three phases. Arrange: prepare all preconditions (create objects, set up fakes, seed data) using fixtures or local setup; this phase may be empty when fixtures cover it entirely. Act: a single call that exercises the behavior under test (one function call, one method invocation, one HTTP request). Assert: verify the outcome of the act; a test may have multiple assert statements as long as they all check the same behavior — use pytest.approx() for floats and pytest.raises() for expected exceptions. If two unrelated behaviors need testing, write two test functions. Never put a second act+assert cycle inside the same test body."
-why = "The adopted default. A single act makes failures unambiguous; self-documenting test names map one-to-one with behaviors; fits pytest's phase model precisely."
+why = "A single act makes failures unambiguous; self-documenting test names map one-to-one with behaviors; fits pytest's phase model precisely."
 
 [[option]]
 id = "multi-step"

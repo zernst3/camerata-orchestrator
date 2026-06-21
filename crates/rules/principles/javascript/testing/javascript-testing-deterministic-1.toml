@@ -37,10 +37,10 @@ why = "A test is only valuable if it produces the same result on every run. A te
 id = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
 label = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
 directive = "Unit tests call jest.useFakeTimers() (optionally with a fixed { now } anchor to avoid epoch-0 side effects) whenever the module under test references Date, setTimeout, setInterval, or setImmediate. jest.useRealTimers() is called in afterEach to prevent timer-fake leakage across tests. Math.random() calls in the module under test are replaced by a jest.spyOn(Math, 'random').mockReturnValue(fixed) when the test needs deterministic random output. No unit test makes a real HTTP request, reads from a real database, or reads from the real filesystem; those calls are mocked (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The eslint-plugin-jest rules expect-expect and no-conditional-expect (both in the recommended config) are configured at error severity."
-why = "The adopted default. Deterministic tests produce reliable CI signal; flaky tests erode trust in the entire test suite and are more expensive to fix later than to prevent upfront."
+why = "Deterministic tests produce reliable CI signal; flaky tests erode trust in the entire test suite and are more expensive to fix later than to prevent upfront."
 
 [[option]]
 id = "tests-use-real-timers-and-may-include-live-network-calls"
 label = "Tests use real timers; time-dependent code is tested with real waits or waitFor helpers"
 directive = "Tests do not use fake timers; time-dependent assertions use waitFor / sleep helpers that busy-wait for up to a timeout. Network calls may be live in integration tests."
-why = "A defensible alternative the project considered and did not adopt as the default for unit tests. Acceptable for integration-layer tests where the real timer behaviour is part of the contract."
+why = "A defensible alternative the project considered for unit tests. Acceptable for integration-layer tests where the real timer behaviour is part of the contract."

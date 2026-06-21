@@ -28,10 +28,10 @@ why = "A unit test suite that takes minutes to run stops being run on every save
 id = "unit-tests-no-io-milliseconds"
 label = "Unit tests: no real I/O, no external processes, completes in milliseconds"
 directive = "A unit test runs in the same process as the code under test, uses no real database connections, network calls, file system reads/writes, or sleep/wait calls, and completes in well under one second (target: milliseconds). Replace external dependencies with in-process fakes, stubs, or in-memory implementations. If a test requires a real external resource to be meaningful, classify it as an integration test and run it in the integration suite, not the unit suite."
-why = "The adopted default. Millisecond unit tests keep the feedback loop tight enough to run on every save; tests that hit real I/O drift toward minutes-per-suite and stop being run frequently."
+why = "Millisecond unit tests keep the feedback loop tight enough to run on every save; tests that hit real I/O drift toward minutes-per-suite and stop being run frequently."
 
 [[option]]
 id = "unit-tests-may-use-real-io"
 label = "Unit tests may use real I/O if it makes the test simpler to write"
 directive = "Unit tests are free to open real database connections, read from the filesystem, or call localhost services if that is more straightforward than setting up a fake."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,7 +16,7 @@ why = "Rails fixtures are YAML files that are loaded as a bulk INSERT before the
 id = "factorybot-factories"
 label = "Define one factory per model in spec/factories/; use create/build/build_stubbed at call sites"
 directive = "Define factories in spec/factories/<model_name>.rb (one file per model). Each factory specifies the minimal set of attributes that satisfies validations; traits extend the base factory for variant states (e.g. trait :admin do role { 'admin' } end). At call sites: use create(:model) for persisted records, build(:model) for in-memory instances, and build_stubbed(:model) for unit tests that do not need DB I/O. Override attributes inline: create(:user, name: 'Alice'). Avoid fixtures (test/fixtures/) and bare Model.create calls in spec bodies. Run FactoryBot.lint in a dedicated spec (or as a CI step) to catch invalid factory definitions early."
-why = "The adopted default. Expressive, co-located, and overrideable test data with no hidden fixture coupling."
+why = "Expressive, co-located, and overrideable test data with no hidden fixture coupling."
 
 [[option]]
 id = "rails-fixtures"

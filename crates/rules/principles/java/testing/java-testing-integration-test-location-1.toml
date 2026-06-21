@@ -27,7 +27,7 @@ linter = "JUnit 5: @Tag"
 id = "it-suffix-plus-tag"
 label = "*IT.java suffix and @Tag(\"integration\") annotation"
 directive = "Name integration test classes with the IT suffix (e.g., UserRepositoryIT.java, OrderServiceIT.java). Annotate the class with @Tag(\"integration\"). Use Maven Failsafe Plugin to run them in the verify phase. Configure Maven Surefire to exclude *IT.java files from the test phase so they never mix with unit tests. Add a CI gate for the verify phase that can be skipped for fast PR runs."
-why = "The adopted default. Failsafe picks them up by convention; @Tag enables fine-grained CI filtering independent of file naming."
+why = "Failsafe picks them up by convention; @Tag enables fine-grained CI filtering independent of file naming."
 
 [[option]]
 id = "separate-source-set"

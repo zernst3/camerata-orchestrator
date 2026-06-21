@@ -26,7 +26,7 @@ linter = "PMD: UnitTestShouldUseTestAnnotation"
 id = "descriptive-snake-or-camel-with-display-name"
 label = "descriptive snake_case or camelCase method name, with @DisplayName for complex labels"
 directive = "Test method names follow one consistent pattern across the codebase: either snake_case (should_return_empty_when_list_is_null) or camelCase (shouldReturnEmptyWhenListIsNull). The name encodes at minimum the scenario and expected outcome. Add @DisplayName only when the auto-generated name would be ambiguous or when the description needs natural prose (spaces, punctuation). If using snake_case, annotate the test class with @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class) so CI and IDE reports render readable sentences."
-why = "The adopted default. Descriptive names are the fastest diagnostic tool when a test fails in CI: the test name tells you what broke without reading the test body."
+why = "Descriptive names are the fastest diagnostic tool when a test fails in CI: the test name tells you what broke without reading the test body."
 
 [[option]]
 id = "legacy-test-prefix"

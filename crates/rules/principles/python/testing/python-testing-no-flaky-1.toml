@@ -17,7 +17,7 @@ why = "pytest's flaky-test explanation states: 'A flaky test is one that exhibit
 id = "mock-nondeterminism"
 label = "mock or inject all non-deterministic sources; tests must pass in any order"
 directive = "Do not call datetime.datetime.now(), time.time(), random.random(), uuid.uuid4(), or any network or filesystem API directly inside the production code under test without making it injectable. In tests, replace these sources: use monkeypatch or unittest.mock.patch to freeze time, seed random with a fixed value, provide deterministic UUIDs, and stub external I/O. Tests must not assume any particular file-system state on CI that is not created by a fixture. Tests must not depend on execution order: each test arranges its own preconditions and cleans up after itself (via fixture teardown or monkeypatch auto-revert). If a test fails intermittently, treat it as a P1 bug: quarantine it (pytest.mark.skip with a tracking-issue reference) rather than ignoring it."
-why = "The adopted default. A deterministic suite is a trustworthy suite; intermittent failures erode confidence in CI and obscure real regressions."
+why = "A deterministic suite is a trustworthy suite; intermittent failures erode confidence in CI and obscure real regressions."
 
 [[option]]
 id = "allow-nondeterminism"

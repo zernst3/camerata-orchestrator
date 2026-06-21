@@ -17,7 +17,7 @@ why = "RSpec generates human-readable failure messages by concatenating the desc
 id = "class-and-method-naming"
 label = "describe ClassName; nested describe '#method'/.method; context 'when ...'; it 'returns ...'"
 directive = "Top-level describe takes the class constant (never a string like 'User'): describe User do. Nested describe blocks that zoom in on a method use '#method_name' for instance methods or '.method_name' for class methods: describe '#authenticate' do. Context blocks explain the precondition and start with 'when', 'with', or 'without': context 'when the password is correct' do. The it block description states the outcome in present tense without leading 'should' or 'will': it 'returns a signed JWT' do. Use is_expected.to rather than expect(subject).to in one-liner examples. Keep it descriptions under 40 characters; if longer, extract a context."
-why = "The adopted default. Produces readable failure messages, mirrors Ruby docs conventions, and is enforced by rubocop-rspec."
+why = "Produces readable failure messages, mirrors Ruby docs conventions, and is enforced by rubocop-rspec."
 
 [[option]]
 id = "freeform-strings"

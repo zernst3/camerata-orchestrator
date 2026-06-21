@@ -29,10 +29,10 @@ why = "An integration test exercises multiple modules working together (e.g. a s
 id = "integration-tests-live-in-dedicated-integration-directory"
 label = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory"
 directive = "Integration tests — tests that span more than one real module and may require a database, HTTP server, or message queue — are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
-why = "The adopted default. Integration tests have a different cost model (slower, require infra), need to be runnable independently, and cannot be owned by a single source file."
+why = "Integration tests have a different cost model (slower, require infra), need to be runnable independently, and cannot be owned by a single source file."
 
 [[option]]
 id = "integration-tests-co-located-with-test-suffix"
 label = "Integration tests are co-located with source using a .integration.test.ts suffix"
 directive = "Integration tests live next to the source under test, distinguished from unit tests by a .integration.test.ts (or .e2e.test.ts) suffix, and excluded from the fast unit-test run via a glob filter on that suffix."
-why = "A defensible alternative the project considered and did not adopt as the default. Keeps all tests near source but blurs the unit/integration boundary."
+why = "A defensible alternative the project considered. Keeps all tests near source but blurs the unit/integration boundary."

@@ -24,16 +24,16 @@ why = "The Rust Book (Ch 11.3) and Rust By Example establish the tests/ director
 id = "tests-dir-each-file-separate-crate"
 label = "tests/ top-level directory; each .rs file is a separate test crate"
 directive = "Integration tests live in a tests/ directory at the crate root (sibling to src/). Each .rs file in tests/ is compiled by Cargo as a separate crate and may only access the library's public API. Shared test utilities live in tests/common/mod.rs (not tests/common.rs) to prevent Cargo from treating them as a test binary. No #[cfg(test)] is needed in tests/ files. Core logic that must be integration-tested lives in src/lib.rs, not src/main.rs only."
-why = "The adopted default. Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Each file is an independent external crate, enforcing public-API-only access."
+why = "Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Each file is an independent external crate, enforcing public-API-only access."
 
 [[option]]
 id = "integration-tests-in-cfg-test-mod"
 label = "Integration tests in an inline #[cfg(test)] mod in lib.rs"
 directive = "Integration tests are placed in a #[cfg(test)] module inside src/lib.rs rather than in a separate tests/ directory."
-why = "A defensible alternative the project considered and did not adopt as the default. Loses external-crate perspective and blurs the unit/integration distinction."
+why = "A defensible alternative the project considered. Loses external-crate perspective and blurs the unit/integration distinction."
 
 [[option]]
 id = "integration-tests-in-separate-crate"
 label = "Integration tests in a dedicated crate in the workspace"
 directive = "Integration tests live in a dedicated workspace member crate (e.g., crates/my-lib-tests) rather than in the conventional tests/ directory."
-why = "A defensible alternative the project considered and did not adopt as the default. Valid for very large projects needing fine-grained dependency control; overkill at small/medium scale and diverges from cargo's built-in tests/ convention."
+why = "A defensible alternative the project considered. Valid for very large projects needing fine-grained dependency control; overkill at small/medium scale and diverges from cargo's built-in tests/ convention."

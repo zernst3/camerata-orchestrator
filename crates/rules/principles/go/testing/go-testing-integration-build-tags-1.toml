@@ -28,7 +28,7 @@ why = "go test ./... is the first command a developer runs to check correctness.
 id = "integration-build-tag"
 label = "//go:build integration tag on *_integration_test.go files"
 directive = "Tests that require live infrastructure (database, message queue, HTTP service) are placed in files named *_integration_test.go. Each such file begins with //go:build integration (followed by a blank line) before the package declaration. Unit tests have no build tag and run by default. CI runs integration tests separately with go test -tags=integration ./..."
-why = "The adopted default. Fast unit tests run by default; integration tests are opt-in. Standard //go:build syntax (Go 1.17+, replacing the deprecated // +build syntax)."
+why = "Fast unit tests run by default; integration tests are opt-in. Standard //go:build syntax (Go 1.17+, replacing the deprecated // +build syntax)."
 
 [[option]]
 id = "testmain-flag"

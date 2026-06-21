@@ -34,7 +34,7 @@ why = "Using package foo_test for tests exercises only the exported (public) API
 id = "black-box-by-default"
 label = "package foo_test by default; package foo only when internal access is required"
 directive = "New _test.go files declare package foo_test. When a test genuinely needs access to unexported symbols, it uses package foo with a comment explaining why. The testpackage linter is configured to require _test package declarations and flag exceptions."
-why = "The adopted default. Tests the public contract, prevents coupling to internals, and enables fearless refactoring."
+why = "Tests the public contract, prevents coupling to internals, and enables fearless refactoring."
 
 [[option]]
 id = "white-box-always"

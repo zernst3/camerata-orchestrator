@@ -28,16 +28,16 @@ why = "A test that asserts on ten independent properties fails on the first fail
 id = "one-logical-assertion-guideline"
 label = "One logical assertion (one reason to fail) per test — guideline"
 directive = "Each test verifies one logical behavior: it has a single reason to fail, and when it fails, the test name and failure message together identify which behavior broke without ambiguity. Multiple physical assert statements are acceptable when they all verify facets of the same single logical outcome (e.g., confirming every field of a returned record matches expectations). Multiple assert statements that each verify a distinct, independently-breakable behavior must be split into separate tests. Treat this as a guideline rather than a strict 'one assert per file' rule: the goal is single failure attribution, not minimal assert count."
-why = "The adopted default. A test with a single reason to fail names the broken behavior in its failure output; a multi-behavior test hides all failures after the first."
+why = "A test with a single reason to fail names the broken behavior in its failure output; a multi-behavior test hides all failures after the first."
 
 [[option]]
 id = "no-assertion-count-constraint"
 label = "No constraint on assertion count per test"
 directive = "Tests may assert on as many properties as the author finds useful in a single test body."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "strict-one-physical-assert"
 label = "Strict one physical assert statement per test"
 directive = "Each test file contains exactly one assert statement; all setup and teardown exists solely to enable that single check."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

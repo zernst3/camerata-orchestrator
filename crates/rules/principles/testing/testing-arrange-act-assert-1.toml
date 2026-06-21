@@ -28,10 +28,10 @@ why = "A test that mixes setup, action, and assertion is hard to read at a glanc
 id = "arrange-act-assert-no-interleaving"
 label = "Arrange / Act / Assert with no interleaving of phases"
 directive = "Each test has exactly one setup block (Arrange), one action block (Act), and one assertion block (Assert), in that order, with no assertion before the action and no additional action after the first assertion. Separate blocks with a blank line or a comment when it aids readability. Shared setup belongs in a before-each fixture, not copied into every test's Arrange block. The BDD equivalents (Given / When / Then) are accepted spellings of the same structure."
-why = "The adopted default. A consistent three-phase shape makes every test a self-documenting, scannable unit; interleaving phases obscures which action caused which outcome."
+why = "A consistent three-phase shape makes every test a self-documenting, scannable unit; interleaving phases obscures which action caused which outcome."
 
 [[option]]
 id = "freeform-no-required-structure"
 label = "No required internal structure; write tests in whatever order is natural"
 directive = "Tests may freely interleave setup, action, and assertion in whatever order the author finds clearest for the scenario."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -39,7 +39,7 @@ why = "time.Sleep is the most common source of flaky tests: the sleep duration i
 id = "deterministic-with-testing-helpers"
 label = "no time.Sleep; inject clocks; use t.TempDir, t.Setenv, t.Cleanup for isolation"
 directive = "Tests never call time.Sleep or time.Now directly. Code under test accepts a clock interface or time.Time parameter so tests pass a fixed time. Filesystem writes use t.TempDir() for isolation. Environment variable changes use t.Setenv(). Resource teardown uses t.Cleanup(). Random seeds are fixed at test start (e.g., rand.New(rand.NewSource(0))). Global state is avoided."
-why = "The adopted default. Eliminates the most common sources of test flakiness. Tests run in any order, on any machine, with identical results."
+why = "Eliminates the most common sources of test flakiness. Tests run in any order, on any machine, with identical results."
 
 [[option]]
 id = "sleep-based-timing"

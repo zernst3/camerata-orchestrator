@@ -33,7 +33,7 @@ why = "Copying a test function for each case produces duplication and is hard to
 id = "table-driven-with-t-run"
 label = "slice-of-structs table with named t.Run subtests"
 directive = "Tests with multiple input/output cases declare a slice (or map) of anonymous structs, each with a `name` field and the relevant input/expected fields. The loop variable is named `tt` or `tc` by convention. Each iteration calls t.Run(tt.name, func(t *testing.T) { ... }). Inside the subtest, t.Errorf reports failures with format 'FuncName(%v) = %v, want %v' (actual before expected). t.Fatal is reserved for setup failures; t.Error is used for assertion failures so all cases run."
-why = "The adopted default. Canonical Go idiom (Go Wiki TableDrivenTests). Clear failure attribution via subtest names. Individually runnable cases. Zero duplication of test logic."
+why = "Canonical Go idiom (Go Wiki TableDrivenTests). Clear failure attribution via subtest names. Individually runnable cases. Zero duplication of test logic."
 
 [[option]]
 id = "one-function-per-case"

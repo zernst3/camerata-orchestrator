@@ -33,7 +33,7 @@ why = "Placing _test.go files in the same directory as the code they test is the
 id = "colocated"
 label = "unit tests in foo_test.go alongside foo.go in the same directory"
 directive = "Every Go source file foo.go has its tests in foo_test.go in the same directory. The file name matches the source file name with the _test.go suffix appended. go test ./... discovers and runs all tests automatically."
-why = "The adopted default. Required by the go tool for automatic test discovery. Keeps tests adjacent to the code they test."
+why = "Required by the go tool for automatic test discovery. Keeps tests adjacent to the code they test."
 
 [[option]]
 id = "separate-test-directory"

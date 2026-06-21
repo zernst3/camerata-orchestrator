@@ -17,7 +17,7 @@ why = "Python's unittest.mock documentation states explicitly: 'The key is to do
 id = "patch-at-usage-namespace"
 label = "patch at the import namespace of the module under test; mock only external I/O boundaries"
 directive = "When using unittest.mock.patch, target the fully-qualified path of the name as it appears in the module under test: if mymodule.py contains `from lib import helper`, patch `mymodule.helper`, not `lib.helper`. For simple attribute replacement, prefer pytest's monkeypatch fixture over patch() to avoid context-manager boilerplate and guarantee cleanup. Mock only external boundaries: network, filesystem, database, clock (datetime.now, time.time), and randomness. Do not mock internal functions, private helpers, or anything whose only purpose is to break up a large function — that is a sign the design needs refactoring, not mocking. Use create_autospec() or spec= when creating a mock of a class or function so that the mock enforces the real signature and catches drift."
-why = "The adopted default. Patch in the right namespace or the real code runs; mock only boundaries or tests break on every refactor."
+why = "Patch in the right namespace or the real code runs; mock only boundaries or tests break on every refactor."
 
 [[option]]
 id = "patch-at-definition-site"

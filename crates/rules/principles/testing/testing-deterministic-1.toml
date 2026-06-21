@@ -28,16 +28,16 @@ why = "A flaky test — one that sometimes passes and sometimes fails on the sam
 id = "always-deterministic-no-flaky"
 label = "Tests are deterministic: same code, same outcome every run"
 directive = "A test must produce the same pass or fail outcome on every run against the same source code, regardless of run order, machine, time of day, or number of retries. Achieve this by: (1) injecting clocks and random-number generators so tests control time and randomness; (2) using in-process fakes or stubs instead of real network, filesystem, or external services; (3) isolating mutable state so each test starts from a clean baseline; (4) making test order irrelevant (no test depends on a side-effect left by a prior test). Never merge a test that is known to be flaky; fix the root cause before committing."
-why = "The adopted default. A flaky test destroys trust in the suite; developers learn to ignore failures rather than investigate them, turning the suite from a safety net into noise."
+why = "A flaky test destroys trust in the suite; developers learn to ignore failures rather than investigate them, turning the suite from a safety net into noise."
 
 [[option]]
 id = "retry-on-failure"
 label = "Allow flaky tests; re-run on failure up to N times before reporting red"
 directive = "Permit tests that are inherently timing- or environment-sensitive; compensate with automatic retry logic that re-runs a failing test up to N times and only marks it failed if all retries fail."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "quarantine-flaky"
 label = "Quarantine known-flaky tests outside the main suite rather than fixing them"
 directive = "Tag or move tests known to be flaky into a separate quarantine suite that does not block CI; run it separately with relaxed expectations."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

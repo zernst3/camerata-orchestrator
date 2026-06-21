@@ -27,10 +27,10 @@ why = "A disabled test is a bug that has been hidden rather than fixed. When a d
 id = "disabled-tests-are-forbidden-in-committed-code"
 label = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
 directive = "The jest/no-disabled-tests and jest/no-focused-tests rules are configured at error severity in the project ESLint config. xtest(), xit(), xdescribe(), test.skip(), it.skip(), describe.skip(), test.only(), it.only(), and describe.only() all fail the lint gate. A temporarily broken test is either fixed before the PR is merged or deleted with a GitHub issue tracking the restoration. A test that must be skipped in a specific environment uses a conditional jest.skip() call guarded by an environment variable, documented with a comment."
-why = "The adopted default. Disabled tests accumulate as hidden technical debt; the lint gate forces resolution at the point of authorship rather than deferring it indefinitely."
+why = "Disabled tests accumulate as hidden technical debt; the lint gate forces resolution at the point of authorship rather than deferring it indefinitely."
 
 [[option]]
 id = "disabled-tests-are-allowed-with-a-tracking-comment"
 label = "Disabled tests are allowed when accompanied by a tracking issue comment"
 directive = "Disabled tests (test.skip, xtest, etc.) are allowed provided each one has an inline comment with a tracking issue URL. jest/no-disabled-tests is set to warn rather than error so the lint step does not fail."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

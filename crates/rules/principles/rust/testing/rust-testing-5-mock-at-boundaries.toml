@@ -28,16 +28,16 @@ why = "Rust's ownership and type system make monkey-patching and global-function
 id = "mock-at-trait-boundaries-inject-via-generic-or-dyn"
 label = "Trait boundary injection: mock via #[automock] or hand-written test double, confined to #[cfg(test)]"
 directive = "Production code depends on traits, not concrete types, for any dependency that must be replaced in tests (external services, file system, clocks, random sources). Unit tests inject mock implementations of those traits. For simple mocks, write a struct inside #[cfg(test)] that implements the trait manually. For complex expectations (call counts, argument matchers, return sequences), use mockall::automock to generate a MockFoo type. Mock types and their impl blocks must be inside #[cfg(test)] or in a test-only module gated by #[cfg(test)]; mock structs must not appear in the production binary."
-why = "The adopted default. The only idiomatic Rust substitution point at the type level is a trait. This is the pattern the ecosystem converges on (mockall, double, faux, and hand-written doubles all assume trait boundaries)."
+why = "The only idiomatic Rust substitution point at the type level is a trait. This is the pattern the ecosystem converges on (mockall, double, faux, and hand-written doubles all assume trait boundaries)."
 
 [[option]]
 id = "cfg-flag-seam-for-substitution"
 label = "Use a cfg feature flag to substitute a test implementation"
 directive = "The production struct is replaced at compile time by a test version selected via a #[cfg(feature = \"test-impl\")] flag rather than via a trait object or generic parameter."
-why = "A defensible alternative the project considered and did not adopt as the default. Works for simple cases (e.g., swapping a clock) but does not compose, requires feature-flag cargo plumbing, and the substitution is compile-time-only not per-test."
+why = "A defensible alternative the project considered. Works for simple cases (e.g., swapping a clock) but does not compose, requires feature-flag cargo plumbing, and the substitution is compile-time-only not per-test."
 
 [[option]]
 id = "integration-tests-over-real-deps"
 label = "Prefer integration tests against real dependencies over mocking"
 directive = "Avoid mocking entirely; test with real dependencies (a real database, real HTTP server, real file system) in integration tests."
-why = "A defensible alternative the project considered and did not adopt as the default. Highest fidelity, but slow, requires environment setup, and is not suitable for fast feedback unit tests of business logic."
+why = "A defensible alternative the project considered. Highest fidelity, but slow, requires environment setup, and is not suitable for fast feedback unit tests of business logic."

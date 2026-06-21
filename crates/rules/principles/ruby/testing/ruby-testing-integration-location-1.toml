@@ -16,7 +16,7 @@ why = "Controller specs (spec/controllers/) test the controller object in isolat
 id = "requests-and-system"
 label = "API/HTTP flows in spec/requests/; full browser flows in spec/system/"
 directive = "Tests that exercise HTTP routing, authentication, middleware, and JSON response shape belong in spec/requests/. Tests that drive a browser (clicking links, filling forms, asserting on rendered HTML) belong in spec/system/. Both directories are subdirectories under spec/ and inherit the _spec.rb naming convention. spec/controllers/ is retired in new work; any existing controller specs are migrated on touch. Minitest equivalent: test/integration/ for multi-controller flows, test/system/ for browser flows."
-why = "The adopted default. Aligns with the rspec-rails team recommendation and Rails 5.1+ system test primitives."
+why = "Aligns with the rspec-rails team recommendation and Rails 5.1+ system test primitives."
 
 [[option]]
 id = "controller-specs"

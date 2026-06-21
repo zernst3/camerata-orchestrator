@@ -28,16 +28,16 @@ why = "Cargo runs tests in parallel across threads by default (cargo test) and a
 id = "deterministic-no-global-state-no-wall-clock-no-unseeded-random"
 label = "Deterministic isolation: no global mutable state, inject clocks and RNG, no env mutation"
 directive = "Every #[test] function must produce the same result regardless of test ordering, concurrency level, or how many times it is run. Concretely: (1) Do not read or write any static mutable variable (static Mutex, OnceLock with side effects, etc.) unless the test initializes and tears it down atomically. (2) Do not call std::env::set_var; if an env var is required, read it with std::env::var in the function under test and inject the value in tests. (3) Do not assert against SystemTime::now() or any wall-clock value; inject a clock trait. (4) Do not call rand::random() in the function under test without an injectable Rng parameter; pass a seeded SmallRng or StdRng in tests. (5) Do not write to a fixed file path; use tempfile::tempdir() for any temporary file system fixtures. A test that passes only when run in isolation but fails in the default parallel run is a flaky test and must be fixed, not annotated with #[ignore]."
-why = "The adopted default. Parallel-by-default (cargo test) and process-per-test (cargo-nextest) execution models both require test independence. Flaky tests erode confidence in the test suite faster than no tests at all."
+why = "Parallel-by-default (cargo test) and process-per-test (cargo-nextest) execution models both require test independence. Flaky tests erode confidence in the test suite faster than no tests at all."
 
 [[option]]
 id = "sequential-tests-with-global-state"
 label = "Allow global state; run tests sequentially (--test-threads=1)"
 directive = "Tests may share global mutable state; the test suite is run with --test-threads=1 to prevent concurrency issues."
-why = "A defensible alternative the project considered and did not adopt as the default. Correct but slow; does not scale with test suite size, and a future contributor running cargo test without the flag will see non-deterministic failures."
+why = "A defensible alternative the project considered. Correct but slow; does not scale with test suite size, and a future contributor running cargo test without the flag will see non-deterministic failures."
 
 [[option]]
 id = "per-test-cleanup-with-mutex"
 label = "Serialize access to shared state via a test Mutex"
 directive = "Tests that must share global mutable state serialize access via a shared Mutex in the test module, acquiring the lock at the start of each test and releasing on drop."
-why = "A defensible alternative the project considered and did not adopt as the default. Safer than --test-threads=1 for concurrent tests, but still couples tests to a shared resource and does not compose with process-per-test runners."
+why = "A defensible alternative the project considered. Safer than --test-threads=1 for concurrent tests, but still couples tests to a shared resource and does not compose with process-per-test runners."

@@ -28,16 +28,16 @@ why = "Rust's toolchain compiles and runs code blocks in /// documentation comme
 id = "doc-tests-on-public-api-items"
 label = "/// comments on pub items include a ```rust code block that cargo test compiles and runs"
 directive = "Every pub function, pub method, pub struct, and pub trait in a library crate carries a /// documentation comment. When the item has a non-trivial usage pattern, the comment includes at least one ``` code block (Rust is the default language; no explicit 'rust' tag needed) demonstrating the typical call. The code block must compile and run to success as part of cargo test. Lines that must be present for compilation but are noise for the reader are prefixed with # to hide them in rendered docs. Doc-tests that are expected to panic use the ```rust,should_panic annotation. Examples that must not run (e.g., they have side effects or require a running service) use ```rust,no_run. Private items and internal helpers do not require doc-tests."
-why = "The adopted default. Doc-tests are a first-class Rust feature that keep documentation examples synchronized with the API they document, enforced by the build."
+why = "Doc-tests are a first-class Rust feature that keep documentation examples synchronized with the API they document, enforced by the build."
 
 [[option]]
 id = "examples-dir-only-no-doc-tests"
 label = "Usage examples live in examples/ only; doc-tests are optional"
 directive = "Usage examples for public API items live in the examples/ directory as standalone runnable programs, not in /// comment code blocks. Doc-tests in comments are optional and not enforced."
-why = "A defensible alternative the project considered and did not adopt as the default. examples/ programs are richer and can express multi-step workflows, but they do not enforce that the documentation comment stays in sync with the API."
+why = "A defensible alternative the project considered. examples/ programs are richer and can express multi-step workflows, but they do not enforce that the documentation comment stays in sync with the API."
 
 [[option]]
 id = "no-examples-prose-doc-only"
 label = "Documentation comments are prose only; no code examples required"
 directive = "Public API items are documented with prose /// comments. No code examples are required in either documentation comments or the examples/ directory."
-why = "A defensible alternative the project considered and did not adopt as the default. Minimal investment but leaves consumers with no executable demonstration of usage and loses the build-time sync guarantee."
+why = "A defensible alternative the project considered. Minimal investment but leaves consumers with no executable demonstration of usage and loses the build-time sync guarantee."

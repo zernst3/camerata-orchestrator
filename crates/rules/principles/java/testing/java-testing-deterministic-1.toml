@@ -26,7 +26,7 @@ title = "JUnit 5 User Guide — Annotations (@BeforeEach resets per-test state; 
 id = "no-sleep-no-clock-no-random"
 label = "no Thread.sleep; inject Clock; fix random seeds; no inter-test ordering dependencies"
 directive = "Prohibit Thread.sleep() in all test code. Any production code that reads the current time must accept a java.time.Clock parameter (constructor-injected); tests pass Clock.fixed(...) to control time. Any production code that uses random values must accept a java.util.Random or equivalent; tests pass new Random(42) to fix the seed. Each @Test method must be independent: it must not read state written by another @Test method. Use @BeforeEach to set up fresh state before each test and @AfterEach to tear down. If a test involves asynchronous behavior, use Awaitility or CompletableFuture.get() with a timeout rather than Thread.sleep()."
-why = "The adopted default. Deterministic tests are the only tests worth having: they always give the same answer for the same code."
+why = "Deterministic tests are the only tests worth having: they always give the same answer for the same code."
 
 [[option]]
 id = "sleep-based-timing"

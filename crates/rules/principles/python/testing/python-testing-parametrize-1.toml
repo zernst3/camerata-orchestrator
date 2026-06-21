@@ -17,7 +17,7 @@ why = "pytest's @pytest.mark.parametrize decorator enables a single test functio
 id = "parametrize-decorator"
 label = "single test function with @pytest.mark.parametrize"
 directive = "When the same test logic must run with multiple different inputs and expected outputs, express it as a single test function decorated with @pytest.mark.parametrize('arg1,arg2,...', [...]) where each element of the list is a (input, expected) tuple or a pytest.param(). For a single parameter, pass a plain string as the argnames argument (not a one-element tuple). Mark individual cases with pytest.param(..., marks=pytest.mark.xfail) when a known-failing case must be included. Do not copy-paste the test body into multiple functions differing only in their literals."
-why = "The adopted default. Each case produces an independent result; adding a new case is a one-line change; Ruff PT006/PT007 keep the decorator call idiomatic."
+why = "Each case produces an independent result; adding a new case is a one-line change; Ruff PT006/PT007 keep the decorator call idiomatic."
 
 [[option]]
 id = "copy-pasted-test-functions"

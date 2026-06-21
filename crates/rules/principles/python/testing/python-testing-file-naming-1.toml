@@ -17,7 +17,7 @@ why = "pytest's test-collection algorithm relies on naming conventions: it searc
 id = "test-prefix-convention"
 label = "test_*.py files, test_ functions, Test classes"
 directive = "Every test file is named test_<subject>.py (e.g. test_user_service.py). Every test function is named test_<behavior>() (e.g. test_create_user_returns_id). Every test class is named Test<Subject> and contains no __init__ method. The *_test.py suffix form is acceptable but should be chosen consistently within the project. No custom python_files or python_functions settings are required."
-why = "The adopted default. Matches pytest's built-in discovery; no extra configuration required; universally familiar to Python contributors."
+why = "Matches pytest's built-in discovery; no extra configuration required; universally familiar to Python contributors."
 
 [[option]]
 id = "custom-naming"

@@ -24,16 +24,16 @@ why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body —
 id = "arrange-act-assert-in-order"
 label = "Arrange then Act then Assert, three distinct phases in sequence"
 directive = "Each #[test] function body is organized into three sequential phases with no interleaving. Arrange: declare and initialize all inputs, expected values, and test doubles. Act: invoke the unit under test exactly once. Assert: verify the outcome with assert!, assert_eq!, assert_ne!, or by checking an Err/Ok result. A single blank line between phases makes the structure visible. A test that requires more than one Act phase should be split into separate #[test] functions. Inline // Arrange / // Act / // Assert comments are encouraged in longer tests."
-why = "The adopted default. Mirrors the three-phase structure the Rust Book describes for test function bodies. One Act per test keeps failures attributable to a single cause."
+why = "Mirrors the three-phase structure the Rust Book describes for test function bodies. One Act per test keeps failures attributable to a single cause."
 
 [[option]]
 id = "free-form-test-body"
 label = "Free-form test body with no enforced phase structure"
 directive = "Test bodies may interleave setup, execution, and assertion in whatever order the test author finds clearest for the specific case."
-why = "A defensible alternative the project considered and did not adopt as the default. Lower friction for trivial tests but inconsistent structure makes test-reading at scale harder."
+why = "A defensible alternative the project considered. Lower friction for trivial tests but inconsistent structure makes test-reading at scale harder."
 
 [[option]]
 id = "given-when-then-bdd"
 label = "BDD-style Given-When-Then comments"
 directive = "Test bodies use // Given / // When / // Then comments instead of // Arrange / // Act / // Assert to match a BDD vocabulary."
-why = "A defensible alternative the project considered and did not adopt as the default. Semantically equivalent to AAA; acceptable if the team prefers BDD vocabulary but not the adopted term for this project."
+why = "A defensible alternative the project considered. Semantically equivalent to AAA; acceptable if the team prefers BDD vocabulary but not the adopted term for this project."
