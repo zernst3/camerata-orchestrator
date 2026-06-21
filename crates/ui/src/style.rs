@@ -3138,4 +3138,113 @@ html, body {
   border-left: 3px solid #d1d5db;
   margin: 0;
 }
+
+/* ── Governed Development page ──────────────────────────────────────────────
+   Two-pane layout: a left nav (Issue Management entry + a card per Unit of Work)
+   and a main area that shows the issue-management panel or a UoW's dev controls. */
+.govdev { display: grid; grid-template-columns: 260px 1fr; min-height: 0; gap: 0; }
+.govdev-nav {
+  border-right: 1px solid var(--line); background: #fbfaf7; padding: 14px;
+  display: flex; flex-direction: column; gap: 6px; overflow-y: auto;
+}
+.govdev-nav-top {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start; text-align: left;
+  border: 1px solid var(--line); background: var(--surface); border-radius: 9px;
+  padding: 11px 12px; cursor: pointer;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.govdev-nav-top:hover { border-color: var(--ink-faint); }
+.govdev-nav-top.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.govdev-nav-top-title { font-size: 13.5px; font-weight: 700; color: var(--ink); }
+.govdev-nav-top-sub { font-size: 11px; color: var(--ink-faint); }
+.govdev-nav-label {
+  font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 14px 0 4px;
+}
+.govdev-uow-list { display: flex; flex-direction: column; gap: 6px; }
+.govdev-uow-empty { font-size: 12px; color: var(--ink-faint); font-style: italic; margin: 0; }
+.govdev-uow-card {
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-start; text-align: left;
+  border: 1px solid var(--line); background: var(--surface); border-radius: 9px;
+  padding: 9px 10px; cursor: pointer;
+  transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+}
+.govdev-uow-card:hover { border-color: var(--ink-faint); }
+.govdev-uow-card.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.govdev-uow-title { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.3; }
+.govdev-uow-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.govdev-uow-repo {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
+  color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line);
+  padding: 1px 6px; border-radius: 5px;
+}
+.govdev-uow-stage {
+  font-size: 10px; font-weight: 700; letter-spacing: .03em; color: var(--accent-ink);
+  background: var(--accent-wash); border: 1px solid #e5c9bd; padding: 1px 7px; border-radius: 5px;
+}
+.govdev-main { padding: 18px 22px; overflow-y: auto; min-width: 0; }
+.govdev-h { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
+
+/* Issue Management panel */
+.issue-mgmt { max-width: 1000px; }
+.issue-conn {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  padding: 12px 14px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 8px;
+}
+.issue-conn-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.issue-conn-label { font-size: 11.5px; font-weight: 600; color: var(--ink-soft); min-width: 96px; }
+.issue-conn-prov { font-size: 13px; font-weight: 700; color: var(--ink); }
+.issue-conn-repos {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink);
+}
+.issue-conn-none { font-size: 12px; color: var(--ink-faint); font-style: italic; }
+.issue-pull-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+
+/* Work-item table (provider-agnostic) */
+.wi-table { width: 100%; border-collapse: collapse; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.wi-table thead th {
+  text-align: left; font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--ink-faint); padding: 9px 11px; background: #f6f4ef; border-bottom: 1px solid var(--line);
+}
+.wi-row { cursor: pointer; transition: background .12s var(--ease); border-bottom: 1px solid var(--line-soft); }
+.wi-row:hover { background: var(--accent-wash); }
+.wi-row td { padding: 9px 11px; font-size: 13px; color: var(--ink); vertical-align: middle; }
+.wi-col-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+.wi-col-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-soft); white-space: nowrap; }
+.wi-col-title { font-weight: 600; }
+.wi-col-labels { font-size: 11.5px; color: var(--ink-soft); }
+.wi-col-act { text-align: right; white-space: nowrap; }
+.wi-state {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 5px;
+  text-transform: uppercase;
+}
+.wi-state.active  { background: #e7eef7; color: #2f5f9e; }
+.wi-state.done    { background: #e2f1e7; color: #2f8f5b; }
+.wi-state.neutral { background: #ece9e3; color: #6c6862; }
+
+/* Work-item detail */
+.wi-detail {
+  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  padding: 14px 16px;
+}
+.wi-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.wi-detail-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
+.wi-detail-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
+.wi-detail-close { margin-left: auto; border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); font-size: 12px; padding: 3px 10px; border-radius: 6px; cursor: pointer; }
+.wi-detail-close:hover { color: var(--ink); border-color: var(--ink-faint); }
+.wi-detail-title { font-size: 15.5px; font-weight: 700; color: var(--ink); margin: 0 0 8px; }
+.wi-detail-body { font-size: 13px; color: var(--ink-soft); line-height: 1.5; white-space: pre-wrap; margin: 0 0 10px; }
+.wi-detail-body.empty { font-style: italic; color: var(--ink-faint); }
+.wi-detail-link { font-size: 12.5px; font-weight: 600; color: var(--accent-ink); text-decoration: none; }
+.wi-detail-link:hover { text-decoration: underline; }
+.wi-detail-actions { margin-top: 12px; }
+
+/* UoW dev controls */
+.uow-dev { max-width: 920px; }
+.uow-dev-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.uow-dev-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
+.uow-dev-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
+.uow-dev-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
+.uow-dev-pull-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.uow-comment { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px; }
 "#;
