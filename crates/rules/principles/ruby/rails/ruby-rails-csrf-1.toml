@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is CSRF protection handled for state-changing requests?"
@@ -28,3 +29,7 @@ id = "csrf-double-submit-cookie"
 label = "use the double-submit cookie pattern instead of server-side token"
 directive = "CSRF protection is implemented as a double-submit cookie rather than Rails' default synchronizer-token pattern."
 why = "A valid alternative for stateless APIs, but requires careful implementation; the Rails built-in synchronizer token is simpler and the right default for server-rendered applications."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/security.html#cross-site-request-forgery-csrf"
+title = "Rails Guides — Securing Rails Applications: Cross-Site Request Forgery (CSRF)"

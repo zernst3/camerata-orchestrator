@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a static-analysis gate (Brakeman, RuboCop) that flags string interpolation and concatenation in ActiveRecord methods like find_by_sql, execute, or raw. Conformance holds when the linter runs in CI and catches string-interpolated SQL."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values incorporated into SQL queries in ActiveRecord?"
@@ -23,3 +24,12 @@ id = "string-interpolation-with-escaping"
 label = "Interpolate values into SQL with manual escaping"
 directive = "Dynamic values are added to SQL strings via string interpolation with manual escaping or quoting logic rather than parameterized binding."
 why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database contexts."
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/sql_injection/"
+title = "Brakeman — SQL Injection warning type"
+linter = "Brakeman: SQL Injection"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/security.html#sql-injection"
+title = "Rails Guides — Securing Rails Applications: SQL Injection"

@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How does the project prevent N+1 queries when traversing ActiveRecord associations?"
@@ -28,3 +29,12 @@ id = "manual-sql-join"
 label = "write raw JOIN SQL to fetch associations"
 directive = "Associations are loaded by writing explicit SQL joins via `.joins` and selecting association columns manually, rather than using `includes` or `eager_load`."
 why = "Avoids N+1 but bypasses ActiveRecord association mapping; result columns must be mapped manually and the approach does not compose with the rest of the query API."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
+title = "Rails Guides — Active Record Query Interface: Eager Loading Associations"
+
+[[sources]]
+url = "https://github.com/flyerhzm/bullet"
+title = "Bullet gem — N+1 query detection for Rails"
+linter = "Bullet: N+1 query detection"

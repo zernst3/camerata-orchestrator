@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where do reusable query conditions live: as named scopes on the model, or as where-clause chains repeated at each call site?"
@@ -28,3 +29,7 @@ id = "default-scope"
 label = "apply recurring conditions as a default scope on the model"
 directive = "Conditions that should apply to all queries for a model (e.g. soft-delete filter) are set via `default_scope { where(deleted_at: nil) }`."
 why = "Convenient for filters that must always apply but introduces invisible filtering that surprises callers who expect unfiltered results; `unscoped` must be remembered to escape it."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_querying.html#scopes"
+title = "Rails Guides — Active Record Query Interface: Scopes"

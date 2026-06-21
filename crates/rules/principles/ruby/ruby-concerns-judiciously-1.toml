@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "When is a concern (Rails mixin module) the right abstraction?"
@@ -22,3 +23,7 @@ id = "concerns-liberally"
 label = "Use Concerns extensively, even for single-use or large behaviors"
 directive = "Concerns are used for any logic that can be extracted, including single-use Concerns and large cross-cutting blocks."
 why = "Can reduce boilerplate but risks creating hard-to-follow mixins with hidden dependencies and implicit expectations about the including class."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/engines.html#concerns"
+title = "Rails Guides — Engines: ActiveSupport::Concern for complex class modifications"

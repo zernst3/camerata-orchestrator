@@ -5,6 +5,7 @@ domain = "ruby"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How large and complex should individual methods be?"
@@ -22,3 +23,12 @@ id = "large-methods"
 label = "Allow large, multi-step methods for convenience"
 directive = "Methods can span many lines and handle multiple responsibilities in a single implementation."
 why = "Reduces indirection but makes code harder to follow, test, and reuse."
+
+[[sources]]
+url = "https://rubystyle.guide/#short-methods"
+title = "Ruby Style Guide — Short Methods"
+
+[[sources]]
+url = "https://docs.rubocop.org/rubocop/1.75/cops_metrics.html#metricsmethodlength"
+title = "RuboCop — Metrics/MethodLength cop"
+linter = "RuboCop: Metrics/MethodLength"

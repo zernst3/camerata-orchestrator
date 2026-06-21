@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the brakeman scanner (mass-assignment finding) and the Rails runtime: passing an unfiltered `params` hash to `.new`, `.create`, `.update`, or `.update_attributes` raises an ActiveModel::ForbiddenAttributesError in Rails 4+ when the Strong Parameters concern is active. Conformance holds when brakeman runs in CI and every controller action that accepts model attributes calls `.require(...)` and `.permit(...)` on params before passing them to the model; it fails when raw `params` or `params[:model]` is passed directly to a model method."
+verification = "grounded"
 
 [decision]
 question = "How does the project guard against mass-assignment vulnerabilities in controller actions?"
@@ -29,3 +30,12 @@ id = "no-mass-assignment-protection"
 label = "pass params directly to the model without filtering"
 directive = "Controller actions pass `params` or `params[:model]` directly to model methods without calling `.permit`."
 why = "Allows any attacker-controlled parameter to be written to the database; this is the original Rails mass-assignment vulnerability."
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/mass_assignment/"
+title = "Brakeman — Mass Assignment warning type"
+linter = "Brakeman: Mass Assignment"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
+title = "Rails Guides — Action Controller Overview: Strong Parameters"

@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by brakeman (SQL injection findings) and a Rubocop-Rails rule. Conformance holds when every `.where`, `.order`, `.joins`, `.group`, and `.having` call either passes a hash condition or a string literal with `?`/named-bind placeholders (`where('active = ? AND role = ?', true, role)`), never an interpolated string (`where(\"role = '#{role}'\")`). Any site where a Ruby variable or expression is interpolated directly into a SQL fragment string fails."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values placed into ActiveRecord query fragments?"
@@ -29,3 +30,12 @@ id = "string-interpolation"
 label = "interpolate values directly into SQL fragment strings"
 directive = "Dynamic values are embedded into SQL strings via Ruby string interpolation or concatenation inside `.where`, `.order`, or other query methods."
 why = "The canonical SQL injection antipattern; every such site is a latent vulnerability waiting for one unsanitized input."
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/sql_injection/"
+title = "Brakeman — SQL Injection warning type"
+linter = "Brakeman: SQL Injection"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/security.html#sql-injection"
+title = "Rails Guides — Securing Rails Applications: SQL Injection"

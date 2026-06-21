@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Rails' built-in strong_parameters feature and code review. Conformance holds when all controller actions use permit() to explicitly allow specific parameters before passing them to model methods like create() or update(). Static analysis (Brakeman) flags bare params hash usage in model mutations."
+verification = "grounded"
 
 [decision]
 question = "How does the controller restrict which parameters are passed to model creation and updates?"
@@ -23,3 +24,12 @@ id = "permissive-params"
 label = "Allow bare params to flow directly to models with minimal validation"
 directive = "Controllers pass params hashes directly to model methods like create(params) or update(params) with little or no filtering."
 why = "A defensible alternative the project considered and did not adopt; creates a mass-assignment vector where attackers can set any writable column."
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/mass_assignment/"
+title = "Brakeman — Mass Assignment warning type"
+linter = "Brakeman: Mass Assignment"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
+title = "Rails Guides — Action Controller Overview: Strong Parameters"
