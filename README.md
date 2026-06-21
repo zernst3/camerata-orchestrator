@@ -20,7 +20,9 @@ Cockpit, a Dioxus desktop app), then open the **Onboard repos** view.
     ▸ GOVERNANCE GATE — deny-before-execute blocks a real `claude -p` agent's
       forbidden write before it touches disk. Fail-closed, provider-neutral,
       binary pass/fail (not an LLM grading an LLM).      ← the defensible wedge
-      reproduce →  cargo run -p camerata -- live-demo
+      Runs in the CLI, not yet in the UI. The video shows the onboarding
+      pipeline; the gate is verified separately at the command line:
+      cargo run -p camerata -- live-demo
     ▸ BROWNFIELD ONBOARDING, end-to-end on fixtures — detect → two-tier audit
       → calibrate/dedup → triage → baseline waivers + GitHub issues → apply.
     ▸ 14-crate Rust workspace · 670+ tests · governs its OWN source in CI.
