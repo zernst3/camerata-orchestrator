@@ -3,14 +3,24 @@ title = "Dependency injection is via constructor parameters, not @Autowired fiel
 tag = "stack"
 domain = "java:spring"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
 qualifies = "Enforced by Checkstyle or Semgrep rules that flag @Autowired fields and recommend constructor injection. Conformance holds when dependencies are declared as constructor parameters and marked final, never as @Autowired instance fields."
+verification = "grounded"
 
 [decision]
 question = "How are dependencies injected into Spring beans?"
 default = "constructor-injection"
 why = "Constructor injection makes dependencies explicit (visible in the method signature), enforces immutability (fields can be final), and makes testing trivial (pass mock objects to the constructor without reflection). Field injection via @Autowired hides dependencies (they are invisible until runtime introspection), requires reflection and mutable fields, makes testing awkward (requires mocking the container or using reflection), and can lead to NullPointerException if the container fails to inject. Constructor injection also makes circular dependencies obvious (they cause constructor errors) rather than hidden (they appear only at runtime). Spring 5.1+ considers field injection a code smell and recommends constructor injection as best practice."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html"
+title = "Spring Framework Reference — Dependency Injection (Constructor-based DI)"
+
+[[sources]]
+url = "https://checkstyle.org/checks/design/visibilitymodifier.html"
+title = "Checkstyle VisibilityModifier — enforces private/final field visibility"
+linter = "Checkstyle: VisibilityModifier"
 
 [[option]]
 id = "constructor-injection"

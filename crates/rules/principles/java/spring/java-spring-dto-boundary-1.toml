@@ -5,11 +5,16 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: DTOs cross the HTTP boundary; JPA entities are never exposed directly in request or response bodies?"
 default = "dtos-at-http-boundary"
 why = "JPA entities are persistence-layer objects: they carry annotations (@Entity, @OneToMany, @Column, @JsonIgnore workarounds), bidirectional relationship fields that cause infinite recursion during JSON serialization, version fields, lazy-loaded collections that trigger queries when the serializer accesses them outside a transaction, and internal state that the API contract never intended to expose. Exposing an entity directly as a @ResponseBody object couples the API contract to the persistence model: adding a column to the database table changes the API response shape, renaming a relationship changes the JSON field name, and adding an audit field exposes it to all API consumers. Removing a field from the response requires @JsonIgnore, which is a leaky abstraction where the persistence model controls the serialization contract. DTOs (plain Java records or classes) represent what the API promises: they contain exactly the fields the API consumer needs, no more and no less, and their shape is independent of the persistence model. The mapping between entity and DTO (a mapper class or MapStruct-generated code) is the explicit, auditable contract between the two layers. This also eliminates the Jackson BidirectionalRelationship serialization problem and the LazyInitializationException that occurs when Jackson accesses a lazy collection after the transaction has closed."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
+title = "Spring MVC Reference — Validation (@Valid on @RequestBody; DTO binding)"
 
 [[option]]
 id = "dtos-at-http-boundary"

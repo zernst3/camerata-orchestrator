@@ -3,14 +3,19 @@ title = "@Valid (or @Validated) is applied to @RequestBody and @RequestParam par
 tag = "stack"
 domain = "java:spring"
 layer = "framework"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
 qualifies = "Enforced by a Checkstyle or Semgrep rule that flags @RequestBody parameters in controller methods that are not also annotated with @Valid or @Validated. Conformance holds when every @RequestBody parameter carries @Valid and a global @ControllerAdvice handles MethodArgumentNotValidException to return a structured 400 response."
+verification = "grounded"
 
 [decision]
 question = "How is incoming request body and parameter data validated before business logic runs?"
 default = "valid-annotation-on-request-body"
 why = "Spring MVC's @RequestBody binds the request JSON to a Java object but does not validate it by default. Without @Valid, a request body that omits a required field, provides a value outside the expected range, or violates a format constraint is bound to a partially populated DTO and passed to the controller method body. The method then operates on data whose constraints it assumes but cannot verify. Adding @Valid (or @Validated for group-sequenced validation) to the @RequestBody parameter instructs Spring to run Bean Validation (Jakarta Validation / Hibernate Validator) on the bound object before the method body executes. Constraint violations throw MethodArgumentNotValidException, which a global @ControllerAdvice exception handler catches and translates into a structured 400 response. This places validation at the earliest possible point (the binding layer), prevents malformed data from reaching service logic, and centralizes the 400 response format in one handler rather than scattering validation checks across controller methods. The DTO's constraint annotations (@NotNull, @Size, @Email, @Pattern) serve as both runtime enforcement and documentation of the API contract."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
+title = "Spring MVC Reference — Validation (@Valid / @Validated on @RequestBody triggers Bean Validation)"
 
 [[option]]
 id = "valid-annotation-on-request-body"

@@ -6,11 +6,16 @@ layer = "architecture"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by package structure conventions and code review. Controllers are in @Controller or @RestController classes; services are in @Service classes; repositories are in @Repository or Repository classes. Static analysis can flag direct @Autowired(Repository) in @Controller classes or database queries outside repository classes."
+verification = "grounded"
 
 [decision]
 question = "How is layering between controllers, services, and repositories enforced?"
 default = "strict-layering"
 why = "A three-tier architecture (presentation / business logic / data access) keeps concerns separated and testable. Controllers should only handle HTTP concerns (request parsing, response serialization, status codes); services should contain business logic and orchestration; repositories should only handle data access (queries, transactions). When controllers query the database directly, they cannot be tested without a database, and business logic in repositories is unreachable to other clients (CLI, workers, etc.). Enforcing layering makes code reusable, testable, and maintainable."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html"
+title = "Spring Framework Reference — Stereotype Annotations (@Controller, @Service, @Repository)"
 
 [[option]]
 id = "strict-layering"

@@ -6,11 +6,17 @@ layer = "language"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by code review and Checkstyle/SpotBugs rules that flag @Nullable return types and recommend Optional. IDEs can also hint that methods should return Optional instead of null."
+verification = "grounded"
 
 [decision]
 question = "How are missing or absent values represented in method return types?"
 default = "optional-return-types"
 why = "Returning null is a contract violation; callers must remember to check for null before using the return value, or face NullPointerException at runtime. This is the 'Billion Dollar Mistake' (Tony Hoare's term). Optional<T> makes the absence of a value explicit in the type signature, so the compiler and caller know that a value might not be present. Using Optional forces callers to explicitly handle the absent case (using ifPresent(), orElse(), orElseThrow(), etc.), making the code safer and more readable. Optional also chains well (Optional.map(), Optional.flatMap()) for functional operations. Null can still be used for internal state or legacy compatibility, but public API return types should use Optional to signal the possibility of absence."
+
+[[sources]]
+url = "https://errorprone.info/bugpatterns"
+title = "Error Prone — NullOptional: Passing null to an Optional parameter likely indicates a logic error"
+linter = "Error Prone: NullOptional"
 
 [[option]]
 id = "optional-return-types"

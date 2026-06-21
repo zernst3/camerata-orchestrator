@@ -6,11 +6,17 @@ layer = "architecture"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by code review and architectural guidelines. Small interfaces are easier to implement, test, and mock. Static analysis can flag interfaces with >5 methods and recommend splitting."
+verification = "grounded"
 
 [decision]
 question = "How large should interfaces be?"
 default = "small-focused-interfaces"
 why = "A small, focused interface is easier to implement, mock, and reason about. An interface that defines many methods (e.g., DatabaseService with 50 methods, or UserService with every operation a user might need) forces implementers to implement all 50 even if they only use 5, creates excessive surface area for testing and mocking, and couples callers to a large, brittle contract. Small interfaces also compose: two focused interfaces can be used together or embedded into a larger one as needed. The Interface Segregation Principle (SOLID) teaches that clients should not depend on interfaces they do not use. Splitting a large interface into small ones also makes partial implementations easier (some clients implement Readable but not Writable)."
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#excessivepubliccount"
+title = "PMD — ExcessivePublicCount: Flags classes/interfaces exposing too many public methods"
+linter = "PMD: ExcessivePublicCount"
 
 [[option]]
 id = "small-focused-interfaces"

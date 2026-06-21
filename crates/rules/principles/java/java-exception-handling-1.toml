@@ -6,11 +6,26 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, Semgrep) that flags empty catch blocks, catch-and-return patterns without logging, or catch blocks with only a comment. A conforming catch block must contain a log statement, a re-throw, or a throw with the original exception as the cause."
+verification = "grounded"
 
 [decision]
 question = "What should happen when an exception is caught?"
 default = "log-or-rethrow-with-context"
 why = "Silently swallowing an exception hides failures, makes debugging impossible, and allows the program to continue in an inconsistent state that later manifests as cryptic downstream errors. The original error context is lost, breaking the causal chain. Every catch block should either log the exception with context (so operations teams can diagnose failures), re-throw it (so a higher layer handles it), or transform it into a domain exception while preserving the cause. Empty catch blocks are the most common form of this anti-pattern and the hardest to debug in production."
+
+[[sources]]
+url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#de-method-might-ignore-exception-de-might-ignore"
+title = "SpotBugs — DE_MIGHT_IGNORE: Method might ignore exception"
+linter = "SpotBugs: DE_MIGHT_IGNORE"
+
+[[sources]]
+url = "https://checkstyle.org/checks/blocks/emptycatchblock.html"
+title = "Checkstyle — EmptyCatchBlock: Checks for empty catch blocks"
+linter = "Checkstyle: EmptyCatchBlock"
+
+[[sources]]
+url = "https://google.github.io/styleguide/javaguide.html#s6.2-caught-exceptions"
+title = "Google Java Style Guide — Section 6.2: Caught exceptions: not ignored"
 
 [[option]]
 id = "log-or-rethrow-with-context"

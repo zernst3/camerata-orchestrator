@@ -5,11 +5,16 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: @Transactional belongs on the service layer; controllers and repositories do not own transactions?"
 default = "transactional-on-service"
 why = "@Transactional on a Spring method wraps its execution in a database transaction: if the method completes normally, the transaction commits; if it throws a RuntimeException, the transaction rolls back. The placement of @Transactional determines the transaction boundary, which determines what constitutes an atomic unit of work. Placing @Transactional on a controller action means the transaction boundary is the HTTP request handler, which mixes HTTP concerns (request parsing, response formatting) with data-consistency concerns and prevents the service method from being called from non-HTTP entry points (jobs, CLI, message listeners) within a transaction. Placing @Transactional on a repository method means each individual data-access call is its own transaction, so a service method that calls three repository methods runs three separate transactions: if the third fails, the first two are already committed and cannot be rolled back. The service layer is the right owner because its methods represent logical operations — 'transfer funds between accounts,' 'create a user and send a welcome email' — that must succeed or fail atomically. The service method calls one or more repository methods within that single transaction boundary, and @Transactional on the service method gives Spring the instruction to wrap all of those repository calls in one transaction."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
+title = "Spring Framework Reference — Using @Transactional (service-layer examples, concrete class recommendation)"
 
 [[option]]
 id = "transactional-on-service"

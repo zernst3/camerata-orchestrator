@@ -5,11 +5,16 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: @RestController methods contain no business logic; they translate HTTP to service calls and return DTOs?"
 default = "thin-controllers-delegate-to-service"
 why = "A @RestController method's responsibility is protocol translation: extract the validated request parameters and body, call the service method that owns the business rule or data operation, and map the service result or exception onto an HTTP response (status code, headers, body DTO). When business logic (conditional branching, rule evaluation, multi-step orchestration) lives inside a @RestController method, it is entangled with the HTTP layer: the logic is only reachable via an HTTP request, so it cannot be unit-tested without spinning up the web layer (MockMvc or a full Spring context), it cannot be reused from a @Scheduled job or a message listener, and a change to the domain rule requires touching HTTP-layer code. The @Transactional annotation is particularly relevant here: @Transactional on a controller method requires the Spring Security and MVC proxy chain to play together correctly with the transaction AOP; on a service method it is unambiguous. The thin-controller rule is architectural: the boundary between the HTTP adapter and the application core is a structural decision, not a style preference."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html"
+title = "Spring Framework Reference — @RestController / @Service stereotype responsibilities"
 
 [[option]]
 id = "thin-controllers-delegate-to-service"
