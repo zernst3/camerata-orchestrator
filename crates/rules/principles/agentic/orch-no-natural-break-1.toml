@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-NO-NATURAL-BREAK-1 (never stop on a natural break)"
 
 [decision]
 question = "What position does the project take on: Never stop on a \"natural break\"?"

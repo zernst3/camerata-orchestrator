@@ -6,6 +6,11 @@ layer = "universal"
 enforcement = "architectural"
 default = true
 qualifies = "Architectural check (AST tier): a static-analysis pass parses the import/use declarations of each module and rejects any import that crosses a declared architectural boundary (a controller importing a repository, a domain module importing an infrastructure module, a feature module importing another feature's internals). This is a structural fact about the module graph, not a text pattern: an import string alone does not say which boundary it crosses; the checker needs the boundary map plus the parsed import list. No LLM is needed — the dependency either is or is not in the allowed set. Conformance holds when the import-boundary AST check runs in CI and a forbidden import fails the build; it fails when any module can import any other with nothing enforcing the layering."
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
+title = "Decision: An AST-checkable architectural enforcement tier — §ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 named as production rule"
 
 [decision]
 question = "What position does the project take on: No cross-boundary imports — modules import only their declared dependencies?"

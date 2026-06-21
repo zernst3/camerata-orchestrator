@@ -6,6 +6,11 @@ layer = "universal"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a lint rule (an ESLint no-restricted-imports / no-restricted-syntax rule or the stack equivalent) that blocks client-side permission introspection: the UI may not import the raw permission-code or role-membership helpers, only read the server-computed permission flags carried on each resource response. Conformance holds when that rule runs in CI and a client component that re-implements an authorization decision from raw codes fails the build; it fails when no rule blocks client-side introspection and the UI can recompute permissions in the browser."
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
 
 [decision]
 question = "What position does the project take on: Authorization on the server; UI renders permission hints?"

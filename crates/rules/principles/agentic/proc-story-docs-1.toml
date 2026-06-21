@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-20_poststoryhook_doc_emission.md"
+title = "Decision: PostStoryHook — per-story documentation emission (PROC-STORY-DOCS-1)"
 
 [decision]
 question = "How does the project capture durable, in-repo documentation for a change (beyond the commit/PR record)?"

@@ -6,6 +6,15 @@ layer = "universal"
 enforcement = "mechanical"
 default = true
 qualifies = "Prose check: a change-time gate verifies that the new code paths a diff introduces are actually exercised by tests in the same diff, not merely that the pre-existing suite stays green. The realistic mechanism is a per-diff coverage check on the introduced lines (a patch-coverage gate that fails when newly-added lines are uncovered) or an equivalent mutation check on the new branches. Conformance holds when the pipeline runs such a per-diff check and a diff that adds an untested branch is rejected; it fails when the only gate is a whole-project coverage percentage or a green run of the existing suite, both of which can pass while the new branch is entirely uncovered."
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-NEW-PATH-TESTS-1 (AI-authored code paths carry tests)"
+
+[[sources]]
+url = "docs/decisions/2026-06-20_uow_governed_dev_loop.md"
+title = "Decision: Wire the governed development loop over the Unit of Work — cites ORCH-NEW-PATH-TESTS-1"
 
 [decision]
 question = "What position does the project take on: AI-authored code paths carry tests, not just a passing existing suite?"

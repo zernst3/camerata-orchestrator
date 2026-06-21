@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
 
 [decision]
 question = "What position does the project take on: Every bug fix ships with a regression test that fails before the fix and passes after?"

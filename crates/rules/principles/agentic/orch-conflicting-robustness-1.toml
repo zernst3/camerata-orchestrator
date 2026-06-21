@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-CONFLICTING-ROBUSTNESS-1 (conflicting robustness is a real tradeoff)"
 
 [decision]
 question = "What position does the project take on: Conflicting robustness is a real tradeoff, not a clear winner?"

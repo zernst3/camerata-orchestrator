@@ -5,6 +5,11 @@ domain = "concurrency"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §PROC-PR-CONCURRENCY-1 (PR template forces a concurrency story)"
 
 [decision]
 question = "What position does the project take on: PR template forces a concurrency story?"

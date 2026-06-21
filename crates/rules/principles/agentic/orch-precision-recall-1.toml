@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-PRECISION-RECALL-1 (autonomous detection defaults to recall)"
 
 [decision]
 question = "How should autonomous detection signals balance false positives against false negatives?"

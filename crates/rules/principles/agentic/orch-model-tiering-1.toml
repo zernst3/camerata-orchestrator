@@ -5,6 +5,15 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-MODEL-TIERING-1 (model tiering)"
+
+[[sources]]
+url = "docs/decisions/2026-06-20_deterministic_model_tiering.md"
+title = "Decision: Deterministic model-tiering for the governed fleet (CapabilityBand, TierMap)"
 
 [decision]
 question = "How should models be tiered?"

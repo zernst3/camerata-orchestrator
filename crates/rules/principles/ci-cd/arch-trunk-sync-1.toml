@@ -5,6 +5,11 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — Branching & Release Flow section (release-branch changes sync to main ONCE post-prod-ship)"
 
 [decision]
 question = "How do release-line fixes get back to trunk?"

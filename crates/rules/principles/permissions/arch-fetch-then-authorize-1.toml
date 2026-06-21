@@ -5,6 +5,11 @@ domain = "permissions"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §ARCH-FETCH-THEN-AUTHORIZE-1 (authorization reads the fetched resource)"
 
 [decision]
 question = "Where does per-resource authorization happen relative to fetching the resource and running business logic?"

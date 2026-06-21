@@ -5,6 +5,11 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — referenced in brownfield onboarding context (auto-merge tight bot PRs)"
 
 [decision]
 question = "Which bot-authored PRs may self-merge?"

@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-NOVELTY-1 (novelty downgrades authority)"
 
 [decision]
 question = "What position does the project take on: Novelty downgrades authority?"

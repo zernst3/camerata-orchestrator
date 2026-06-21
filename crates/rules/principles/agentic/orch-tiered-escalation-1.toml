@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-TIERED-ESCALATION-1 (tiered escalation)"
 
 [decision]
 question = "How should flagged items gate the routine?"

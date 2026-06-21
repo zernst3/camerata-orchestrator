@@ -5,6 +5,11 @@ domain = "permissions"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §PROC-HIDE-DEAD-END-1 (hide dead-end affordances)"
 
 [decision]
 question = "What position does the project take on: Hide dead-end affordances?"

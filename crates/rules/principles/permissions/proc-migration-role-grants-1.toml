@@ -5,6 +5,11 @@ domain = "permissions"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §PROC-CI-MIGRATION-HYGIENE-1 + SQL-AUDIT-COLUMNS-1 domain (migration grant pattern)"
 
 [decision]
 question = "What position does the project take on: Adding a permission seeds its role grants in the same migration?"

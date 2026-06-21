@@ -5,6 +5,11 @@ domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-16_scan_execution_modes.md"
+title = "Decision: Scan execution modes — 'this is literally ARCH-PARALLEL-INDEPENDENT-1, our own rule' (explicitly cited)"
 
 [decision]
 question = "What position does the project take on: Independent concurrent calls in any code path run in parallel, not sequentially?"
