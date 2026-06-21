@@ -1,8 +1,7 @@
 # Camerata — end-to-end user guide
 
 This is the "I have a repo new to Camerata — where do I start, and how do I take it all
-the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat
-bubble's **Guide** mode) answers from. Keep it accurate to what's actually shipped — an
+the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
 > Status (updated 2026-06-19): the brownfield **onboarding flow is built and live** — per-repo
