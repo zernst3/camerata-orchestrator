@@ -1,0 +1,59 @@
+[package]
+name = "corpus-verifier"
+edition.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# corpus-verifier: MAINTAINER-ONLY repo-governance tool.
+#
+# It promotes corpus rules from `grounded` to `verified` by editing the rule
+# TOML in place, then committing on a `verify/*` branch and opening a PR into
+# `main`. `verified` is therefore ONLY ever set through a reviewed commit in the
+# source of truth.
+#
+# This is REPO TOOLING, NOT part of the shipped Camerata product. It is excluded
+# from the app deploy and MUST NEVER be a dependency of any app crate
+# (camerata-ui / camerata-server / camerata / ...). It is allowed to depend on
+# `camerata-rules` ONLY to read/identify the corpus.
+
+[lib]
+name = "corpus_verifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "corpus-verifier"
+path = "src/main.rs"
+
+# Thin Dioxus DESKTOP front-end over the same CORE the CLI uses. Same Dioxus 0.7
+# family version as crates/ui so the desktop patterns match.
+[[bin]]
+name = "corpus-verifier-gui"
+path = "src/bin/gui.rs"
+
+[dependencies]
+# Read the corpus only. corpus-verifier is the ONLY writer of `verified`, but it
+# reuses camerata-rules to load/identify rules (round-trip after editing).
+camerata-rules = { path = "../../crates/rules" }
+camerata-core = { path = "../../crates/core" }
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+
+# Targeted, formatting-preserving TOML editing (keeps comments + field order).
+toml_edit = "0.22"
+
+# CLI surface.
+clap = { version = "4", features = ["derive"] }
+
+# Date handling for the `at` field (today, ISO-8601) without panicking.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Thin desktop GUI, same family version as crates/ui.
+dioxus = { version = "0.7", features = ["desktop"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

@@ -16,6 +16,7 @@ members = [
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
     "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
+    "tools/corpus-verifier",  # MAINTAINER-ONLY repo-governance tool: promote rules grounded -> verified via branch + PR. NOT part of the shipped app; never a dependency of any app crate.
 ]
 
 [workspace.lints.rust]
