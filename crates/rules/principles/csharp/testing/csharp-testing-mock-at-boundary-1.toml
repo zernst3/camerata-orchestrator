@@ -1,0 +1,41 @@
+id = "CSHARP-TESTING-MOCK-AT-BOUNDARY-1"
+title = "Mocks and stubs target only infrastructure boundaries (I/O, external services, time); production class internals are never mocked"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Moq (or NSubstitute) is used exclusively for interfaces and abstractions that represent external dependencies: repositories, HTTP clients, email providers, clocks, message queues. Production classes that contain pure logic are never mocked — they are tested directly. When production code depends on a static reference (DateTime.Now, File.Exists) that makes tests non-deterministic, a seam interface (e.g. IDateTimeProvider) is introduced and injected via the constructor, then stubbed in tests."
+
+[decision]
+question = "When should mocks and stubs be used, and what should they target?"
+default = "mock-at-infrastructure-boundary"
+why = "Mocking a class that contains real business logic defeats the purpose of the test: you end up testing the mock's behavior rather than the production behavior. The correct target for mocks and stubs is the boundary between the system under test and external infrastructure (databases, network, time, file system). Microsoft's best-practices documentation demonstrates this with a concrete example: DateTime.Now makes a price-calculator test non-deterministic because results differ on different weekdays. The fix is to introduce IDateTimeProvider, inject it, and stub it in the test — giving the test full control of the system under test. Moq is the dominant .NET mocking library and is designed specifically for interface-level mocking: its API (Setup, Returns, Verify) operates on interface methods. Mocking concrete classes is possible but signals a design smell (missing interface abstraction at the boundary)."
+
+[[option]]
+id = "mock-at-infrastructure-boundary"
+label = "mock only interface-based boundaries (repositories, HTTP clients, time providers); test production logic directly"
+directive = "Dependencies injected into a class under test via constructor injection are represented as interfaces. In test setup, create a Mock<IMyDependency> using Moq, configure it with .Setup(x => x.Method()).Returns(value), inject it, and call the real system under test. After the Act, use mock.Verify(...) only when the test specifically cares about the interaction (call count, argument values). Use stubs (Setup only, no Verify) when only the returned value matters. Never create a Mock<> of a production class that contains logic you are not trying to isolate; instantiate it directly instead. Introduce seam interfaces (IDateTimeProvider, IFileSystem) for non-injectable static calls that would otherwise create non-determinism."
+why = "The adopted default. Boundaries are the only correct place to inject test doubles; mocking internals produces tests that pass even when production logic is broken."
+
+[[option]]
+id = "mock-concrete-classes"
+label = "mock concrete classes (not just interfaces) using Moq.Protected or virtual overrides"
+directive = "Use Mock<ConcreteClass>() and override virtual methods to isolate dependencies without introducing interfaces."
+why = "Creates a tight coupling between the test and the class's inheritance/virtual hierarchy; changes to the class break tests in unexpected ways. Requires the class to be designed for mocking (virtual methods), which is an artificial constraint."
+
+[[option]]
+id = "no-mocks-integration-style"
+label = "spin up real in-process infrastructure (SQLite, in-memory buses) even for unit tests"
+directive = "Unit tests instantiate real database connections (in-memory SQLite), real HTTP servers (TestServer), or real queue implementations."
+why = "These are integration tests, not unit tests; they are slower, order-dependent, and require environment setup. Reserve real infrastructure for the IntegrationTests project."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Handle stub static references with seams; Avoid infrastructure dependencies"
+
+[[sources]]
+url = "https://github.com/devlooped/moq"
+title = "Moq — The most popular and friendly mocking library for .NET"

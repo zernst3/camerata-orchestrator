@@ -1,0 +1,35 @@
+id = "CSHARP-TESTING-SEPARATE-UNIT-PROJECT-1"
+title = "Unit tests live in a dedicated .UnitTests project; integration tests live in a separate .IntegrationTests project"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Unit tests and integration tests are kept in separate csproj files that mirror the production project name (e.g. MyApp.UnitTests, MyApp.IntegrationTests). The unit-test project must never reference infrastructure packages (databases, HTTP clients, file-system I/O); the integration-test project may. Separate projects allow CI to run unit tests on every commit while deferring slower integration runs."
+
+[decision]
+question = "Where do unit tests and integration tests live relative to the production code?"
+default = "separate-test-projects"
+why = "Unit tests must be isolated: they run in milliseconds, have no external dependencies, and must be runnable in any environment. Integration tests exercise real infrastructure (databases, HTTP, queues) and are slower and environment-specific. Mixing both in one project makes it impossible to selectively run only unit tests in CI without complex filter expressions, and risks infrastructure packages (e.g., database drivers, WebApplicationFactory) leaking into the unit-test build. Microsoft's ASP.NET Core integration-test documentation explicitly states: 'Separating the tests helps ensure that infrastructure testing components aren't accidentally included in the unit tests.' The industry convention, reflected in all major .NET templates, is: MyApp.UnitTests.csproj and MyApp.IntegrationTests.csproj, each in its own directory, both added to the solution."
+
+[[option]]
+id = "separate-test-projects"
+label = "one .UnitTests project and one .IntegrationTests project, each in their own directory"
+directive = "Create MyApp.UnitTests/ and MyApp.IntegrationTests/ as sibling directories of the src/ folder (or alongside the production csproj). The unit-test project references only the production project and xUnit + Moq; it must not reference infrastructure packages. The integration-test project may reference Microsoft.AspNetCore.Mvc.Testing, real database packages, etc. Both projects are added to the solution file. CI runs dotnet test for unit tests on every commit; integration tests run in a later pipeline stage."
+why = "The adopted default. Separation enforces infrastructure isolation at the project level rather than relying on filtering conventions."
+
+[[option]]
+id = "single-test-project-with-categories"
+label = "one combined Tests project with [Trait] or category filters to distinguish unit from integration"
+directive = "A single MyApp.Tests project houses both unit and integration tests. Tests are tagged with [Trait(\"Category\", \"Unit\")] or [Trait(\"Category\", \"Integration\")] and CI filters with --filter."
+why = "Requires discipline to keep infrastructure packages from contaminating unit-test compilation; filter expressions are easy to misconfigure, allowing integration tests to run in unit-only CI jobs accidentally."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"
+title = "Integration tests in ASP.NET Core — Separation requirement"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Avoid infrastructure dependencies"

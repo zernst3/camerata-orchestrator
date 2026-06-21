@@ -1,0 +1,37 @@
+id = "CSHARP-TESTING-AAA-STRUCTURE-1"
+title = "Every test body follows Arrange-Act-Assert structure with one Act and one Assert per test"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Test methods are organized into three named sections: // Arrange (set up objects and state), // Act (invoke the behavior under test — exactly one call), and // Assert (verify the outcome — one logical assertion or one Assert per behavior). Multiple Act blocks in a single test are forbidden. Tests that naturally share Act inputs should use [Theory] + [InlineData] rather than loops or multiple Assert calls."
+
+[decision]
+question = "What internal structure must every test method follow?"
+default = "aaa-one-act-one-assert"
+why = "The Arrange-Act-Assert (AAA) pattern is the industry standard for C# unit-test structure, mandated by Microsoft's official best-practices documentation. Separating Arrange from Act from Assert makes clear (a) what pre-conditions the test depends on, (b) exactly which behavior is exercised, and (c) what the expected outcome is. When there is more than one Act in a test, a failing Assert may be ambiguous: which Act caused it? When there is logic (loops, conditionals) inside the test, the test itself can have bugs that are harder to diagnose than production bugs. Microsoft's documentation explicitly shows the anti-pattern (loop over test cases, multiple Assert inside loop) and its replacement (parameterized [Theory] + [InlineData]). A single Act call also prevents side-effect contamination between calls in the same method."
+
+[[option]]
+id = "aaa-one-act-one-assert"
+label = "// Arrange / // Act / // Assert comments, single Act call, single logical assertion"
+directive = "Every test method body is divided into three regions with // Arrange, // Act, and // Assert comments. The Arrange section creates and configures the system under test and any stubs/mocks. The Act section contains exactly one statement that invokes the behavior under test and captures its output. The Assert section contains assertions about the captured output; one logical concern per test is the goal. When multiple similar scenarios need testing, use [Theory] with [InlineData], [MemberData], or [ClassData] instead of a loop or multiple Act calls inside a single [Fact]."
+why = "The adopted default. Mandated by Microsoft's official unit-testing best-practices documentation with explicit before/after examples."
+
+[[option]]
+id = "multi-act-per-test"
+label = "multiple Act calls in a single test, multiple Assert blocks"
+directive = "A test can invoke the system under test multiple times in sequence and assert after each call."
+why = "When an Assert fails, it is impossible to know which Act caused it without a debugger. Subsequent assertions do not execute, hiding additional failures. Splits poorly with test filtering."
+
+[[option]]
+id = "logic-in-test"
+label = "control flow (loops, if) inside test bodies to cover multiple cases"
+directive = "Test methods use foreach or if/else to cover multiple inputs in a single test."
+why = "Logic in tests introduces the risk of bugs in the test itself; a bug in the loop could silently pass an invalid test case. Prefer [Theory] + [InlineData] for parameterized cases."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Arrange your tests; Avoid multiple Act tasks; Avoid coding logic in unit tests"

@@ -1,0 +1,37 @@
+id = "CSHARP-TESTING-INTEGRATION-WEBAPPLICATIONFACTORY-1"
+title = "ASP.NET Core integration tests use WebApplicationFactory<TProgram> to host the real application in-process; infrastructure is replaced via ConfigureWebHost"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Integration tests that exercise the full HTTP request/response pipeline use WebApplicationFactory<TProgram> from Microsoft.AspNetCore.Mvc.Testing to start the application in-process. Production infrastructure (database, external services) is replaced inside a subclass that overrides ConfigureWebHost. The test project references Microsoft.AspNetCore.Mvc.Testing and specifies Sdk=\"Microsoft.NET.Sdk.Web\". Tests implement IClassFixture<CustomWebApplicationFactory<Program>> to share the factory across tests in one class."
+
+[decision]
+question = "How is the ASP.NET Core application bootstrapped for integration tests?"
+default = "webapplicationfactory-in-process"
+why = "Integration tests that spin up the real application pipeline catch bugs that unit tests cannot: middleware ordering, routing resolution, filter execution, dependency injection registration mistakes, and request/response serialization. The correct .NET mechanism for this is WebApplicationFactory<TProgram>, which boots the application without network I/O (no open ports) using an in-process TestServer. The factory is extended via ConfigureWebHost to replace production databases with in-memory or SQLite equivalents, swap out external HTTP clients with stubs, and set the environment to 'Development' or 'Testing'. This approach is described in detail in Microsoft's official integration-testing documentation. Using IClassFixture<> with the factory ensures the in-process server starts once per test class (not once per test), keeping integration test suites fast. The test project must reference Microsoft.AspNetCore.Mvc.Testing and use the Web SDK because the factory needs access to the application's Web host builder."
+
+[[option]]
+id = "webapplicationfactory-in-process"
+label = "subclass WebApplicationFactory<TProgram>, override ConfigureWebHost to swap infrastructure, use IClassFixture to share the factory"
+directive = "Create a CustomWebApplicationFactory<TProgram> : WebApplicationFactory<TProgram> class. In ConfigureWebHost, call builder.ConfigureServices to remove the production DbContext registration and add an in-memory or SQLite equivalent, replace external HttpClient registrations with stub handlers, and call builder.UseEnvironment(\"Development\"). Test classes implement IClassFixture<CustomWebApplicationFactory<Program>>. Each test creates an HttpClient via _factory.CreateClient() and follows the Arrange-Act-Assert pattern: Arrange prepares the request, Act calls await client.GetAsync(\"/endpoint\"), Assert checks response.StatusCode and the deserialized body."
+why = "The adopted default. The in-process TestServer is the correct ASP.NET Core mechanism for integration tests; it exercises the real pipeline without network overhead."
+
+[[option]]
+id = "external-http-integration-tests"
+label = "integration tests call the running application on a real port (localhost:XXXX)"
+directive = "Tests start the application with 'dotnet run' and send real HTTP requests to the live URL."
+why = "Requires the application to be running before tests execute; introduces port-allocation races and environment dependencies. Not runnable in standard CI without extra setup. The WebApplicationFactory approach is both faster and more portable."
+
+[[option]]
+id = "no-integration-tests"
+label = "rely solely on unit tests; skip integration tests"
+directive = "Only unit tests are written; the HTTP pipeline and DI registrations are never integration-tested."
+why = "Skips an entire class of bugs — middleware ordering, routing, DI wiring — that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"
+title = "Integration tests in ASP.NET Core — WebApplicationFactory, project structure, IClassFixture pattern"

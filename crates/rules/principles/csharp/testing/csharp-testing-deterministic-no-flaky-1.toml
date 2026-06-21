@@ -1,0 +1,41 @@
+id = "CSHARP-TESTING-DETERMINISTIC-NO-FLAKY-1"
+title = "Tests are deterministic and environment-independent; no sleeps, random values, real clocks, or shared mutable state across tests"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "A test must produce the same pass/fail result on every run, on every machine, in any order. Non-determinism sources are forbidden in unit tests: Thread.Sleep, DateTime.Now/UtcNow (inject IDateTimeProvider), Random without a seeded value, shared static fields mutated by multiple tests, real file system paths, and environment variables read directly. xUnit creates a new test class instance per test, which prevents shared mutable instance state; static mutable state must be avoided."
+
+[decision]
+question = "How are non-determinism sources eliminated from unit tests?"
+default = "deterministic-by-design"
+why = "A test that sometimes passes and sometimes fails (a 'flaky' test) is actively harmful: developers learn to re-run tests until they go green rather than investigating failures, so real regressions hide behind noise. Microsoft's best-practices documentation codifies 'Repeatable' as one of the five required characteristics of a good unit test: 'Running a unit test should be consistent with its results. The test always returns the same result if you don't change anything in between runs.' The most common sources of non-determinism in C# unit tests are: (1) DateTime.Now — the fix is a seam interface (IDateTimeProvider) stubbed in tests; (2) Thread.Sleep for timing — the fix is a virtual clock or an interface; (3) shared static state modified by tests — xUnit's per-test class instantiation isolates instance state, but static fields bypass this; (4) file system or network calls — these belong in integration tests, not unit tests. The xUnit runner creates a new instance of the test class for every [Fact] and [Theory] case, which isolates all instance-level state automatically."
+
+[[option]]
+id = "deterministic-by-design"
+label = "inject clocks and random sources; no Thread.Sleep; no shared static mutable state; no file system or network in unit tests"
+directive = "DateTime.Now and DateTime.UtcNow are never read directly in production code that is unit-tested; instead, inject IClock or IDateTimeProvider and stub it in tests. Random is never used without a fixed seed in test helpers. Thread.Sleep and Task.Delay are never used inside unit tests; if timing behavior must be tested, use a virtual timer abstraction. Static mutable fields or properties shared across test classes are forbidden; use constructor injection and xUnit's per-test class instantiation for isolation. File system access and network calls are not allowed in unit tests; they belong in the IntegrationTests project."
+why = "The adopted default. Eliminates all known sources of flakiness at the design level."
+
+[[option]]
+id = "sleep-based-timing"
+label = "use Thread.Sleep or Task.Delay in tests to wait for async side-effects"
+directive = "Tests that depend on timing behavior sleep for a fixed duration to ensure side effects have occurred."
+why = "Introduces environment-specific flakiness: a sleep that is long enough on a developer laptop may be too short on a loaded CI agent, or vice versa. Any test with a sleep is non-deterministic."
+
+[[option]]
+id = "shared-static-state"
+label = "use static fields or class-level [OneTimeSetUp] equivalents to share state across tests"
+directive = "Static fields hold expensive objects (DbContext, HTTP clients) that are initialized once and reused by all tests in the file."
+why = "Shared mutable static state allows one test to corrupt the state seen by another, causing order-dependent failures. xUnit's IClassFixture and ICollectionFixture provide the correct mechanism for sharing expensive state without mutation risks."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Characteristics of good unit tests (Repeatable); Handle stub static references with seams"
+
+[[sources]]
+url = "https://xunit.net/docs/shared-context"
+title = "xUnit.net — Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture)"
