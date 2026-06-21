@@ -2064,7 +2064,59 @@ html, body {
 .rule-modal-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 700; color: var(--accent-ink); }
 .rule-modal-close { border: none; background: transparent; font-size: 16px; color: var(--ink-soft); cursor: pointer; padding: 2px 6px; }
 .rule-modal-close:hover { color: var(--ink); }
+.rule-modal-title-row {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin: 8px 0 12px;
+}
+/* Drop the bottom-margin from the title itself — the row wrapper owns it now. */
+.rule-modal-title-row .rule-modal-title { margin: 0; }
 .rule-modal-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 8px 0 12px; line-height: 1.35; }
+
+/* ── Verification / provenance badges ───────────────────────────────────────
+ *
+ * Four rungs of the rule grounding ladder, displayed:
+ *   - next to the rule NAME in the rule detail modal (.rule-modal-title-row)
+ *   - as a "Provenance" column in all three rule tables (proposed-rules in
+ *     onboarding, corpus + applied in the Rules window).
+ *
+ * Design intent:
+ *   verified      -> prominent GREEN checkmark — the one mark that means a human confirmed it.
+ *   grounded      -> subtle BLUE pill — cited source, usable, but not human-signed-off yet.
+ *   draft         -> muted GRAY italic — AI-generated, de-emphasized; not in the armed set.
+ *   needs_recheck -> distinct AMBER warning — was verified, source drifted; needs attention.
+ *
+ * Hover tooltip carries the source citation for `grounded` / `verified`; the
+ * browser's native `title` attribute provides it — no JS needed.
+ */
+.verif-badge {
+  display: inline-block;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; border-radius: 999px;
+  padding: 2px 9px; white-space: nowrap;
+  /* Tooltip cursor so the user knows there may be hover text. */
+  cursor: default;
+}
+
+/* verified: GREEN + checkmark — prominent, the gold standard. */
+.verif-badge-verified {
+  background: #dcfce7; color: #166534; border: 1px solid #bbf7d0;
+}
+
+/* grounded: BLUE — cited source, machine-grounded, fully usable. */
+.verif-badge-grounded {
+  background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe;
+}
+
+/* draft: GRAY + italic — de-emphasized; these are NOT in the armed ruleset. */
+.verif-badge-draft {
+  background: var(--paper); color: var(--ink-faint);
+  border: 1px solid var(--line); font-style: italic;
+}
+
+/* needs-recheck: AMBER — was verified, source drifted; does NOT wear the checkmark. */
+.verif-badge-needs-recheck {
+  background: #fef9c3; color: #854d0e; border: 1px solid #fde68a;
+}
 /* Full, wrapping explanation text in the finding-detail modal (the row cell truncates). */
 .rule-modal-detail { font-size: 13.5px; color: var(--ink-soft); margin: 4px 0 12px; line-height: 1.55; white-space: pre-wrap; }
 .rule-modal-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }

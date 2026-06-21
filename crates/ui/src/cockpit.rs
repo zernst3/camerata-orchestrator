@@ -804,6 +804,11 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
+    let verif_badges = BadgeVariantMap::new()
+        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
+        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
+        .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &AppliedRuleRow| {
             CellValue::Text(r.domain())
@@ -817,6 +822,19 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(300.0),
+        // Provenance badge sourced from the corpus join. Falls back to `draft` for
+        // unknown / custom rule ids that have no corpus entry.
+        ColumnDef::new(ColumnId("verif"), "Provenance", |r: &AppliedRuleRow| {
+            CellValue::Text(
+                r.corpus
+                    .as_ref()
+                    .map(|c| c.verification.clone())
+                    .unwrap_or_else(|| "draft".to_string()),
+            )
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(verif_badges))
+        .initial_width(140.0),
         ColumnDef::new(ColumnId("scope"), "Scope", |r: &AppliedRuleRow| {
             CellValue::Text(r.scope_label().to_string())
         })
@@ -849,6 +867,11 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
+    let verif_badges = BadgeVariantMap::new()
+        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
+        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
+        .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
         ColumnDef::new(ColumnId("domain"), "Domain", |r: &ProposedRuleView| {
             CellValue::Text(if r.domain.is_empty() {
@@ -866,6 +889,15 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(300.0),
+        // Provenance / verification badge: lets the architect see which rules are
+        // human-confirmed, which are grounded in a cited source, and which are still
+        // AI drafts before deciding to apply them. See `verif_badge()`.
+        ColumnDef::new(ColumnId("verif"), "Provenance", |r: &ProposedRuleView| {
+            CellValue::Text(r.verification.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(verif_badges))
+        .initial_width(140.0),
         ColumnDef::new(ColumnId("scope"), "Scope", |r: &ProposedRuleView| {
             CellValue::Text(r.scope.clone())
         })
@@ -1400,6 +1432,8 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
         return rsx! {};
     };
     let mut detail_rule_mut = use_context::<Signal<Option<ProposedRuleView>>>();
+    let (vbadge_label, vbadge_cls) = verif_badge(&r.verification);
+    let vsources_tip = verif_sources_tooltip(&r.sources);
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| detail_rule_mut.set(None),
             div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
@@ -1407,7 +1441,14 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
                     span { class: "rule-modal-id", "{r.id}" }
                     button { class: "rule-modal-close", onclick: move |_| detail_rule_mut.set(None), "\u{2715}" }
                 }
-                p { class: "rule-modal-title", "{r.title}" }
+                div { class: "rule-modal-title-row",
+                    p { class: "rule-modal-title", "{r.title}" }
+                    span {
+                        class: "verif-badge verif-badge-{vbadge_cls}",
+                        title: "{vsources_tip}",
+                        "{vbadge_label}"
+                    }
+                }
                 div { class: "rule-modal-meta",
                     span { class: "rule-modal-tag", "domain \u{00b7} {r.domain}" }
                     span { class: "rule-modal-tag", "scope \u{00b7} {r.scope}" }
@@ -4071,6 +4112,16 @@ struct RuleOptionView {
     why: String,
 }
 
+/// One authoritative source backing a rule's grounding (mirrors `RuleSourceView`
+/// from the server DTO). Used in `ProposedRuleView.sources`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+struct RuleSourceView {
+    url: String,
+    title: String,
+    #[serde(default)]
+    linter: Option<String>,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ProposedRuleView {
     id: String,
@@ -4098,6 +4149,59 @@ struct ProposedRuleView {
     finding_count: usize,
     #[serde(default)]
     recommended: bool,
+    /// Provenance / verification status: `draft` | `grounded` | `verified` |
+    /// `needs_recheck`. Defaults to `draft` for any rule that omits the field
+    /// (pre-schema corpus rules, AI-discovered rules). See
+    /// `docs/decisions/2026-06-20_rule_provenance_schema.md`.
+    #[serde(default = "default_draft")]
+    verification: String,
+    /// Authoritative sources backing this rule's grounding (empty for `draft`).
+    #[serde(default)]
+    sources: Vec<RuleSourceView>,
+}
+
+fn default_draft() -> String {
+    "draft".to_string()
+}
+
+/// Map a verification string to `(badge_label, css_modifier)`.
+///
+/// Used in every table that shows rules (proposed-rules in onboarding, corpus
+/// in the Rules window, applied in the Rules window) and in the rule detail
+/// modal. Pure function so it is unit-testable without a DOM.
+///
+/// CSS modifiers correspond to `.verif-badge.<modifier>` rules in GLOBAL_CSS:
+/// - `verified`     -> green checkmark badge ("Verified")
+/// - `grounded`     -> blue source-dot badge ("Grounded")
+/// - `draft`        -> muted italic badge ("Draft")
+/// - `needs_recheck`-> amber warning badge ("Needs re-check")
+/// - anything else  -> same as `draft`
+fn verif_badge(verif: &str) -> (&'static str, &'static str) {
+    match verif {
+        "verified"     => ("\u{2713} Verified",   "verified"),
+        "grounded"     => ("Grounded",             "grounded"),
+        "needs_recheck"=> ("Needs re-check",       "needs-recheck"),
+        _              => ("Draft",                "draft"),
+    }
+}
+
+/// Build a human-readable tooltip string from a list of sources.
+/// Returns an empty string when sources is empty (badge has no hover text in that case).
+fn verif_sources_tooltip(sources: &[RuleSourceView]) -> String {
+    if sources.is_empty() {
+        return String::new();
+    }
+    sources
+        .iter()
+        .map(|s| {
+            if let Some(ref linter) = s.linter {
+                format!("{} [{}]", s.title, linter)
+            } else {
+                s.title.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -4156,6 +4260,11 @@ impl CustomRuleView {
             placement: "Guidance in AGENTS.md, reviewed at PR (custom · prose)".to_string(),
             finding_count: 0,
             recommended: true,
+            // Custom rules are user-authored; they don't go through the corpus grounding
+            // ladder. Emit them as `verified` (the architect authored + trusts them) so
+            // they show the checkmark badge alongside corpus-verified rules.
+            verification: "verified".to_string(),
+            sources: Vec::new(),
         }
     }
 }
@@ -5012,6 +5121,16 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
         .with("process", BadgeVariant::new("Process", "gray"));
+    // Verification badge map: four rungs of the provenance ladder.
+    // `verified`      -> green  (human-confirmed, most trusted)
+    // `grounded`      -> blue   (cited source, machine-grounded)
+    // `needs_recheck` -> yellow (was verified; source drifted)
+    // `draft`         -> gray   (AI-generated, not yet grounded; default)
+    let verif_badges = BadgeVariantMap::new()
+        .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
+        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
+        .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
         // The group-by column (the table groups on this). A rule's corpus domain —
         // sql / api-layer / ui / security / architecture / process / integration.
@@ -5053,6 +5172,16 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(280.0),
+        // Provenance / verification state — displayed next to the rule name so the
+        // architect immediately sees whether a rule is human-verified, grounded in a
+        // cited source, a draft (AI-generated, not yet grounded), or flagged for
+        // re-check. See `verif_badge()` and `docs/decisions/2026-06-20_ui_verification_badges.md`.
+        ColumnDef::new(ColumnId("verif"), "Provenance", |r: &ProposedRuleView| {
+            CellValue::Text(r.verification.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(verif_badges))
+        .initial_width(140.0),
         ColumnDef::new(ColumnId("scope"), "Scope", |r: &ProposedRuleView| {
             CellValue::Text(r.scope.clone())
         })
@@ -6096,6 +6225,8 @@ fn RuleDetailModal() -> Element {
     let Some(r) = detail_rule() else {
         return rsx! {};
     };
+    let (vbadge_label, vbadge_cls) = verif_badge(&r.verification);
+    let vsources_tip = verif_sources_tooltip(&r.sources);
     rsx! {
         div { class: "rule-modal-overlay", onclick: move |_| detail_rule.set(None),
             div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
@@ -6103,7 +6234,14 @@ fn RuleDetailModal() -> Element {
                     span { class: "rule-modal-id", "{r.id}" }
                     button { class: "rule-modal-close", onclick: move |_| detail_rule.set(None), "\u{2715}" }
                 }
-                p { class: "rule-modal-title", "{r.title}" }
+                div { class: "rule-modal-title-row",
+                    p { class: "rule-modal-title", "{r.title}" }
+                    span {
+                        class: "verif-badge verif-badge-{vbadge_cls}",
+                        title: "{vsources_tip}",
+                        "{vbadge_label}"
+                    }
+                }
                 div { class: "rule-modal-meta",
                     span { class: "rule-modal-tag", "domain · {r.domain}" }
                     span { class: "rule-modal-tag", "scope · {r.scope}" }
@@ -8915,5 +9053,90 @@ mod tests {
             dollars_batch < dollars_parallel,
             "batch cheaper even with 0 rules: {dollars_batch:.4} < {dollars_parallel:.4}"
         );
+    }
+
+    // ── verif_badge() unit tests ──────────────────────────────────────────────
+    //
+    // Pure function, no DOM — each test just asserts label + CSS modifier.
+    // Coverage: all four canonical values + an unknown value (falls back to draft).
+
+    use super::{verif_badge, verif_sources_tooltip, RuleSourceView};
+
+    #[test]
+    fn verif_badge_verified_returns_checkmark_label_and_green_class() {
+        let (label, cls) = verif_badge("verified");
+        assert!(label.contains("Verified"), "label should mention Verified, got: {label}");
+        assert_eq!(cls, "verified");
+    }
+
+    #[test]
+    fn verif_badge_grounded_returns_grounded_label_and_blue_class() {
+        let (label, cls) = verif_badge("grounded");
+        assert_eq!(label, "Grounded");
+        assert_eq!(cls, "grounded");
+    }
+
+    #[test]
+    fn verif_badge_draft_returns_draft_label_and_gray_class() {
+        let (label, cls) = verif_badge("draft");
+        assert_eq!(label, "Draft");
+        assert_eq!(cls, "draft");
+    }
+
+    #[test]
+    fn verif_badge_needs_recheck_returns_distinct_label_and_class() {
+        let (label, cls) = verif_badge("needs_recheck");
+        assert!(label.contains("re-check") || label.contains("recheck"), "label should signal re-check, got: {label}");
+        assert_eq!(cls, "needs-recheck");
+    }
+
+    #[test]
+    fn verif_badge_unknown_value_falls_back_to_draft() {
+        // An unrecognised value (e.g. a future extension the UI hasn't caught up to)
+        // must not panic and must fall back to the `draft` visual.
+        let (label, cls) = verif_badge("something_new");
+        assert_eq!(label, "Draft");
+        assert_eq!(cls, "draft");
+    }
+
+    #[test]
+    fn verif_sources_tooltip_empty_sources_returns_empty_string() {
+        assert_eq!(verif_sources_tooltip(&[]), "");
+    }
+
+    #[test]
+    fn verif_sources_tooltip_with_linter_includes_bracket_suffix() {
+        let sources = vec![RuleSourceView {
+            url: "https://example.com".to_string(),
+            title: "Example rule".to_string(),
+            linter: Some("eslint: no-unused-vars".to_string()),
+        }];
+        let tip = verif_sources_tooltip(&sources);
+        assert!(tip.contains("Example rule"), "title absent: {tip}");
+        assert!(tip.contains("eslint: no-unused-vars"), "linter absent: {tip}");
+    }
+
+    #[test]
+    fn verif_sources_tooltip_without_linter_uses_title_only() {
+        let sources = vec![RuleSourceView {
+            url: "https://example.com".to_string(),
+            title: "Google Style Guide".to_string(),
+            linter: None,
+        }];
+        let tip = verif_sources_tooltip(&sources);
+        assert_eq!(tip, "Google Style Guide");
+    }
+
+    #[test]
+    fn verif_sources_tooltip_multiple_sources_joined_with_separator() {
+        let sources = vec![
+            RuleSourceView { url: "u1".to_string(), title: "Source A".to_string(), linter: None },
+            RuleSourceView { url: "u2".to_string(), title: "Source B".to_string(), linter: Some("tool: rule".to_string()) },
+        ];
+        let tip = verif_sources_tooltip(&sources);
+        // Both titles must appear; the separator is " · " (middle dot).
+        assert!(tip.contains("Source A"), "Source A missing: {tip}");
+        assert!(tip.contains("Source B"), "Source B missing: {tip}");
+        assert!(tip.contains(" · "), "separator missing: {tip}");
     }
 }
