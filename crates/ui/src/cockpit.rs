@@ -1659,6 +1659,9 @@ fn RulesView() -> Element {
     // Signal from Table 2 to Table 1: "go to this repo".
     let goto_repo: Signal<Option<String>> = use_signal(|| None);
 
+    // pw/cockpit-ui: single-rule editor — the rule currently open for editing (None = closed).
+    let mut single_edit_rule: Signal<Option<ProposedRuleView>> = use_signal(|| None);
+
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
     let corpus = corpus_res.read().clone().flatten().unwrap_or_default();
@@ -1729,12 +1732,28 @@ fn RulesView() -> Element {
                     let pid_emit = p.id.clone();
                     let pid_sup = p.id.clone();
                     let pid_health = p.id.clone();
+                    let pid_drift = p.id.clone();
                     let p_modal = p_owned.clone();
                     let p_t1 = p_owned.clone();
                     let p_t2 = p_owned.clone();
+                    let p_edit = p_owned.clone();
                     let corpus_t1 = corpus.clone();
                     let corpus_t2 = corpus.clone();
                     rsx! {
+                        // pw/cockpit-ui Feature 3: single-rule editor overlay. Rendered at
+                        // the subtree root (same ghost-click-eater rationale as RulesDetailModalHost).
+                        if let Some(rule_for_edit) = single_edit_rule() {
+                            SingleRuleEditor {
+                                project: p_edit.clone(),
+                                rule: rule_for_edit,
+                                on_close: move |_| single_edit_rule.set(None),
+                                on_saved: move |_| {
+                                    single_edit_rule.set(None);
+                                    refresh += 1;
+                                },
+                            }
+                        }
+
                         // The modal host is rendered at this subtree root (outside the chorale
                         // tables) to avoid the ghost-click-eater bug. option_picked persists
                         // the chosen option immediately on every pick.
@@ -1771,6 +1790,41 @@ fn RulesView() -> Element {
                         // Broken-path health check (issue #33): up top so a path that doesn't
                         // resolve to a local checkout is the first thing the architect sees.
                         RepoHealthPanel { project_id: pid_health }
+
+                        // pw/cockpit-ui Feature 2: rule-drift notice. Shows rules whose corpus
+                        // entry changed since they were adopted, with inline diffs and "Update".
+                        RuleDriftNotice { project_id: pid_drift }
+
+                        // pw/cockpit-ui Feature 3: "Edit rule" entry point — opens the
+                        // SingleRuleEditor for the currently-selected corpus rule. Placed above
+                        // Table 1 so it's visible without scrolling past the table.
+                        if !corpus.is_empty() {
+                            {
+                                let corpus_for_edit = corpus.clone();
+                                rsx! {
+                                    div { class: "single-rule-edit-entry",
+                                        p { class: "section-hint",
+                                            "To edit a single rule's option (project-level or repo override), "
+                                            "select a rule in the corpus table below and click the button."
+                                        }
+                                        select {
+                                            class: "single-rule-edit-select",
+                                            onchange: move |e: Event<FormData>| {
+                                                let id = e.value();
+                                                if id.is_empty() { return; }
+                                                if let Some(r) = corpus_for_edit.iter().find(|r| r.id == id) {
+                                                    single_edit_rule.set(Some(r.clone()));
+                                                }
+                                            },
+                                            option { value: "", "Choose a rule to edit…" }
+                                            for r in corpus.iter() {
+                                                option { key: "{r.id}", value: "{r.id}", "{r.id} — {r.title}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // Table 1: the project's applied rules, filterable by repo, with
                         // option-edit (via modal) and remove-from-repo actions.
@@ -3441,6 +3495,7 @@ pub fn CockpitApp() -> Element {
         let conn = provider_res.read().clone().flatten();
         return rsx! {
             div { class: "cockpit",
+                AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     OnboardView { connection: conn }
@@ -3451,6 +3506,7 @@ pub fn CockpitApp() -> Element {
     if view() == CockpitView::Rules {
         return rsx! {
             div { class: "cockpit",
+                AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     RulesView {}
@@ -3461,6 +3517,7 @@ pub fn CockpitApp() -> Element {
     if view() == CockpitView::Routines {
         return rsx! {
             div { class: "cockpit",
+                AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     crate::routines::RoutineDashboard {}
@@ -3471,6 +3528,7 @@ pub fn CockpitApp() -> Element {
     if view() == CockpitView::Workspace {
         return rsx! {
             div { class: "cockpit",
+                AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     crate::workspace::WorkspaceView {}
@@ -3481,6 +3539,7 @@ pub fn CockpitApp() -> Element {
     if view() == CockpitView::Docs {
         return rsx! {
             div { class: "cockpit",
+                AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     DocsView {}
@@ -3519,6 +3578,7 @@ pub fn CockpitApp() -> Element {
 
             rsx! {
                 div { class: "cockpit",
+                    AppUpdateBanner {}
                     CockpitNav { view }
                     CockpitTopBar { story: current.clone(), connection: conn.clone() }
                     GateSelfCheck {}
@@ -4158,6 +4218,14 @@ struct ProposedRuleView {
     finding_count: usize,
     #[serde(default)]
     recommended: bool,
+    /// Server-side auto-recommend flag (pw/cockpit-ui product wave). The server
+    /// emits `is_auto_recommended: true` for rules whose `verification` is
+    /// `grounded` or `verified` (the two rungs that have been reviewed against a
+    /// real source). `draft` and `needs_recheck` rules arrive with it `false`.
+    /// Falls back to `recommended` when the field is absent so old server payloads
+    /// continue to work.
+    #[serde(default)]
+    is_auto_recommended: bool,
     /// Provenance / verification status: `draft` | `grounded` | `verified` |
     /// `needs_recheck`. Defaults to `draft` for any rule that omits the field
     /// (pre-schema corpus rules, AI-discovered rules). See
@@ -4171,6 +4239,29 @@ struct ProposedRuleView {
 
 fn default_draft() -> String {
     "draft".to_string()
+}
+
+impl ProposedRuleView {
+    /// True when this rule should be pre-checked on first view of the proposed-rules
+    /// table. Prefers the explicit `is_auto_recommended` field (set by the pw/cockpit-ui
+    /// server wave); falls back to `recommended` for older server payloads.
+    ///
+    /// Only `grounded` and `verified` rules are auto-recommended because those are the
+    /// two rungs of the provenance ladder that have been reviewed against a real source.
+    /// `draft` and `needs_recheck` appear LISTED but unchecked so the architect must
+    /// explicitly opt them in.
+    fn effective_auto_recommended(&self) -> bool {
+        // If the server sent an explicit `is_auto_recommended` flag, honour it.
+        // Otherwise derive from `verification`: grounded/verified → recommended.
+        if self.is_auto_recommended {
+            return true;
+        }
+        // Back-compat: use `recommended` only when the rule is also grounded/verified.
+        // A `recommended: true` on a `draft` rule was previously possible; we now
+        // treat those as "available (not auto-recommended)" to match the new UX contract.
+        self.recommended
+            && matches!(self.verification.as_str(), "grounded" | "verified")
+    }
 }
 
 /// Map a verification string to `(badge_label, css_modifier)`.
@@ -4275,7 +4366,9 @@ impl CustomRuleView {
             recommended: true,
             // Custom rules are user-authored; they don't go through the corpus grounding
             // ladder. Emit them as `verified` (the architect authored + trusts them) so
-            // they show the checkmark badge alongside corpus-verified rules.
+            // they show the checkmark badge alongside corpus-verified rules, and
+            // is_auto_recommended = true so they are pre-checked on the proposed-rules table.
+            is_auto_recommended: true,
             verification: "verified".to_string(),
             sources: Vec::new(),
         }
@@ -5199,14 +5292,15 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         // architect tick the domains they care about (sql + api-layer, say) and see only those.
         .filter(FilterKind::MultiSelect { options: domains })
         .initial_width(150.0),
-        // Suggested = the rule's domain matched the scanned stack; the rest are the full
-        // library, available to arm but not recommended for this stack.
+        // Auto-recommend status: `recommended` = grounded/verified rules pre-checked for
+        // this stack; `available` = draft/needs_recheck rules listed but unchecked.
+        // The badge makes the provenance tier immediately visible alongside the rule row.
         ColumnDef::new(
             ColumnId("suggested"),
-            "For this stack",
+            "Recommendation",
             |r: &ProposedRuleView| {
-                CellValue::Text(if r.recommended {
-                    "suggested".to_string()
+                CellValue::Text(if r.effective_auto_recommended() {
+                    "recommended".to_string()
                 } else {
                     "available".to_string()
                 })
@@ -5215,10 +5309,10 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                .with("suggested", BadgeVariant::new("Suggested", "green"))
+                .with("recommended", BadgeVariant::new("\u{2713} Recommended", "green"))
                 .with("available", BadgeVariant::new("Available", "gray")),
         ))
-        .initial_width(130.0),
+        .initial_width(150.0),
         ColumnDef::new(ColumnId("id"), "Rule", |r: &ProposedRuleView| {
             CellValue::Text(r.id.clone())
         })
@@ -5749,14 +5843,14 @@ fn ProposedRulesTable(
                 .filter(|(_, p)| ids.contains(&p.id))
                 .map(|(r, _)| *r)
                 .collect(),
-            // First view: pre-select all recommended rules — including ones that still need an
-            // alternative chosen. Those load SELECTED + unresolved, so they highlight yellow and
-            // gate audit/arm until the architect picks an alternative (or deselects them). The
-            // per-repo selection model means this no longer causes the old invisible cross-repo
-            // block.
+            // First view: pre-select all auto-recommended rules — grounded/verified rules
+            // whose provenance has been reviewed against a real source. Draft + needs_recheck
+            // rules appear listed but unchecked so the architect must opt them in explicitly.
+            // Rules that are selected but still need an alternative highlighted yellow and
+            // gate audit/arm until the architect picks an alternative (or deselects them).
             None => rows
                 .iter()
-                .filter(|(_, p)| p.recommended)
+                .filter(|(_, p)| p.effective_auto_recommended())
                 .map(|(r, _)| *r)
                 .collect(),
         }
@@ -7235,6 +7329,14 @@ fn ScanResults(report: ScanReportView) -> Element {
     // threat model) after the standard audit and attaches the results as `report.deep`.
     // Output is ADVISORY — never a SOC-2 report or a penetration test.
     let mut audit_deep = use_signal(|| false);
+    // pw/cockpit-ui Feature 5: feature-flag map. Controls per-feature affordances —
+    // SOC-2 section visibility, deep-export scope. Fetched once on mount; degrades
+    // gracefully (all flags default to false) when the server is old.
+    let feature_flags_res = use_resource(fetch_feature_flags);
+    let feature_flags = feature_flags_res
+        .read()
+        .clone()
+        .unwrap_or_default();
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
@@ -7267,7 +7369,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 let ids: Vec<String> = report
                     .proposed_rules
                     .iter()
-                    .filter(|r| r.recommended && r.repos.iter().any(|rp| rp == repo))
+                    .filter(|r| r.effective_auto_recommended() && r.repos.iter().any(|rp| rp == repo))
                     .map(|r| r.id.clone())
                     .collect();
                 m.insert(repo.clone(), ids);
@@ -8122,76 +8224,117 @@ fn ScanResults(report: ScanReportView) -> Element {
                 // Shown only when the audit ran with deep:true and the server returned the
                 // three-lens report. Everything here is ADVISORY — never a SOC-2 report or
                 // a penetration test. The disclaimer at the top of each lens makes this explicit.
-                if let Some(deep) = audited.as_ref().and_then(|a| a.deep.clone()) {
-                    div { class: "deep-tier-panel",
-                        p { class: "deep-tier-heading", "Deep compliance & security tier (ADVISORY)" }
-                        // Tier-level disclaimer — surfaced prominently before any findings.
-                        if !deep.disclaimer.is_empty() {
-                            p { class: "deep-tier-disclaimer", "{deep.disclaimer}" }
-                        } else {
-                            p { class: "deep-tier-disclaimer",
-                                "ADVISORY ONLY. This output is model-inferred from static code. \
-                                 It is not a SOC-2 report, not a certification, and not a penetration test. \
-                                 Controls that require organisational evidence (policies, HR, vendor contracts) \
-                                 cannot be assessed from code alone. A qualified professional must review and \
-                                 validate these findings before any compliance or security claim is made."
+                //
+                // pw/cockpit-ui Feature 5: the SOC-2 lens (soc2-gap) is gated by the `soc2`
+                // feature flag. When the flag is off, the SOC-2 section is hidden entirely;
+                // deep-security and threat-model still render. The flag state comes from the
+                // `feature_flags` map fetched at mount time.
+                {
+                    let soc2_on = feature_flags.soc2;
+                    if let Some(deep) = audited.as_ref().and_then(|a| a.deep.clone()) {
+                        rsx! {
+                        div { class: "deep-tier-panel",
+                            p { class: "deep-tier-heading", "Deep compliance & security tier (ADVISORY)" }
+                            // Tier-level disclaimer — surfaced prominently before any findings.
+                            if !deep.disclaimer.is_empty() {
+                                p { class: "deep-tier-disclaimer", "{deep.disclaimer}" }
+                            } else {
+                                p { class: "deep-tier-disclaimer",
+                                    "ADVISORY ONLY. This output is model-inferred from static code. \
+                                     It is not a SOC-2 report, not a certification, and not a penetration test. \
+                                     Controls that require organisational evidence (policies, HR, vendor contracts) \
+                                     cannot be assessed from code alone. A qualified professional must review and \
+                                     validate these findings before any compliance or security claim is made."
+                                }
                             }
-                        }
-                        for lens in deep.lenses.iter() {
-                            {
-                                let (heading, description) = match lens.lens.as_str() {
-                                    "soc2-gap"       => ("SOC-2 Readiness Gap Analysis",
-                                                          "Maps the repo's detectable practices against SOC-2 Common Criteria and reports gaps. \
-                                                           This is a gap analysis, not a SOC-2 report. \
-                                                           Controls needing organisational evidence are marked unknown."),
-                                    "deep-security"  => ("Deep Security Audit",
-                                                          "Authorization, authentication, sensitive-data handling, and injection paths beyond the \
-                                                           deterministic floor. Every finding is advisory — a human must validate each one."),
-                                    "threat-model"   => ("Threat Model",
-                                                          "Entry points, trust boundaries, sensitive-data paths, and STRIDE-flavoured threats with \
-                                                           mitigation directions. Model-inferred from the repo structure."),
-                                    other            => (other, ""),
-                                };
-                                let lens = lens.clone();
-                                rsx! {
-                                    div { class: "deep-lens", key: "{lens.lens}",
-                                        p { class: "deep-lens-heading", "{heading}" }
-                                        p { class: "deep-lens-desc", "{description}" }
-                                        if !lens.disclaimer.is_empty() {
-                                            p { class: "deep-lens-disclaimer", "{lens.disclaimer}" }
-                                        }
-                                        if !lens.summary.is_empty() {
-                                            p { class: "deep-lens-summary", "{lens.summary}" }
-                                        }
-                                        // SOC-2 gap table
-                                        if !lens.soc2_gaps.is_empty() {
-                                            div { class: "soc2-gap-table",
-                                                div { class: "soc2-gap-row header",
-                                                    span { class: "soc2-col-ctrl", "Control" }
-                                                    span { class: "soc2-col-title", "Title" }
-                                                    span { class: "soc2-col-status", "Status" }
-                                                    span { class: "soc2-col-obs", "Observed" }
-                                                    span { class: "soc2-col-gap", "Gap / Remediation" }
-                                                }
-                                                for (i, gap) in lens.soc2_gaps.iter().enumerate() {
-                                                    div { key: "{i}", class: "soc2-gap-row soc2-status-{gap.status}",
-                                                        span { class: "soc2-col-ctrl", "{gap.control}" }
-                                                        span { class: "soc2-col-title", "{gap.title}" }
-                                                        span { class: "soc2-col-status soc2-badge-{gap.status}", "{gap.status}" }
-                                                        span { class: "soc2-col-obs", "{gap.observed}" }
-                                                        span { class: "soc2-col-gap", "{gap.gap}" }
+                            // Feature 5: when soc2 flag is OFF, show a notice that the SOC-2
+                            // affordance is disabled for this workspace, but do NOT hide the
+                            // deep-security or threat-model sections.
+                            if !soc2_on {
+                                p { class: "deep-soc2-disabled-notice",
+                                    "\u{1F512} SOC-2 gap analysis is disabled for this workspace \
+                                     (feature flag \u{2018}soc2\u{2019} is off). \
+                                     Deep security and threat model results are shown below."
+                                }
+                            }
+                            for lens in deep.lenses.iter() {
+                                {
+                                    // Feature 5: skip the soc2-gap lens when the flag is off.
+                                    if lens.lens == "soc2-gap" && !soc2_on {
+                                        rsx! {}
+                                    } else {
+                                    let (heading, description) = match lens.lens.as_str() {
+                                        "soc2-gap"       => ("SOC-2 Readiness Gap Analysis",
+                                                              "Maps the repo's detectable practices against SOC-2 Common Criteria and reports gaps. \
+                                                               This is a gap analysis, not a SOC-2 report. \
+                                                               Controls needing organisational evidence are marked unknown."),
+                                        "deep-security"  => ("Deep Security Audit",
+                                                              "Authorization, authentication, sensitive-data handling, and injection paths beyond the \
+                                                               deterministic floor. Every finding is advisory — a human must validate each one."),
+                                        "threat-model"   => ("Threat Model",
+                                                              "Entry points, trust boundaries, sensitive-data paths, and STRIDE-flavoured threats with \
+                                                               mitigation directions. Model-inferred from the repo structure."),
+                                        other            => (other, ""),
+                                    };
+                                    let lens = lens.clone();
+                                    rsx! {
+                                        div { class: "deep-lens", key: "{lens.lens}",
+                                            p { class: "deep-lens-heading", "{heading}" }
+                                            p { class: "deep-lens-desc", "{description}" }
+                                            if !lens.disclaimer.is_empty() {
+                                                p { class: "deep-lens-disclaimer", "{lens.disclaimer}" }
+                                            }
+                                            if !lens.summary.is_empty() {
+                                                p { class: "deep-lens-summary", "{lens.summary}" }
+                                            }
+                                            // SOC-2 gap table (only rendered when soc2 flag is on,
+                                            // which is guaranteed by the lens filter above — belt + suspenders).
+                                            if !lens.soc2_gaps.is_empty() && soc2_on {
+                                                div { class: "soc2-gap-table",
+                                                    div { class: "soc2-gap-row header",
+                                                        span { class: "soc2-col-ctrl", "Control" }
+                                                        span { class: "soc2-col-title", "Title" }
+                                                        span { class: "soc2-col-status", "Status" }
+                                                        span { class: "soc2-col-obs", "Observed" }
+                                                        span { class: "soc2-col-gap", "Gap / Remediation" }
+                                                    }
+                                                    for (i, gap) in lens.soc2_gaps.iter().enumerate() {
+                                                        div { key: "{i}", class: "soc2-gap-row soc2-status-{gap.status}",
+                                                            span { class: "soc2-col-ctrl", "{gap.control}" }
+                                                            span { class: "soc2-col-title", "{gap.title}" }
+                                                            span { class: "soc2-col-status soc2-badge-{gap.status}", "{gap.status}" }
+                                                            span { class: "soc2-col-obs", "{gap.observed}" }
+                                                            span { class: "soc2-col-gap", "{gap.gap}" }
+                                                        }
                                                     }
                                                 }
                                             }
+                                            // Free-text detail (deep-security + threat-model)
+                                            if !lens.detail.is_empty() {
+                                                pre { class: "deep-lens-detail", "{lens.detail}" }
+                                            }
                                         }
-                                        // Free-text detail (deep-security + threat-model)
-                                        if !lens.detail.is_empty() {
-                                            pre { class: "deep-lens-detail", "{lens.detail}" }
-                                        }
+                                    }
+                                    }
+                                }
+                            }
+
+                            // pw/cockpit-ui Feature 4: deep-report export button.
+                            // Placed at the bottom of the deep-tier panel so it's visible after
+                            // reviewing the findings. Project id comes from the active project.
+                            {
+                                let pid_export = report.repos.first().cloned().unwrap_or_default();
+                                rsx! {
+                                    DeepReportExportPanel {
+                                        project_id: pid_export,
+                                        soc2_enabled: soc2_on,
                                     }
                                 }
                             }
                         }
+                        }
+                    } else {
+                        rsx! {}
                     }
                 }
 
@@ -8999,6 +9142,603 @@ fn DecomposeSection(story_id: String) -> Element {
 
 // ── Docs view ─────────────────────────────────────────────────────────────────
 
+// ── pw/cockpit-ui product wave ────────────────────────────────────────────────
+//
+// Features 2–5 of the last product wave. All are purely client-side additions;
+// the server endpoints they call are part of the companion pw/server-features wave.
+// Endpoints are called optimistically and degrade gracefully (None/empty) when the
+// server hasn't shipped the new routes yet.
+//
+//  Feature 2: App-update banner + applied-rule drift notice + "update this rule".
+//  Feature 3: Single-rule editing scoped to project AND repo.
+//  Feature 4: Deep-report export button (Markdown surfaced in a modal).
+//  Feature 5: Feature-flag awareness (GET /api/feature-flags) gates SOC-2 UI.
+
+// ── Feature 5: Feature flags ──────────────────────────────────────────────────
+
+/// Feature-flag map returned by `GET /api/feature-flags`.
+/// Keys are flag names; values are booleans.
+/// A missing flag is treated as `false` (conservative default: the feature is off).
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct FeatureFlagMap {
+    /// SOC-2 gap analysis section in the deep-tier results. When `false`, the
+    /// SOC-2 gap table and the SOC-2 portion of the deep-export are hidden.
+    #[serde(default)]
+    soc2: bool,
+    /// Flat catch-all for any flag the UI hasn't explicitly modelled yet.
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Fetch the current feature-flag state from the server. Returns the default map
+/// (all flags off) when the endpoint is unreachable, so older server versions
+/// don't break the UI.
+async fn fetch_feature_flags() -> FeatureFlagMap {
+    let result: Option<FeatureFlagMap> = async {
+        reqwest::get(format!("{}/api/feature-flags", crate::BFF_URL))
+            .await
+            .ok()?
+            .json::<FeatureFlagMap>()
+            .await
+            .ok()
+    }
+    .await;
+    result.unwrap_or_default()
+}
+
+// ── Feature 2: App-update banner + rule-drift notice ─────────────────────────
+
+/// Minimum release info returned by `GET /api/release`.
+/// The server checks the latest GitHub release tag and reports whether the running
+/// binary is behind.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct AppReleaseView {
+    /// Version string of the running binary (e.g. `"0.4.1"`).
+    current: String,
+    /// Latest published release tag (e.g. `"0.4.2"`). `None` when the check
+    /// hasn't run yet or the GitHub API was unreachable.
+    #[serde(default)]
+    latest: Option<String>,
+    /// True when `latest > current` (server-side semver compare).
+    #[serde(default)]
+    update_available: bool,
+    /// HTML / Markdown release notes for `latest` (empty when not available).
+    #[serde(default)]
+    release_notes: String,
+}
+
+async fn fetch_app_release() -> Option<AppReleaseView> {
+    reqwest::get(format!("{}/api/release", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<AppReleaseView>()
+        .await
+        .ok()
+}
+
+/// App-update banner. Shown across the top of every cockpit tab when the server
+/// reports a newer release. Dismissible within the session (not persisted).
+#[component]
+fn AppUpdateBanner() -> Element {
+    let release_res = use_resource(fetch_app_release);
+    let mut dismissed = use_signal(|| false);
+
+    let Some(rel) = release_res.read().clone().flatten() else {
+        return rsx! {};
+    };
+    if !rel.update_available || dismissed() {
+        return rsx! {};
+    }
+    let latest = rel.latest.clone().unwrap_or_default();
+    let current = rel.current.clone();
+    rsx! {
+        div { class: "app-update-banner",
+            span { class: "app-update-icon", "\u{2B06}" }
+            span { class: "app-update-text",
+                "Camerata {latest} is available (you are running {current}). "
+                if !rel.release_notes.is_empty() {
+                    span { class: "app-update-notes", "{rel.release_notes}" }
+                }
+            }
+            a {
+                class: "app-update-link",
+                href: "https://github.com/zernst3/camerata-orchestrator/releases",
+                target: "_blank",
+                "View release"
+            }
+            button {
+                class: "app-update-dismiss",
+                onclick: move |_| dismissed.set(true),
+                "\u{00D7}"
+            }
+        }
+    }
+}
+
+/// One applied-rule drift entry from `GET /api/projects/:id/rule-drift`.
+/// Reports a rule that is applied to the project but whose corpus version has
+/// changed since it was adopted (corpus body updated after grounding/verification).
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct RuleDriftEntry {
+    rule_id: String,
+    #[serde(default)]
+    title: String,
+    /// The text of the directive as it was when the rule was adopted.
+    #[serde(default)]
+    applied_directive: String,
+    /// The current corpus directive (the update the architect is being asked to review).
+    #[serde(default)]
+    corpus_directive: String,
+    /// Repos in the project that currently have the stale directive.
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+async fn fetch_rule_drift(project_id: &str) -> Option<Vec<RuleDriftEntry>> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/rule-drift",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    serde_json::from_value(v.get("drift").cloned()?).ok()
+}
+
+/// Apply a corpus-updated directive to a project rule (calls the update endpoint).
+/// The server re-emits the governance files for the affected repos.
+async fn apply_rule_drift_update(project_id: &str, rule_id: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/rule-drift/{}/accept",
+            crate::BFF_URL,
+            project_id,
+            rule_id
+        ))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// The drift-notice panel: shown in the Rules view whenever the active project has
+/// rules whose corpus version has changed. Each entry shows an inline diff and an
+/// "Update this rule" action.
+#[component]
+fn RuleDriftNotice(project_id: String) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let refresh = use_signal(|| 0u32);
+    let pid = project_id.clone();
+    let drift_res = use_resource(move || {
+        let pid = pid.clone();
+        let _ = refresh();
+        async move { fetch_rule_drift(&pid).await }
+    });
+    let drift = drift_res.read().clone().flatten().unwrap_or_default();
+    if drift.is_empty() {
+        return rsx! {};
+    }
+
+    // Which entry's diff is currently expanded.
+    let expanded: Signal<Option<String>> = use_signal(|| None);
+
+    rsx! {
+        div { class: "drift-notice",
+            div { class: "drift-notice-header",
+                span { class: "drift-notice-icon", "\u{26A0}" }
+                span { class: "drift-notice-title",
+                    "{drift.len()} applied rule(s) have corpus updates"
+                }
+                p { class: "drift-notice-hint",
+                    "These rules were adopted before their corpus entry was updated. \
+                     Review the diff and accept the update to keep your governance in sync."
+                }
+            }
+            for entry in drift.iter() {
+                {
+                    let rule_id = entry.rule_id.clone();
+                    let rule_id_exp = rule_id.clone();
+                    let rule_id_update = rule_id.clone();
+                    let pid_update = project_id.clone();
+                    let is_expanded = expanded.read().as_deref() == Some(&rule_id);
+                    let entry = entry.clone();
+                    rsx! {
+                        div { class: "drift-entry", key: "{rule_id}",
+                            div { class: "drift-entry-head",
+                                span { class: "drift-entry-id", "{rule_id}" }
+                                if !entry.title.is_empty() {
+                                    span { class: "drift-entry-title", " — {entry.title}" }
+                                }
+                                if !entry.repos.is_empty() {
+                                    span { class: "drift-entry-repos", "repos: {entry.repos.join(\", \")}" }
+                                }
+                                button {
+                                    class: "btn-edit-sm",
+                                    onclick: move |_| {
+                                        let mut exp = expanded;
+                                        if exp.read().as_deref() == Some(&rule_id_exp) {
+                                            exp.set(None);
+                                        } else {
+                                            exp.set(Some(rule_id_exp.clone()));
+                                        }
+                                    },
+                                    if is_expanded { "Hide diff" } else { "Show diff" }
+                                }
+                                button {
+                                    class: "btn-run drift-update-btn",
+                                    onclick: move |_| {
+                                        let pid = pid_update.clone();
+                                        let rid = rule_id_update.clone();
+                                        let mut refresh = refresh;
+                                        spawn(async move {
+                                            if apply_rule_drift_update(&pid, &rid).await {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{rid}: updated to current corpus version."));
+                                                refresh += 1;
+                                            } else {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{rid}: update failed — check server logs."));
+                                            }
+                                        });
+                                    },
+                                    "Update this rule"
+                                }
+                            }
+                            if is_expanded {
+                                div { class: "drift-diff",
+                                    div { class: "drift-diff-col drift-diff-old",
+                                        p { class: "drift-diff-label", "Applied (current)" }
+                                        pre { class: "drift-diff-body", "{entry.applied_directive}" }
+                                    }
+                                    div { class: "drift-diff-col drift-diff-new",
+                                        p { class: "drift-diff-label", "Corpus (update)" }
+                                        pre { class: "drift-diff-body", "{entry.corpus_directive}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Feature 3: Single-rule editor ────────────────────────────────────────────
+
+/// The scope at which a single-rule edit applies. Rules cascade: repo overrides
+/// project which overrides the corpus default. The editor lets the architect pick
+/// which level to write to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuleEditScope {
+    /// Edit the project-level rule selection (applies to all repos in the project).
+    Project,
+    /// Edit a repo-specific override (applies to one repo, overrides the project value).
+    Repo,
+}
+
+/// Fetch the current state of a single rule for a project (project-level option + any
+/// repo overrides) from `GET /api/projects/:id/rules/:rule_id`.
+/// Retained as the documented server contract; the UI currently opens the editor
+/// without pre-fetching (the data is already in `ProjectView`).
+#[allow(dead_code)]
+async fn fetch_single_rule(project_id: &str, rule_id: &str) -> Option<serde_json::Value> {
+    reqwest::get(format!(
+        "{}/api/projects/{}/rules/{}",
+        crate::BFF_URL,
+        project_id,
+        rule_id
+    ))
+    .await
+    .ok()?
+    .json::<serde_json::Value>()
+    .await
+    .ok()
+}
+
+/// Persist a single-rule edit. Scope determines whether the edit goes to the project
+/// level or a specific repo override.
+///
+/// Body shape: `{ "chosen_option": "opt-id", "scope": "project"|"repo", "repo": "owner/repo" }`
+async fn save_single_rule_edit(
+    project_id: &str,
+    rule_id: &str,
+    chosen_option: &str,
+    scope: RuleEditScope,
+    repo: Option<&str>,
+) -> bool {
+    let body = serde_json::json!({
+        "chosen_option": chosen_option,
+        "scope": match scope {
+            RuleEditScope::Project => "project",
+            RuleEditScope::Repo => "repo",
+        },
+        "repo": repo,
+    });
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/rules/{}",
+            crate::BFF_URL,
+            project_id,
+            rule_id
+        ))
+        .json(&body)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Single-rule editor. Shown in the Rules view when the architect selects a corpus rule
+/// from the applied-rules table and clicks "Edit rule". Lets them choose the option at
+/// project scope OR override it for one specific repo.
+///
+/// The scope cascade: repo override > project selection > corpus default.
+/// Writing to "Repo" creates a repo-local override that silently wins over the
+/// project-level choice for that repo; writing to "Project" updates the project
+/// selection which applies to every repo that doesn't have a repo override.
+#[component]
+fn SingleRuleEditor(
+    project: ProjectView,
+    rule: ProposedRuleView,
+    on_close: EventHandler<()>,
+    on_saved: EventHandler<()>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut scope = use_signal(|| RuleEditScope::Project);
+    let mut repo_target = use_signal(String::new);
+    let chosen = use_signal(|| rule.default_option.clone().unwrap_or_default());
+    let mut saving = use_signal(|| false);
+
+    let (vbadge_label, vbadge_cls) = verif_badge(&rule.verification);
+
+    rsx! {
+        div { class: "single-rule-editor-overlay", onclick: move |_| on_close.call(()),
+            div { class: "single-rule-editor", onclick: move |e| e.stop_propagation(),
+                div { class: "single-rule-editor-head",
+                    div { class: "single-rule-editor-id-row",
+                        span { class: "rule-modal-id", "{rule.id}" }
+                        span {
+                            class: "verif-badge verif-badge-{vbadge_cls}",
+                            "{vbadge_label}"
+                        }
+                        button {
+                            class: "rule-modal-close",
+                            onclick: move |_| on_close.call(()),
+                            "\u{00D7}"
+                        }
+                    }
+                    p { class: "rule-modal-title", "{rule.title}" }
+                }
+
+                div { class: "single-rule-editor-body",
+                    // Scope picker: Project (apply to all repos) vs Repo (override for one repo).
+                    div { class: "single-rule-scope",
+                        p { class: "section-label", "Edit scope" }
+                        p { class: "section-hint",
+                            "Project scope updates the project-level selection (all repos). \
+                             Repo scope creates or overwrites a repo-specific override that silently \
+                             wins over the project value for that repo."
+                        }
+                        div { class: "single-rule-scope-btns",
+                            button {
+                                class: if scope() == RuleEditScope::Project { "scope-btn active" } else { "scope-btn" },
+                                onclick: move |_| scope.set(RuleEditScope::Project),
+                                "Project (all repos)"
+                            }
+                            button {
+                                class: if scope() == RuleEditScope::Repo { "scope-btn active" } else { "scope-btn" },
+                                onclick: move |_| scope.set(RuleEditScope::Repo),
+                                "Repo override"
+                            }
+                        }
+                        if scope() == RuleEditScope::Repo {
+                            div { class: "single-rule-repo-row",
+                                label { class: "single-rule-repo-label", "Target repo" }
+                                select {
+                                    class: "repo-select-input",
+                                    value: "{repo_target}",
+                                    onchange: move |e| repo_target.set(e.value()),
+                                    option { value: "", "Choose a repo…" }
+                                    for r in project.repos.iter() {
+                                        option { key: "{r}", value: "{r}", "{r}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Option picker (if the rule has alternatives).
+                    if rule.options.is_empty() {
+                        p { class: "section-hint", "Single-variant rule — no alternatives to choose. Editing the scope or using Apply/Emit re-arms it as-is." }
+                    } else {
+                        div { class: "single-rule-options",
+                            p { class: "section-label", "Choose the alternative" }
+                            if rule.default_option.is_none() {
+                                p { class: "rule-modal-mustchoose", "No default — you must choose an alternative." }
+                            }
+                            div { class: "rule-modal-opts",
+                                for o in rule.options.iter() {
+                                    {
+                                        let oid = o.id.clone();
+                                        let cur = chosen();
+                                        let picked = cur == o.id;
+                                        let is_default = rule.default_option.as_deref() == Some(o.id.as_str());
+                                        let cls = if picked { "rule-opt on" } else { "rule-opt" };
+                                        let mut chosen = chosen;
+                                        rsx! {
+                                            button {
+                                                key: "{o.id}",
+                                                class: "{cls}",
+                                                onclick: move |_| chosen.set(oid.clone()),
+                                                div { class: "rule-opt-head",
+                                                    span { class: "rule-opt-label", "{o.label}" }
+                                                    if is_default {
+                                                        span { class: "rule-opt-default-badge", "default" }
+                                                    }
+                                                    if picked {
+                                                        span { class: "rule-opt-picked-badge", "\u{2713} selected" }
+                                                    }
+                                                }
+                                                span { class: "rule-opt-directive", "{o.directive}" }
+                                                if !o.why.is_empty() {
+                                                    span { class: "rule-opt-why", "Why: {o.why}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "single-rule-editor-actions",
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| on_close.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn-run",
+                        disabled: saving() || (scope() == RuleEditScope::Repo && repo_target().is_empty()),
+                        title: if scope() == RuleEditScope::Repo && repo_target().is_empty() {
+                            "Choose a target repo for the repo override"
+                        } else { "" },
+                        onclick: move |_| {
+                            let pid = project.id.clone();
+                            let rid = rule.id.clone();
+                            let opt = chosen();
+                            let sc = scope();
+                            let repo = if sc == RuleEditScope::Repo { Some(repo_target()) } else { None };
+                            saving.set(true);
+                            spawn(async move {
+                                if save_single_rule_edit(
+                                    &pid, &rid, &opt, sc,
+                                    repo.as_deref()
+                                ).await {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{rid}: saved."));
+                                    on_saved.call(());
+                                } else {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{rid}: save failed."));
+                                }
+                                saving.set(false);
+                            });
+                        },
+                        if saving() { "Saving\u{2026}" } else { "Save" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Feature 4: Deep-report export ────────────────────────────────────────────
+
+/// Fetch and return the Markdown deep report for the active project from
+/// `GET /api/projects/:id/deep-report`. Returns the Markdown string on success.
+/// The `soc2` parameter controls whether the SOC-2 section is included.
+async fn fetch_deep_report(project_id: &str, include_soc2: bool) -> Option<String> {
+    let url = format!(
+        "{}/api/projects/{}/deep-report?include_soc2={}",
+        crate::BFF_URL,
+        project_id,
+        include_soc2
+    );
+    let resp = reqwest::get(url).await.ok()?;
+    if resp.status().is_success() {
+        resp.text().await.ok()
+    } else {
+        None
+    }
+}
+
+/// The deep-report export panel: a single button that calls the export endpoint and
+/// shows the resulting Markdown in a scrollable modal. The SOC-2 section is only
+/// included when the `soc2` feature flag is on (Feature 5 gate).
+///
+/// Placed in the Onboard view after the audit findings, below the deep-tier results.
+#[component]
+fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut loading = use_signal(|| false);
+    let mut report_md: Signal<Option<String>> = use_signal(|| None);
+
+    rsx! {
+        div { class: "deep-export-panel",
+            p { class: "section-label", "Export deep compliance report" }
+            p { class: "section-hint",
+                "Downloads the full deep-tier analysis as a Markdown document. \
+                 Includes deep security findings and threat model."
+                if soc2_enabled {
+                    " SOC-2 gap analysis is also included."
+                }
+                if !soc2_enabled {
+                    " SOC-2 gap analysis is disabled for this workspace (feature flag off)."
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: loading(),
+                onclick: move |_| {
+                    let pid = project_id.clone();
+                    let include_soc2 = soc2_enabled;
+                    loading.set(true);
+                    spawn(async move {
+                        match fetch_deep_report(&pid, include_soc2).await {
+                            Some(md) => report_md.set(Some(md)),
+                            None => crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Error,
+                                "Deep report export failed — run an audit with deep tier enabled first.",
+                            ),
+                        }
+                        loading.set(false);
+                    });
+                },
+                if loading() { "Exporting\u{2026}" } else { "Export deep report (Markdown)" }
+            }
+            if let Some(md) = report_md.read().clone() {
+                div { class: "deep-export-modal-overlay",
+                    onclick: move |_| report_md.set(None),
+                    div { class: "deep-export-modal",
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "deep-export-modal-head",
+                            p { class: "deep-export-modal-title", "Deep compliance report" }
+                            button {
+                                class: "rule-modal-close",
+                                onclick: move |_| report_md.set(None),
+                                "\u{00D7}"
+                            }
+                        }
+                        textarea {
+                            class: "deep-export-body",
+                            readonly: true,
+                            value: "{md}",
+                        }
+                        button {
+                            class: "btn-edit-sm",
+                            onclick: move |_| {
+                                let md_copy = md.clone();
+                                spawn(async move {
+                                    let _ = save_csv("camerata-deep-report.md", md_copy).await;
+                                });
+                            },
+                            "Save to file"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── In-app documentation viewer ───────────────────────────────────────────────
+
 /// In-app documentation viewer. Renders USER_GUIDE.md and TECHNICAL.md as
 /// markdown, with a toggle to switch between them. Uses the same `md_to_html`
 /// renderer and `.chat-turn-text.md` CSS that the chat bubble uses, so tables,
@@ -9295,5 +10035,118 @@ mod tests {
         assert!(tip.contains("Source A"), "Source A missing: {tip}");
         assert!(tip.contains("Source B"), "Source B missing: {tip}");
         assert!(tip.contains(" · "), "separator missing: {tip}");
+    }
+
+    // ── pw/cockpit-ui: Feature 1 — effective_auto_recommended ─────────────────
+    // Tests for the `ProposedRuleView::effective_auto_recommended()` helper which
+    // is the single truth-gate for pre-checking a proposed rule during onboarding.
+
+    use super::{FeatureFlagMap, ProposedRuleView};
+
+    fn make_proposed_rule(recommended: bool, verification: &str, is_auto_recommended: bool) -> ProposedRuleView {
+        ProposedRuleView {
+            id: "TEST-1".to_string(),
+            title: "Test rule".to_string(),
+            kind: "structural".to_string(),
+            enforcement: "error".to_string(),
+            options: vec![],
+            default_option: None,
+            decision_question: None,
+            decision_why: None,
+            scope: "repo".to_string(),
+            domain: "test".to_string(),
+            repos: vec![],
+            placement: "AGENTS.md".to_string(),
+            finding_count: 0,
+            recommended,
+            is_auto_recommended,
+            verification: verification.to_string(),
+            sources: vec![],
+        }
+    }
+
+    /// If the server sets `is_auto_recommended = true`, the rule is pre-checked
+    /// regardless of the verification level.
+    #[test]
+    fn effective_auto_recommended_server_flag_wins() {
+        let r = make_proposed_rule(false, "draft", true);
+        assert!(r.effective_auto_recommended(), "server flag should override draft");
+    }
+
+    /// Backward-compat path: when `is_auto_recommended` is false (old server),
+    /// the method falls back to `recommended && (grounded | verified)`.
+    #[test]
+    fn effective_auto_recommended_fallback_grounded() {
+        let r = make_proposed_rule(true, "grounded", false);
+        assert!(r.effective_auto_recommended(), "grounded + recommended should be pre-checked");
+    }
+
+    #[test]
+    fn effective_auto_recommended_fallback_verified() {
+        let r = make_proposed_rule(true, "verified", false);
+        assert!(r.effective_auto_recommended(), "verified + recommended should be pre-checked");
+    }
+
+    /// Draft rules that are recommended but not yet grounded should NOT be
+    /// pre-checked in backward-compat mode (old server).
+    #[test]
+    fn effective_auto_recommended_fallback_draft_not_pre_checked() {
+        let r = make_proposed_rule(true, "draft", false);
+        assert!(!r.effective_auto_recommended(), "draft rules should not be pre-checked");
+    }
+
+    /// `needs_recheck` is not pre-checked in the backward-compat path.
+    #[test]
+    fn effective_auto_recommended_fallback_needs_recheck_not_pre_checked() {
+        let r = make_proposed_rule(true, "needs_recheck", false);
+        assert!(!r.effective_auto_recommended(), "needs_recheck rules should not be pre-checked");
+    }
+
+    /// Not recommended at all: must not be pre-checked even if grounded.
+    #[test]
+    fn effective_auto_recommended_fallback_grounded_not_recommended() {
+        let r = make_proposed_rule(false, "grounded", false);
+        assert!(!r.effective_auto_recommended(), "grounded-but-not-recommended must not be pre-checked");
+    }
+
+    // ── pw/cockpit-ui: Feature 5 — FeatureFlagMap deserialization ─────────────
+    // The feature flag map uses `#[serde(flatten)]` to absorb unknown future flags.
+    // These tests confirm the known `soc2` field parses correctly and unknown
+    // keys are absorbed without error.
+
+    #[test]
+    fn feature_flag_map_soc2_true() {
+        let json = r#"{"soc2": true}"#;
+        let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
+        assert!(m.soc2, "soc2 should be true");
+    }
+
+    #[test]
+    fn feature_flag_map_soc2_false() {
+        let json = r#"{"soc2": false}"#;
+        let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
+        assert!(!m.soc2, "soc2 should be false");
+    }
+
+    #[test]
+    fn feature_flag_map_defaults_to_false_when_key_absent() {
+        let json = r#"{}"#;
+        let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
+        assert!(!m.soc2, "soc2 should default to false when absent");
+    }
+
+    #[test]
+    fn feature_flag_map_extra_keys_do_not_error() {
+        let json = r#"{"soc2": true, "future_flag": true, "another": 42}"#;
+        let m: FeatureFlagMap = serde_json::from_str(json).unwrap();
+        assert!(m.soc2, "soc2 should still parse when extra keys present");
+        assert_eq!(m.extra.len(), 2, "extra keys should be absorbed into the extra map");
+    }
+
+    #[test]
+    fn feature_flag_map_default_impl_all_flags_off() {
+        let m = FeatureFlagMap::default();
+        assert!(!m.soc2, "default FeatureFlagMap should have all flags off");
+        assert!(m.extra.is_empty(), "default extra should be empty");
     }
 }
