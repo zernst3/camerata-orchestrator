@@ -5,6 +5,11 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — Deployment section (Trigger→environment mapping table: push to main → dev; release branch → staging; semver tag → prod)"
 
 [decision]
 question = "How do changes map to deploy environments?"

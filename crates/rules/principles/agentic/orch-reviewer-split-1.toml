@@ -5,6 +5,15 @@ domain = "agentic"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from author agent)"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
+title = "Decision: Cross-agent rules — the integration gate (reviewer-author separation principle)"
 
 [decision]
 question = "What position does the project take on: The reviewer agent for any change is distinct from the author agent?"

@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-CLEAR-WINNER-1 (the clear-winner test)"
 
 [decision]
 question = "What position does the project take on: The clear-winner test — decide vs. stop?"

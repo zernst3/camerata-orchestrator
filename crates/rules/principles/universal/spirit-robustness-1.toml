@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — SPIRIT-ROBUSTNESS-1 (robustness over terseness)"
 
 [[emits]]
 target = "aicodingrules"

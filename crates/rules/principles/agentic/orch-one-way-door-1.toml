@@ -5,6 +5,15 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
+title = "Decision: Cross-agent rules — the integration gate (a third enforcement tier)"
 
 [decision]
 question = "What position does the project take on: One-way-door routing — blast radius gates autonomy?"

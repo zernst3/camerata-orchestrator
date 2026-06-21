@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-TRAINING-CUTOFF-1 (training-data-limited decisions route by category)"
 
 [decision]
 question = "What position does the project take on: Training-data-limited decisions route to human review by category, not by confidence?"

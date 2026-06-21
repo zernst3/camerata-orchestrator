@@ -5,6 +5,11 @@ domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-14_persistence_sqlite_event_sourced_versioning.md"
+title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (MONOLITH-1 cited: single-process Tokio monolith)"
 
 [decision]
 question = "What is the default deployment topology, and when is a separate message broker introduced?"

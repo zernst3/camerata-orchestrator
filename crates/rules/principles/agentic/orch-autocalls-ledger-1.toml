@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-AUTOCALLS-LEDGER-1 (auto-calls ledger + periodic judgment review)"
 
 [decision]
 question = "What position does the project take on: Auto-calls ledger + periodic judgment review?"

@@ -6,6 +6,11 @@ layer = "universal"
 enforcement = "architectural"
 default = true
 qualifies = "Architectural check (AST tier): a static-analysis pass parses each handler/controller function and rejects any direct database-handle method call (a `db`/`pool`/`conn`/`tx` receiver calling `.query`/`.execute`/etc.) inside its body. No regex can express this — the same `db.query(...)` token is correct in a repository function and a violation in a handler, and only the parse tree knows which scope it sits in. No LLM is needed: the answer is a hard yes/no over the AST. Conformance holds when the AST check runs in CI and a handler that calls a DB handle directly fails the build; it fails when no parse-based boundary exists and a handler can issue a query with nothing flagging it. Camerata ships a proof checker for this rule in `camerata-checks::architectural::handler_no_direct_db`."
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
+title = "Decision: An AST-checkable architectural enforcement tier — worked example §ARCH-HANDLER-NO-DB-1"
 
 [decision]
 question = "What position does the project take on: Handlers never touch the database directly?"

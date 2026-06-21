@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — SPIRIT-FILE-SIZE-1 (files sized for human reading)"
 
 [decision]
 question = "What position does the project take on: Files are sized for human reading, not for AI write-cost?"

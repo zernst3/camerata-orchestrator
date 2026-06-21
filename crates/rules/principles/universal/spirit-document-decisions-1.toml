@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §SPIRIT-DOC-DECISIONS-1 (document decisions immediately)"
 
 [decision]
 question = "What position does the project take on: Document decisions immediately?"

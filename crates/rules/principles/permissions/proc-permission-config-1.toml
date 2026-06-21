@@ -5,6 +5,11 @@ domain = "permissions"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — permission model: per-resource _can flags + §ARCH-SERVER-AUTHZ-1 domain"
 
 [decision]
 question = "What position does the project take on: A missing grant is configuration; a missing permission is code?"

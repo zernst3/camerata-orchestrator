@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §PROC-CITE-CONVENTION-ID-1 + preamble (cite rule IDs in commit body)"
 
 [decision]
 question = "What position does the project take on: Cite the convention ID in commit messages and PR descriptions?"

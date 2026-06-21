@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-OUTPUT-DIGEST-1 (output discipline — local-mostly + single consolidated digest)"
 
 [decision]
 question = "How should routines report their output?"

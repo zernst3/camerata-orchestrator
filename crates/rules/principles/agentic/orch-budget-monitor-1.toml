@@ -4,8 +4,12 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
-
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-BUDGET-MONITOR-1 (budget self-monitoring)"
 
 [decision]
 question = "How should an autonomous run cap its spend?"

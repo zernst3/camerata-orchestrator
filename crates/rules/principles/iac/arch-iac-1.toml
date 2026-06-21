@@ -5,6 +5,11 @@ domain = "iac"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_credential_delegated_scope_and_build_targets.md"
+title = "Decision: Credential-delegated scope + story-source/build-target separation (per-environment isolation pattern)"
 
 [decision]
 question = "What position does the project take on: Infrastructure as code, per-environment isolation?"

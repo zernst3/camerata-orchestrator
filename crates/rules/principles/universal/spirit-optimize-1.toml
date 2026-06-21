@@ -5,6 +5,11 @@ domain = "*"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — SPIRIT-OPTIMIZE-1 (optimization by default)"
 
 [decision]
 question = "What position does the project take on: Optimization by default?"

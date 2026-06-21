@@ -5,6 +5,11 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-CONTEXT-OVERRIDE-1 (rule overrides require explicit human sign-off)"
 
 [decision]
 question = "What position does the project take on: Rule overrides driven by project context require explicit human sign-off?"

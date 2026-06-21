@@ -6,6 +6,15 @@ layer = "universal"
 enforcement = "mechanical"
 default = true
 qualifies = "Prose check: a deterministic gate (a lint rule, a type-system constraint, an AST scan, a CI-run AI reviewer reading against the codified commitments, or a combination) is wired into the change pipeline, and a durable waiver log exists. Conformance holds when the pipeline configuration names that gate and a change that violates a known commitment is demonstrably blocked, escalated, or waivered with the violation and reviewer recorded, rather than merged silently. It fails when the commitments live only as documents that reviewers cite ad hoc with no mechanical step on the agent's output."
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-CONFORMANCE-1 (codified architectural commitments are enforced gates)"
+
+[[sources]]
+url = "docs/RATIONALE.md"
+title = "docs/RATIONALE.md — §2 The approach: two deterministic layers (the enforcement thesis)"
 
 [decision]
 question = "What position does the project take on: Codified architectural commitments are enforced gates, not advisory documents?"

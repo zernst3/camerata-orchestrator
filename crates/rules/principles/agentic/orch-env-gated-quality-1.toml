@@ -6,6 +6,15 @@ layer = "universal"
 enforcement = "mechanical"
 default = true
 qualifies = "Prose check: the pre-merge pipeline runs a local quality bar (a clean compile, a clean lint pass, a green test run, plus a migration-safety check on schema changes) and fails the change if any step is red. At least one pre-production environment sits between merge and users, and advancement through it is triggered by an automated check rather than a manual approval click. Conformance holds when the CI configuration shows both the pre-merge gate and an automated promotion gate with no human-approval step between merge and the user-facing environment; it fails when code can reach users straight from a developer machine or by a reviewer pressing a button."
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — ORCH-ENV-GATED-QUALITY-1 (environment-gated quality)"
+
+[[sources]]
+url = "docs/decisions/2026-06-16_enforcement_tiers_gate_vs_ci.md"
+title = "Decision: Enforcement tiers — write-time gate (security) vs CI checks (consistency)"
 
 [decision]
 question = "What position does the project take on: Environment-gated quality — nothing ships unverified?"
