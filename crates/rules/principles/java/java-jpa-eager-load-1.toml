@@ -3,14 +3,19 @@ title = "JPA relationships default to lazy loading; eager loading is explicit an
 tag = "stack"
 domain = "java"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
 qualifies = "Enforced by code review and performance testing. Relationships in entity definitions use @OneToMany(fetch = FetchType.LAZY) by default. Eager loading is marked with @OneToMany(fetch = FetchType.EAGER) or explicitly loaded via FETCH JOIN in queries. N+1 query detection can be automated with Hibernate query inspection."
+verification = "grounded"
 
 [decision]
 question = "Should JPA relationships be eagerly or lazily loaded?"
 default = "lazy-by-default"
 why = "Eager loading (loading related entities automatically with the parent) seems convenient but often loads unused data and causes N+1 query problems: one query for the parent entity, then one query for each related entity in a loop. Lazy loading defers loading until needed, but risks lazy-initialization exceptions if the session is closed. The best practice is lazy loading by default (smaller queries, faster in happy paths), and explicit eager loading or batch fetching only when needed. FETCH JOIN in JPQL allows explicit eager loading of specific relationships for a query, and Hibernate hints like @BatchSize(...) can batch-load relationships efficiently. Starting with lazy prevents silent N+1 bugs."
+
+[[sources]]
+url = "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html#jpa.entity-graph"
+title = "Spring Data JPA Reference — Configuring Fetch- and LoadGraphs (@EntityGraph)"
 
 [[option]]
 id = "lazy-by-default"

@@ -6,11 +6,27 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, IntelliJ inspections) that flag unmanaged closeable resources and recommend try-with-resources. Conformance holds when every resource implementing AutoCloseable (Connection, Statement, Stream, Reader, Writer, etc.) is guarded by try-with-resources or an explicit finally close."
+verification = "grounded"
 
 [decision]
 question = "How are resources (connections, streams, readers) guaranteed to be closed?"
 default = "try-with-resources-or-finally"
 why = "Database connections, file handles, and streams consume finite OS resources. If a resource is not closed, it leaks, and the OS runs out of file descriptors or connection limits, causing subsequent operations to fail mysteriously. Relying on garbage collection and finalize() is unreliable (finalize() is not guaranteed to run promptly or at all) and leaves the program vulnerable to resource starvation. Try-with-resources (Java 7+) is syntactic sugar that guarantees close() is called even if an exception is thrown; it is the most concise and reliable form. Manual finally blocks are acceptable but more verbose and error-prone."
+
+[[sources]]
+url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#os-method-may-fail-to-close-stream-on-exception-os-open-stream"
+title = "SpotBugs — OS_OPEN_STREAM: Method may fail to close stream on exception"
+linter = "SpotBugs: OS_OPEN_STREAM"
+
+[[sources]]
+url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#odr-method-may-fail-to-close-database-resource-on-exception-odr-open-database-resource"
+title = "SpotBugs — ODR_OPEN_DATABASE_RESOURCE: Method may fail to close database resource"
+linter = "SpotBugs: ODR_OPEN_DATABASE_RESOURCE"
+
+[[sources]]
+url = "https://errorprone.info/bugpattern/StreamResourceLeak"
+title = "Error Prone — StreamResourceLeak: Streams encapsulating closeable resources must use try-with-resources"
+linter = "Error Prone: StreamResourceLeak"
 
 [[option]]
 id = "try-with-resources-or-finally"

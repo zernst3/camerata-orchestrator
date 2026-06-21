@@ -6,11 +6,17 @@ layer = "language"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by code review and Checkstyle rules that flag System.out.println() and System.err.println() in production code. Conformance requires slf4j or a similar logging framework with structured fields."
+verification = "grounded"
 
 [decision]
 question = "How is diagnostic information logged?"
 default = "structured-logging-framework"
 why = "Structured logging (using slf4j, Log4j, or similar) produces machine-readable output (JSON or key-value pairs) that can be parsed, indexed, and searched by centralized logging systems (Elasticsearch, Splunk, CloudWatch). Concatenating strings and printing to stdout or stderr is unstructured, cannot be easily searched, is hard to correlate with application events, and gets lost or buffered in container environments. Structured logging also supports multiple output formats and log levels (debug, info, warn, error) that can be dynamically configured without recompilation. Exception objects are properly serialized with full stack traces, not mangled in string concatenation."
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#systemprintln"
+title = "PMD — SystemPrintln: References to System.out/err.print should use a logger"
+linter = "PMD: SystemPrintln"
 
 [[option]]
 id = "structured-logging-framework"

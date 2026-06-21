@@ -5,11 +5,20 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Spring components follow a strict layered hierarchy: @RestController calls @Service; @Service calls @Repository; no layer calls a higher layer?"
 default = "strict-layer-hierarchy"
 why = "Spring's stereotype annotations (@RestController, @Service, @Repository) are not purely decorative: each layer carries a distinct responsibility and a distinct set of things it is allowed to depend on. @RestController methods translate HTTP to service calls; @Service methods implement domain rules and orchestrate data access; @Repository methods (or Spring Data interfaces) perform SQL / JPA operations. Violating the hierarchy in either direction produces specific failure modes. A @Service injecting a @RestController to reuse HTTP-shaping code couples domain logic to the HTTP protocol, making the service impossible to test or reuse outside the web layer. A @RestController injecting a @Repository directly to 'save a round trip' puts data-access code in the HTTP layer, bypasses any @Transactional annotations on the service, and makes the HTTP handler responsible for both the protocol translation and the persistence logic. The layered boundary is not a style guideline: it determines where @Transactional annotations take effect, where exception-to-HTTP mapping occurs, and which code is testable without a Spring container."
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html"
+title = "Spring Framework Reference — Stereotype Annotations: @Controller, @Service, @Repository"
+
+[[sources]]
+url = "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
+title = "Spring Framework Reference — Using @Transactional (service-layer placement)"
 
 [[option]]
 id = "strict-layer-hierarchy"

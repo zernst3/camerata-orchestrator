@@ -6,11 +6,17 @@ layer = "architecture"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by package structure conventions and code review. The directory structure reflects feature boundaries (users, organizations, projects) not horizontal layers."
+verification = "grounded"
 
 [decision]
 question = "Should packages be organized by layer or by feature?"
 default = "package-by-feature"
 why = "Organizing by layer (com.example.controllers.*, com.example.services.*, com.example.repositories.*) spreads a single feature's code across many packages, making it hard to locate and understand the feature as a unit. It also encourages tight coupling across layers (controllers and services in the same layer often have implicit dependencies). Organizing by feature (com.example.users.*, com.example.organizations.*, com.example.projects.*) groups all code for a feature together, makes dependencies between features explicit (imports across packages), and makes it easier to understand a feature in isolation. Each feature package contains its own controller, service, repository, and domain model; this is sometimes called 'vertical slicing' or 'package-by-feature.' Dependencies flow between features (users depend on organizations) not within layers. It also makes it easier to extract a feature into a separate microservice later."
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#loosepackagecoupling"
+title = "PMD — LoosePackageCoupling: Enforce package-level architectural boundaries"
+linter = "PMD: LoosePackageCoupling"
 
 [[option]]
 id = "package-by-feature"

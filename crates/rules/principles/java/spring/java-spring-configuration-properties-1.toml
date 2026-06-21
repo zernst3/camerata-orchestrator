@@ -5,11 +5,16 @@ domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: @ConfigurationProperties binds typed config POJOs; @Value on individual fields is reserved for simple single-value injections?"
 default = "configuration-properties-for-grouped-config"
 why = "@Value('${property.key}') injects a single environment property into a field by string key. The string key is opaque to tooling until runtime, there is no compile-time validation that the key exists, a misspelled key fails at startup (if the property has no default) or silently uses the default (if it has one), and a class with five @Value fields holds five individual string keys with no structural relationship between them. @ConfigurationProperties binds a prefix of the configuration namespace (application.yml or environment variables) to a typed POJO: all keys under the prefix are bound to fields by name, the binding is validated at startup via @Validated + Bean Validation annotations on the POJO, and the POJO is a self-contained description of the configuration section the class requires. IDE tooling (Spring Boot Configuration Processor) generates metadata from the POJO, enabling auto-completion and documentation in application.yml. The comparison: a JwtProperties class with @ConfigurationProperties(prefix = 'jwt') and fields secret, expiry, issuer is validated at startup, documented in the IDE, and testable by constructing a JwtProperties instance directly. Three @Value injections of jwt.secret, jwt.expiry, and jwt.issuer lack those properties unless ConfigurationProcessor metadata is added manually."
+
+[[sources]]
+url = "https://docs.spring.io/spring-boot/reference/features/external-config.html#features.external-config.typesafe-configuration-properties"
+title = "Spring Boot Reference — Type-safe Configuration Properties (@ConfigurationProperties vs @Value)"
 
 [[option]]
 id = "configuration-properties-for-grouped-config"

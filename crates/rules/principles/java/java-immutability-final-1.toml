@@ -6,11 +6,22 @@ layer = "language"
 enforcement = "prose"
 default = true
 qualifies = "Enforced by Checkstyle rules that recommend final on classes (unless explicitly designed for subclassing) and fields (unless explicitly mutable). Code review verifies that mutability is intentional and documented."
+verification = "grounded"
 
 [decision]
 question = "Should classes and fields be mutable or immutable by default?"
 default = "final-by-default"
 why = "Mutable shared state is a source of subtle bugs, race conditions, and makes reasoning about code harder. Immutable objects are thread-safe by default (no synchronization needed), are easier to reason about (state does not change), can be safely shared, and are easier to test. Java's final modifier signals to readers that a class or field is not intended to be changed; it is a form of documentation. A class marked final cannot be unexpectedly subclassed (which might break invariants). Fields marked final must be initialized in the constructor or at declaration and cannot be reassigned, making the object's state stable. In rare cases where mutability is needed, it should be explicit (not final) and documented. Collections should be immutable by default (Collections.unmodifiableList(...) or Guava's ImmutableList), and defensive copies should be made when necessary."
+
+[[sources]]
+url = "https://checkstyle.org/checks/design/finalclass.html"
+title = "Checkstyle — FinalClass: classes with only private constructors should be final"
+linter = "Checkstyle: FinalClass"
+
+[[sources]]
+url = "https://checkstyle.org/checks/design/visibilitymodifier.html"
+title = "Checkstyle — VisibilityModifier: enforces private/final field visibility"
+linter = "Checkstyle: VisibilityModifier"
 
 [[option]]
 id = "final-by-default"

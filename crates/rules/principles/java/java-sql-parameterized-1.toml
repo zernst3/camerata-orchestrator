@@ -6,11 +6,17 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation, or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values incorporated into SQL queries?"
 default = "parameterized-queries"
 why = "Concatenating or interpolating user input directly into a SQL string is the canonical SQL-injection vulnerability and remains one of the most damaging web security flaws. Parameterized queries send the SQL text and values to the database driver as separate entities, so a value can never be parsed as SQL grammar regardless of its content; the database treats it strictly as data. This is the same amount of code as concatenation, removes the entire class of injection bug, and has no legitimate downside for values. Static table or column names that must be dynamic should come from a fixed allow-list, never from user input."
+
+[[sources]]
+url = "https://find-sec-bugs.github.io/bugs.htm#SQL_INJECTION_JDBC"
+title = "Find Security Bugs — SQL_INJECTION_JDBC: Potential JDBC SQL injection via string concatenation"
+linter = "SpotBugs/FindSecBugs: SQL_INJECTION_JDBC"
 
 [[option]]
 id = "parameterized-queries"
