@@ -1,0 +1,36 @@
+id = "JAVASCRIPT-TESTING-UNIT-COLOCATION-1"
+title = "Unit test files live next to the source file they test, named <module>.test.ts"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Jest's default testMatch glob (**/__tests__/**/*.?([mc])[jt]s?(x) and **/?(*.)+(spec|test).?([mc])[jt]s?(x)) and Vitest's default include pattern (**/*.{test,spec}.?(c|m)[jt]s?(x)). Both frameworks discover co-located *.test.ts files without any configuration change. Conformance holds when test files follow the <source>.test.ts (or .spec.ts) naming pattern in the same directory as the source; it fails when tests live only in a remote top-level tests/ or __tests__/ tree that is disconnected from the source files."
+verification = "grounded"
+
+[[sources]]
+url = "https://jestjs.io/docs/configuration#testmatch-arraystring"
+title = "Jest configuration — testMatch"
+linter = "jest: testMatch default glob"
+
+[[sources]]
+url = "https://vitest.dev/config/include"
+title = "Vitest configuration — include default pattern"
+linter = "vitest: include default glob"
+
+[decision]
+question = "What position does the project take on: where do unit test files live and how are they named?"
+default = "unit-test-files-live-next-to-source-named-test-ts"
+why = "Co-locating a test file with its source module eliminates the navigation cost of finding the matching test: the test is always the file whose name is <source>.test.ts, one directory entry away. When tests live in a remote __tests__/ or tests/ tree, every rename or move of a source file requires a parallel rename elsewhere, and the reader must mentally map between two tree shapes. Co-location also makes coverage gaps visible at a glance: a source file with no sibling .test.ts is obviously untested. Both Jest (via testMatch) and Vitest (via include) discover co-located *.test.ts files in their default configuration without any additional setup."
+
+[[option]]
+id = "unit-test-files-live-next-to-source-named-test-ts"
+label = "Unit test files live next to the source file they test, named <module>.test.ts"
+directive = "Unit test files are placed in the same directory as the module under test and named <module>.test.ts (or .test.tsx for components). The file tests/foo.test.ts lives at src/foo.test.ts, not at tests/foo.test.ts. A parallel __tests__/ subdirectory within a feature directory is acceptable when the feature owns many test utilities, but the rule of thumb is: test file next to source file."
+why = "The adopted default. Co-location makes navigation trivial, keeps renames synchronised, and makes coverage gaps visible without tooling."
+
+[[option]]
+id = "unit-test-files-live-in-remote-tests-tree"
+label = "Unit test files live in a top-level tests/ or __tests__/ tree that mirrors the source tree"
+directive = "All test files are placed in a parallel tests/ directory that mirrors the src/ directory structure (e.g. tests/services/user.test.ts for src/services/user.ts). No test files appear next to source files."
+why = "A defensible alternative the project considered and did not adopt as the default. Keeps the src/ tree free of test files, which some teams prefer for publication."

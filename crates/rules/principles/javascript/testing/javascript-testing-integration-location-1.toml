@@ -1,0 +1,38 @@
+id = "JAVASCRIPT-TESTING-INTEGRATION-LOCATION-1"
+title = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory, not co-located"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "No single ESLint rule enforces integration-test directory placement. The convention is structural: integration tests span multiple modules and therefore cannot have a canonical 'next to source' location. The Jest testPathIgnorePatterns or Vitest exclude option can isolate integration tests from unit test runs. Enforcement is via project convention (PR review + CI test-script split), not a linter gate."
+verification = "grounded"
+
+[[sources]]
+url = "https://jestjs.io/docs/configuration#testpathignorepatterns-arraystring"
+title = "Jest configuration — testPathIgnorePatterns"
+
+[[sources]]
+url = "https://jestjs.io/docs/configuration#projects-arraystring--projectconfig"
+title = "Jest configuration — projects (split unit vs integration)"
+
+[[sources]]
+url = "https://vitest.dev/config/include"
+title = "Vitest configuration — include/exclude for project-level splits"
+
+[decision]
+question = "What position does the project take on: where do integration tests live?"
+default = "integration-tests-live-in-dedicated-integration-directory"
+why = "An integration test exercises multiple modules working together (e.g. a service + repository + real database), so it cannot be associated with any single source file. Placing such tests next to a source file implies false ownership and misleads readers into thinking the test is scoped to that module. A dedicated tests/integration/ (or __tests__/integration/) directory makes the distinction explicit, allows the CI pipeline to run unit tests (fast, no external dependencies) and integration tests (slower, requires infra) in separate steps using testPathIgnorePatterns or distinct Jest project configurations, and signals clearly that the cost model of running these tests differs."
+
+[[option]]
+id = "integration-tests-live-in-dedicated-integration-directory"
+label = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory"
+directive = "Integration tests — tests that span more than one real module and may require a database, HTTP server, or message queue — are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
+why = "The adopted default. Integration tests have a different cost model (slower, require infra), need to be runnable independently, and cannot be owned by a single source file."
+
+[[option]]
+id = "integration-tests-co-located-with-test-suffix"
+label = "Integration tests are co-located with source using a .integration.test.ts suffix"
+directive = "Integration tests live next to the source under test, distinguished from unit tests by a .integration.test.ts (or .e2e.test.ts) suffix, and excluded from the fast unit-test run via a glob filter on that suffix."
+why = "A defensible alternative the project considered and did not adopt as the default. Keeps all tests near source but blurs the unit/integration boundary."

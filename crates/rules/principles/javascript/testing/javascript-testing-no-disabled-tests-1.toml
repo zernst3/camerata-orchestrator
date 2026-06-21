@@ -1,0 +1,36 @@
+id = "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1"
+title = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by the jest/no-disabled-tests rule (eslint-plugin-jest recommended config), which flags xtest(), xit(), xdescribe(), test.skip(), it.skip(), describe.skip(), and test bodies called with no implementation. The jest/no-focused-tests rule (also in the recommended config) is the complementary gate: it blocks test.only() and fit() from being committed, preventing a focused test from silently skipping the entire rest of the suite. Both rules must be configured at error severity to form a hard gate; at warn severity they allow disabled tests to be committed. Conformance holds when both rules are error-level in the ESLint config and the lint step is a required CI gate."
+verification = "grounded"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-disabled-tests.md"
+title = "eslint-plugin-jest — no-disabled-tests rule (recommended)"
+linter = "jest: no-disabled-tests"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
+title = "eslint-plugin-jest — no-focused-tests rule (recommended)"
+linter = "jest: no-focused-tests"
+
+[decision]
+question = "What position does the project take on: may disabled tests (xtest, test.skip, pending, etc.) be committed to the main branch?"
+default = "disabled-tests-are-forbidden-in-committed-code"
+why = "A disabled test is a bug that has been hidden rather than fixed. When a developer commits xtest() or test.skip(), they have removed a safety net without removing the problem the test was written to catch. The longer a disabled test sits in the codebase, the more likely the tested behaviour has changed in the interim, and the test no longer reflects reality even if re-enabled. The jest/no-disabled-tests rule (recommended config) makes disabled tests a lint error, so the author must either fix the test before committing or delete it with a tracked issue instead of silently burying it. The jest/no-focused-tests rule is the symmetric gate: a committed test.only() or fit() silently skips the rest of the suite, meaning CI can be green with 90% of tests not running — an extremely dangerous false positive."
+
+[[option]]
+id = "disabled-tests-are-forbidden-in-committed-code"
+label = "Disabled tests (xtest, xit, .skip, pending) are forbidden in committed code"
+directive = "The jest/no-disabled-tests and jest/no-focused-tests rules are configured at error severity in the project ESLint config. xtest(), xit(), xdescribe(), test.skip(), it.skip(), describe.skip(), test.only(), it.only(), and describe.only() all fail the lint gate. A temporarily broken test is either fixed before the PR is merged or deleted with a GitHub issue tracking the restoration. A test that must be skipped in a specific environment uses a conditional jest.skip() call guarded by an environment variable, documented with a comment."
+why = "The adopted default. Disabled tests accumulate as hidden technical debt; the lint gate forces resolution at the point of authorship rather than deferring it indefinitely."
+
+[[option]]
+id = "disabled-tests-are-allowed-with-a-tracking-comment"
+label = "Disabled tests are allowed when accompanied by a tracking issue comment"
+directive = "Disabled tests (test.skip, xtest, etc.) are allowed provided each one has an inline comment with a tracking issue URL. jest/no-disabled-tests is set to warn rather than error so the lint step does not fail."
+why = "A defensible alternative the project considered and did not adopt as the default."
