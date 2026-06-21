@@ -92,6 +92,133 @@ pub async fn list_open_issues(repo: &str, token: &str) -> anyhow::Result<Vec<Iss
     parse_open_issues(&resp.body)
 }
 
+/// Parse a SINGLE GitHub issue JSON object into an [`IssueSummary`] (the same flat
+/// shape the list endpoint produces). Pure (no I/O), so it is unit-testable against a
+/// fixture without a network call or a token. Returns an error if the row is actually
+/// a pull request (a PR is not a story to refresh).
+pub fn parse_single_issue(json: &str) -> anyhow::Result<IssueSummary> {
+    let raw: RawIssue =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_single_issue: {e}"))?;
+    if raw.pull_request.is_some() {
+        anyhow::bail!("expected an issue but got a pull request (#{})", raw.number);
+    }
+    Ok(IssueSummary {
+        number: raw.number,
+        title: raw.title,
+        body: raw.body.unwrap_or_default(),
+        url: raw.html_url,
+    })
+}
+
+/// The raw single-issue shape carries the open/closed `state` (the list adopt path
+/// does not need it, but the WorkItem layer does). Read alongside [`parse_single_issue`]
+/// when the caller needs the state too.
+#[derive(Debug, Deserialize)]
+struct RawIssueWithState {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+    html_url: String,
+    state: String,
+    #[serde(default)]
+    labels: Vec<RawLabel>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+/// Minimal label shape (only the name is read).
+#[derive(Debug, Deserialize)]
+struct RawLabel {
+    name: String,
+}
+
+/// A single open/closed GitHub issue with its `state` and label names, parsed from a
+/// single-issue JSON object. The richer shape the WorkItem layer maps from. Pure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IssueDetail {
+    /// The issue number.
+    pub number: u64,
+    /// The issue title.
+    pub title: String,
+    /// The issue body (markdown). Empty when the issue has none.
+    pub body: String,
+    /// The human-navigable URL on github.com.
+    pub url: String,
+    /// `"open"` or `"closed"`.
+    pub state: String,
+    /// The label names on the issue.
+    pub labels: Vec<String>,
+}
+
+/// Parse a single GitHub issue JSON object into an [`IssueDetail`] (carrying state +
+/// labels). Errors if the row is actually a pull request. Pure (no I/O).
+pub fn parse_issue_detail(json: &str) -> anyhow::Result<IssueDetail> {
+    let raw: RawIssueWithState =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_issue_detail: {e}"))?;
+    if raw.pull_request.is_some() {
+        anyhow::bail!("expected an issue but got a pull request (#{})", raw.number);
+    }
+    Ok(IssueDetail {
+        number: raw.number,
+        title: raw.title,
+        body: raw.body.unwrap_or_default(),
+        url: raw.html_url,
+        state: raw.state,
+        labels: raw.labels.into_iter().map(|l| l.name).collect(),
+    })
+}
+
+/// Fetch ONE issue (`owner/repo#number`) via the GitHub REST API, returning the
+/// detail shape (state + labels included). Used by the WorkItem refresh path to
+/// re-pull a single item. `repo` must be `owner/name`.
+pub async fn get_issue_detail(repo: &str, number: u64, token: &str) -> anyhow::Result<IssueDetail> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{number}",
+        coord.owner, coord.repo
+    );
+    let resp = transport.get(&url).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub get issue #{number}: HTTP {}", resp.status);
+    }
+    parse_issue_detail(&resp.body)
+}
+
+/// Post a plain markdown comment onto an issue (`owner/repo#number`) via the GitHub
+/// REST API. Returns the created comment's `html_url`. Used by the WorkItem comment
+/// path to write back onto the source issue. `repo` must be `owner/name`.
+///
+/// This is the minimal "comment back" primitive, distinct from the worktracker
+/// provider's structured `push_status` / `post_clarifying_questions` (which carry
+/// status rollups / clarify markers). A free-text comment from the dev surface uses
+/// this so it does not get a status-rollup or clarify-marker wrapper.
+pub async fn comment_on_issue(
+    repo: &str,
+    number: u64,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{number}/comments",
+        coord.owner, coord.repo
+    );
+    let payload = serde_json::to_string(&serde_json::json!({ "body": body }))
+        .map_err(|e| anyhow::anyhow!("encode comment body: {e}"))?;
+    let resp = transport.post(&url, &payload).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub comment on issue #{number}: HTTP {}", resp.status);
+    }
+    let v: serde_json::Value = serde_json::from_str(&resp.body)
+        .map_err(|e| anyhow::anyhow!("parse comment response: {e}"))?;
+    Ok(v["html_url"].as_str().unwrap_or_default().to_string())
+}
+
 /// Build a `CanonicalStory` from an adopted GitHub issue. The canonical id is
 /// namespaced by repo (`<owner>/<repo>#<number>`) so adopting issue #20 from two
 /// different repos produces two distinct spine rows instead of colliding on the
@@ -160,6 +287,44 @@ mod tests {
     #[test]
     fn parse_open_issues_rejects_non_array_json() {
         assert!(parse_open_issues("{\"message\":\"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn parse_issue_detail_maps_state_and_labels_and_rejects_prs() {
+        let json = r#"{
+            "number": 42,
+            "title": "Add CSV export",
+            "body": "We need CSV exports.",
+            "html_url": "https://github.com/o/r/issues/42",
+            "state": "open",
+            "labels": [{"name":"bug"},{"name":"camerata:status:intake"}]
+        }"#;
+        let d = parse_issue_detail(json).expect("parse");
+        assert_eq!(d.number, 42);
+        assert_eq!(d.title, "Add CSV export");
+        assert_eq!(d.body, "We need CSV exports.");
+        assert_eq!(d.url, "https://github.com/o/r/issues/42");
+        assert_eq!(d.state, "open");
+        assert_eq!(d.labels, vec!["bug", "camerata:status:intake"]);
+
+        // A PR row is rejected.
+        let pr = r#"{
+            "number": 7, "title": "PR", "html_url": "https://github.com/o/r/pull/7",
+            "state": "open", "pull_request": {"url": "x"}
+        }"#;
+        assert!(parse_issue_detail(pr).is_err());
+    }
+
+    #[test]
+    fn parse_single_issue_null_body_and_rejects_prs() {
+        let json = r#"{
+            "number": 9, "title": "No body", "html_url": "https://github.com/o/r/issues/9"
+        }"#;
+        let s = parse_single_issue(json).expect("parse");
+        assert_eq!(s.number, 9);
+        assert_eq!(s.body, "");
+        let pr = r#"{"number":1,"title":"x","html_url":"u","pull_request":{}}"#;
+        assert!(parse_single_issue(pr).is_err());
     }
 
     #[test]

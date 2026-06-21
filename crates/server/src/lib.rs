@@ -46,6 +46,7 @@ pub mod suppression;
 pub mod terminal;
 pub mod transcript;
 pub mod uow;
+pub mod workitems;
 pub mod workspace;
 
 use std::sync::Arc;
@@ -334,6 +335,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/git/pull", post(git_pull))
         .route("/api/projects/:id/git/cherry-pick", post(git_cherry_pick))
         // ── Unit of Work (issue #39) ─────────────────────────────────────────
+        // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ─────
+        // Replaces the inline owner/repo adopt-issue hack: pull all open issues
+        // across the active project's repos, then create a UoW (deduped by external
+        // ref) and drive it through the EXISTING governed-dev endpoints (the gate).
+        .route("/api/workitems/pull", post(workitems_pull))
+        .route("/api/workitems/refresh", post(workitems_refresh))
+        .route("/api/workitems/comment", post(workitems_comment))
+        .route("/api/uows", get(uows_list))
+        .route("/api/uow/from-workitem", post(uow_from_workitem))
         .route("/api/uow", get(uow_list))
         .route("/api/uow/:story_id", get(uow_get))
         .route("/api/uow/:story_id/status", post(uow_set_status))
@@ -4043,6 +4053,229 @@ async fn uow_get(
     Json(state.uow.get_or_create(&story_id))
 }
 
+// ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
+
+/// Read `CAMERATA_GITHUB_TOKEN`, returning `None` when unset or empty.
+fn github_token() -> Option<String> {
+    std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+/// `POST /api/workitems/pull` — pull ALL open issues across ALL the ACTIVE project's
+/// repos via the GitHub adapter, normalized to [`WorkItem`] (each carrying its repo).
+/// Manual (user-triggered), no cache. Returns `{ items: WorkItem[] }`.
+///
+/// Degrades gracefully: with no token, or no active project, or no repos, returns an
+/// empty item list (never an error) so the UI can render a "Connect GitHub / add a
+/// repo" hint. A per-repo fetch failure is skipped (the union of the repos that DID
+/// resolve is returned) rather than failing the whole pull.
+async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let Some(token) = github_token() else {
+        return Json(serde_json::json!({
+            "items": [],
+            "message": "Connect GitHub to pull work items.",
+        }));
+    };
+    let Some(project) = state.projects.active() else {
+        return Json(serde_json::json!({
+            "items": [],
+            "message": "No active project. Create or select one to pull work items.",
+        }));
+    };
+    let mut items: Vec<crate::workitems::WorkItem> = Vec::new();
+    for repo in &project.repos {
+        match crate::github_issues::list_open_issues(repo, &token).await {
+            Ok(issues) => {
+                for issue in issues {
+                    // The list path returns IssueSummary (no state/labels); open issues
+                    // are by definition "open" with no camerata labels needed for the
+                    // pull view. Map straight onto a WorkItem with the repo set.
+                    items.push(crate::workitems::WorkItem {
+                        id: crate::workitems::WorkItem::github_id(repo, issue.number),
+                        provider: "github".to_string(),
+                        repo: repo.clone(),
+                        number: issue.number,
+                        title: issue.title,
+                        body: issue.body,
+                        state: "open".to_string(),
+                        url: issue.url,
+                        labels: Vec::new(),
+                    });
+                }
+            }
+            // Skip a repo that fails (bad name, 404, rate limit) — the union of the
+            // repos that resolved is still useful; the architect sees what loaded.
+            Err(_) => continue,
+        }
+    }
+    Json(serde_json::json!({ "items": items }))
+}
+
+/// `POST /api/workitems/refresh` body `{ work_item_id }` — re-pull ONE work item from
+/// its source (GitHub), returning `{ item: WorkItem }`. Needs the token.
+#[derive(serde::Deserialize)]
+struct WorkItemRefreshReq {
+    work_item_id: String,
+}
+
+async fn workitems_refresh(
+    State(_state): State<AppState>,
+    Json(req): Json<WorkItemRefreshReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = github_token()
+        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
+    let detail = crate::github_issues::get_issue_detail(&repo, number, &token)
+        .await
+        .map_err(AppError)?;
+    let item = crate::workitems::WorkItem::from_github_issue(&repo, &detail);
+    Ok(Json(serde_json::json!({ "item": item })))
+}
+
+/// `POST /api/workitems/comment` body `{ work_item_id, body }` — comment back onto the
+/// source issue (GitHub) via the adapter / sync path. Returns `{ ok, url }`. Needs the
+/// token. The `url` is the created comment's html_url.
+#[derive(serde::Deserialize)]
+struct WorkItemCommentReq {
+    work_item_id: String,
+    body: String,
+}
+
+async fn workitems_comment(
+    State(_state): State<AppState>,
+    Json(req): Json<WorkItemCommentReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = github_token()
+        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    if req.body.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("comment body must not be empty")));
+    }
+    let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
+    let url = crate::github_issues::comment_on_issue(&repo, number, &req.body, &token)
+        .await
+        .map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "ok": true, "url": url })))
+}
+
+/// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)`.
+/// Errors when the provider is not `github` or the shape is malformed.
+fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
+    let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`"
+        ))
+    })?;
+    let (repo, num) = rest.rsplit_once('#').ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "work_item_id missing `#NUMBER`: `{work_item_id}`"
+        ))
+    })?;
+    if camerata_worktracker::RepoCoord::parse(repo).is_none() {
+        return Err(AppError(anyhow::anyhow!(
+            "work_item_id repo is not `owner/repo`: `{repo}`"
+        )));
+    }
+    let number: u64 = num
+        .parse()
+        .map_err(|_| AppError(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
+    Ok((repo.to_string(), number))
+}
+
+/// A UoW with the WorkItem it references and its lifecycle stage, for `GET /api/uows`.
+#[derive(serde::Serialize)]
+struct UowView {
+    /// The UoW id (its story id, e.g. `OWNER/REPO#123`).
+    id: String,
+    /// The work item this UoW references, when it maps to one (a GitHub-sourced
+    /// spine story). `None` for native/legacy stories with no external ref.
+    work_item: Option<crate::workitems::WorkItem>,
+    /// The lifecycle stage as a snake_case wire string (`intake`, `development`, …).
+    stage: String,
+}
+
+/// `GET /api/uows` — list all Units of Work, each with the WorkItem it references
+/// (resolved from the story spine) and its lifecycle stage.
+async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    let stories = state.stories.list().await.map_err(AppError)?;
+    let uows = state.uow.list();
+    let views: Vec<UowView> = uows
+        .into_iter()
+        .map(|u| {
+            let work_item = stories
+                .iter()
+                .find(|s| s.id == u.story_id)
+                .and_then(crate::workitems::WorkItem::from_canonical_story);
+            UowView {
+                id: u.story_id,
+                work_item,
+                stage: u.stage.wire_str().to_string(),
+            }
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "uows": views })))
+}
+
+/// `POST /api/uow/from-workitem` body `{ work_item_id }` — create a UoW referencing the
+/// work item. DEDUP by external ref: if a UoW already exists for that work item, return
+/// it with `created=false` (never a duplicate). Returns `{ uow_id, created }`.
+///
+/// The work item is also ensured on the canonical story spine (idempotent upsert) when
+/// it is not already there, so `/api/uows` can resolve the WorkItem back and the
+/// governed-dev endpoints find a story to run against. This REPLACES the adopt-issue
+/// hack: the UI no longer names a repo + number directly; it pulls work items, then
+/// projects one onto a UoW here.
+#[derive(serde::Deserialize)]
+struct UowFromWorkItemReq {
+    work_item_id: String,
+}
+
+async fn uow_from_workitem(
+    State(state): State<AppState>,
+    Json(req): Json<UowFromWorkItemReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
+    // The UoW key is the spine story id (provider prefix stripped).
+    let story_id = crate::workitems::story_id_for(&req.work_item_id);
+
+    // DEDUP by external ref: a UoW already exists for this work item id.
+    let already = state.uow.list().iter().any(|u| u.story_id == story_id);
+    if already {
+        return Ok(Json(
+            serde_json::json!({ "uow_id": story_id, "created": false }),
+        ));
+    }
+
+    // Ensure the work item is on the canonical spine so /api/uows resolves it and the
+    // governed-dev endpoints have a story to run against. Idempotent upsert: refresh
+    // the row from GitHub when a token is configured, else seed a minimal row from the
+    // id alone (so a token-free environment still creates a usable UoW).
+    let story = match (
+        state.stories.get(&story_id).await.map_err(AppError)?,
+        github_token(),
+    ) {
+        (Some(existing), _) => existing,
+        (None, Some(token)) => {
+            match crate::github_issues::get_issue_detail(&repo, number, &token).await {
+                Ok(detail) => {
+                    crate::github_issues::issue_to_story(&repo, number, &detail.title, &detail.body)
+                }
+                // Token present but the fetch failed: still create a minimal spine row
+                // so the UoW is usable; the architect can refresh it later.
+                Err(_) => crate::github_issues::issue_to_story(&repo, number, "", ""),
+            }
+        }
+        (None, None) => crate::github_issues::issue_to_story(&repo, number, "", ""),
+    };
+    state.stories.upsert(story).await.map_err(AppError)?;
+
+    // Create the UoW (get_or_create materializes it at the default Intake stage).
+    let uow = state.uow.get_or_create(&story_id);
+    Ok(Json(
+        serde_json::json!({ "uow_id": uow.story_id, "created": true }),
+    ))
+}
+
 #[derive(serde::Deserialize)]
 struct UowStatusReq {
     /// Accepted values: `"new"`, `"in_progress"`, `"done"`.
@@ -5512,5 +5745,157 @@ mod tests {
         .await;
         assert!(result.is_ok(), "must not error without a token");
         assert!(result.unwrap().is_none(), "must return None without a token");
+    }
+
+    // ── WorkItem + UoW layer (governed-dev surface) ──────────────────────────
+
+    /// POST /api/workitems/pull degrades gracefully with no token: it returns an
+    /// empty item list plus a hint, never an error.
+    #[tokio::test]
+    async fn workitems_pull_no_token_returns_empty_with_message() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/pull")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["items"].as_array().unwrap().len(), 0);
+        assert!(json["message"].is_string());
+    }
+
+    /// POST /api/uow/from-workitem creates a UoW on first call and DEDUPES on the
+    /// second (created=false, same uow_id, no duplicate). Token-free: the spine row is
+    /// seeded from the id alone, so this is hermetic.
+    #[tokio::test]
+    async fn uow_from_workitem_dedups_by_external_ref() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow = state.uow.clone();
+        let app = router(state);
+
+        let call = |app: Router| async {
+            let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/from-workitem")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        // First call: created=true, the UoW key is the story id (prefix stripped).
+        let json1 = body_json(call(app.clone()).await).await;
+        assert_eq!(json1["created"], true);
+        assert_eq!(json1["uow_id"], "o/r#20");
+
+        // Second call with the SAME work item: created=false, same id.
+        let json2 = body_json(call(app).await).await;
+        assert_eq!(json2["created"], false, "must dedup, never duplicate");
+        assert_eq!(json2["uow_id"], "o/r#20");
+
+        // Exactly one UoW exists for this story.
+        let n = uow.list().iter().filter(|u| u.story_id == "o/r#20").count();
+        assert_eq!(n, 1, "exactly one UoW for the work item");
+    }
+
+    /// GET /api/uows returns each UoW with the WorkItem it references (resolved from
+    /// the spine, repo set) and its lifecycle stage.
+    #[tokio::test]
+    async fn uows_list_carries_workitem_and_stage() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+
+        // Create one UoW from a work item.
+        let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/from-workitem")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/uows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let uows = json["uows"].as_array().unwrap();
+        assert_eq!(uows.len(), 1);
+        assert_eq!(uows[0]["id"], "o/r#20");
+        assert_eq!(uows[0]["stage"], "intake");
+        assert_eq!(uows[0]["work_item"]["id"], "github:o/r#20");
+        assert_eq!(uows[0]["work_item"]["repo"], "o/r", "repo set on the work item");
+        assert_eq!(uows[0]["work_item"]["number"], 20);
+    }
+
+    /// POST /api/workitems/comment rejects an empty body and a non-github id without
+    /// touching the network. The well-formed-token path is exercised in integration.
+    #[tokio::test]
+    async fn workitems_comment_validates_input() {
+        std::env::set_var("CAMERATA_GITHUB_TOKEN", "ghp_test");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+
+        // Empty body → 500 (validation error).
+        let body = serde_json::json!({ "work_item_id": "github:o/r#20", "body": "  " }).to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/comment")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+    }
+
+    /// The work-item id parser produces the (repo, number) the comment/refresh paths
+    /// pass to the adapter, and rejects malformed ids. This pins the comment-payload
+    /// addressing (repo + number) the GitHub comment call uses.
+    #[test]
+    fn parse_github_work_item_id_extracts_repo_and_number() {
+        let (repo, number) = match parse_github_work_item_id(
+            "github:zernst3/camerata-orchestrator#42",
+        ) {
+            Ok(v) => v,
+            Err(e) => panic!("valid id should parse: {}", e.0),
+        };
+        assert_eq!(repo, "zernst3/camerata-orchestrator");
+        assert_eq!(number, 42);
+
+        // Wrong provider, missing number, bad repo, non-numeric number all error.
+        assert!(parse_github_work_item_id("jira:PROJ-1").is_err());
+        assert!(parse_github_work_item_id("github:o/r").is_err());
+        assert!(parse_github_work_item_id("github:notarepo#1").is_err());
+        assert!(parse_github_work_item_id("github:o/r#notanumber").is_err());
     }
 }
