@@ -1472,6 +1472,26 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
                         span { class: "rule-modal-tag", "enforcement \u{00b7} {r.enforcement}" }
                     }
                 }
+                // Sources: the cited corpus source(s) backing this rule's grounding, shown
+                // as a real panel (not only a badge hover) and extensible to multiple sources.
+                if !r.sources.is_empty() {
+                    div { class: "rule-modal-section",
+                        span { class: "rule-modal-label", "Sources" }
+                        for s in r.sources.iter() {
+                            div { style: "margin:4px 0 8px;",
+                                a {
+                                    href: "{s.url}",
+                                    style: "color:#2563eb; text-decoration:underline; word-break:break-all;",
+                                    "{s.title}"
+                                }
+                                if let Some(linter) = s.linter.as_ref().filter(|l| !l.is_empty()) {
+                                    span { style: "color:#666; margin-left:6px;", "[{linter}]" }
+                                }
+                                div { style: "color:#888; font-size:0.85em; word-break:break-all;", "{s.url}" }
+                            }
+                        }
+                    }
+                }
                 if let Some(q) = r.decision_question.as_ref().filter(|s| !s.is_empty()) {
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "The decision" }

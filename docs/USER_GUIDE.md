@@ -277,7 +277,7 @@ The Rules view also shows **verification badges** on every rule:
 | Badge | Meaning |
 |---|---|
 | ✓ **Verified** (green) | A human explicitly approved this rule; gold standard |
-| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice); hover for the source |
+| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice). The cited source(s) are listed in the rule's **detail panel** — open the rule and read the **Sources** section (a rule may cite several). |
 | **Draft** (gray, italic) | AI-generated rule not yet grounded; advisory only |
 | **Needs re-check** (amber) | Was verified but its source drifted; review before relying on it |
 
