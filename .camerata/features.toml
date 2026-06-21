@@ -1,0 +1,14 @@
+# Camerata feature flags.
+#
+# Every flag defaults to TRUE when absent (opt-out model). Set a flag to
+# `false` explicitly to disable it. You can also override per-flag with the
+# env var CAMERATA_FEATURE_<UPPER_NAME>=false.
+#
+# Flags:
+#   soc2  — SOC-2 gap-analysis lens in the deep audit tier.
+#            When false, the lens is skipped (deep-security + threat-model
+#            still run; the report is valid with an empty soc2_gaps field).
+#            The SOC-2 lens code is retained; only the runtime execution is
+#            gated. Re-enable by setting soc2 = true here or removing this line.
+
+soc2 = false

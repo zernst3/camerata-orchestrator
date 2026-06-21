@@ -436,6 +436,24 @@ impl Rule {
     pub fn is_shippable(&self) -> bool {
         self.verification.is_shippable()
     }
+
+    /// Whether this rule is AUTO-RECOMMENDED in the onboarding scan PROPOSAL.
+    ///
+    /// A rule is auto-recommended (pre-checked / pre-selected) iff it is
+    /// `Grounded` or `Verified` — i.e. it is backed by an authoritative source
+    /// that was machine-verified or human-confirmed. `Draft` and `NeedsRecheck`
+    /// rules are still *listed* in the proposal so the architect can review and
+    /// opt in, but they are NOT pre-checked because they carry unreduced AI risk.
+    ///
+    /// The distinction matters for the UI: `is_auto_recommended = true` means the
+    /// checkbox is ticked by default; `false` means the row is visible but the
+    /// checkbox is unchecked.
+    pub fn is_auto_recommended(&self) -> bool {
+        matches!(
+            self.verification,
+            Verification::Grounded | Verification::Verified
+        )
+    }
 }
 
 impl Rule {
@@ -1714,5 +1732,48 @@ mod tests {
     fn rule_id_str_returns_inner_string() {
         let r = make_rule("MY-RULE-1", "rust", EnforcementKind::Prose);
         assert_eq!(r.id_str(), "MY-RULE-1");
+    }
+
+    // ── Rule::is_auto_recommended ─────────────────────────────────────────────
+
+    #[test]
+    fn is_auto_recommended_true_for_grounded() {
+        let mut r = make_rule("R-GROUND-1", "rust", EnforcementKind::Structured);
+        r.verification = Verification::Grounded;
+        assert!(
+            r.is_auto_recommended(),
+            "grounded rule must be auto-recommended"
+        );
+    }
+
+    #[test]
+    fn is_auto_recommended_true_for_verified() {
+        let mut r = make_rule("R-VER-1", "rust", EnforcementKind::Structured);
+        r.verification = Verification::Verified;
+        assert!(
+            r.is_auto_recommended(),
+            "verified rule must be auto-recommended"
+        );
+    }
+
+    #[test]
+    fn is_auto_recommended_false_for_draft() {
+        let r = make_rule("R-DRAFT-1", "rust", EnforcementKind::Prose);
+        // make_rule defaults to Draft.
+        assert_eq!(r.verification, Verification::Draft);
+        assert!(
+            !r.is_auto_recommended(),
+            "draft rule must NOT be auto-recommended"
+        );
+    }
+
+    #[test]
+    fn is_auto_recommended_false_for_needs_recheck() {
+        let mut r = make_rule("R-RECHECK-1", "rust", EnforcementKind::Structured);
+        r.verification = Verification::NeedsRecheck;
+        assert!(
+            !r.is_auto_recommended(),
+            "needs_recheck rule must NOT be auto-recommended (stale verification)"
+        );
     }
 }

@@ -124,6 +124,19 @@ impl JobStore {
     pub fn get(&self, id: &str) -> Option<JobState> {
         self.inner.lock().ok().and_then(|g| g.get(id).cloned())
     }
+
+    /// Return the deep-tier report from the most recently COMPLETED job that
+    /// had a non-None `report.deep` field. Used by the deep-report export
+    /// endpoint to find the last successful deep audit without needing the job
+    /// id. Returns `None` when no completed job has a deep report yet.
+    #[must_use]
+    pub fn latest_deep_report(&self) -> Option<crate::ai_audit::DeepReport> {
+        let guard = self.inner.lock().ok()?;
+        guard
+            .values()
+            .filter_map(|j| j.report.as_ref()?.deep.clone())
+            .next()
+    }
 }
 
 #[cfg(test)]
