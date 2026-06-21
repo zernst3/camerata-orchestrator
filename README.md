@@ -13,7 +13,7 @@ The fastest way to see the real, working part: `cargo run -p camerata-ui` (the E
 Cockpit, a Dioxus desktop app), then open the **Onboard repos** view.
 
 ```text
- CAMERATA — WHAT'S REAL vs STAGED                              (60-second read)
+ CAMERATA — WHAT'S REAL vs STAGED
  ════════════════════════════════════════════════════════════════════════════
 
  ✅ REAL — runs today, you can reproduce it
