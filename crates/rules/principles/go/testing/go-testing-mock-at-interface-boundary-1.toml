@@ -1,0 +1,48 @@
+id = "GO-TESTING-MOCK-AT-INTERFACE-BOUNDARY-1"
+title = "Mocks implement the same interface as the dependency they replace; tests inject the mock through the production injection point"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+qualifies = "In Go, a type that satisfies an interface satisfies it implicitly. Mocks for unit tests implement the same interface that the production code accepts as a parameter. The test passes the mock through the constructor or function parameter — the same injection point used in production — so no test-only code paths exist in the production code itself."
+
+[[sources]]
+url = "https://pkg.go.dev/github.com/stretchr/testify/mock"
+title = "pkg.go.dev — testify/mock"
+qualifies = "testify/mock provides the canonical Go mock pattern: embed mock.Mock in a struct, implement interface methods by calling m.Called(args...), and call m.AssertExpectations(t) to verify all expected calls occurred."
+
+[[sources]]
+url = "https://go.dev/doc/effective_go#interfaces_and_types"
+title = "Effective Go — Interfaces and types"
+qualifies = "Go interfaces are satisfied implicitly — any type with the matching method set satisfies the interface. Mocks exploit this: a test mock struct implementing the same interface methods is accepted by any code that takes the interface parameter."
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#interfaces"
+title = "Go Code Review Comments — Interfaces"
+qualifies = "Interfaces should be defined by the consumer, not the producer. Defining the interface in the consuming package makes it straightforward to swap in a mock for testing without any changes to the production package."
+
+[decision]
+question = "How are external dependencies (databases, HTTP clients, queues) replaced in unit tests?"
+default = "interface-mock-at-injection-point"
+why = "Go's implicit interface satisfaction means any struct with the right method set satisfies an interface. A service that takes a UserRepository interface can be tested with an in-memory mock that implements the same interface, without a live database. The mock is injected through the same constructor parameter used in production — there is no if isTesting branch, no global variable swap, no unexported field access. testify/mock is the widely-used library for this: it records call expectations (m.On), returns controlled values, and verifies expectations with m.AssertExpectations(t)."
+
+[[option]]
+id = "interface-mock-at-injection-point"
+label = "mock implements the interface; injected through the same constructor the production code uses"
+directive = "Each external dependency (database, HTTP client, email sender, cache) is expressed as a narrow interface in the consumer package. Tests create a mock struct implementing that interface — using testify/mock or a hand-written stub — and pass it to the function or constructor under test via the same parameter the production wiring uses. m.On('MethodName', args...).Return(values...) sets expectations. m.AssertExpectations(t) verifies all expected calls occurred."
+why = "The adopted default. No test-only code paths in production. Mocks are isolated to test files. Interface satisfaction is compile-time checked."
+
+[[option]]
+id = "global-variable-swap"
+label = "replace a global variable with a test double"
+directive = "The dependency is held in a package-level variable. Tests replace the variable with a mock value and restore it in t.Cleanup."
+why = "Global variable swaps create test ordering sensitivity and break parallel tests (t.Parallel() cannot safely mutate globals)."
+
+[[option]]
+id = "embed-real-dependency"
+label = "use the real dependency (e.g., a real database) in unit tests"
+directive = "Unit tests connect to a real database or service; no mocking."
+why = "Correct approach for integration tests but not unit tests — makes unit tests slow, fragile, and dependent on external infrastructure."

@@ -1,0 +1,43 @@
+id = "GO-TESTING-HELPER-T-HELPER-1"
+title = "Test helper functions call t.Helper() as their first statement so failures are attributed to the caller"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+qualifies = "A test helper is any function that takes *testing.T and may call t.Fatal or t.Error. Without t.Helper(), a test failure inside the helper reports the line inside the helper — which is useless for debugging. t.Helper() marks the function as a helper so Go's testing framework skips it in the stack trace and reports the failure at the call site in the test body."
+
+[[sources]]
+url = "https://pkg.go.dev/testing#T.Helper"
+title = "pkg.go.dev/testing — T.Helper"
+qualifies = "Official testing package: 'Helper marks the calling function as a test helper function. When printing file and line information, that function will be skipped. Helper may be called simultaneously from multiple goroutines.'"
+
+[[sources]]
+url = "https://go.dev/wiki/TestComments"
+title = "Go Wiki — Test Comments (testing conventions)"
+qualifies = "Go test comments wiki: 'Call t.Helper() to attribute failures to the call site, not the helper function.' Shows readFile example with t.Helper() as first statement."
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters — thelper"
+linter = "golangci-lint: thelper"
+qualifies = "golangci-lint thelper: 'Detects tests helpers which do not start with the t.Helper() method.' Mechanically enforces the t.Helper() convention on functions that take *testing.T."
+
+[decision]
+question = "Do test helper functions (those accepting *testing.T and calling t.Fatal/t.Error) call t.Helper()?"
+default = "t-helper-always"
+why = "Without t.Helper(), every failure inside a shared helper function reports the line inside the helper, not the test that called it. The developer must read the test code to figure out which assertion failed. With t.Helper(), the testing framework skips the helper in the stack trace and attributes the failure to the actual call site in the test body — exactly where the developer needs to look. The golangci-lint thelper linter automates this check: it flags any function accepting *testing.T that does not call t.Helper() first."
+
+[[option]]
+id = "t-helper-always"
+label = "call t.Helper() as first statement in every test helper function"
+directive = "Any function that accepts *testing.T (or *testing.TB) and may call t.Fatal, t.Error, t.Fatalf, or t.Errorf calls t.Helper() as its first line. This includes helper constructors (e.g., mustOpenDB(t, dsn)), assertion helpers (e.g., assertUser(t, got, want)), and setup helpers (e.g., seedTestData(t, db)). The thelper golangci-lint linter is enabled to catch violations."
+why = "The adopted default. Failures are attributed to the call site in the test body, not the helper internals. Required for debuggable test output."
+
+[[option]]
+id = "no-t-helper"
+label = "omit t.Helper() from helper functions"
+directive = "Test helper functions do not call t.Helper(); failures are attributed to the line inside the helper."
+why = "Failure messages point inside the helper rather than the test that invoked it, making it harder to identify which test case failed."

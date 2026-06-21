@@ -1,0 +1,43 @@
+id = "GO-TESTING-BLACK-BOX-PKG-TEST-1"
+title = "Black-box tests use package foo_test to verify exported API only; white-box tests stay in package foo"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+qualifies = "Go allows two package declarations in _test.go files: package foo (white-box, can access unexported symbols) and package foo_test (black-box, only exported API). Black-box tests in package foo_test are the idiomatic choice for testing observable behaviour; white-box tests in package foo are acceptable when internal state must be asserted. The convention prevents accidental coupling of tests to unexported details."
+
+[[sources]]
+url = "https://pkg.go.dev/testing"
+title = "pkg.go.dev/testing — Go testing package"
+qualifies = "The testing package documentation describes the two legal package declarations for _test.go files: the package under test (white-box) and the package under test with _test suffix (black-box), compiled as a separate package linked with the main test binary."
+
+[[sources]]
+url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
+title = "cmd/go — Test packages"
+linter = "golangci-lint: testpackage"
+qualifies = "cmd/go documents: 'Files declaring package name_test are compiled as a separate package, then linked and run with the main test binary.' golangci-lint testpackage enforces the use of separate _test packages."
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters — testpackage"
+linter = "golangci-lint: testpackage"
+
+[decision]
+question = "Which package declaration do _test.go files use: package foo or package foo_test?"
+default = "black-box-by-default"
+why = "Using package foo_test for tests exercises only the exported (public) API, which is the contract callers depend on. This prevents tests from coupling to unexported implementation details that may legitimately change during refactoring. When a test needs to reach private state — for example, to validate an internal cache — package foo is acceptable, but this should be deliberate, not the default. The testpackage golangci-lint linter can enforce the black-box preference and require explicit justification for white-box tests."
+
+[[option]]
+id = "black-box-by-default"
+label = "package foo_test by default; package foo only when internal access is required"
+directive = "New _test.go files declare package foo_test. When a test genuinely needs access to unexported symbols, it uses package foo with a comment explaining why. The testpackage linter is configured to require _test package declarations and flag exceptions."
+why = "The adopted default. Tests the public contract, prevents coupling to internals, and enables fearless refactoring."
+
+[[option]]
+id = "white-box-always"
+label = "always use package foo (same package as source)"
+directive = "All _test.go files declare package foo, giving tests access to unexported symbols and implementation details."
+why = "Couples tests to internal implementation; tests break when unexported code is refactored even if behaviour is unchanged."

@@ -1,0 +1,48 @@
+id = "GO-TESTING-DETERMINISTIC-NO-TIME-SLEEP-1"
+title = "Tests are deterministic: no time.Sleep, no real clocks, no random seeds; use t.TempDir and t.Setenv for isolation"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+qualifies = "A Go test that calls time.Sleep is a flaky test waiting to happen: it passes on a fast machine and fails on a loaded CI runner. Deterministic tests control all sources of non-determinism — time, randomness, environment variables, filesystem paths — through the interfaces the testing package provides (t.TempDir, t.Setenv, t.Cleanup) or by injecting a clock interface."
+
+[[sources]]
+url = "https://pkg.go.dev/testing#T.TempDir"
+title = "pkg.go.dev/testing — T.TempDir"
+qualifies = "t.TempDir() returns a temporary directory unique to each test, cleaned up automatically when the test ends. Tests that write to the filesystem use t.TempDir() instead of os.MkdirTemp with manual cleanup."
+
+[[sources]]
+url = "https://pkg.go.dev/testing#T.Setenv"
+title = "pkg.go.dev/testing — T.Setenv"
+qualifies = "t.Setenv(key, value) sets an environment variable for the test duration and restores it via t.Cleanup when the test ends. Cannot be used in parallel tests (panics if t.Parallel has been called)."
+
+[[sources]]
+url = "https://pkg.go.dev/testing#T.Cleanup"
+title = "pkg.go.dev/testing — T.Cleanup"
+qualifies = "t.Cleanup(f) registers f to run when the test ends in LIFO order. Guarantees teardown even if the test panics. The idiomatic replacement for defer in test helper functions."
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters"
+linter = "golangci-lint: tparallel"
+qualifies = "golangci-lint tparallel detects inappropriate usage of t.Parallel() that can cause data races when tests mutate shared state. Used alongside t.Setenv restrictions to prevent race conditions in parallel tests."
+
+[decision]
+question = "How do tests avoid flakiness from time, randomness, environment, and filesystem side effects?"
+default = "deterministic-with-testing-helpers"
+why = "time.Sleep is the most common source of flaky tests: the sleep duration is a guess, and a guess that passes locally fails under CI load. The correct approach is to either inject a clock interface that the test controls directly, or to use channel synchronisation. Environment variables mutated without restoration affect other tests running in the same process. Filesystem writes without cleanup accumulate across test runs. The testing package provides t.TempDir, t.Setenv, and t.Cleanup precisely to handle these cases deterministically: they scope the side effect to one test and tear it down automatically."
+
+[[option]]
+id = "deterministic-with-testing-helpers"
+label = "no time.Sleep; inject clocks; use t.TempDir, t.Setenv, t.Cleanup for isolation"
+directive = "Tests never call time.Sleep or time.Now directly. Code under test accepts a clock interface or time.Time parameter so tests pass a fixed time. Filesystem writes use t.TempDir() for isolation. Environment variable changes use t.Setenv(). Resource teardown uses t.Cleanup(). Random seeds are fixed at test start (e.g., rand.New(rand.NewSource(0))). Global state is avoided."
+why = "The adopted default. Eliminates the most common sources of test flakiness. Tests run in any order, on any machine, with identical results."
+
+[[option]]
+id = "sleep-based-timing"
+label = "use time.Sleep to wait for async operations in tests"
+directive = "Tests call time.Sleep with a duration expected to be long enough for the operation to complete."
+why = "Duration is a guess; passes on fast machines, fails on loaded CI. Makes the test suite artificially slow on every run."
