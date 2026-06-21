@@ -25,7 +25,7 @@ why = "Rob Pike's principle: small interfaces are the right size in Go. A callee
 id = "small-focused-interfaces"
 label = "define small, focused interfaces with 1-3 methods"
 directive = "Each interface has a single responsibility and defines the minimal set of methods a caller needs. If a service needs to read JSON and write to a database, it takes (io.Reader, database.Saver), not a large Database interface with every method. Larger interfaces are built by embedding smaller ones."
-why = "The adopted default. Small interfaces are easy to implement, mock, and test; they compose well."
+why = "Small interfaces are easy to implement, mock, and test; they compose well."
 
 [[option]]
 id = "god-interfaces"

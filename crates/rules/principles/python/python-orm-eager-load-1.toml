@@ -17,7 +17,7 @@ why = "An ORM relationship configured for lazy loading issues a fresh query the 
 id = "eager-load"
 label = "eager-load related rows in batched queries"
 directive = "Any relationship traversed while iterating a collection is eager-loaded at the query site with a batching strategy (`selectinload` / `joinedload` for SQLAlchemy, `select_related` / `prefetch_related` for the Django ORM), so the related rows arrive in one or two queries regardless of result-set size. Iterating a list and touching a lazy relationship per item is banned. A query-count assertion guards the list-returning paths in CI."
-why = "The adopted default. Batched eager-loading keeps round-trips constant as data grows; N+1 access causes 10-100x slowdowns invisible at small sizes."
+why = "Batched eager-loading keeps round-trips constant as data grows; N+1 access causes 10-100x slowdowns invisible at small sizes."
 
 [[option]]
 id = "lazy-load-default"

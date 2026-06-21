@@ -20,13 +20,13 @@ title = "Spring Framework Reference — @RestController / @Service stereotype re
 id = "thin-controllers-delegate-to-service"
 label = "@RestController methods delegate entirely to @Service; no domain logic inline"
 directive = "@RestController methods perform exactly: (1) read validated request input (from @RequestBody, @PathVariable, @RequestParam), (2) call one @Service method, (3) map the service result to a ResponseEntity with the appropriate status code and a DTO body. Conditional logic beyond HTTP-concern branching (is the result empty? return 404 vs 200), data transformation (entity-to-DTO mapping is in the service or a mapper), and multi-step orchestration do not appear in controller methods. @Transactional is not placed on controller methods. A controller method body longer than ~10 lines is a signal that business logic has leaked into the controller."
-why = "The adopted default. Thin controllers keep the domain logic in the service layer where it is independently testable, transactionally managed, and reusable from non-HTTP entry points."
+why = "Thin controllers keep the domain logic in the service layer where it is independently testable, transactionally managed, and reusable from non-HTTP entry points."
 
 [[option]]
 id = "fat-controllers-inline-logic"
 label = "Business logic inline in @RestController methods"
 directive = "Controller methods contain the full business rule implementation: validate inputs, apply domain rules, call repositories directly, and construct the response. Services are not introduced unless the same logic is needed in multiple controllers."
-why = "A defensible alternative the project considered and did not adopt as the default. Inline logic in controllers is reachable only via HTTP, bypasses @Transactional semantics on the service layer, and mixes HTTP protocol concerns with domain concerns."
+why = "A defensible alternative the project considered. Inline logic in controllers is reachable only via HTTP, bypasses @Transactional semantics on the service layer, and mixes HTTP protocol concerns with domain concerns."
 
 [[option]]
 id = "command-handler-per-request"

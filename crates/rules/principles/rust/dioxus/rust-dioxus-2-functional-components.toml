@@ -16,19 +16,19 @@ why = "Functional components are the canonical shape the framework actively main
 id = "components-are-free-functions-returning-element"
 label = "Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq"
 directive = "Every component is a free function whose body returns Element, annotated with the component attribute. Struct-based components implementing a component trait, trait-object wrappers, the legacy Scope-bearing signature from earlier framework versions, and untyped value bags as props are forbidden — these are the load-bearing constraints and the only ones a finding should treat as more than a style note. Declaring props inline as function arguments is acceptable at any prop count: the component-attribute macro generates the backing Props struct and its Clone + PartialEq derives either way, so diffing is correct regardless. A dedicated Props struct is PREFERRED once a component has three or more props purely because the function signature gets long; flag its absence only as a low-severity readability suggestion, never as a correctness or performance defect."
-why = "The adopted default. Functional components with derived Props are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for."
+why = "Functional components with derived Props are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for."
 
 [[option]]
 id = "every-component-is-defined-as-a-struct-implement"
 label = "every component is defined as a struct implementing a …"
 directive = "every component is defined as a struct implementing a Component trait, rather than as a free function annotated with the component attribute"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "props-are-passed-to-components-as-untyped-value"
 label = "props are passed to components as untyped value bags …"
 directive = "props are passed to components as untyped value bags (a HashMap-shaped or map-like container) rather than as a typed Props struct with derived Props, Clone, and PartialEq"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-component-declares-its-props-inline-as-fun"

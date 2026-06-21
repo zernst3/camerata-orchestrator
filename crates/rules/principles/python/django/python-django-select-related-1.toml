@@ -16,7 +16,7 @@ why = "Django's lazy-loading default means that accessing `order.customer.name` 
 id = "select-related-or-prefetch-related"
 label = "select_related for FK/O2O; prefetch_related for M2M and reverse FK"
 directive = "Any view, viewset, or serializer that will traverse a ForeignKey or OneToOne relationship adds `.select_related('relation_name')` to the queryset before evaluation. Any view that will traverse a ManyToMany or reverse ForeignKey relationship adds `.prefetch_related('relation_name')`. Django Debug Toolbar or `nplusone` is enabled in development to surface unguarded traversals as warnings or errors. Accessing a related object attribute on each item in a queryset loop without a corresponding `select_related` or `prefetch_related` is the antipattern."
-why = "The adopted default. `select_related` collapses FK traversals into a single JOIN; `prefetch_related` batches reverse and M2M traversals into one additional query."
+why = "`select_related` collapses FK traversals into a single JOIN; `prefetch_related` batches reverse and M2M traversals into one additional query."
 
 [[option]]
 id = "lazy-loading-accepted"

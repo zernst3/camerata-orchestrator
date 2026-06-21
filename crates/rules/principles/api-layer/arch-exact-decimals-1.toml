@@ -16,22 +16,22 @@ why = "Binary floating-point cannot represent most decimal fractions exactly. 0.
 id = "monetary-and-quantity-values-use-exact-decimal-t"
 label = "Monetary and quantity values use exact decimal types in code; never floats"
 directive = "Any value that represents money, a counted quantity, a percentage with decimal precision, or any other domain where exact arithmetic matters is represented in code by the language's exact-decimal type (BigDecimal, Decimal, rust_decimal, decimal.Decimal, depending on language), never by binary floating-point (f64, double, Number, etc.). The persistence layer uses NUMERIC or DECIMAL columns for these values, not REAL or DOUBLE. Strings or integer-cents representations are not substitutes; they remove the ability to do arithmetic at the type level."
-why = "The adopted default. Binary floating-point cannot represent most decimal fractions exactly."
+why = "Binary floating-point cannot represent most decimal fractions exactly."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-in"
 label = "monetary and quantity values are represented in code as …"
 directive = "monetary and quantity values are represented in code as binary floating-point (f64, double, Number) and stored as REAL or DOUBLE in the database"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "monetary-values-are-represented-in-code-as-integ"
 label = "monetary values are represented in code as integer-cents (or …"
 directive = "monetary values are represented in code as integer-cents (or minor-unit integers) rather than as the language's exact-decimal type"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-as"
 label = "monetary and quantity values are represented as strings throughout, …"
 directive = "monetary and quantity values are represented as strings throughout, and consumers parse and re-format them at each compute step"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

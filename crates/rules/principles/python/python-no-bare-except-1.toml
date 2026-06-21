@@ -17,7 +17,7 @@ why = "A bare `except:` catches everything, including KeyboardInterrupt and Syst
 id = "catch-specific"
 label = "catch specific exception types only"
 directive = "Exception handlers name the specific exception type(s) they can recover from. Bare `except:` is forbidden everywhere. A blind `except Exception:` is permitted only at a process or request top-level boundary that logs the full traceback and re-raises or converts the error into a structured response; it must never silently swallow. Every handler either handles, re-raises, or chains with `raise ... from`."
-why = "The adopted default. Specific handlers recover from what they planned for and let every unanticipated failure surface where it can be diagnosed."
+why = "Specific handlers recover from what they planned for and let every unanticipated failure surface where it can be diagnosed."
 
 [[option]]
 id = "allow-broad-catch"

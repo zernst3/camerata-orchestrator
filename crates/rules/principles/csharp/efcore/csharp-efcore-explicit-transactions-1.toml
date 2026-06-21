@@ -15,7 +15,7 @@ why = "EF Core's SaveChanges/SaveChangesAsync wraps all pending changes in a sin
 id = "explicit-transaction-for-multi-write"
 label = "Explicit transaction wrapping all SaveChanges calls that form one logical operation"
 directive = "Any service method that calls SaveChangesAsync more than once within a single logical operation wraps both calls in using var tx = await context.Database.BeginTransactionAsync(); ... await tx.CommitAsync() (with the full async/await pattern for rollback on exception). If the operation can be restructured so that EF Core's implicit per-SaveChanges transaction covers it (by adding all entities to the same tracked context instance and calling SaveChanges once), that restructuring is preferred over an explicit transaction. Calling SaveChanges twice without an explicit transaction, where the second call's success is required for the first call's result to be valid, is forbidden."
-why = "The adopted default. Explicit transactions guarantee that multi-step writes are atomic: a failure after the first SaveChanges but before the second rolls back the first, leaving no partial state."
+why = "Explicit transactions guarantee that multi-step writes are atomic: a failure after the first SaveChanges but before the second rolls back the first, leaving no partial state."
 
 [[option]]
 id = "single-saveschanges-restructure"

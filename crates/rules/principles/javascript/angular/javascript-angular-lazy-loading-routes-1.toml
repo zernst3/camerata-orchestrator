@@ -20,10 +20,10 @@ why = "Lazy loading defers the bundling and loading of a feature module or route
 id = "feature-routes-are-lazy-loaded-to-reduce-the-init"
 label = "Feature routes are lazy-loaded to reduce the initial bundle"
 directive = "All routes beyond the root and authentication routes use loadComponent or loadChildren with dynamic imports to defer bundling until navigation. The routing configuration uses import('path/to/component/or/module.ts') in a loadComponent or loadChildren property, and Angular automatically chunks that code into a separate bundle. The main bundle includes only the root layout, navigation, and critical routes. Feature modules and routes are split into separate chunks that load on demand."
-why = "The adopted default. Lazy loading reduces the initial bundle and improves time-to-interactive, especially in large applications."
+why = "Lazy loading reduces the initial bundle and improves time-to-interactive, especially in large applications."
 
 [[option]]
 id = "all-routes-are-eagerly-loaded-in-the-main-bundle"
 label = "all routes are eagerly loaded in the main bundle for …"
 directive = "all routes are imported and bundled with the main application, and lazy loading is not used"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

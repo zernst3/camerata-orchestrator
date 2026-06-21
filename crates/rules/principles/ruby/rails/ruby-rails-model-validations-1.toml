@@ -16,7 +16,7 @@ why = "A Rails controller receives one HTTP request. A background job, a rake ta
 id = "model-validations"
 label = "validations declared on the model; database constraints mirror them"
 directive = "Data integrity rules (presence, length, format, numericality, inclusion, uniqueness, custom business rules) are declared as `validates` or `validate` calls on the ActiveRecord model class. Database constraints (NOT NULL, UNIQUE indexes, CHECK) mirror the model validations for defense in depth. Controller-level checks address HTTP-specific concerns (early 400 responses) but are not the sole or primary enforcement point. Writing data without model validations — using `.update_columns`, `update_all`, or `save(validate: false)` — requires an explicit comment justifying the bypass."
-why = "The adopted default. Model validations fire on every `save` call regardless of the entry point, so background jobs, rake tasks, and console writes all share the same guard."
+why = "Model validations fire on every `save` call regardless of the entry point, so background jobs, rake tasks, and console writes all share the same guard."
 
 [[option]]
 id = "controller-validation-only"

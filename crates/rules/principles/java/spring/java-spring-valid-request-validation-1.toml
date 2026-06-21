@@ -21,7 +21,7 @@ title = "Spring MVC Reference — Validation (@Valid / @Validated on @RequestBod
 id = "valid-annotation-on-request-body"
 label = "@Valid on every @RequestBody parameter; MethodArgumentNotValidException handled globally"
 directive = "Every controller method parameter annotated with @RequestBody also carries @Valid (or @Validated when validation groups are needed). DTO classes declare Bean Validation annotations (@NotNull, @NotBlank, @Size, @Min, @Max, @Email, @Pattern, etc.) on their fields. A @ControllerAdvice class handles MethodArgumentNotValidException and ConstraintViolationException, returning a structured 400 response body with field-level error details. Manual null checks or constraint checks inside the controller method body that duplicate Bean Validation constraints are forbidden; the validation framework handles them."
-why = "The adopted default. @Valid triggers Bean Validation at the binding layer before the method body runs, centralizes the 400 response format in one handler, and uses DTO annotations as self-documenting API constraints."
+why = "@Valid triggers Bean Validation at the binding layer before the method body runs, centralizes the 400 response format in one handler, and uses DTO annotations as self-documenting API constraints."
 
 [[option]]
 id = "manual-validation-in-controller"

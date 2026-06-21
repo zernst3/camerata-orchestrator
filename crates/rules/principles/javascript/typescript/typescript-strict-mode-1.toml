@@ -21,10 +21,10 @@ why = "The single most consequential of the strict flags is strictNullChecks: wi
 id = "the-compiler-runs-in-strict-mode"
 label = "The compiler runs in strict mode"
 directive = "tsconfig sets \"strict\": true at the root, enabling the full strict family (strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, and the rest). A tsc type-check (tsc --noEmit or equivalent) is a required build/CI gate. Disabling individual strict flags to silence errors is forbidden; the error is fixed at its source instead."
-why = "The adopted default. With strictNullChecks off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs that are most common and most expensive at runtime."
+why = "With strictNullChecks off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs that are most common and most expensive at runtime."
 
 [[option]]
 id = "the-compiler-runs-with-strict-mode-off-or-with-i"
 label = "the compiler runs with strict mode off, or with …"
 directive = "the compiler runs with strict mode off, or with individual strict flags such as strictNullChecks or noImplicitAny disabled, rather than enabling the full strict family and keeping it on"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

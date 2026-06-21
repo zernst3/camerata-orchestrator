@@ -17,7 +17,7 @@ why = "Flask configuration is typically set on `app.config` from a Python config
 id = "env-vars-or-config-object-from-env"
 label = "config object reads all secrets from environment variables; no secret string literals in source"
 directive = "Flask configuration is applied via a config object (class-based config pattern) or `app.config.from_envvar()`; every sensitive field (SECRET_KEY, SQLALCHEMY_DATABASE_URI, API keys, MAIL_PASSWORD, OAuth secrets) is read from environment variables using `os.environ.get(...)` or equivalent. Config source files committed to git contain only the logic to read environment variables and non-sensitive defaults. A `.env` file for local development is listed in `.gitignore` and never committed. `app.config['SECRET_KEY'] = 'some-literal-string'` and equivalent direct assignments in any committed source file are forbidden."
-why = "The adopted default. Environment variables keep secrets out of the repository and git history; per-environment values are injected at deploy time."
+why = "Environment variables keep secrets out of the repository and git history; per-environment values are injected at deploy time."
 
 [[option]]
 id = "hardcoded-in-source"

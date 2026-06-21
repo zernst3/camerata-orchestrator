@@ -24,7 +24,7 @@ why = "A handler without a timeout can hang indefinitely if a downstream service
 id = "per-route-timeout-explicit-context"
 label = "Routes have explicit timeouts; long-running operations use background jobs"
 directive = "Handlers are wrapped with a timeout middleware (per-route or per-group), or the handler explicitly sets a context deadline with context.WithTimeout. The timeout is appropriate to the operation: a fast API call might be 5 seconds, a database query might be 10 seconds. Operations known to be long (report generation, batch processing) are enqueued as background jobs; the handler enqueues the job and returns immediately with a job ID."
-why = "The adopted default. Per-route timeouts prevent handler goroutines from hanging indefinitely; background jobs separate long-running work from the request cycle."
+why = "Per-route timeouts prevent handler goroutines from hanging indefinitely; background jobs separate long-running work from the request cycle."
 
 [[option]]
 id = "global-timeout-only"

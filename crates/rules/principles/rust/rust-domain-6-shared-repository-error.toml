@@ -24,28 +24,28 @@ why = "Per-function or per-aggregate error proliferation forces callers to handl
 id = "errors-are-category-scoped-one-shared-enum-per-f"
 label = "Errors are category-scoped, one shared enum per failure category at the crate boundary"
 directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly. Per-function or per-aggregate error types are not used."
-why = "The adopted default. Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling."
+why = "Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling."
 
 [[option]]
 id = "each-function-or-aggregate-defines-its-own-error"
 label = "each function or aggregate defines its own error enum, …"
 directive = "each function or aggregate defines its own error enum, so the crate's public surface exposes many small per-call error types rather than a small number of shared category enums"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-crate-exposes-a-single-error-enum-that-mixes"
 label = "the crate exposes a single error enum that mixes …"
 directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into one enum per category"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-crate-re-exports-the-underlying-framework-s"
 label = "the crate re-exports the underlying framework's or driver's error …"
 directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned category enum at the boundary"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
 label = "the crate's public functions return Box of dyn Error …"
 directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

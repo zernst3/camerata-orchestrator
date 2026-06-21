@@ -15,7 +15,7 @@ why = "Immutability makes code easier to reason about, thread-safe without locks
 id = "records-and-immutable-classes"
 label = "use records (C# 9+) for immutable data; immutable classes for older targets"
 directive = "Data transfer objects, API request/response models, and value types are records (record class or record struct). Entity classes are explicitly designed for mutation with clear boundaries and documented as mutable. Non-entity classes use init-only properties or private setters to enforce immutability. Records use init-only or read-only properties. No accidental mutation via public setters outside of aggregate roots."
-why = "The adopted default. Immutability is thread-safe, sharable, and easier to reason about. Records eliminate boilerplate (Equals, GetHashCode, ToString)."
+why = "Immutability is thread-safe, sharable, and easier to reason about. Records eliminate boilerplate (Equals, GetHashCode, ToString)."
 
 [[option]]
 id = "mutable-classes-everywhere"

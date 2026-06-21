@@ -19,22 +19,22 @@ label = "Explicit UnitOfWork parameter on transactional repository methods"
 directive = """
 Repository write methods that may participate in a multi-write transaction take an explicit Option of UnitOfWork (a marker trait defined in the domain crate so the trait surface carries no concrete ORM or database type). Infrastructure implements UnitOfWork on its concrete transaction wrapper and downcasts internally via Any to access the underlying ORM transaction. Services wrap multi-write operations in a closure run on the unit of work and pass Some(uow) to each participating repo call.
 """
-why = "The adopted default. Compile-time visibility of transactional posture at every call site."
+why = "Compile-time visibility of transactional posture at every call site."
 
 [[option]]
 id = "repository-write-methods-take-a-generic-tx-param"
 label = "Repository write methods take a generic Tx parameter, and …"
 directive = "Repository write methods take a generic Tx parameter, and every consumer of the repository must carry that generic through its type graph"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "transactional-context-is-provided-as-a-closure-b"
 label = "Transactional context is provided as a closure-based ambient via …"
 directive = "Transactional context is provided as a closure-based ambient via task-local storage, so the repository trait carries no transaction parameter and the transaction is read from task-local state at call time"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"
 label = "Repository write methods take a parameter typed as the …"
 directive = "Repository write methods take a parameter typed as the concrete ORM transaction type directly, with the ORM type appearing in the domain trait surface"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,13 +16,13 @@ why = "A handler is a translation layer: it reads the validated HTTP request (no
 id = "handlers-thin-delegate-to-services"
 label = "Handlers stay thin; delegate to services or repositories"
 directive = "Handlers are limited to HTTP concerns: extract and validate the request, call a service or repository function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler calls. A direct database query or business-rule computation written inside a handler is forbidden; it moves behind the service layer."
-why = "The adopted default. Thin handlers keep transport concerns separate from domain logic, enable reuse, and improve testability."
+why = "Thin handlers keep transport concerns separate from domain logic, enable reuse, and improve testability."
 
 [[option]]
 id = "handlers-contain-business-logic-and-data-access"
 label = "Handlers contain business logic and data access inline"
 directive = "Handlers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/"

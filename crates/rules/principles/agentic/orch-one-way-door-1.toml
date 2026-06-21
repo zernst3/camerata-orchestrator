@@ -24,16 +24,16 @@ why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way do
 id = "one-way-door-routing-blast-radius-gates-autonomy"
 label = "One-way-door routing — blast radius gates autonomy"
 directive = "Even with a clear winner, STOP and escalate the decision to a human reviewer if the call is hard to reverse: it shapes the data model, a public/API contract, or a pattern that gets copied. Two-way doors (local, encapsulated, trivially refactored) you may auto-decide. Structural/topology changes (new/moved crate or module boundary, changed public trait/API surface) always pause for a human, even with a clear winner: reversibility decays as downstream code adopts the new shape. Decaying reversibility, not file count, is the real property. (\"Routing\" in the title refers to where the decision goes: to the AI to auto-apply, or to a human to review, based on the blast radius of getting it wrong.)"
-why = "The adopted default. A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes."
+why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes."
 
 [[option]]
 id = "the-agent-auto-decides-whenever-the-winner-feels"
 label = "the agent auto-decides whenever the winner feels obvious, regardless …"
 directive = "the agent auto-decides whenever the winner feels obvious, regardless of whether the call is hard to reverse"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-gates-autonomy-on-the-size-of-the-chan"
 label = "the agent gates autonomy on the size of the …"
 directive = "the agent gates autonomy on the size of the change in files rather than on its reversibility, auto-deciding small changes and pausing for large ones"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

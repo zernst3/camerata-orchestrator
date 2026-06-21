@@ -20,7 +20,7 @@ title = "Spring MVC Reference — Validation (@Valid on @RequestBody; DTO bindin
 id = "dtos-at-http-boundary"
 label = "Request and response bodies are DTOs; entities are never serialized directly"
 directive = "All @RequestMapping and @RestController methods accept request bodies as DTO types (plain Java classes or records with Jackson annotations) and return DTO types (or ResponseEntity<DtoType>). JPA @Entity types do not appear as method parameters annotated with @RequestBody or as return types that will be serialized to JSON. Mapping between entities and DTOs is performed in the service layer or via a dedicated mapper component (MapStruct or hand-written). @JsonIgnore and @JsonManagedReference/@JsonBackReference on entity fields are forbidden as a substitute for proper DTO separation."
-why = "The adopted default. DTOs decouple the API contract from the persistence model: the response shape is controlled explicitly, serialization is predictable, and schema changes do not silently alter the API contract."
+why = "DTOs decouple the API contract from the persistence model: the response shape is controlled explicitly, serialization is predictable, and schema changes do not silently alter the API contract."
 
 [[option]]
 id = "entities-as-api-objects"

@@ -24,10 +24,10 @@ why = "Route groups in App Router are how layout composition is opt-in. Placing 
 id = "app-router-pages-live-under-the-gated-route-grou"
 label = "App Router pages live under the gated route group, not at the top level"
 directive = "Pages live under app/(gated)/(main)/... (for the main chrome) or app/(gated)/admin/... (for admin chrome). Pages placed directly under app/(main)/, app/admin/, or outside (gated)/ render with only the root layout and miss their intended auth wrapper, header, and sidebar."
-why = "The adopted default. Route groups in App Router are how layout composition is opt-in."
+why = "Route groups in App Router are how layout composition is opt-in."
 
 [[option]]
 id = "pages-live-anywhere-under-app-that-is-convenient"
 label = "pages live anywhere under app/ that is convenient at …"
 directive = "pages live anywhere under app/ that is convenient at the time, with no required (gated) route group housing all authenticated pages"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

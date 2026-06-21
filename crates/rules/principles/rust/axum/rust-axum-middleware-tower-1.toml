@@ -16,13 +16,13 @@ why = "Tower middleware wraps request/response processing and runs before and af
 id = "tower-middleware-for-cross-cutting-concerns"
 label = "Implement cross-cutting concerns as tower middleware"
 directive = "Logging, tracing, authentication, rate limiting, CORS, compression, and other concerns that span multiple routes are implemented as tower middleware components and registered on the router or on specific routes. Handlers do not contain inline implementations of these concerns. Middleware runs in a defined order, before the handler or after the response is produced."
-why = "The adopted default. Middleware centralizes cross-cutting logic, avoids duplication, and ensures consistent application across all routes."
+why = "Middleware centralizes cross-cutting logic, avoids duplication, and ensures consistent application across all routes."
 
 [[option]]
 id = "cross-cutting-concerns-inline-in-handlers"
 label = "Implement cross-cutting concerns inline in handlers"
 directive = "Each handler is responsible for implementing logging, authentication, rate limiting, and other cross-cutting concerns directly in the handler body or by calling helper functions from the handler."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/middleware/index.html"

@@ -16,7 +16,7 @@ why = "A Django view (function-based or class-based) is a request-response adapt
 id = "model-methods-or-service-layer"
 label = "thin views; logic in model methods (single-model) or service modules (cross-model)"
 directive = "Views (function-based or class-based) are limited to HTTP concerns: validate input with a Form or Serializer, call a model method or service function, return a response. Business rules that operate on a single model live as model methods. Business rules that coordinate multiple models, trigger async tasks, or send notifications live in a service module (`app/services.py` or `services/` package) that has no import dependency on Django's HTTP layer. Multi-step workflows, direct ORM calls for business-logic purposes, and external API calls inside a view function are the patterns to eliminate from the view layer."
-why = "The adopted default. Model methods and service modules are independently unit-testable and callable from management commands, Celery tasks, and shell sessions without the HTTP stack."
+why = "Model methods and service modules are independently unit-testable and callable from management commands, Celery tasks, and shell sessions without the HTTP stack."
 
 [[option]]
 id = "fat-views"

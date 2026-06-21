@@ -22,7 +22,7 @@ linter = "Error Prone: NullOptional"
 id = "optional-return-types"
 label = "return Optional<T> instead of null"
 directive = "Methods that might not have a value to return use Optional<T> as the return type (e.g., Optional<User> findById(int id)). Callers explicitly handle the absence with ifPresent(), orElse(), orElseThrow(), or other Optional methods. Null is used only for internal fields that are immediately assigned in initialization or legacy APIs that cannot be changed."
-why = "The adopted default. Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
+why = "Optional makes absence explicit in the type system, forces callers to handle it, and avoids NullPointerException."
 
 [[option]]
 id = "return-null"

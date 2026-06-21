@@ -15,7 +15,7 @@ why = "EF Core's dotnet ef migrations add command generates a C# migration file 
 id = "migrations-in-source-control"
 label = "Migrations generated via dotnet ef migrations add, checked in, applied as a pre-deploy step"
 directive = "Schema changes are made by modifying the EF Core model (entities, relationships, configuration) and running dotnet ef migrations add <Name> to generate a migration file. The generated migration file and the updated model snapshot are committed to source control in the same PR as the model change they implement. Migrations are applied as a pre-deploy step (migration runner job, EF Bundle, or pipeline step), not inside Program.cs. Database.EnsureCreated() is forbidden in production code; it may appear only in test setup helpers that create in-memory or ephemeral databases."
-why = "The adopted default. Checked-in migrations are reviewable, reproducible, and deployable independently of application startup; a pre-deploy runner avoids startup-time migration races under horizontal scaling."
+why = "Checked-in migrations are reviewable, reproducible, and deployable independently of application startup; a pre-deploy runner avoids startup-time migration races under horizontal scaling."
 
 [[option]]
 id = "migrate-on-startup"

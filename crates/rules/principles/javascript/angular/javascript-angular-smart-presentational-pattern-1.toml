@@ -15,10 +15,10 @@ why = "The smart/container vs. presentational component pattern separates concer
 id = "components-follow-the-smart-container-vs-presenta"
 label = "Components follow the smart (container) vs. presentational pattern"
 directive = "Components are classified as either smart/container (orchestrates state and data fetching via services, manages local state, handles business logic) or presentational/dumb (receives data via @Input(), emits actions via @Output(), owns no business logic or service dependencies). Presentational components accept data as @Input() and actions as @Output() EventEmitter; they do not inject services or manage global state. Smart components are typically at the route level or feature boundary; presentational components form the rest of the tree. Each presentational component is designed to be testable in isolation without mocking services."
-why = "The adopted default. The pattern makes presentational components reusable and testable without service setup, and keeps smart components small and focused on orchestration."
+why = "The pattern makes presentational components reusable and testable without service setup, and keeps smart components small and focused on orchestration."
 
 [[option]]
 id = "components-mix-business-logic-state-and-presentat"
 label = "components mix business logic, state, and presentation …"
 directive = "components mix business logic, service calls, state management, and presentation together, without a consistent separation between smart and dumb layers"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

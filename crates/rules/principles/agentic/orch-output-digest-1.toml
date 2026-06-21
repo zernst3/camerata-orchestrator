@@ -20,16 +20,16 @@ why = "Signal-to-noise: one clean ranked digest is read; N direct pings get mute
 id = "local-artifacts-a-single-consolidated-daily-dige"
 label = "local artifacts + a single consolidated daily digest"
 directive = "Autonomous routines produce local artifacts (commits, state files) and write to a shared inbox. A single daily consolidator ranks all routines' output by priority and sends one digest, rather than each routine pinging directly. Critical items break through this cadence and notify immediately."
-why = "The adopted default. Signal-to-noise: one clean ranked digest is read; N direct pings get muted."
+why = "Signal-to-noise: one clean ranked digest is read; N direct pings get muted."
 
 [[option]]
 id = "per-routine-direct-notifications"
 label = "per-routine direct notifications"
 directive = "each autonomous routine sends its own direct notification on its own cadence, with no consolidator step in between"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "batch-everything"
 label = "batch everything"
 directive = "all autonomous-routine output is batched into one consolidated stream with no ranking or prioritization, and critical items wait for the next batch alongside routine output"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

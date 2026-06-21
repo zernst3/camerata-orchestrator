@@ -31,7 +31,7 @@ title = "Google Java Style Guide — Section 6.2: Caught exceptions: not ignored
 id = "log-or-rethrow-with-context"
 label = "log with context or re-throw (preserving cause)"
 directive = "Every catch block contains exactly one of: (1) a log statement (error, warn, or debug level) with the exception and relevant context variables, (2) a re-throw of the original or transformed exception, or (3) a throw of a new exception with the original as the cause (.initCause(...) or new Exception(..., cause)). Empty catch blocks are forbidden. Catch blocks that return a default value must still log the exception first."
-why = "The adopted default. Logging or re-throwing preserves diagnostic information and ensures failures are visible to operators and developers."
+why = "Logging or re-throwing preserves diagnostic information and ensures failures are visible to operators and developers."
 
 [[option]]
 id = "silent-catch-and-continue"

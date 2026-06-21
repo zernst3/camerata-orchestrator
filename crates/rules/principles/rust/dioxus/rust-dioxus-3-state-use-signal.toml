@@ -16,25 +16,25 @@ why = "Signals are the framework's reactivity primitive: they automatically subs
 id = "local-component-state-is-a-signal-read-via-call"
 label = "Local component state is a Signal, read via call or read, written via set or with_mut"
 directive = "Local component state uses the framework's signal primitive. Display interpolation reads the signal directly via call syntax or the read accessor. Replacing a value uses the set method; in-place mutation of a contained collection uses with_mut. Legacy state hooks from earlier framework versions are forbidden. Threading mutable state through props as a borrowed reference is forbidden. When state is shared across siblings, lift it to a common ancestor; when state is genuinely app-wide, use the cross-tree context pattern rather than passing signals through every layer."
-why = "The adopted default. Signals are the framework's reactivity primitive: they automatically subscribe components that read them and integrate with template interpolation."
+why = "Signals are the framework's reactivity primitive: they automatically subscribe components that read them and integrate with template interpolation."
 
 [[option]]
 id = "local-component-state-uses-the-legacy-hook-based"
 label = "local component state uses the legacy hook-based state APIs …"
 directive = "local component state uses the legacy hook-based state APIs from earlier framework versions rather than the current signal primitive"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "local-component-state-is-held-in-a-lock-protecte"
 label = "local component state is held in a lock-protected value …"
 directive = "local component state is held in a lock-protected value wrapped in a shared pointer (Arc/Mutex or equivalent) inside props, rather than in a signal"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "a-dummy-signal-is-incremented-manually-to-force"
 label = "a dummy signal is incremented manually to force a …"
 directive = "a dummy signal is incremented manually to force a re-render whenever component state changes, rather than letting the signal primitive's automatic subscription tracking drive re-renders"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/essentials/state/"

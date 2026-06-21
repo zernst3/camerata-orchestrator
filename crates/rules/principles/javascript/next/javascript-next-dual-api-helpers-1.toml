@@ -26,16 +26,16 @@ why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) h
 id = "two-sanctioned-api-helpers-client-vs-server-only"
 label = "Two sanctioned API helpers: client vs server-only"
 directive = "All API calls go through one of two helpers: a client-side helper (browser context, attaches credentials, handles auth redirects) or a server-only helper marked 'server-only' (can reach private-network hostnames, never bundled to the client). Direct fetch calls in components and route handlers are forbidden."
-why = "The adopted default. Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access."
+why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access."
 
 [[option]]
 id = "a-single-isomorphic-api-helper-covers-both-brows"
 label = "a single isomorphic API helper covers both browser and …"
 directive = "a single isomorphic API helper covers both browser and server contexts, with the same code path handling cookies, hostname resolution, and secret access across both runtimes"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "api-calls-are-made-via-raw-fetch-at-each-call-si"
 label = "API calls are made via raw fetch at each …"
 directive = "API calls are made via raw fetch at each call site, with each call site responsible for attaching its own credentials, choosing its own hostnames, and handling its own context-specific concerns"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

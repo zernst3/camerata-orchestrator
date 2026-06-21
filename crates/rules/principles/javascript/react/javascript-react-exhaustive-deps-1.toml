@@ -26,10 +26,10 @@ why = "The dependency array is React's declaration of what the effect (or memoiz
 id = "effect-and-memo-dependency-arrays-list-every-rea"
 label = "Effect and memo dependency arrays list every reactive value the body reads"
 directive = "Every useEffect, useCallback, and useMemo declares in its dependency array every reactive value (props, state, context, and values derived from them) that its body reads. When an effect re-runs too often, the fix keeps the array complete (functional state updaters, useCallback-wrapped functions, moving values out of the effect, or splitting it), never trimming a real dependency or blanket-disabling the exhaustive-deps lint."
-why = "The adopted default. The dependency array declares what the effect depends on; omitting a value the body reads makes the effect close over a stale copy and operate on outdated data indefinitely, with no error and no obvious cause."
+why = "The dependency array declares what the effect depends on; omitting a value the body reads makes the effect close over a stale copy and operate on outdated data indefinitely, with no error and no obvious cause."
 
 [[option]]
 id = "dependency-arrays-are-trimmed-to-control-when-ef"
 label = "dependency arrays are trimmed to control when effects …"
 directive = "dependency arrays are trimmed to control when effects re-run, omitting values the body reads (or suppressing the exhaustive-deps lint) when listing them would cause unwanted re-execution, rather than keeping every read reactive value in the array"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -17,7 +17,7 @@ why = "When a controller or service iterates over a collection of records and ac
 id = "eager-load-with-includes"
 label = "Use includes() or eager_load() to load associations upfront"
 directive = "When a collection's associations are accessed in a loop or iteration, the query uses includes(:association) or eager_load(:association) to load the data upfront. Example: @posts = Post.includes(:author, :comments).all; @posts.each { |p| puts p.author.name } performs two queries, not N+1. For nested associations, use includes(author: :team). Rails's eager_load() is used when a JOIN is required for filtering or sorting by the association."
-why = "The adopted default. Eager loading in a single or two queries is always faster than issuing N+1 queries serially."
+why = "Eager loading in a single or two queries is always faster than issuing N+1 queries serially."
 
 [[option]]
 id = "lazy-load-on-access"

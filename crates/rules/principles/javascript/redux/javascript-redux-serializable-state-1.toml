@@ -25,10 +25,10 @@ why = "Several core Redux capabilities depend on state and actions being plain s
 id = "only-plain-serializable-values-live-in-the-store"
 label = "Only plain serializable values live in the store and in actions"
 directive = "The state tree and all action payloads contain only plain serializable values: primitives, plain objects, and arrays. Promises, functions, class instances, Dates, Maps, Sets, and other non-serializable values are not stored; their serializable projection is stored instead (an ISO string for a time, a plain object or id for an entity) and the rich value is reconstructed at the point of use. Non-serializable runtime concerns live in middleware or component state, not the store."
-why = "The adopted default. Persistence, action replay, time-travel debugging, and the devtools all serialize state and assume it survives a round trip, so a Promise, class instance, or Date in the store breaks those features quietly."
+why = "Persistence, action replay, time-travel debugging, and the devtools all serialize state and assume it survives a round trip, so a Promise, class instance, or Date in the store breaks those features quietly."
 
 [[option]]
 id = "non-serializable-values-such-as-dates-class-inst"
 label = "non-serializable values such as Dates, class instances, …"
 directive = "non-serializable values such as Dates, class instances, Maps, or Promises are stored directly in the state tree or action payloads when convenient, rather than keeping only plain serializable projections in the store"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

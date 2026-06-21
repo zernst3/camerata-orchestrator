@@ -16,25 +16,25 @@ why = "SeaORM's generator emits one file per table; matching that shape keeps ge
 id = "one-file-per-entity-under-entities-named-for-the"
 label = "One file per entity under entities/, named for the table"
 directive = "Inside the entities crate, every entity lives in its own file under entities/<table_name>.rs. No prelude module that re-exports many entities under one name, no grouping by domain concept inside the crate. The flat shape matches SeaORM's code-generator output and lets a reader find an entity by its table name without learning a project-specific organization."
-why = "The adopted default. SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge."
+why = "SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge."
 
 [[option]]
 id = "entities-are-grouped-by-domain-concept-inside-th"
 label = "entities are grouped by domain concept inside the entities …"
 directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-entities-crate-exposes-a-prelude-module-that"
 label = "the entities crate exposes a prelude module that re-exports …"
 directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "multiple-small-related-entities-are-inlined-into"
 label = "multiple small related entities are inlined into a single …"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"

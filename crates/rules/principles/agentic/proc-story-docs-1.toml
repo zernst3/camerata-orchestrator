@@ -20,22 +20,22 @@ why = "The commit and PR records capture WHAT changed; a governed agent needs a 
 id = "per-story-docs"
 label = "Per-story docs keyed by story id"
 directive = "When a governed agent completes a story, emit two documentation files: docs/<story-id>/technical/<story-id>-dev.md (developer-facing: design rationale, implementation decisions, testable assertions, routing notes) and docs/<story-id>/user/<story-id>-guide.md (user-facing: what the change enables, how to use it, any migration steps). The story id is the canonical key already tracked by the dev console and unit of work, so the agent places files deterministically without additional configuration."
-why = "The adopted default. Keys off the story id the dev console and UoW already track; separates technical vs. user audiences; the governed agent can place docs deterministically without additional routing logic."
+why = "Keys off the story id the dev console and UoW already track; separates technical vs. user audiences; the governed agent can place docs deterministically without additional routing logic."
 
 [[option]]
 id = "living-central-docs"
 label = "Living central docs — update TECHNICAL.md + USER_GUIDE.md per change"
 directive = "Maintain a single docs/TECHNICAL.md and a single docs/USER_GUIDE.md. Each completed story appends a dated section to both files. The agent performs a targeted append rather than creating new files."
-why = "A defensible alternative the project considered and did not adopt as the default. Simpler directory structure; works well for small projects where per-story attribution is rarely needed. Becomes unwieldy as the story count grows and makes per-story audit difficult."
+why = "A defensible alternative the project considered. Simpler directory structure; works well for small projects where per-story attribution is rarely needed. Becomes unwieldy as the story count grows and makes per-story audit difficult."
 
 [[option]]
 id = "adr-per-change"
 label = "ADR-per-change — docs/decisions/<date>_<slug>.md"
 directive = "For every story, emit a single Architecture Decision Record at docs/decisions/<date>_<slug>.md following the existing ADR format. No separate user-facing file is produced; user impact is noted inside the ADR when relevant."
-why = "A defensible alternative the project considered and did not adopt as the default. Precise and consistent with the existing docs/decisions/ directory; biased toward architecture rather than usage; produces no dedicated user-facing artifact and can conflate technical rationale with user guidance."
+why = "A defensible alternative the project considered. Precise and consistent with the existing docs/decisions/ directory; biased toward architecture rather than usage; produces no dedicated user-facing artifact and can conflate technical rationale with user guidance."
 
 [[option]]
 id = "mechanical-minimum"
 label = "Mechanical minimum — commit/PR record + generated CHANGELOG only"
 directive = "Do not create separate in-repo documentation files per story. Rely on the commit messages (gated by PROCESS-COMMIT-DOC-1 for substantive bodies with story-id references) and the PR description as the durable record. Optionally generate a CHANGELOG from the commit log at release time."
-why = "A defensible alternative the project considered and did not adopt as the default. Lowest overhead; no file proliferation; commit and PR records are already durable artifacts. Loses searchable narrative, per-story technical rationale, and dedicated user-facing documentation for anything beyond what fits in a commit body."
+why = "A defensible alternative the project considered. Lowest overhead; no file proliferation; commit and PR records are already durable artifacts. Loses searchable narrative, per-story technical rationale, and dedicated user-facing documentation for anything beyond what fits in a commit body."

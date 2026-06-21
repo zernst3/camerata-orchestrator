@@ -25,10 +25,10 @@ why = "A computed property derives a value from reactive data and caches the res
 id = "computed-for-derived-state"
 label = "Use computed properties for derived state"
 directive = "Derived values that depend on reactive data are computed properties. A computed property transforms or filters reactive data without side effects and is only recomputed when its dependencies change. Methods are used for event handlers or actions with side effects (API calls, mutations), not for deriving state."
-why = "The adopted default. Computed properties cache derived state and improve performance."
+why = "Computed properties cache derived state and improve performance."
 
 [[option]]
 id = "methods-for-derived-state"
 label = "Use methods for derived state"
 directive = "Derived values are computed using methods. The method is called from the template and recomputes every time it is invoked."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,7 +16,7 @@ why = "Client-side validation (JavaScript) is a convenience for the user but pro
 id = "controller-and-model-validation"
 label = "Validate input at both the controller (strong_parameters) and model (ActiveRecord validates) layers"
 directive = "The Rails controller uses strong_parameters to permit only expected fields; the model uses ActiveRecord validations (validates :field, ...) to enforce business rules and data integrity. Invalid inputs are rejected at both layers. A model method that receives unvalidated input from a background job or internal call is still responsible for validating it or assuming it came from a trusted source. Client-side validation (JavaScript) is an optional convenience but provides no security guarantees."
-why = "The adopted default. Two-layer validation ensures invalid data is caught early and the database is never in an inconsistent state."
+why = "Two-layer validation ensures invalid data is caught early and the database is never in an inconsistent state."
 
 [[option]]
 id = "client-side-only"

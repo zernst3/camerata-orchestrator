@@ -16,13 +16,13 @@ why = "tokio::sync channels can be bounded (capacity limit) or unbounded. An unb
 id = "use-bounded-channels"
 label = "Use bounded channels to apply backpressure"
 directive = "Channels are created with a bounded capacity (e.g., tokio::sync::mpsc::channel(capacity)). Unbounded channels are not used for inter-task communication. The capacity is chosen based on the expected message size, processing rate, and acceptable memory use."
-why = "The adopted default. Bounded channels prevent memory exhaustion and apply natural backpressure between producers and consumers."
+why = "Bounded channels prevent memory exhaustion and apply natural backpressure between producers and consumers."
 
 [[option]]
 id = "use-unbounded-channels"
 label = "Use unbounded channels"
 directive = "Channels are created unbounded (e.g., tokio::sync::mpsc::unbounded_channel()) to avoid backpressure and allow senders to proceed without waiting."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html"

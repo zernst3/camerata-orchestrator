@@ -16,19 +16,19 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 id = "owner-audit-fks-to-the-same-parent-belongs-to-on"
 label = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
 directive = "When an entity has an owner FK plus audit FKs (e.g. created_by, modified_by) all pointing at the same parent, declare the reverse has_many on the parent for the OWNER only. Reverse traversal for audit FKs goes through filtered queries or an audit_log table."
-why = "The adopted default. Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants."
+why = "Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants."
 
 [[option]]
 id = "the-parent-entity-declares-a-reverse-has-many-va"
 label = "the parent entity declares a reverse has_many variant for …"
 directive = "the parent entity declares a reverse has_many variant for every audit FK pointing at it, alongside the variant for the owner FK"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-entity-stores-its-audit-relationships-create"
 label = "the entity stores its audit relationships (created_by, modified_by) as …"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"

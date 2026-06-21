@@ -25,22 +25,22 @@ why = "A commitment that nobody checks degrades into a commitment nobody respect
 id = "codified-architectural-commitments-are-enforced"
 label = "Codified architectural commitments are enforced gates, not advisory documents"
 directive = "The architectural commitments the project codifies for its autonomous agents are enforced as gates on changes, not held as advisory documents. A deterministic check (a lint rule, a type-system constraint, an AST scan, an AI reviewer reading against the rules, or a combination of those) is wired into the change pipeline. A change that violates a commitment is rejected, escalated, or carries an explicit waiver naming the commitment, the violation, and the reviewer who waived it. Waivers are recorded in a durable log so periodic human review can sweep them and decide whether the commitment needs refinement."
-why = "The adopted default. A commitment that nobody checks degrades into a commitment nobody respects."
+why = "A commitment that nobody checks degrades into a commitment nobody respects."
 
 [[option]]
 id = "architectural-commitments-are-held-as-advisory-d"
 label = "architectural commitments are held as advisory documents that reviewers …"
 directive = "architectural commitments are held as advisory documents that reviewers cite ad hoc when they happen to notice violations during code review, with no mechanical or systematic enforcement step"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "architectural-commitments-are-mechanically-enfor"
 label = "architectural commitments are mechanically enforced on every change with …"
 directive = "architectural commitments are mechanically enforced on every change with no waiver mechanism; a violation either rewrites the rule upstream or is rejected outright"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "architectural-commitments-live-only-in-the-agent"
 label = "architectural commitments live only in the agent's prompt context …"
 directive = "architectural commitments live only in the agent's prompt context for each run, with no separate verification step on the agent's output"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

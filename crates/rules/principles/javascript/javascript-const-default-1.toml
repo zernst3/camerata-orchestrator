@@ -22,10 +22,10 @@ why = "A const binding tells the reader, in one keyword at the declaration site,
 id = "const-is-the-default-binding-let-only-when-the-b"
 label = "const is the default binding; let only when the binding is reassigned"
 directive = "Declarations default to const. let is used only for a binding that is genuinely reassigned after initialization. A let that is never reassigned is rewritten as const."
-why = "The adopted default. A const binding tells the reader at the declaration site that the name will never be reassigned, so they can reason about the scope without scanning for a later mutation."
+why = "A const binding tells the reader at the declaration site that the name will never be reassigned, so they can reason about the scope without scanning for a later mutation."
 
 [[option]]
 id = "let-is-used-as-the-default-binding-keyword-for-u"
 label = "let is used as the default binding keyword for …"
 directive = "let is used as the default binding keyword for uniformity, with const reserved for a narrower set of cases, rather than defaulting to const and using let only where reassignment actually occurs"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

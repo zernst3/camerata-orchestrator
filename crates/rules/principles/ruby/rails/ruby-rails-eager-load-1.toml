@@ -16,7 +16,7 @@ why = "An N+1 query is the single most common Rails performance antipattern: loa
 id = "includes-or-eager-load"
 label = "includes or eager_load at the query site; Bullet in development"
 directive = "Any query whose result set will traverse an association must call `.includes(:association)` (or `.eager_load(:association)` when the association is also referenced in a WHERE or ORDER clause) at the point the collection is fetched. Adding `.includes` after seeing N+1 queries in logs or Bullet notifications is the minimum response. Bullet is enabled in development and test environments so unguarded association traversals raise or log warnings. Calling `.association` on each record in a loop, or rendering an association in a view or serializer without a corresponding `.includes` at the query site, is the antipattern to eliminate."
-why = "The adopted default. `includes` collapses N+1 round trips into one or two queries, and Bullet makes violations audible during development before they reach production."
+why = "`includes` collapses N+1 round trips into one or two queries, and Bullet makes violations audible during development before they reach production."
 
 [[option]]
 id = "select-n-plus-1-accepted"

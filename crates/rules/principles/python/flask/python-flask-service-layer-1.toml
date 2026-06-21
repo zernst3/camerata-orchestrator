@@ -16,7 +16,7 @@ why = "A Flask route function is an HTTP adapter: its job is to extract input fr
 id = "service-layer"
 label = "thin route handlers; business logic in service modules with no Flask dependency"
 directive = "Route handler functions are limited to HTTP concerns: extract and validate input (via schema), call a service function, and format the HTTP response (JSON serialization, status code). Business rules, database queries (ORM calls), cross-resource coordination, external API calls, email dispatch, and any logic reusable from a CLI or background task live in service modules (`services/`, `app/services.py`) that import no Flask request-context objects (`request`, `g`, `current_user`) and accept plain Python arguments. A route handler that contains an ORM query for a business purpose, a conditional business rule, or a direct external HTTP call without delegating to a service is the pattern to eliminate."
-why = "The adopted default. Service modules are independently unit-testable and callable from any entry point; route handlers stay focused on the HTTP contract."
+why = "Service modules are independently unit-testable and callable from any entry point; route handlers stay focused on the HTTP contract."
 
 [[option]]
 id = "logic-in-route-handler"

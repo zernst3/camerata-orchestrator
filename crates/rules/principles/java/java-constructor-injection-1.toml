@@ -26,7 +26,7 @@ linter = "Checkstyle: VisibilityModifier"
 id = "constructor-injection"
 label = "inject dependencies via constructor parameters, marked final"
 directive = "All dependencies are declared as constructor parameters and assigned to final instance fields. The constructor is explicitly defined (not relying on implicit injection). For Spring Framework, @Autowired is omitted from the constructor (Spring auto-wires single constructors). Each dependency is final so it cannot be reassigned. No @Autowired fields."
-why = "The adopted default. Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
+why = "Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
 
 [[option]]
 id = "field-injection"

@@ -24,10 +24,10 @@ why = "A controller's job is to handle an HTTP request: extract parameters and b
 id = "thin-controllers-delegate-to-services"
 label = "Controllers stay thin; delegate to services"
 directive = "Controllers are limited to HTTP concerns: extract the request, call a service, and map the result to a response. Business rules, data access (database queries, ORM calls), and external API calls live in services or repositories that the controller calls. A database query, computation, or API call inside a controller is forbidden; it moves behind the service layer."
-why = "The adopted default. Thin controllers keep transport concerns separate from domain logic, enable reuse, and improve testability."
+why = "Thin controllers keep transport concerns separate from domain logic, enable reuse, and improve testability."
 
 [[option]]
 id = "controllers-contain-business-logic"
 label = "Controllers contain business logic and data access"
 directive = "Controllers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the controller, rather than delegating to a separate service or repository layer."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

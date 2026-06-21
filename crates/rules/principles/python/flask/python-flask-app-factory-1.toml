@@ -16,7 +16,7 @@ why = "A module-level `app = Flask(__name__)` created at import time makes testi
 id = "app-factory-plus-blueprints"
 label = "create_app() factory + Blueprint per feature area"
 directive = "The Flask application is created inside a `create_app(config=None)` factory function in `app/__init__.py` (or equivalent). Routes are organized as Blueprints (`auth_bp`, `api_bp`, etc.), each in its own module, and registered on the app inside `create_app`. Extensions (SQLAlchemy, Migrate, LoginManager) are instantiated at module level without an app and initialized with `ext.init_app(app)` inside the factory. A module-level `app = Flask(__name__)` outside the factory is forbidden; route decorators (`@app.route(...)`) that reference the global app rather than a Blueprint are forbidden."
-why = "The adopted default. The factory pattern enables multiple app instances with different configs (dev vs. test); Blueprints keep routes modular and eliminate circular imports."
+why = "The factory pattern enables multiple app instances with different configs (dev vs. test); Blueprints keep routes modular and eliminate circular imports."
 
 [[option]]
 id = "global-app-instance"

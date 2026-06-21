@@ -24,7 +24,7 @@ why = "gRPC services receive a context argument (ctx context.Context) with a dea
 id = "propagate-respect-deadlines"
 label = "All implementations respect context deadlines; outbound calls use the same context"
 directive = "Every RPC service method receives (ctx context.Context, req *Request) and uses ctx in all outbound operations: database queries accept ctx, other gRPC calls pass ctx, any blocking I/O is done with ctx as the timeout source. If the context deadline is exceeded, operations fail with deadline-exceeded errors; the implementation does not suppress or mask this signal. Implementations do not call operations with context.Background() or context.TODO(); they propagate the caller's context."
-why = "The adopted default. Deadline propagation is gRPC's built-in timeout mechanism; respecting it ensures timeouts work end-to-end and resources are bounded."
+why = "Deadline propagation is gRPC's built-in timeout mechanism; respecting it ensures timeouts work end-to-end and resources are bounded."
 
 [[option]]
 id = "background-context-in-services"

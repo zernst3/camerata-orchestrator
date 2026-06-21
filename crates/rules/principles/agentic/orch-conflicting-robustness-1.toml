@@ -20,22 +20,22 @@ why = "Robustness is plural; picking one dimension unilaterally silently accepts
 id = "conflicting-robustness-is-a-real-tradeoff-not-a"
 label = "Conflicting robustness is a real tradeoff, not a clear winner"
 directive = "When options are each robust against different failures (rigid constraints vs. bad data; flexibility vs. changing requirements), name both failure modes and pause to escalate the decision to a human reviewer. That is a genuine tradeoff, not a clear winner. Let the human pick which failure mode their context cares about more."
-why = "The adopted default. Robustness is plural; picking one dimension unilaterally silently accepts the other failure mode."
+why = "Robustness is plural; picking one dimension unilaterally silently accepts the other failure mode."
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent treats the first robust option it encounters as the winner and proceeds"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f-2"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent picks autonomously based on which option's failure mode has a cheaper recovery in the project's context"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f-3"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent combines every option's protections in the same artifact rather than picking one"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

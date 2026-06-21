@@ -15,7 +15,7 @@ why = "DbContext is designed to be a unit-of-work: it tracks changes, caches ent
 id = "scoped-per-request"
 label = "DbContext registered as Scoped via AddDbContext<T>"
 directive = "DbContext is registered via builder.Services.AddDbContext<AppDbContext>(options => ...) which registers it as Scoped by default. No AddSingleton<AppDbContext> or AddTransient<AppDbContext> call appears. IDbContextFactory<T> (which is registered as Singleton and creates Scoped or Transient contexts on demand) may be used for background services and Blazor Server components that have non-request lifetimes, but never as a replacement for direct Scoped injection in HTTP request handlers."
-why = "The adopted default. Scoped lifetime gives one DbContext instance per HTTP request, allowing transactions to span multiple service-layer calls within the same request, and disposes the connection at request end."
+why = "Scoped lifetime gives one DbContext instance per HTTP request, allowing transactions to span multiple service-layer calls within the same request, and disposes the connection at request end."
 
 [[option]]
 id = "singleton-dbcontext"

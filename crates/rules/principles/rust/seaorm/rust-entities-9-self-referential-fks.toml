@@ -16,19 +16,19 @@ why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity
 id = "self-referential-fks-single-belongs-to-impl-rela"
 label = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
 directive = "Declare only the belongs_to (with explicit from/to) and add impl Related<Entity> for Entity. Reverse traversal is done via find().filter(...). Use role-based variant naming (e.g. Inviter, not User)."
-why = "The adopted default. DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation."
+why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation."
 
 [[option]]
 id = "the-self-referential-entity-declares-both-a-belo"
 label = "the self-referential entity declares both a belongs_to and a …"
 directive = "the self-referential entity declares both a belongs_to and a has_many variant on the same pair, attempting bidirectional macro-driven traversal"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-self-referential-entity-declares-the-belongs"
 label = "the self-referential entity declares the belongs_to but omits impl …"
 directive = "the self-referential entity declares the belongs_to but omits impl Related, and every caller spells out the join inline at the call site"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"

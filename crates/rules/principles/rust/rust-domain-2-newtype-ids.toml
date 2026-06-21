@@ -30,16 +30,16 @@ why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time. The i
 id = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
 label = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
 directive = "UserId(Uuid), OrganizationId(Uuid); bare Uuid only at persistence and HTTP boundaries."
-why = "The adopted default. Moves wrong-ID-to-wrong-function bugs from runtime to compile time."
+why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time."
 
 [[option]]
 id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
 label = "every ID in the codebase is a bare Uuid, …"
 directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "all-ids-use-a-single-generic-entityid-of-t-type"
 label = "all IDs use a single generic EntityId-of-T type parameterized …"
 directive = "all IDs use a single generic EntityId-of-T type parameterized on a phantom marker, rather than each ID being its own concrete newtype"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

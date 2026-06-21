@@ -16,13 +16,13 @@ why = "Axum State is a typed, immutable container for application-wide dependenc
 id = "use-state-for-shared-dependencies"
 label = "Share application dependencies via Axum State"
 directive = "Application-wide dependencies (database pools, caches, config, service clients) are placed into a struct that is wrapped in Axum State and registered on the router. Handlers receive this State as an extractor argument. Global static variables or lazy_static initialization is not used for application dependencies."
-why = "The adopted default. State makes dependencies explicit in handler signatures and simplifies testing via dependency injection."
+why = "State makes dependencies explicit in handler signatures and simplifies testing via dependency injection."
 
 [[option]]
 id = "use-global-statics-for-dependencies"
 label = "Use global static variables for application dependencies"
 directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"

@@ -21,7 +21,7 @@ title = "Spring Data JPA Reference — Configuring Fetch- and LoadGraphs (@Entit
 id = "lazy-by-default"
 label = "default to lazy loading; eager load explicitly when needed"
 directive = "Relationships (@OneToMany, @ManyToOne, @OneToOne) are defined with fetch = FetchType.LAZY (or left unspecified, as LAZY is the default for @OneToMany). Eager loading is explicit and documented: use FETCH JOIN in JPQL/HQL queries when a relationship is needed with the parent, or use @BatchSize(...) or query hints to batch-load related entities. The service or query layer makes explicit decisions about which relationships to load."
-why = "The adopted default. Lazy loading is efficient by default; explicit eager loading prevents N+1 queries and makes performance intentions clear."
+why = "Lazy loading is efficient by default; explicit eager loading prevents N+1 queries and makes performance intentions clear."
 
 [[option]]
 id = "eager-by-default"

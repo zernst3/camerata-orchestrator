@@ -21,10 +21,10 @@ why = "A handler's job is request/response shaping; data access is the repositor
 id = "handlers-delegate-all-data-access-to-services-or-repositories"
 label = "Handlers never touch the database directly"
 directive = "Handler and controller functions contain no direct database-handle calls (no `db`/`pool`/`conn`/`tx` receiver calling a query/execute method). Handlers delegate to a service, which delegates to a repository; only repositories hold a DB handle. Enforce with an AST static-analysis check in CI that parses each handler body and rejects a direct DB call, so a handler that queries the database directly fails the build."
-why = "The adopted default. A handler's job is request/response shaping; collapsing data access into it hides business logic in the transport layer where it is hardest to test and review, and an AST check makes the violation impossible to merge rather than relying on review to notice it."
+why = "A handler's job is request/response shaping; collapsing data access into it hides business logic in the transport layer where it is hardest to test and review, and an AST check makes the violation impossible to merge rather than relying on review to notice it."
 
 [[option]]
 id = "handlers-may-query-the-database-directly"
 label = "handlers may query the database directly when convenient …"
 directive = "handlers may query the database directly when convenient, with no AST boundary preventing a controller from holding and using a DB handle"
-why = "A defensible alternative the project considered and did not adopt as the default: it is faster to write a one-off endpoint, but it erodes the layering and the erosion is invisible until the transport layer is full of business logic."
+why = "A defensible alternative the project considered: it is faster to write a one-off endpoint, but it erodes the layering and the erosion is invisible until the transport layer is full of business logic."

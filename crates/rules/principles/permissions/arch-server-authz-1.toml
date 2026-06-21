@@ -21,10 +21,10 @@ why = "UI can't drift from server enforcement when both read the same server-com
 id = "authorization-on-the-server-ui-renders-permissio"
 label = "Authorization on the server; UI renders permission hints"
 directive = "Each resource response carries server-computed permission flags (e.g. _can: { manage: true }); the UI gates affordances on those flags and never recomputes permission logic client-side. Block client-side permission introspection with lint."
-why = "The adopted default. UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser."
+why = "UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser."
 
 [[option]]
 id = "the-ui-inspects-raw-permission-codes-or-role-mem"
 label = "the UI inspects raw permission codes or role membership …"
 directive = "the UI inspects raw permission codes or role membership on the client and re-implements the authorization decision in browser code, rather than gating on server-computed permission flags carried by each resource response"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

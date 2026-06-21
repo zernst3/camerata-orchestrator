@@ -20,22 +20,22 @@ why = "A permission with no grants is a no-op. The feature gated on it silently 
 id = "adding-a-permission-seeds-its-role-grants-in-the"
 label = "Adding a permission seeds its role grants in the same migration"
 directive = "When a migration introduces a new permission, the same migration also writes the role-permission grants for every role that should have it. The permission row and its grant rows ship together, idempotently, in one atomic change. Roles whose grants are intentionally left for post-deploy configuration are exempt, but the migration declares that intent explicitly so a reviewer can tell the difference between a missing grant and a deliberate one."
-why = "The adopted default. A permission with no grants is a no-op."
+why = "A permission with no grants is a no-op."
 
 [[option]]
 id = "migrations-that-introduce-a-new-permission-write"
 label = "migrations that introduce a new permission write only the …"
 directive = "migrations that introduce a new permission write only the permission row; granting that permission to roles is deferred to a runtime configuration tool or admin UI"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-permission-row-and-its-role-permission-grant"
 label = "the permission row and its role-permission grants ship in …"
 directive = "the permission row and its role-permission grants ship in separate migrations, deployed in sequence, with no requirement that both apply in the same atomic change"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-permission-row-is-added-in-a-migration-and-t"
 label = "the permission row is added in a migration and …"
 directive = "the permission row is added in a migration and the role-permission grants are written by a seed script that lives outside the migration system and runs separately during deploy"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

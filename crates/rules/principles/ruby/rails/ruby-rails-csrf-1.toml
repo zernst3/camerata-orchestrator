@@ -16,7 +16,7 @@ why = "Rails includes `protect_from_forgery with: :exception` in ApplicationCont
 id = "csrf-on-with-selective-api-exemption"
 label = "protect_from_forgery on globally; API controllers opt out only when using token auth"
 directive = "ApplicationController includes `protect_from_forgery with: :exception` (or `:null_session` for JSON API responses). Controllers that serve pure JSON API requests authenticated exclusively with a Bearer token or API key (never a session cookie) may call `protect_from_forgery with: :null_session` or `skip_before_action :verify_authenticity_token` scoped to that controller only. Any controller that handles requests from a browser session (session cookie present) must retain CSRF protection. Exempting an entire application or ApplicationController from CSRF verification is forbidden."
-why = "The adopted default. CSRF protection is necessary for all cookie-session-based state changes. Token-authenticated API-only controllers are a safe, narrow exemption because the Same-Origin Policy prevents forged requests from supplying the Authorization header."
+why = "CSRF protection is necessary for all cookie-session-based state changes. Token-authenticated API-only controllers are a safe, narrow exemption because the Same-Origin Policy prevents forged requests from supplying the Authorization header."
 
 [[option]]
 id = "csrf-disabled-globally"

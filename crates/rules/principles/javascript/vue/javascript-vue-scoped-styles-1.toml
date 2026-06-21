@@ -25,10 +25,10 @@ why = "Vue's scoped styles (a <style scoped> tag) automatically add a unique att
 id = "use-scoped-styles"
 label = "Use scoped styles"
 directive = "Each component's <style> tag includes the scoped attribute, so CSS rules apply only to that component. Global styles (resets, typography, app theme) are in a separate global stylesheet."
-why = "The adopted default. Scoped styles prevent CSS leaks and make components more reusable."
+why = "Scoped styles prevent CSS leaks and make components more reusable."
 
 [[option]]
 id = "use-global-css"
 label = "Use global CSS for component styles"
 directive = "Component styles are written in global CSS files. CSS classes may conflict if different components use the same class names."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

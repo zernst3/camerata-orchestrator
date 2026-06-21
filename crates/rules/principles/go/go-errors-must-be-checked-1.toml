@@ -26,7 +26,7 @@ why = "A Go function returns an error as a signal that something went wrong and 
 id = "check-every-error"
 label = "check err != nil on every call that returns error"
 directive = "Every function call that returns an error is followed by an explicit nil check (if err != nil { ... }). Errors are never discarded with blank assignments (_) except for rare exceptions documented inline. Naked return statements do not discard error returns. When an error is explicitly safe to ignore (e.g., a formatting call that panics on garbage input already validated), the blank assignment is paired with a comment explaining why."
-why = "The adopted default. Checking every error keeps the contract visible and prevents silent cascading failures."
+why = "Checking every error keeps the contract visible and prevents silent cascading failures."
 
 [[option]]
 id = "ignore-low-consequence-errors"

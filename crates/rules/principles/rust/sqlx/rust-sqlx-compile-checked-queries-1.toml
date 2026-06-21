@@ -16,13 +16,13 @@ why = "sqlx::query! is a compile-time macro that checks SQL syntax and column na
 id = "use-sqlx-query-macro"
 label = "Use sqlx::query! for compile-time SQL validation"
 directive = "SQL queries are written using sqlx::query! (or sqlx::query_as!, sqlx::query_scalar!, etc.) which validates the SQL against the database schema at compile time. Parameters are bound using placeholders (?) and macro arguments. SQL strings are never built with format!, string concatenation, or string interpolation."
-why = "The adopted default. Compile-time validation and parameterized binding prevent SQL errors and injection vulnerabilities."
+why = "Compile-time validation and parameterized binding prevent SQL errors and injection vulnerabilities."
 
 [[option]]
 id = "use-format-or-string-interpolation"
 label = "Build SQL strings with format! or string interpolation"
 directive = "SQL queries are built using format!, string concatenation, or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.query.html"

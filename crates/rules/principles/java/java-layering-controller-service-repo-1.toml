@@ -21,7 +21,7 @@ title = "Spring Framework Reference — Stereotype Annotations (@Controller, @Se
 id = "strict-layering"
 label = "enforce strict separation: controllers → services → repositories"
 directive = "Controllers inject only @Service beans and handle HTTP serialization. Services contain business logic, validation, and orchestration; they inject @Repository beans or data sources. Repositories contain only data access code (queries, save/delete operations, transaction handling). Database calls never appear outside repositories. Business logic never appears in repositories or controllers."
-why = "The adopted default. Strict layering makes code testable (mock services), reusable (CLI/workers can call services), and maintainable."
+why = "Strict layering makes code testable (mock services), reusable (CLI/workers can call services), and maintainable."
 
 [[option]]
 id = "controllers-query-database"

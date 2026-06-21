@@ -20,7 +20,7 @@ title = "Spring Boot Reference — Type-safe Configuration Properties (@Configur
 id = "configuration-properties-for-grouped-config"
 label = "@ConfigurationProperties for grouped settings; @Value only for isolated single-value cases"
 directive = "Any group of two or more related configuration keys is represented by a @ConfigurationProperties(prefix = '...') class (a POJO with public getters/setters or a Java record) validated with @Validated and Bean Validation annotations (@NotBlank, @NotNull, @Min, etc.). The class is registered as a @Bean or discovered via @EnableConfigurationProperties and @ConfigurationPropertiesScan. @Value may be used for genuinely isolated single-value injections (a single flag, a single URL with no related keys) but is not the default pattern for grouped settings. @Value with default values that mask missing-key failures is avoided."
-why = "The adopted default. @ConfigurationProperties produces typed, validated, IDE-documented configuration bindings; the POJO is the self-contained contract of what configuration the component requires."
+why = "@ConfigurationProperties produces typed, validated, IDE-documented configuration bindings; the POJO is the self-contained contract of what configuration the component requires."
 
 [[option]]
 id = "value-injection-only"

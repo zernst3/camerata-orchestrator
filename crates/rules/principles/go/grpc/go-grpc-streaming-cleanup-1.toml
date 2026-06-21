@@ -24,7 +24,7 @@ why = "A streaming RPC (server-side stream, client-side stream, bidirectional) i
 id = "streaming-context-cleanup"
 label = "Streaming loops respect context cancellation; loops exit cleanly on context deadline or client close"
 directive = "Streaming RPC handlers read from the receive stream in a loop: for { msg, err := stream.Recv(); if err != nil { return } ... }. The Recv() call blocks until a message arrives or the context is cancelled; when the context is cancelled, Recv() returns an error, and the handler exits the loop. Similarly, before sending, the handler checks the context or lets the Send() call fail if the context is already cancelled. Handlers do not spawn goroutines that outlive the stream; if a handler starts a background goroutine, it is managed by the context or explicitly waited for before the handler returns."
-why = "The adopted default. Context-aware streaming loops ensure goroutines are bounded by the request lifecycle; no leaks."
+why = "Context-aware streaming loops ensure goroutines are bounded by the request lifecycle; no leaks."
 
 [[option]]
 id = "streaming-ignore-context"

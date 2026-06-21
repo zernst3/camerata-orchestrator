@@ -15,7 +15,7 @@ why = "An HTTP handler exists to translate HTTP into a call and back; when busin
 id = "handler-service-repository-layers"
 label = "use handler, service, and repository layers"
 directive = "HTTP handlers (in a handlers/ or api/ package) parse and validate input, call a service-layer function, and shape the HTTP response. Services (in a services/ package) contain business rules, orchestrate multi-step workflows, and call repository methods; they take plain arguments and return plain domain objects, never http.Request. Repositories (in a repositories/ or persistence/ package) own all data access (SQL queries, caching, external API calls) behind an interface; services call repository interfaces, not concrete implementations."
-why = "The adopted default. A service layer makes business logic reusable and testable in isolation; repositories decouple services from storage implementation."
+why = "A service layer makes business logic reusable and testable in isolation; repositories decouple services from storage implementation."
 
 [[option]]
 id = "logic-in-handlers"

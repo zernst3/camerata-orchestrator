@@ -15,22 +15,22 @@ why = "Duplicating validation rules between the domain layer and the UI is the l
 id = "forms-display-errors-from-the-domain-newtype-con"
 label = "Forms display errors from the domain newtype constructors; the UI never re-implements validation rules"
 directive = "Form fields bind to signals holding raw user text. On submit (or on blur for live-validation), the form constructs the relevant domain newtype through its fallible constructor and displays whatever validation error the constructor returns. The UI does NOT re-implement validation rules: no inline regex for email format, no max-length check duplicated in the component, no decimal parser repeated per form. The domain newtype is the rule; the UI's job is to call the constructor and render whatever the domain says is wrong. Multi-field forms compose a form-level type that exposes its own fallible constructor in turn."
-why = "The adopted default. Duplicating validation rules between the domain layer and the UI is the largest single source of bugs of the shape 'the form let me submit but the backend rejected it.' The domain layer is the only correct place for validation rules; the UI presents them and never re-states them."
+why = "Duplicating validation rules between the domain layer and the UI is the largest single source of bugs of the shape 'the form let me submit but the backend rejected it.' The domain layer is the only correct place for validation rules; the UI presents them and never re-states them."
 
 [[option]]
 id = "form-validation-runs-through-a-declarative-valid"
 label = "form validation runs through a declarative validation library used …"
 directive = "form validation runs through a declarative validation library used in the UI alongside the domain newtypes, with the library carrying its own rule definitions for each field"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "each-form-component-re-implements-its-own-valida"
 label = "each form component re-implements its own validation logic inline …"
 directive = "each form component re-implements its own validation logic inline (regex, length checks, format helpers) rather than delegating to the domain newtype constructors"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "form-fields-are-validated-only-on-the-server-the"
 label = "form fields are validated only on the server; the …"
 directive = "form fields are validated only on the server; the client submits whatever the user types and shows whatever error the server returns, with no client-side validation step"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

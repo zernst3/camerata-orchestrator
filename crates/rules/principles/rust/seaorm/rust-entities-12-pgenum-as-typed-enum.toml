@@ -16,19 +16,19 @@ why = "Compile-time exhaustive match on the variants and a hard stop on unknown 
 id = "postgres-pgenum-columns-map-to-typed-rust-enums"
 label = "Postgres pgEnum columns map to typed Rust enums via DeriveActiveEnum"
 directive = "Columns backed by a Postgres pgEnum are typed as a Rust enum with DeriveActiveEnum, with explicit rs_type, db_type, enum_name, and a string_value per variant. Single-consumer enums live in the entity file. Multi-consumer enums live in a shared _enums/ module under the most-conceptual-parent entity."
-why = "The adopted default. Compile-time exhaustive match on the variants and a hard stop on unknown values at the boundary."
+why = "Compile-time exhaustive match on the variants and a hard stop on unknown values at the boundary."
 
 [[option]]
 id = "columns-backed-by-a-postgres-pgenum-are-typed-as"
 label = "columns backed by a Postgres pgEnum are typed as …"
 directive = "columns backed by a Postgres pgEnum are typed as String in the entity rather than as a typed Rust enum with DeriveActiveEnum"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-pgenum-lives-in-a-shared-enums-module-from"
 label = "every pgEnum lives in a shared _enums/ module from …"
 directive = "every pgEnum lives in a shared _enums/ module from the moment it is introduced, regardless of how many entities currently consume it"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveActiveEnum.html"

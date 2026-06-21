@@ -15,22 +15,22 @@ why = "Long-lived feature branches drift from main and the merge cost grows supe
 id = "feature-flags-via-env-var-or-runtime-config-no-l"
 label = "Feature flags via env var or runtime config; no long-lived feature branches"
 directive = "Incomplete features ship behind a per-environment gate (an env var, a config-service flag, or a runtime configuration entry) checked at runtime via a single helper. The code lives on the trunk but user-visible behavior stays off until the gate is configured to allow it. Long-lived feature branches are not used; work merges incrementally behind a gate instead. When the feature is shipped, the gate and its check are removed in a follow-up cleanup change rather than left behind as permanent infrastructure."
-why = "The adopted default. Long-lived feature branches drift from main and the merge cost grows superlinearly with the branch's age."
+why = "Long-lived feature branches drift from main and the merge cost grows superlinearly with the branch's age."
 
 [[option]]
 id = "incomplete-features-live-on-long-lived-feature-b"
 label = "incomplete features live on long-lived feature branches that merge …"
 directive = "incomplete features live on long-lived feature branches that merge to main only when the feature is complete, rather than landing incrementally behind a gate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "features-ship-behind-a-flag-but-the-flag-default"
 label = "features ship behind a flag but the flag defaults …"
 directive = "features ship behind a flag but the flag defaults to on, with a kill switch available to disable the feature if a problem appears"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "features-ship-conditionally-based-on-the-deploy"
 label = "features ship conditionally based on the deploy environment rather …"
 directive = "features ship conditionally based on the deploy environment rather than behind a runtime gate, so staging and prod have different code paths active by default"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

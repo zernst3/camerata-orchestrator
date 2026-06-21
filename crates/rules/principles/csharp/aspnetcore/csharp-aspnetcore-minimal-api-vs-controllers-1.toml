@@ -15,7 +15,7 @@ why = "ASP.NET Core supports two routing styles: MVC controllers (classes inheri
 id = "minimal-apis-throughout"
 label = "Minimal APIs throughout the project; no MVC controllers"
 directive = "All HTTP endpoints are registered via MapGet, MapPost, MapPut, MapDelete (and MapGroup for prefix grouping) in Program.cs or in IEndpointRouteBuilder extension methods. No ControllerBase subclasses are introduced. Endpoint handlers delegate to service-layer methods; business logic does not live inline in the lambda. Validation occurs via the filter pipeline (AddEndpointFilter) or via a service-layer contract, not scattered per-handler."
-why = "The adopted default. Minimal APIs produce less framework ceremony, are the strategic ASP.NET Core direction, and are trivially testable in isolation."
+why = "Minimal APIs produce less framework ceremony, are the strategic ASP.NET Core direction, and are trivially testable in isolation."
 
 [[option]]
 id = "mvc-controllers-throughout"
@@ -27,7 +27,7 @@ why = "The right choice for projects with deep existing investment in controller
 id = "mixed-minimal-and-controller"
 label = "Both Minimal APIs and MVC controllers coexist in the same project"
 directive = "Some endpoints are registered via Map* and others live in ControllerBase classes; the mix is determined per-endpoint by what is convenient at the time of authoring."
-why = "A defensible alternative the project considered and did not adopt as the default. Two routing models in one project multiply the mental model surface without adding capability either model lacks."
+why = "A defensible alternative the project considered. Two routing models in one project multiply the mental model surface without adding capability either model lacks."
 
 verification = "grounded"
 

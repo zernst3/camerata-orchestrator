@@ -15,22 +15,22 @@ why = "Inline SVG is the smallest-bundle, fastest-first-paint approach. It has n
 id = "icons-render-as-inline-svg-from-static-string-co"
 label = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
 directive = "Icons live in a single icons module as static SVG string constants. A single Icon component takes a name (an enum variant) and a class string, looks up the corresponding SVG, and renders it inline through the framework's raw-inner-html attribute. Sources for the SVG strings are extracted once from whichever icon set the design system uses, stripped of any framework wrapper, and stored as the raw inner SVG. Runtime fetching of an icon library, icon-font web fonts, and large icon-set crates that pull every icon into the binary are all forbidden."
-why = "The adopted default. Inline SVG is the smallest-bundle, fastest-first-paint approach."
+why = "Inline SVG is the smallest-bundle, fastest-first-paint approach."
 
 [[option]]
 id = "icons-come-from-a-rust-icon-library-crate-that-b"
 label = "icons come from a Rust icon-library crate that bundles …"
 directive = "icons come from a Rust icon-library crate that bundles every icon from a popular icon set, and the application imports specific icons from that crate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "icons-are-rendered-as-glyphs-from-a-web-font-con"
 label = "icons are rendered as glyphs from a web font …"
 directive = "icons are rendered as glyphs from a web font containing the icon set, with the font fetched at runtime and the icons rendered through CSS class names"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "icons-are-loaded-from-an-external-svg-sprite-she"
 label = "icons are loaded from an external SVG sprite sheet …"
 directive = "icons are loaded from an external SVG sprite sheet served over HTTP, with the application referencing each icon by its fragment identifier"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

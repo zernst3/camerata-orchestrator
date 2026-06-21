@@ -16,13 +16,13 @@ why = "Axum handlers return Result<T, E> where the error type E implements IntoR
 id = "typed-errors-implement-intoresponse"
 label = "Handlers return typed error types that implement IntoResponse"
 directive = "Handlers return a domain Result type (e.g., Result<User, UserError>). The error type UserError implements IntoResponse, so the handler just returns the Result and Axum converts UserError into a status code and response body. Error mapping is centralized in the IntoResponse impl, not duplicated in handlers."
-why = "The adopted default. Typed errors centralize error-to-HTTP mapping and keep handlers focused on business logic."
+why = "Typed errors centralize error-to-HTTP mapping and keep handlers focused on business logic."
 
 [[option]]
 id = "handlers-build-http-responses-directly"
 label = "Handlers build HTTP responses directly for errors"
 directive = "Each handler constructs StatusCode and response bodies directly when errors occur, mapping domain errors to HTTP responses inline in the handler code."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/response/index.html"

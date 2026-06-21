@@ -20,22 +20,22 @@ why = "Per-decision gates miss aggregate drift; many small calls can drift heavy
 id = "auto-calls-ledger-periodic-judgment-review"
 label = "Auto-calls ledger + periodic judgment review"
 directive = "Every self-made clear-winner call is logged with date, rule, decision, alternatives, and why. The agent surfaces the accumulated batch for human accept/modify/reject on a weekly cadence. Further autonomous runs hold until the batch is cleared, so drift cannot compound past the weekly review window."
-why = "The adopted default. Per-decision gates miss aggregate drift; many small calls can drift heavy or split into competing patterns over hundreds of choices."
+why = "Per-decision gates miss aggregate drift; many small calls can drift heavy or split into competing patterns over hundreds of choices."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject daily, and further autonomous runs hold until the batch is cleared"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-2"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject monthly, and further autonomous runs hold until the batch is cleared"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-3"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject weekly, and autonomous runs continue freely between reviews rather than holding until the batch is cleared"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

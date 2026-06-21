@@ -22,7 +22,7 @@ linter = "PMD: ExcessivePublicCount"
 id = "small-focused-interfaces"
 label = "define small, focused interfaces with 1-3 methods"
 directive = "Each interface has a single responsibility and the minimal set of methods a caller needs. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory (each 1-3 methods)."
-why = "The adopted default. Small interfaces are easy to implement, test, and mock; they compose well and follow the Interface Segregation Principle."
+why = "Small interfaces are easy to implement, test, and mock; they compose well and follow the Interface Segregation Principle."
 
 [[option]]
 id = "god-interfaces"

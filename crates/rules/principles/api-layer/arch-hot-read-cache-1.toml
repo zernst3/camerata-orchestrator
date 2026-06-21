@@ -15,22 +15,22 @@ why = "Cache hits are typically sub-millisecond while a database round trip is t
 id = "hot-reads-sit-behind-a-ttl-cache-with-explicit-w"
 label = "Hot reads sit behind a TTL cache with explicit write-side invalidation"
 directive = "Read paths with high request volume and slowly-changing data sit behind a cache with a TTL. Writes that affect those reads explicitly invalidate the relevant cache keys. The TTL is the backstop for missed invalidations, not the primary mechanism. Apply to directory listings, profile lookups, RBAC and permission resolutions, and similar read-heavy endpoints. Do NOT apply to mutating paths, reads that are unsafe if stale (in-flight auth decisions, idempotency-key lookups), or paths where the caller expects to see their own just-completed change immediately."
-why = "The adopted default. Cache hits are typically sub-millisecond while a database round trip is tens of milliseconds; the speedup is on the order of 20 to 50 times for the common path, free per request once warmed."
+why = "Cache hits are typically sub-millisecond while a database round trip is tens of milliseconds; the speedup is on the order of 20 to 50 times for the common path, free per request once warmed."
 
 [[option]]
 id = "hot-reads-run-directly-against-the-database-with"
 label = "hot reads run directly against the database with no …"
 directive = "hot reads run directly against the database with no cache layer; every read request pays the full database round trip"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "hot-reads-sit-behind-a-ttl-cache-with-no-write-s"
 label = "hot reads sit behind a TTL cache with no …"
 directive = "hot reads sit behind a TTL cache with no write-side invalidation; the TTL is the only mechanism that controls staleness"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "hot-reads-sit-behind-a-cache-with-explicit-write"
 label = "hot reads sit behind a cache with explicit write-side …"
 directive = "hot reads sit behind a cache with explicit write-side invalidation but no TTL; the cache trusts the invalidation paths to cover every change"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

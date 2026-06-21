@@ -25,7 +25,7 @@ why = "Defining interfaces at the consumer decouples the implementation from the
 id = "accept-interfaces-return-structs"
 label = "accept narrow interfaces, return concrete structs, define interfaces at the consumer"
 directive = "Function parameters use narrow interfaces (io.Reader, io.Writer, etc.) so any implementation can be passed. Return types are concrete structs (e.g., *User, *database.Connection) so the caller has full capability. Interfaces are defined in the package that uses them (the consumer), not in the package that implements them (the producer)."
-why = "The adopted default. Accepting interfaces allows callers to pass any implementation; returning structs gives the caller full information; consumer-defined interfaces keep dependencies flowing downhill."
+why = "Accepting interfaces allows callers to pass any implementation; returning structs gives the caller full information; consumer-defined interfaces keep dependencies flowing downhill."
 
 [[option]]
 id = "return-interfaces"

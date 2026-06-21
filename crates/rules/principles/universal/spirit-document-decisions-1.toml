@@ -20,10 +20,10 @@ why = "Decisions made only in conversation evaporate; agents cannot cite them an
 id = "document-decisions-immediately"
 label = "Document decisions immediately"
 directive = "Every decision (architectural, process, convention, even small) is written to a persistent artifact the moment it is made: a conventions file with a rule ID for code, a dated decision doc for process."
-why = "The adopted default. Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them."
+why = "Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them."
 
 [[option]]
 id = "decisions-accumulate-in-conversation-as-they-are"
 label = "decisions accumulate in conversation as they are made and …"
 directive = "decisions accumulate in conversation as they are made and are written to durable artifacts in a documentation pass later, batched by week, sprint, or feature shipment"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

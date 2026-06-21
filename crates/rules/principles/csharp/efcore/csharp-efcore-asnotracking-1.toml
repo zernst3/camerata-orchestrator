@@ -15,7 +15,7 @@ why = "By default, EF Core attaches every entity returned by a query to the DbCo
 id = "asnotracking-for-read-only"
 label = "AsNoTracking on all read-only queries; tracked queries only when SaveChanges follows"
 directive = "Every LINQ query whose result is not subsequently passed to SaveChanges calls .AsNoTracking() before execution. Repository method naming encodes the tracking intent: Get/Find/List methods return AsNoTracking results; methods that load an entity for mutation (Update, Delete, Patch) fetch with tracking (no AsNoTracking). The global default tracking behavior is not changed (AsNoTrackingWithIdentityResolution is not set globally) so that tracked queries remain the intentional opt-in for write paths. Callers do not modify AsNoTracking results and expect SaveChanges to persist the change."
-why = "The adopted default. Read-only queries gain lower memory use, faster execution, and smaller DbContext state; tracked queries remain available for the write path that needs them."
+why = "Read-only queries gain lower memory use, faster execution, and smaller DbContext state; tracked queries remain available for the write path that needs them."
 
 [[option]]
 id = "global-asnotracking-default"

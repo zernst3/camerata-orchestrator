@@ -29,10 +29,10 @@ why = "Angular's dependency injection (DI) container is the authoritative source
 id = "services-are-injected-via-constructor-or-inject"
 label = "Services are injected via constructor parameters or the inject() function, never manually instantiated"
 directive = "All service instances are obtained through Angular's dependency injection: either via a constructor parameter (declare it in the component's constructor, and Angular injects it) or via the inject() function called during component setup. Services are configured via the providers array (in a component's @Component decorator, in an NgModule, or in the providers array of a bootstrapApplication call) or via providedIn: 'root' in the @Injectable decorator. Writing 'new MyService()' to instantiate a service manually is forbidden; the pattern bypasses DI, loses singleton behavior, skips initialization, and makes testing impossible without modifying source code."
-why = "The adopted default. DI injection ensures singleton behavior, initialization, mocking for tests, and the ability to swap implementations without code changes. Manual instantiation bypasses all of these guarantees."
+why = "DI injection ensures singleton behavior, initialization, mocking for tests, and the ability to swap implementations without code changes. Manual instantiation bypasses all of these guarantees."
 
 [[option]]
 id = "services-are-manually-instantiated-with-new-where"
 label = "services are manually instantiated with 'new' where …"
 directive = "services are instantiated manually using the 'new' keyword where needed, rather than relying on dependency injection"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

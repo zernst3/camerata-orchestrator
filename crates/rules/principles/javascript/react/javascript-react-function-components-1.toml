@@ -20,10 +20,10 @@ why = "Function components with hooks are the shape React's documentation, tooli
 id = "components-are-functions-using-hooks-not-classes"
 label = "Components are functions using hooks, not classes"
 directive = "Components are written as functions that use hooks for state and lifecycle. Class components are not written for new code. The one sanctioned exception is an error boundary, which currently requires a class; it is isolated as a small, single-purpose wrapper rather than becoming a pattern that pulls other logic back into class form."
-why = "The adopted default. Function components with hooks are the shape React's tooling and newer APIs are built around; mixing in class components maintains two parallel idioms for the same concerns and cuts those components off from custom-hook reuse."
+why = "Function components with hooks are the shape React's tooling and newer APIs are built around; mixing in class components maintains two parallel idioms for the same concerns and cuts those components off from custom-hook reuse."
 
 [[option]]
 id = "class-components-are-written-alongside-function"
 label = "class components are written alongside function components …"
 directive = "class components are written alongside function components at the author's discretion, maintaining lifecycle-method and hook-based idioms in parallel, rather than standardizing on function components with hooks for new code"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

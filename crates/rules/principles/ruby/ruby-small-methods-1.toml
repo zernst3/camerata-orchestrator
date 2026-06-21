@@ -16,7 +16,7 @@ why = "A method that handles multiple responsibilities or spans many lines (rule
 id = "small-focused-methods"
 label = "Keep methods small and focused; extract complex logic into smaller methods or classes"
 directive = "Each method has a single responsibility and is kept to 10-20 lines of code. Complex logic is extracted into smaller private methods with descriptive names (e.g., validate_payment, calculate_discount, notify_user) or into separate service classes for broader workflows. A method that spans more than 20 lines is a candidate for extraction. Comments that explain what a block of code does signal that it should be extracted into a named method."
-why = "The adopted default. Small methods are easier to name, test, understand, and reuse."
+why = "Small methods are easier to name, test, understand, and reuse."
 
 [[option]]
 id = "large-methods"

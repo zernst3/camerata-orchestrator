@@ -22,7 +22,7 @@ linter = "PMD: SystemPrintln"
 id = "structured-logging-framework"
 label = "use a logging framework (slf4j, Log4j, Logback) with structured output"
 directive = "Logging is done via a logging framework (slf4j with Logback or Log4j2 is standard in Spring). Log statements use {} placeholders (log.info(\"User {} logged in\", userId)) and attach contextual fields as needed (MDC for thread context, structured fields in the log record). Log levels (debug, info, warn, error) are used appropriately. Exception objects are logged with the exception parameter so stack traces are included. Configuration (log level, output format, filters) is external (logback.xml or application.yml), not hardcoded."
-why = "The adopted default. Structured logging is machine-readable, searchable, and integrates with centralized logging systems."
+why = "Structured logging is machine-readable, searchable, and integrates with centralized logging systems."
 
 [[option]]
 id = "system-print-statements"

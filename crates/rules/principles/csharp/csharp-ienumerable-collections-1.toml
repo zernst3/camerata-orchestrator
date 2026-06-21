@@ -15,7 +15,7 @@ why = "Returning a concrete collection type (List<T>, T[], HashSet<T>) tightly c
 id = "return-abstract-collections"
 label = "return IEnumerable<T>, ICollection<T>, or IReadOnlyList<T> from public methods"
 directive = "Public methods that return collections use abstract types: IEnumerable<T> for lazy or streaming results; ICollection<T> for counted collections with membership checks; IReadOnlyList<T> for indexed access without modification. Callers cannot modify or invalidate internal state. Internal implementations may return any concrete type (List<T>, HashSet<T>, etc.); the caller sees only the interface."
-why = "The adopted default. Abstract types hide implementation details and prevent accidental corruption of internal state."
+why = "Abstract types hide implementation details and prevent accidental corruption of internal state."
 
 [[option]]
 id = "return-list-array"

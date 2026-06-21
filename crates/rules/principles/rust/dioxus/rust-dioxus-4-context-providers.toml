@@ -16,25 +16,25 @@ why = "Threading state through props (prop drilling) kills review-ability after 
 id = "cross-tree-state-lives-in-named-per-concern-cont"
 label = "Cross-tree state lives in named per-concern contexts, provided at or near the app root"
 directive = "App-wide state (current user and session, modal stack, consent state, theme) is exposed through the framework's context system. Each concern gets its own context, named for what it is (AuthContext, ModalStackContext, ConsentContext). Providers are mounted at or near the app root. Contexts that own reactive state expose it as a signal so that consumers participate in subscription tracking. A single mega-context that holds every concern at once is forbidden because it forces every reader to re-render on every change, regardless of which concern actually moved."
-why = "The adopted default. Threading state through props (prop drilling) kills review-ability after two or three layers of pass-through; contributors start violating the rule out of frustration as soon as the chain gets deep enough."
+why = "Threading state through props (prop drilling) kills review-ability after two or three layers of pass-through; contributors start violating the rule out of frustration as soon as the chain gets deep enough."
 
 [[option]]
 id = "cross-tree-state-is-held-in-global-statics-wrapp"
 label = "cross-tree state is held in global statics wrapped in …"
 directive = "cross-tree state is held in global statics wrapped in thread-safe primitives, with manual re-render plumbing at every component that reads the state"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-cross-tree-concern-lives-on-a-single-super"
 label = "every cross-tree concern lives on a single super-context struct …"
 directive = "every cross-tree concern lives on a single super-context struct that components read by field, rather than each concern getting its own named context"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "cross-tree-state-is-threaded-through-props-at-ev"
 label = "cross-tree state is threaded through props at every intermediate …"
 directive = "cross-tree state is threaded through props at every intermediate layer, with no context-system use even for state that crosses three or more tree levels"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/context"

@@ -24,10 +24,10 @@ why = "A canActivate route guard is evaluated before the route activates, making
 id = "protected-routes-are-guarded-by-canactivate-guard"
 label = "Protected routes are guarded by canActivate guards, not checked in component ngOnInit"
 directive = "All routes that require authentication or authorization are protected by a canActivate guard attached to the route configuration in the routing module. The guard checks permissions and returns true (allow navigation) or false / UrlTree (deny and redirect). Components do not check authorization in ngOnInit or component methods; the guard is the sole authorization boundary. A component loaded via a route without a guard cannot assume the user is authenticated or has permission to view it."
-why = "The adopted default. Route guards authorize at the boundary before the component instantiates, preventing partial renders and wasted initialization for unauthorized users."
+why = "Route guards authorize at the boundary before the component instantiates, preventing partial renders and wasted initialization for unauthorized users."
 
 [[option]]
 id = "authorization-is-checked-in-component-oninitonaf"
 label = "authorization is checked in component ngOnInit or …"
 directive = "authorization checks are performed inside component lifecycle hooks (ngOnInit) or component methods, redirecting to a login or access-denied page if the user lacks permission"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

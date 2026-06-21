@@ -20,7 +20,7 @@ why = "A single deployable that calls its own components in-process and runs bac
 id = "monolith-first"
 label = "single service first; broker only on measured need"
 directive = "The system deploys as a single service by default. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced only when a measured need justifies it (a throughput ceiling that profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons, or a decoupling requirement an in-process design genuinely cannot satisfy). Adding broker infrastructure on anticipation alone is avoided."
-why = "The adopted default. A single service avoids the operational and consistency costs of a broker until the product reaches a scale that actually requires one."
+why = "A single service avoids the operational and consistency costs of a broker until the product reaches a scale that actually requires one."
 
 [[option]]
 id = "broker-up-front"

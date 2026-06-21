@@ -20,10 +20,10 @@ why = "The logical extension of 'a missing permission is a config task': the cod
 id = "hide-dead-end-affordances"
 label = "Hide dead-end affordances"
 directive = "For permission-gated UIs: never render a UI action the user's permissions can't execute. Gate each affordance's render on the same permission its endpoint requires. A button that 403s drives the user to an error page; that redirect IS the bug."
-why = "The adopted default. The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do."
+why = "The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do."
 
 [[option]]
 id = "the-ui-renders-every-action-regardless-of-the-cu"
 label = "the UI renders every action regardless of the current …"
 directive = "the UI renders every action regardless of the current user's permissions, and unauthorized clicks are caught at the endpoint with a 403 response that drives the user to an error page"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

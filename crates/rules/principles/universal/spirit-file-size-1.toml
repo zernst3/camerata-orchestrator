@@ -20,16 +20,16 @@ why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) 
 id = "files-are-sized-for-human-reading-not-for-ai-wri"
 label = "Files are sized for human reading, not for AI write-cost"
 directive = "Hand-maintained files are split at sizes a human can navigate without losing their place. AI can generate and read a 2000-line file at no cost; every human who reviews, debugs, or maintains it pays full attention price. Auto-generated files (schema dumps, generated entity files, ORM-emitted models, lockfiles) are exempt: a tool maintains them, not a person."
-why = "The adopted default. Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) that made monolithic files a defensible tradeoff."
+why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) that made monolithic files a defensible tradeoff."
 
 [[option]]
 id = "hand-maintained-files-are-allowed-to-grow-withou"
 label = "hand-maintained files are allowed to grow without a human-reading …"
 directive = "hand-maintained files are allowed to grow without a human-reading size guideline, and their size is whatever they end up at"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-human-reading-size-guideline-applies-to-auto"
 label = "the human-reading size guideline applies to auto-generated files (schema …"
 directive = "the human-reading size guideline applies to auto-generated files (schema dumps, ORM-emitted models, lockfiles) at the same threshold as hand-maintained files"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

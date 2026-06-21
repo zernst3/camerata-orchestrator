@@ -17,7 +17,7 @@ why = "Building a SQL string by interpolating a value with an f-string, `%`, `.f
 id = "bind-parameters"
 label = "always bind values as query parameters"
 directive = "Every dynamic value in a SQL statement is passed as a bound parameter (the driver's placeholder form, or the ORM's parameterized API), never interpolated into the query string. f-strings, `%`-formatting, `.format()`, and string concatenation are forbidden anywhere a value flows into `cursor.execute`, `session.execute(text(...))`, or a `.raw()` call. Static table or column names that must be dynamic come from a fixed allow-list, never from request input."
-why = "The adopted default. Parameterization sends SQL and values separately so a value can never be parsed as SQL, eliminating injection entirely."
+why = "Parameterization sends SQL and values separately so a value can never be parsed as SQL, eliminating injection entirely."
 
 [[option]]
 id = "interpolate-with-escaping"

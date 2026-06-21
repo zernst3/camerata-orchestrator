@@ -16,7 +16,7 @@ why = "Calling .Result or .Wait() on a Task blocks the current thread, which in 
 id = "async-await-throughout"
 label = "use async/await in the entire call chain; never block"
 directive = "All methods that perform I/O (database, network, file system) are declared async Task or async Task<T>. All calls to async methods are awaited. At the top of the call stack (e.g., ASP.NET controller action, Main in a console app, or Quartz job), the entry point is async. .Result and .Wait() are forbidden. If a sync wrapper is absolutely necessary at the application boundary, it is isolated to a single well-documented entry point and comments explain why the boundary cannot be async."
-why = "The adopted default. Async/await chains never block threads, allowing the thread pool to handle many concurrent requests efficiently."
+why = "Async/await chains never block threads, allowing the thread pool to handle many concurrent requests efficiently."
 
 [[option]]
 id = "sync-over-async"

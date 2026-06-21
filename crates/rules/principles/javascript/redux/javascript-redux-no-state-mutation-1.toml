@@ -20,10 +20,10 @@ why = "Redux's entire model rests on state being treated as immutable: the store
 id = "reducers-never-mutate-existing-state-they-produc"
 label = "Reducers never mutate existing state; they produce a new state value"
 directive = "Reducers treat the incoming state as read-only and return a new state value with the changed parts replaced, never assigning to a property of the existing state, pushing to an existing array, or otherwise editing it in place. Spreads (or Immer, as used internally by Redux Toolkit's createSlice) produce the new value. The 'mutating' syntax inside createSlice is permitted precisely because Immer turns it into an immutable update; raw mutation of state outside that wrapper is forbidden."
-why = "The adopted default. React-Redux uses a shallow reference check to decide on re-renders, so an in-place mutation keeps the same reference, reports 'unchanged', and silently fails to update the UI; it also corrupts time-travel debugging and undo history."
+why = "React-Redux uses a shallow reference check to decide on re-renders, so an in-place mutation keeps the same reference, reports 'unchanged', and silently fails to update the UI; it also corrupts time-travel debugging and undo history."
 
 [[option]]
 id = "reducers-mutate-the-existing-state-object-in-pla"
 label = "reducers mutate the existing state object in place …"
 directive = "reducers mutate the existing state object in place and return it, relying on the mutated reference to carry the change, rather than returning a new state value with the changed parts replaced"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

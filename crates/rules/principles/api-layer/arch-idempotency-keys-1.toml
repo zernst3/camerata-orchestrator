@@ -15,22 +15,22 @@ why = "Network retries are inevitable. Without idempotency keys, a client cannot
 id = "non-get-writes-that-trigger-external-side-effect"
 label = "Non-GET writes that trigger external side effects require an idempotency key"
 directive = "POST, PUT, PATCH, and DELETE endpoints that produce external side effects (charge a card, send an email, enqueue a downstream job, write to a message queue) require an Idempotency-Key header on each request. The server stores the response keyed by that key; a retry with the same key returns the stored response instead of running the operation again. Reads and writes that are naturally idempotent at the storage layer may omit this. The key-retention window is bounded (commonly 24 hours) and documented per endpoint."
-why = "The adopted default. Network retries are inevitable."
+why = "Network retries are inevitable."
 
 [[option]]
 id = "the-api-accepts-retries-without-any-idempotency"
 label = "the API accepts retries without any idempotency-key contract; the …"
 directive = "the API accepts retries without any idempotency-key contract; the client is expected to detect prior success out of band before retrying"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-api-deduplicates-requests-by-inspecting-natu"
 label = "the API deduplicates requests by inspecting natural keys in …"
 directive = "the API deduplicates requests by inspecting natural keys in the payload (such as an email address or invoice number) rather than by requiring an explicit Idempotency-Key header"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-api-does-no-server-side-deduplication-at-all"
 label = "the API does no server-side deduplication at all; each …"
 directive = "the API does no server-side deduplication at all; each consumer is responsible for not retrying after a timeout, and the server treats every request as new"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

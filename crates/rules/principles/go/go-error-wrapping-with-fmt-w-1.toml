@@ -21,7 +21,7 @@ why = "Go 1.13 added error wrapping via fmt.Errorf(\"...: %w\", err). The %w dir
 id = "wrap-with-fmt-w"
 label = "wrap errors with fmt.Errorf(\"...: %w\", err)"
 directive = "Whenever an error from a lower layer is augmented with context, fmt.Errorf is used with the %w directive: return fmt.Errorf(\"processing user %d: %w\", userID, err). This preserves the error chain for inspection by errors.Unwrap and errors.Is."
-why = "The adopted default. Error chains remain inspectable; callers can match on root cause with errors.Is."
+why = "Error chains remain inspectable; callers can match on root cause with errors.Is."
 
 [[option]]
 id = "stringify-with-fmt-v"

@@ -20,10 +20,10 @@ why = "Express sends no protective HTTP response headers by default, and it adve
 id = "a-security-headers-middleware-is-mounted-app-wid"
 label = "A security-headers middleware is mounted app-wide"
 directive = "A security-headers middleware (helmet, or an equivalent) is mounted once near the top of the middleware chain so every response carries a baseline of protective headers (Content-Security-Policy, Strict-Transport-Security, X-Content-Type-Options, frame protection) and the X-Powered-By fingerprint is removed. Application-specific policies such as a tightened CSP or CORS rules are configured on top of that baseline. Relying on Express's header defaults, or setting protective headers ad hoc per response, is not sufficient."
-why = "The adopted default. Express sends no protective headers by default and advertises X-Powered-By; an app-wide middleware sets the security-header baseline on every response, including routes added later, in one place rather than per-response and partially."
+why = "Express sends no protective headers by default and advertises X-Powered-By; an app-wide middleware sets the security-header baseline on every response, including routes added later, in one place rather than per-response and partially."
 
 [[option]]
 id = "protective-response-headers-are-set-ad-hoc-or-le"
 label = "protective response headers are set ad hoc, or left …"
 directive = "protective response headers are set ad hoc on individual responses, or left at Express's defaults, rather than mounting an app-wide security-headers middleware that covers every response by default"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

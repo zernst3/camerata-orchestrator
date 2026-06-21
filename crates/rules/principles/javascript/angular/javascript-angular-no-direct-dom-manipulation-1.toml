@@ -24,10 +24,10 @@ why = "Direct DOM manipulation using document.querySelector(), .innerHTML, .clas
 id = "dom-is-not-manipulated-directly-renderer2-and-bin"
 label = "DOM is not manipulated directly; Renderer2 and property bindings are used instead"
 directive = "DOM manipulation uses one of two patterns: (1) template bindings for declarative updates ([property]='value', [style.property]='value', [class.name]='condition') or (2) Renderer2 service for imperative DOM changes (Renderer2.setStyle, Renderer2.addClass, Renderer2.setProperty). Direct calls to document.querySelector(), .innerHTML, .style, .className, or any direct property assignment on DOM elements are forbidden. When accessing elements via ViewChild or ElementRef, only Renderer2 methods or property bindings are used to modify the DOM."
-why = "The adopted default. Property bindings and Renderer2 keep Angular's model and the DOM in sync, enable SSR and alternative rendering targets, and prevent desynchronization bugs."
+why = "Property bindings and Renderer2 keep Angular's model and the DOM in sync, enable SSR and alternative rendering targets, and prevent desynchronization bugs."
 
 [[option]]
 id = "direct-dom-manipulation-using-documentqueryselec"
 label = "direct DOM manipulation using document.querySelector …"
 directive = "direct DOM manipulation is performed using document.querySelector, .innerHTML, .style, and .className assignments to modify the DOM without going through Angular's rendering system"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

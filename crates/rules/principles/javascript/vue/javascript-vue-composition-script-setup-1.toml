@@ -29,10 +29,10 @@ why = "Vue 3 introduced the Composition API and <script setup>, which improve co
 id = "composition-api-script-setup"
 label = "Use Composition API with <script setup>"
 directive = "Component logic uses the Composition API (ref, computed, watch, onMounted, etc.) and is written in a <script setup> block. The Options API (data, computed, methods, mounted, etc.) is not used."
-why = "The adopted default. Composition API with <script setup> improves code organization and reusability."
+why = "Composition API with <script setup> improves code organization and reusability."
 
 [[option]]
 id = "options-api"
 label = "Use the Options API"
 directive = "Component logic is organized using the Options API: data(), computed, methods, lifecycle hooks (mounted, created, etc.). Component state, derived values, and handlers are separated into different sections."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

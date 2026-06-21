@@ -24,10 +24,10 @@ why = "Vue is a declarative framework: you describe the desired state (data, com
 id = "declarative-rendering-no-direct-dom"
 label = "Declare state; let Vue render; no direct DOM manipulation"
 directive = "Vue reactivity (data, computed, props) drives the DOM state. v-if, v-show, v-bind:class, v-bind:style, and other Vue directives declare the desired state. No direct DOM access via document, jQuery, or element manipulation in component code."
-why = "The adopted default. Declarative rendering keeps Vue's reactivity system and the DOM in sync."
+why = "Declarative rendering keeps Vue's reactivity system and the DOM in sync."
 
 [[option]]
 id = "direct-dom-manipulation"
 label = "Directly manipulate the DOM"
 directive = "Component code accesses and modifies the DOM directly via document.querySelector, element.style, element.classList, jQuery, or similar methods."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

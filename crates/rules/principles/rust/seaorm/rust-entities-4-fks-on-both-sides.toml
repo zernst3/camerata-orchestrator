@@ -16,25 +16,25 @@ why = "Compile-time validation of the full FK graph, plus find_related working i
 id = "fk-relations-declared-on-both-sides"
 label = "FK relations declared on BOTH sides"
 directive = "Declare each foreign-key relation on both entities: belongs_to on the child plus has_one or has_many on the parent. Variant naming: belongs_to uses the parent singular; has_one uses the child singular; has_many uses the child plural."
-why = "The adopted default. Compile-time validation of the full FK graph, plus find_related working in both directions."
+why = "Compile-time validation of the full FK graph, plus find_related working in both directions."
 
 [[option]]
 id = "foreign-key-relations-are-declared-only-on-the-c"
 label = "foreign-key relations are declared only on the child side …"
 directive = "foreign-key relations are declared only on the child side (belongs_to) and not on the parent side, so the FK graph in the entities crate is one-directional"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-entities-crate-declares-no-foreign-key-relat"
 label = "the entities crate declares no foreign-key relations at all …"
 directive = "the entities crate declares no foreign-key relations at all and relies entirely on database-level FK enforcement, so all joined reads are hand-built rather than going through find_related"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "foreign-key-relations-are-added-on-each-side-onl"
 label = "foreign-key relations are added on each side only when …"
 directive = "foreign-key relations are added on each side only when the current code path needs them, so the FK graph in the entities crate grows only as features exercise specific traversal directions"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"

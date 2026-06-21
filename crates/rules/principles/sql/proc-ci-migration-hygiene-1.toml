@@ -26,10 +26,10 @@ why = "Preventive enforcement catches what code review misses under pressure; mi
 id = "ci-hygiene-enforce-migration-idempotency-safety"
 label = "CI hygiene — enforce migration idempotency + safety at the gate"
 directive = "For SQL systems: lint every migration in CI. Require idempotency (IF NOT EXISTS), require explicit opt-in for destructive ops, and guard against migration-journal index collisions, all before the build."
-why = "The adopted default. Preventive enforcement catches what code review misses under pressure; migrations are append-only, so a silent skip corrupts state downstream."
+why = "Preventive enforcement catches what code review misses under pressure; migrations are append-only, so a silent skip corrupts state downstream."
 
 [[option]]
 id = "the-project-relies-on-human-code-review-alone-to"
 label = "the project relies on human code review alone to …"
 directive = "the project relies on human code review alone to catch unsafe migrations, with no mechanical CI lint enforcing idempotency, destructive-op opt-in, or migration-journal index collisions"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

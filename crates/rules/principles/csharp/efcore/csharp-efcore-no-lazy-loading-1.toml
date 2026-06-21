@@ -15,7 +15,7 @@ why = "Lazy loading is EF Core's automatic database-query-on-navigation-access f
 id = "lazy-loading-disabled"
 label = "Lazy loading disabled; navigation properties loaded via Include or explicit load only"
 directive = "UseLazyLoadingProxies() is not called. Navigation properties on entity classes are not declared virtual (removing the proxy interception point). All navigation property data is loaded via Include/ThenInclude at query time or via explicit context.Entry(entity).Reference/Collection.LoadAsync() calls. An unloaded navigation property accessed after the DbContext is disposed produces null or an empty collection, not a transparent database query. Loading an entity and then accessing a navigation without having included it is treated as a bug to be fixed by adding Include, not by enabling lazy loading."
-why = "The adopted default. Disabling lazy loading makes every database round-trip explicit and visible at the query site, eliminates the N+1 pattern from transparent navigation access, and removes the disposed-context exception risk."
+why = "Disabling lazy loading makes every database round-trip explicit and visible at the query site, eliminates the N+1 pattern from transparent navigation access, and removes the disposed-context exception risk."
 
 [[option]]
 id = "lazy-loading-enabled-proxies"

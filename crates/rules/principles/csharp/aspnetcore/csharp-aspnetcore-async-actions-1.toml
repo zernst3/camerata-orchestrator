@@ -16,7 +16,7 @@ why = "ASP.NET Core is built on a thread-pool model. Each concurrent request con
 id = "async-task-actions"
 label = "All I/O-bound actions are async Task<IActionResult> or async Task<T>; await at every I/O call"
 directive = "Every controller action or Minimal API endpoint handler that performs I/O (database access, HTTP calls, file I/O) is declared async Task<IActionResult> (MVC) or async Task<T> (Minimal API). All awaitable calls inside the handler are awaited. ConfigureAwait(false) is used on library-internal async calls to avoid unnecessary context capture. .Result, .Wait(), and GetAwaiter().GetResult() on Tasks are forbidden inside action methods and endpoint handlers. CPU-bound work that does not involve I/O may use synchronous implementations; I/O-bound work may not."
-why = "The adopted default. Async actions release the thread-pool thread during I/O wait, allowing the server to handle many concurrent requests with a bounded thread count, and avoid the deadlock risk of sync-over-async in ASP.NET's synchronization context."
+why = "Async actions release the thread-pool thread during I/O wait, allowing the server to handle many concurrent requests with a bounded thread count, and avoid the deadlock risk of sync-over-async in ASP.NET's synchronization context."
 
 [[option]]
 id = "sync-actions-blocking"

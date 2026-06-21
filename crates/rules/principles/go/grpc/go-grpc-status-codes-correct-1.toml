@@ -20,7 +20,7 @@ why = "gRPC status codes (codes.OK, codes.INVALID_ARGUMENT, codes.NOT_FOUND, cod
 id = "status-codes-semantically-correct"
 label = "Status codes are assigned semantically: NOT_FOUND for missing resources, INVALID_ARGUMENT for validation, etc."
 directive = "Each RPC implementation maps domain and infrastructure errors to the correct gRPC status code. Validation errors are codes.InvalidArgument, missing resources are codes.NotFound, authentication failures are codes.Unauthenticated, permission failures are codes.PermissionDenied, transient infrastructure errors are codes.Internal or codes.Unavailable, input-parsing errors are codes.InvalidArgument. Status messages provide additional context (why the input was invalid, what was not found). A helper or middleware pattern ensures consistent error mapping across handlers."
-why = "The adopted default. Clients can rely on status codes for error handling logic; the semantic meaning enables proper retry strategies and error recovery."
+why = "Clients can rely on status codes for error handling logic; the semantic meaning enables proper retry strategies and error recovery."
 
 [[option]]
 id = "status-all-internal"

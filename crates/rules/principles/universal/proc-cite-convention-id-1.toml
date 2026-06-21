@@ -20,22 +20,22 @@ why = "Makes drift detection and review fast. A reviewer reading a PR sees immed
 id = "cite-the-convention-id-in-commit-messages-and-pr"
 label = "Cite the convention ID in commit messages and PR descriptions"
 directive = "A commit (or PR description) that applies a documented convention cites its ID in the body, for example 'per ENTITIES-4' or 'follows RUST-DOMAIN-2'. The citation lives in the commit body, not the subject line, so the convention reference does not crowd the headline."
-why = "The adopted default. Makes drift detection and review fast."
+why = "Makes drift detection and review fast."
 
 [[option]]
 id = "commits-and-pr-descriptions-omit-any-reference-t"
 label = "commits and PR descriptions omit any reference to the …"
 directive = "commits and PR descriptions omit any reference to the convention ID being applied, leaving the rule citation entirely out of the project's written record"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "commits-omit-the-convention-id-citation-and-only"
 label = "commits omit the convention ID citation and only the …"
 directive = "commits omit the convention ID citation and only the PR description carries it"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-convention-id-is-cited-in-a-code-comment-nex"
 label = "the convention ID is cited in a code comment …"
 directive = "the convention ID is cited in a code comment next to the application site rather than in the commit body"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

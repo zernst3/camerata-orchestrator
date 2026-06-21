@@ -15,22 +15,22 @@ why = "Versioning in the URL is the most discoverable and toolable scheme: a cur
 id = "api-versions-live-in-the-url-prefix-changes-with"
 label = "API versions live in the URL prefix; changes within a version are additive only"
 directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs, and so on. Within a published version, no field is renamed, removed, or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
-why = "The adopted default. Versioning in the URL is the most discoverable and toolable scheme: a curl command, a router log, and a trace all surface the version at a glance."
+why = "Versioning in the URL is the most discoverable and toolable scheme: a curl command, a router log, and a trace all surface the version at a glance."
 
 [[option]]
 id = "the-api-version-is-selected-by-a-request-header"
 label = "the API version is selected by a request header …"
 directive = "the API version is selected by a request header (such as Accept: application/vnd.api.v2+json) rather than appearing in the URL path"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
 label = "the API has no version segment at all and …"
 directive = "the API has no version segment at all and evolves in place, with each change applying to all current clients"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-api-exposes-multiple-representations-of-each"
 label = "the API exposes multiple representations of each resource and …"
 directive = "the API exposes multiple representations of each resource and clients negotiate version through a content-negotiation handshake"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

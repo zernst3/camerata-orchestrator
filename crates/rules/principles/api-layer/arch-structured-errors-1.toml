@@ -16,22 +16,22 @@ why = "Stringly-typed error messages are a leading source of brittle client code
 id = "error-responses-use-a-structured-envelope-with-s"
 label = "Error responses use a structured envelope with stable machine-readable codes"
 directive = "Every 4xx and 5xx response uses the same shape: a top-level error object containing a code (a stable identifier like INVALID_EMAIL or RATE_LIMITED), a message (a human-readable description), and an optional details object for field-level errors or context. Codes are documented and remain stable across releases; messages may evolve freely. Clients pattern-match on code, never on message. Enforced at the controller layer with a single error-rendering middleware that all handlers route through."
-why = "The adopted default. Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
+why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
 
 [[option]]
 id = "error-responses-are-plain-strings-or-contain-onl"
 label = "error responses are plain strings (or contain only a …"
 directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "error-responses-use-only-the-http-status-code-wi"
 label = "error responses use only the HTTP status code with …"
 directive = "error responses use only the HTTP status code with an empty body, and clients distinguish failure modes by status code alone"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "each-endpoint-defines-its-own-custom-error-respo"
 label = "each endpoint defines its own custom error response shape, …"
 directive = "each endpoint defines its own custom error response shape, and clients implement per-endpoint error parsing rather than a single shared parser"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

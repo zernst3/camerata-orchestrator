@@ -15,7 +15,7 @@ why = "The N+1 query problem is the most common EF Core performance failure: a q
 id = "eager-load-or-project"
 label = "Include/ThenInclude or Select projection for related data; lazy-loading disabled"
 directive = "Lazy loading is disabled (the UseLazyLoadingProxies call is absent and virtual navigation properties are not used as lazy-loading triggers). Related data required by a query is either explicitly included via Include(e => e.Related).ThenInclude(r => r.Nested) or projected via Select into a DTO that picks only the needed columns from both tables. Looping over a result set and accessing a navigation property on each entity without having included it in the query is forbidden. Repository methods document which navigation properties they load so callers do not re-query for data already fetched."
-why = "The adopted default. Explicit Include or projection makes the loading strategy visible at the query site, eliminates unintended round-trips, and loads exactly the data required."
+why = "Explicit Include or projection makes the loading strategy visible at the query site, eliminates unintended round-trips, and loads exactly the data required."
 
 [[option]]
 id = "lazy-loading-via-proxies"

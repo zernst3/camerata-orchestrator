@@ -16,7 +16,7 @@ why = "Flask applies no authentication to routes by default. A route that does n
 id = "decorator-or-before-request-hook"
 label = "@login_required / @jwt_required on each route, or a Blueprint before_request hook"
 directive = "Every route that requires authentication declares it explicitly via `@login_required` (Flask-Login), `@jwt_required()` (Flask-JWT-Extended), or an equivalent auth decorator immediately before the route function. Alternatively, a Blueprint that groups protected routes registers a `before_request` hook that enforces authentication for all routes in the blueprint, with public sub-routes within the blueprint explicitly exempted. A route that lacks an auth decorator and is not registered under a Blueprint with a before_request auth hook is treated as unintentionally public and must be corrected. Authentication checks inside the route body (after business logic begins) are not sufficient."
-why = "The adopted default. Explicit decorators or Blueprint hooks make authentication requirements visible at the route definition and reviewable in code, rather than being a runtime assumption."
+why = "Explicit decorators or Blueprint hooks make authentication requirements visible at the route definition and reviewable in code, rather than being a runtime assumption."
 
 [[option]]
 id = "manual-check-in-route-body"

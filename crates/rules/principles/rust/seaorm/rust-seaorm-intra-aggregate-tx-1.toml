@@ -16,7 +16,7 @@ why = "Atomicity inside one aggregate is an implementation detail of that aggreg
 id = "repository-owns-intra-aggregate-transaction"
 label = "Repository opens and commits its own transaction"
 directive = "Repository methods that require multiple writes to be atomic within a single aggregate open and commit their own database transaction inside the method, rather than requiring callers to supply a unit-of-work handle. The unit-of-work parameter on the repository trait is reserved for cross-aggregate coordination owned by the service layer; intra-aggregate atomicity is the repository's own responsibility and does not appear in the method signature."
-why = "The adopted default. Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern the service layer should know about, so the transaction stays where the invariant lives."
+why = "Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern the service layer should know about, so the transaction stays where the invariant lives."
 
 [[option]]
 id = "uniform-unit-of-work-parameter"

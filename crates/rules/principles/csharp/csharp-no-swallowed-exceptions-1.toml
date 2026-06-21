@@ -16,7 +16,7 @@ why = "Catching an exception without logging it, rethrowing it, or transforming 
 id = "catch-specific-log-or-rethrow"
 label = "catch specific exceptions only; every handler logs or rethrows"
 directive = "Exception handlers catch the most specific exception type they can recover from. Every catch block either: (1) logs the full exception (including stack trace) via the application's structured logger, (2) rethrows the exception or a wrapped version via throw or throw new WrappedException(..., ex), or (3) recovers locally with a documented rationale (e.g., \"retrying on transient database timeout\"). Empty catch bodies are forbidden. Catch-all blocks (Exception) are allowed only at top-level application boundaries (request handlers, Main entry point) where they log and transform the error into a structured response."
-why = "The adopted default. Every exception surfaces either as a log entry or is propagated to the caller; bugs never silently vanish."
+why = "Every exception surfaces either as a log entry or is propagated to the caller; bugs never silently vanish."
 
 [[option]]
 id = "swallow-broad-exceptions"

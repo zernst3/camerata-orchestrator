@@ -25,7 +25,7 @@ why = "SQL injection is a critical vulnerability: a query built by concatenating
 id = "parameterized-queries"
 label = "Parameterized queries: builder preferred, raw SQL with ? placeholders acceptable"
 directive = "The codebase uses GORM's query builder (db.Where(\"age > ?\", 30).Find(&users)) for queries the builder can express. When raw SQL is necessary, it uses parameterized placeholders (db.Raw(\"SELECT * FROM users WHERE age > ?\", 30).Scan(&users)). User input, request parameters, and any untrusted values are always passed as parameters, never interpolated into the SQL string. A linting rule or code review practice flags fmt.Sprintf in query contexts as a violation."
-why = "The adopted default. Parameterized queries prevent SQL injection; the query builder is the idiomatic first choice, raw SQL with parameters is acceptable as a fallback."
+why = "Parameterized queries prevent SQL injection; the query builder is the idiomatic first choice, raw SQL with parameters is acceptable as a fallback."
 
 [[option]]
 id = "string-interpolation"

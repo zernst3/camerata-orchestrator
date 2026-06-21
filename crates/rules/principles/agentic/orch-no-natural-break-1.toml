@@ -20,10 +20,10 @@ why = "For long-running work, the budget cap is the ceiling, not the target; qui
 id = "never-stop-on-a-natural-break"
 label = "Never stop on a \"natural break\""
 directive = "A completed chunk, a milestone, or a periodic self-check is NOT a valid stop. The only valid exits are: budget/time cap, a real escalation trigger, queue genuinely empty, or unrecoverable error. Don't wrap early with budget unspent."
-why = "The adopted default. For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode."
+why = "For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode."
 
 [[option]]
 id = "the-routine-treats-milestones-completed-chunks-o"
 label = "the routine treats milestones, completed chunks, or other natural …"
 directive = "the routine treats milestones, completed chunks, or other natural seams as valid stops, even when budget and queue still permit continuing"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

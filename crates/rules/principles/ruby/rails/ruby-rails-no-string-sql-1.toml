@@ -17,7 +17,7 @@ why = "String interpolation in a SQL fragment (`where(\"name = '#{params[:name]}
 id = "placeholders-or-hash-conditions"
 label = "hash conditions or ? / :named placeholders only"
 directive = "Every ActiveRecord query method that accepts a SQL fragment (`.where`, `.order`, `.joins`, `.having`, `.group`) receives either a hash (`where(status: 'active')`) or a string literal with `?` or `:name` placeholders whose values are passed as subsequent arguments (`where('status = ? AND role = :role', 'active', role: role)`). String interpolation (`\"#{variable}\"`) and string concatenation (`'col = ' + value`) inside any SQL fragment are forbidden. Column and table names that must be dynamic come from a fixed allow-list, not from request input."
-why = "The adopted default. Hash conditions and placeholder syntax bind values separately from the SQL grammar so they can never be parsed as SQL, eliminating injection."
+why = "Hash conditions and placeholder syntax bind values separately from the SQL grammar so they can never be parsed as SQL, eliminating injection."
 
 [[option]]
 id = "sanitize-sql-for-conditions"

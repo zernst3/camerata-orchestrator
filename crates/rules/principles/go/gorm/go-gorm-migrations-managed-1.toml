@@ -20,7 +20,7 @@ why = "A migration is a versioned SQL script or code that transforms the schema 
 id = "migrations-all-changes"
 label = "All schema changes go through version-controlled migrations"
 directive = "Schema changes (create table, add column, add index, drop constraint) are written as migrations (GORM's AutoMigration or SQL migration files managed by a tool like golang-migrate). Migrations are committed to version control, reviewed, and applied in order. Production deployments run migrations as part of the deployment process. No manual SQL ALTER statements are executed in production; any schema change not tracked in a migration is a deviation that must be rolled back or documented."
-why = "The adopted default. Migrations are the source of truth for schema evolution; the database is reproducible from migrations."
+why = "Migrations are the source of truth for schema evolution; the database is reproducible from migrations."
 
 [[option]]
 id = "manual-sql-alters"

@@ -16,25 +16,25 @@ why = "Public-content pages need server-rendered HTML for indexability: search-e
 id = "single-binary-serves-server-rendered-html-the-cl"
 label = "Single binary serves server-rendered HTML, the client bundle, and server-function endpoints"
 directive = "The Dioxus project enables the framework's fullstack feature so that one server binary handles three concerns in one process. It renders the initial HTML on the server (so public content is indexable and first paint is fast). It serves the client bundle, which hydrates the server-rendered HTML on the client. And it mounts the server-function endpoints (per the server-function rule) and any remaining first-class HTTP endpoints (webhooks, health checks, authentication) on the same router. A separate frontend process running a different framework is forbidden. A client-only single-page application with no server-rendered initial paint is permitted only for fully-behind-login products where indexability has no value."
-why = "The adopted default. Public-content pages need server-rendered HTML for indexability: search-engine rendering of JavaScript-only pages has improved over the years but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic."
+why = "Public-content pages need server-rendered HTML for indexability: search-engine rendering of JavaScript-only pages has improved over the years but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic."
 
 [[option]]
 id = "the-ui-is-a-client-only-single-page-application"
 label = "the UI is a client-only single-page application with no …"
 directive = "the UI is a client-only single-page application with no server-rendered initial paint, with the application rendering entirely on the client after the bundle loads"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-frontend-runs-as-a-separate-process-under-a"
 label = "the frontend runs as a separate process under a …"
 directive = "the frontend runs as a separate process under a JavaScript framework, with the Rust API binary serving only the server-function and HTTP endpoints over the wire"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "html-rendering-is-handled-by-a-separate-rust-bin"
 label = "HTML rendering is handled by a separate Rust binary …"
 directive = "HTML rendering is handled by a separate Rust binary distinct from the API binary, with the two binaries deployed independently rather than as a single process"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/"

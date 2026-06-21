@@ -26,7 +26,7 @@ why = "Go's package system enforces a simple rule: only exported symbols (capita
 id = "clear-boundaries-internal-packages"
 label = "use clear package boundaries and internal/ packages"
 directive = "Circular imports are not allowed (enforced by the compiler). Public APIs are exported at the package root (package main, package http, package service). Implementation details are placed in .../internal/... packages. External packages can only import the public API; the internal/ tree is off-limits. This enforces one-way dependency flows: handlers import services, services import repositories; repositories do not import services or handlers."
-why = "The adopted default. Clear boundaries prevent circular dependencies and keep the dependency graph a DAG."
+why = "Clear boundaries prevent circular dependencies and keep the dependency graph a DAG."
 
 [[option]]
 id = "minimal-boundary-enforcement"

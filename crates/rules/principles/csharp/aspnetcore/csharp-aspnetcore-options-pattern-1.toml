@@ -15,13 +15,13 @@ why = "ASP.NET Core's IConfiguration is a flat string-keyed dictionary that acce
 id = "options-pattern-ioptionst"
 label = "Configuration bound to typed POCO via IOptions<T>; validated at startup"
 directive = "Each logical group of configuration values is represented by a POCO class with public properties. The section is bound in Program.cs via builder.Services.Configure<MyOptions>(builder.Configuration.GetSection('MySection')) and startup validation is enabled via .ValidateOnStart() or ValidateDataAnnotations(). Service classes accept IOptions<MyOptions> (or IOptionsSnapshot<MyOptions> for per-request reload) in their constructor, not IConfiguration. Direct IConfiguration injection into service or repository classes is forbidden; raw string-keyed reads (configuration['Key']) outside of Program.cs are forbidden."
-why = "The adopted default. Typed binding exposes configuration requirements in the constructor signature, catches missing or malformed values at startup rather than at runtime under load, and eliminates string-keyed reads scattered across service classes."
+why = "Typed binding exposes configuration requirements in the constructor signature, catches missing or malformed values at startup rather than at runtime under load, and eliminates string-keyed reads scattered across service classes."
 
 [[option]]
 id = "raw-iconfiguration-injection"
 label = "IConfiguration injected into services; values read by string key"
 directive = "Services accept IConfiguration in their constructor and read values via configuration['Section:Key'] or configuration.GetValue<T>('Key'). No POCO binding or startup validation."
-why = "A defensible alternative the project considered and did not adopt as the default. String-keyed reads are untyped, invisible to callers of the constructor, and surface missing keys as null at runtime rather than as a startup error."
+why = "A defensible alternative the project considered. String-keyed reads are untyped, invisible to callers of the constructor, and surface missing keys as null at runtime rather than as a startup error."
 
 [[option]]
 id = "hardcoded-fallbacks"
