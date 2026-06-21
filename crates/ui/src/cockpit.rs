@@ -7958,24 +7958,29 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
                 // Deep compliance & security tier (#55): opt-in, ADVISORY, expensive.
-                div { class: "audit-model-row",
-                    label { class: "audit-model-label", "Deep compliance & security (opt-in)" }
-                    label { class: "audit-thorough-toggle",
-                        input {
-                            r#type: "checkbox",
-                            checked: audit_deep(),
-                            disabled: auditing(),
-                            onchange: move |e| audit_deep.set(e.checked()),
+                // Gated on the `soc2` feature flag — hidden entirely when soc2 is disabled
+                // (this is the SOC-2-headlined surface; set via .camerata/features.toml or
+                // CAMERATA_FEATURE_SOC2=false). The server also skips the lens when off.
+                if feature_flags.soc2 {
+                    div { class: "audit-model-row",
+                        label { class: "audit-model-label", "Deep compliance & security (opt-in)" }
+                        label { class: "audit-thorough-toggle",
+                            input {
+                                r#type: "checkbox",
+                                checked: audit_deep(),
+                                disabled: auditing(),
+                                onchange: move |e| audit_deep.set(e.checked()),
+                            }
+                            span { "Run SOC-2 gap analysis, deep security audit, and threat model" }
                         }
-                        span { "Run SOC-2 gap analysis, deep security audit, and threat model" }
-                    }
-                    span { class: "audit-model-hint deep-tier-warning",
-                        "ADVISORY ONLY — not a SOC-2 report and not a penetration test. \
-                         Camerata sees static code only; controls that depend on org-level evidence \
-                         (HR policies, vendor contracts, access reviews) cannot be assessed from code. \
-                         Three extra whole-repo passes run after the standard audit. \
-                         This is the MOST EXPENSIVE tier (~3 extra whole-repo passes). \
-                         Enable only when you explicitly want compliance gap analysis for this codebase."
+                        span { class: "audit-model-hint deep-tier-warning",
+                            "ADVISORY ONLY — not a SOC-2 report and not a penetration test. \
+                             Camerata sees static code only; controls that depend on org-level evidence \
+                             (HR policies, vendor contracts, access reviews) cannot be assessed from code. \
+                             Three extra whole-repo passes run after the standard audit. \
+                             This is the MOST EXPENSIVE tier (~3 extra whole-repo passes). \
+                             Enable only when you explicitly want compliance gap analysis for this codebase."
+                        }
                     }
                 }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
