@@ -5,6 +5,11 @@ domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gorm.io/docs/transactions.html"
+title = "GORM — Transactions"
 
 [decision]
 question = "How should multiple write operations be coordinated to ensure consistency?"

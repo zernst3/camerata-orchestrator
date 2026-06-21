@@ -5,6 +5,16 @@ domain = "go:gorm"
 layer = "library"
 enforcement = "mechanical"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://securego.io/docs/rules/g201-g202.html"
+title = "gosec — G201/G202: SQL query construction using format string/string concatenation"
+linter = "golangci-lint: gosec (G201, G202)"
+
+[[sources]]
+url = "https://gorm.io/docs/sql_builder.html"
+title = "GORM — SQL Builder"
 
 [decision]
 question = "How should variables be included in SQL queries?"

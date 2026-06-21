@@ -5,6 +5,16 @@ domain = "go"
 layer = "language"
 enforcement = "mechanical"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#handle-errors"
+title = "Go Code Review Comments — Handle Errors"
+
+[[sources]]
+url = "https://golangci-lint.run/docs/linters/"
+title = "golangci-lint linters — errcheck"
+linter = "golangci-lint: errcheck"
 qualifies = "Enforced by a static-analysis gate (errcheck, golangci-lint errcheck) that flags unhandled error returns and naked assignments that discard errors. Conformance holds when the gate runs in CI and undeclared errors fail the build; it fails when no error-check lint runs."
 
 [decision]

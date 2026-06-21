@@ -5,6 +5,15 @@ domain = "go"
 layer = "language"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/blog/slog"
+title = "Go Blog — Structured Logging with slog"
+
+[[sources]]
+url = "https://pkg.go.dev/log/slog"
+title = "pkg.go.dev — log/slog"
 qualifies = "Structured logging (JSON or key-value format) is easier to parse, search, and aggregate in log aggregation systems. A logger with Info(msg, keyVals...) or ctx.Log.Info(msg, key, value) produces parseable output; unstructured Printf logs require regex parsing and are fragile."
 
 [decision]

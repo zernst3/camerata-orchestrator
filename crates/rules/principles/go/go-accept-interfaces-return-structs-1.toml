@@ -5,6 +5,15 @@ domain = "go"
 layer = "architecture"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#interfaces"
+title = "Go Code Review Comments — Interfaces"
+
+[[sources]]
+url = "https://go.dev/doc/effective_go#interfaces_and_types"
+title = "Effective Go — Interfaces and other types"
 qualifies = "A function's parameters should use narrow interfaces (e.g., io.Reader, io.Writer) so callers can pass any implementation. Conversely, return types should be concrete structs (e.g., *User, *Order) so the caller holds the full capability and can downcast to other interfaces if needed. Interfaces should be defined by the package that uses them (the consumer), not by the package that implements them (the producer), because only the consumer knows what behavior it needs."
 
 [decision]

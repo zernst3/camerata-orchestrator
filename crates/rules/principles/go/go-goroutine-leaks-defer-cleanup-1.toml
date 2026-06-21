@@ -5,6 +5,15 @@ domain = "go"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/doc/effective_go#defer"
+title = "Effective Go — Defer"
+
+[[sources]]
+url = "https://go.dev/wiki/CodeReviewComments#goroutine-lifetimes"
+title = "Go Code Review Comments — Goroutine Lifetimes"
 qualifies = "A deferred function is paired with every resource acquire (file.Open, net.Listen, db.Begin, goroutine spawn). Goroutines spawned by a function should either join (via a sync.WaitGroup or channel) before the function returns, or be anchored to a context that the function cancels. Leaks manifest as growing process memory, orphaned database connections, or stuck goroutines; they are difficult to debug once deployed."
 
 [decision]

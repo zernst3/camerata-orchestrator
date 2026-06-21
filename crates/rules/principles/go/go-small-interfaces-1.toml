@@ -5,6 +5,15 @@ domain = "go"
 layer = "architecture"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/doc/effective_go#interfaces_and_types"
+title = "Effective Go — Interfaces and other types"
+
+[[sources]]
+url = "https://go-proverbs.github.io/"
+title = "Go Proverbs — The bigger the interface, the weaker the abstraction"
 qualifies = "Small, focused interfaces are easier to implement, mock, and reason about. A large interface that requires many methods (e.g., Database with 50 methods) forces implementers to implement all 50 even if they only use 5, creates surface-area for mocking, and couples callers to a large contract."
 
 [decision]

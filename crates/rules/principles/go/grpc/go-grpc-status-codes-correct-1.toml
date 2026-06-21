@@ -5,6 +5,11 @@ domain = "go:grpc"
 layer = "framework"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://grpc.io/docs/guides/status-codes/"
+title = "gRPC — Status codes and their use in gRPC"
 
 [decision]
 question = "How should gRPC status codes be assigned to different error conditions?"

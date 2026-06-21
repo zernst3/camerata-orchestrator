@@ -3,8 +3,13 @@ title = "Proto-generated code is not hand-edited; changes flow through .proto de
 tag = "stack"
 domain = "go:grpc"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://grpc.io/docs/languages/go/basics/"
+title = "gRPC — Basics tutorial (Go)"
 
 [decision]
 question = "How should proto-generated Go code be maintained?"

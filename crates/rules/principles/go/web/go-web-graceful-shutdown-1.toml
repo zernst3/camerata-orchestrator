@@ -5,6 +5,11 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://pkg.go.dev/net/http#Server.Shutdown"
+title = "pkg.go.dev — net/http Server.Shutdown"
 
 [decision]
 question = "How should the HTTP server handle shutdown when a stop signal (SIGTERM, interrupt) is received?"

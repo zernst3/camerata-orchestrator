@@ -5,6 +5,15 @@ domain = "go"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://go.dev/doc/articles/race_detector"
+title = "Go Data Race Detector"
+
+[[sources]]
+url = "https://go.dev/doc/effective_go#goroutines"
+title = "Effective Go — Goroutines"
 qualifies = "Package-level variables that are not read-only or protected by locks (mutex, channels) can be accessed concurrently by multiple goroutines, causing races. Go's -race detector catches many such bugs at runtime; the rule is to avoid the situation entirely by keeping mutable state off the package level."
 
 [decision]
