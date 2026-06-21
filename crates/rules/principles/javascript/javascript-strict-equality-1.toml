@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the ESLint eqeqeq rule (set to 'always', or 'smart' if intentional == null checks are sanctioned), which fails the lint step on any abstract-equality operator. Conformance holds when eqeqeq is configured at error severity and a == or != in the codebase fails the build; it fails when the rule is absent or downgraded to a warning that does not block."
+verification = "grounded"
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/eqeqeq"
+title = "ESLint eqeqeq rule"
+linter = "eslint: eqeqeq"
 
 [decision]
 question = "What position does the project take on: Comparisons use strict equality (=== / !==), never the coercing == / !=?"

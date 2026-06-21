@@ -5,6 +5,11 @@ domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://redux.js.org/style-guide/#reducers-must-not-have-side-effects"
+title = "Redux Style Guide — Reducers Must Not Have Side Effects (Priority A: Essential)"
 
 [decision]
 question = "What position does the project take on: Reducers are pure; side effects live in thunks or middleware?"

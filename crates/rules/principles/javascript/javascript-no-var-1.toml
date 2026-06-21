@@ -6,6 +6,12 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the ESLint no-var rule, which fails the lint step on any var declaration. Conformance holds when no-var is configured at error severity and a var in the codebase fails the build; it fails when the rule is absent or only warns."
+verification = "grounded"
+
+[[sources]]
+url = "https://eslint.org/docs/latest/rules/no-var"
+title = "ESLint no-var rule"
+linter = "eslint: no-var"
 
 [decision]
 question = "What position does the project take on: Bindings are declared with const or let; var is forbidden?"

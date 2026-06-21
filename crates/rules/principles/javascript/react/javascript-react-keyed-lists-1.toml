@@ -5,6 +5,16 @@ domain = "javascript:react"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://react.dev/learn/rendering-lists#keeping-list-items-in-order-with-key"
+title = "React docs — Rendering Lists: keeping list items in order with key"
+
+[[sources]]
+url = "https://github.com/jsx-eslint/eslint-plugin-react/blob/master/docs/rules/no-array-index-key.md"
+title = "eslint-plugin-react no-array-index-key rule"
+linter = "react: no-array-index-key"
 
 [decision]
 question = "What position does the project take on: Rendered lists carry a stable key from the data, never the array index?"
