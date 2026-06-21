@@ -34,4 +34,4 @@ why = "A consistent three-phase shape makes every test a self-documenting, scann
 id = "freeform-no-required-structure"
 label = "No required internal structure; write tests in whatever order is natural"
 directive = "Tests may freely interleave setup, action, and assertion in whatever order the author finds clearest for the scenario."
-why = "A defensible alternative the project considered."
+why = "Maximizes author flexibility and can feel natural for complex scenarios, but mixes setup, action, and assertion in ways that obscure causality. When the test fails, a reader must trace through interleaved code to identify which action produced the failing assertion rather than scanning three visually distinct blocks."

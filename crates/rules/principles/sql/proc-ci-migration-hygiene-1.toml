@@ -32,4 +32,4 @@ why = "Preventive enforcement catches what code review misses under pressure; mi
 id = "the-project-relies-on-human-code-review-alone-to"
 label = "the project relies on human code review alone to …"
 directive = "the project relies on human code review alone to catch unsafe migrations, with no mechanical CI lint enforcing idempotency, destructive-op opt-in, or migration-journal index collisions"
-why = "A defensible alternative the project considered."
+why = "Requires no tooling investment and keeps CI configuration simple, but relies on every reviewer catching every class of migration error under time pressure. Migrations are append-only: a missing idempotency guard or an unmarked destructive operation that ships cannot be undone, only worked around with a follow-up migration."

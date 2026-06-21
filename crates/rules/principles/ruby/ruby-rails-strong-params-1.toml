@@ -23,7 +23,7 @@ why = "Strong parameters are a built-in Rails convention that require explicit o
 id = "permissive-params"
 label = "Allow bare params to flow directly to models with minimal validation"
 directive = "Controllers pass params hashes directly to model methods like create(params) or update(params) with little or no filtering."
-why = "A defensible alternative the project considered and did not adopt; creates a mass-assignment vector where attackers can set any writable column."
+why = "Eliminates permit() boilerplate but makes every writable column available to any attacker who can forge a request parameter. There is no server-side checkpoint between the HTTP request and the database write, so a single missing validation is a full mass-assignment breach."
 
 [[sources]]
 url = "https://brakemanscanner.org/docs/warning_types/mass_assignment/"

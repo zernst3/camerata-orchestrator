@@ -34,4 +34,4 @@ why = "A test suite whose names read as a spec is the only always-current docume
 id = "test-names-reflect-method-under-test"
 label = "Test names mirror the method under test (e.g. testProcessOrder)"
 directive = "Test names identify the method or class being called; the expected behavior is apparent from reading the test body."
-why = "A defensible alternative the project considered."
+why = "Names are immediately familiar to developers who know the codebase and mirror IDE navigation, but a CI failure report listing `testProcessOrder` tells a reader nothing about what behavior broke. Understanding the failure requires opening the test file, reading the body, and inferring the expected contract."

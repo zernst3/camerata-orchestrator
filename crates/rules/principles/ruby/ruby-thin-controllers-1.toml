@@ -22,7 +22,7 @@ why = "Logic in models or services is independently testable, reusable across en
 id = "fat-controllers"
 label = "Controllers contain business logic and data access; business logic lives inline in request handlers"
 directive = "Controllers handle validation, queries, business rules, and rendering all in the action method, rather than delegating to models or services."
-why = "A defensible alternative the project considered and did not adopt; mixes transport concerns with domain concerns, inhibits reuse and testing."
+why = "Keeps all logic in one file and avoids the indirection of service classes, but couples business rules to the HTTP request cycle: they cannot be called from background jobs, rake tasks, or the Rails console without faking a request, and testing requires a full controller integration harness rather than a simple unit test."
 
 [[sources]]
 url = "https://guides.rubyonrails.org/action_controller_overview.html"

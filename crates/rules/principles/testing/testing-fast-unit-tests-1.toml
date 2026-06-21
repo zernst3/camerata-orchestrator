@@ -34,4 +34,4 @@ why = "Millisecond unit tests keep the feedback loop tight enough to run on ever
 id = "unit-tests-may-use-real-io"
 label = "Unit tests may use real I/O if it makes the test simpler to write"
 directive = "Unit tests are free to open real database connections, read from the filesystem, or call localhost services if that is more straightforward than setting up a fake."
-why = "A defensible alternative the project considered."
+why = "Reduces the effort of setting up fakes and keeps tests closer to production behavior, but makes the unit suite bounded by network and disk latency rather than CPU. Suites that include real I/O drift from milliseconds toward minutes, break under network unavailability, and stop being run on every save, destroying the tight feedback loop that unit tests are designed to provide."
