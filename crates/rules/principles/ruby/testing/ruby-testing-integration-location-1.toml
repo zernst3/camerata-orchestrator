@@ -1,0 +1,37 @@
+id = "RUBY-TESTING-INTEGRATION-LOCATION-1"
+title = "Integration and system tests live in spec/requests/ (API flows) and spec/system/ (browser flows), not spec/controllers/"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[decision]
+question = "Where do integration-level and end-to-end tests live in an RSpec Rails project?"
+default = "requests-and-system"
+why = "Controller specs (spec/controllers/) test the controller object in isolation from routing and middleware. The RSpec core team deprecated this approach because it tests an artificial interface rather than the HTTP contract: two tests can both pass while a routing misconfiguration silently breaks all requests. Request specs (spec/requests/) exercise the full Rack stack — routing, middleware, authentication, serialization — against a real in-process HTTP client, which is the correct layer for testing API endpoints. System specs (spec/system/) drive a real browser (or headless Capybara driver) and cover full user flows including JavaScript; Rails 5.1 adopted this as the canonical end-to-end test layer and rspec-rails ships first-class support for it. The split between spec/requests/ and spec/system/ maps naturally to the two integration concerns: HTTP contracts vs. user-visible behavior."
+
+[[option]]
+id = "requests-and-system"
+label = "API/HTTP flows in spec/requests/; full browser flows in spec/system/"
+directive = "Tests that exercise HTTP routing, authentication, middleware, and JSON response shape belong in spec/requests/. Tests that drive a browser (clicking links, filling forms, asserting on rendered HTML) belong in spec/system/. Both directories are subdirectories under spec/ and inherit the _spec.rb naming convention. spec/controllers/ is retired in new work; any existing controller specs are migrated on touch. Minitest equivalent: test/integration/ for multi-controller flows, test/system/ for browser flows."
+why = "The adopted default. Aligns with the rspec-rails team recommendation and Rails 5.1+ system test primitives."
+
+[[option]]
+id = "controller-specs"
+label = "Test controllers in isolation in spec/controllers/"
+directive = "Controller specs test controller actions directly using assigns, response.body, and stub collaborators. No browser or full stack involved."
+why = "Faster isolation but tests an artificial boundary; the RSpec core team discourages this style in modern Rails projects."
+
+[[sources]]
+url = "https://rspec.info/features/6-0/rspec-rails/directory-structure/"
+title = "RSpec Rails — Directory Structure"
+
+[[sources]]
+url = "https://www.codewithjason.com/difference-system-specs-feature-specs/"
+title = "The difference between system specs and feature specs — Code with Jason"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/testing.html"
+title = "Rails Guides — Testing Rails Applications (integration + system directories)"

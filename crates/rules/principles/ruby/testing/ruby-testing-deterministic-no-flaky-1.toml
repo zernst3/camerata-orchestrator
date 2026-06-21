@@ -1,0 +1,38 @@
+id = "RUBY-TESTING-DETERMINISTIC-NO-FLAKY-1"
+title = "Tests run in random order with --order random and pass on any seed; no time, sequence, or state leakage"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[decision]
+question = "How should the test suite be configured to prevent flaky, order-dependent, or non-deterministic tests?"
+default = "random-order-no-leakage"
+why = "A test suite that only passes when examples run in a fixed order has hidden dependencies: one example is setting global state (a class variable, an ActiveRecord object, a singleton, an environment variable) that a later example silently depends on. These dependencies are invisible until a future refactor or a CI shuffle changes the run order, causing spurious red builds. RSpec's config.order = :random surfaces order dependencies immediately: if a failure only reproduces on one seed, rspec --bisect isolates the minimal failing pair. Three categories of leakage to eliminate: (1) database state — use database_cleaner or Rails' transactional fixtures so each example begins from an empty database; (2) time — freeze time in examples that assert on timestamps using Timecop or travel_to; (3) global/class state — reset class variables, singletons, and instance variables in after hooks. Randomizing with Kernel.srand config.seed means the same seed always produces the same run order, making failures reproducible for debugging."
+
+[[option]]
+id = "random-order-no-leakage"
+label = "config.order = :random; DatabaseCleaner or transactional fixtures; freeze time in time-sensitive specs"
+directive = "In spec_helper.rb or rails_helper.rb set: config.order = :random and Kernel.srand config.seed. Use database_cleaner-active_record (or Rails transactional fixtures with config.use_transactional_fixtures = true) to reset the database between examples. Wrap time-sensitive assertions with travel_to(Time.zone.now) { } or Timecop.freeze. Reset any global / class-level state modified during a spec in an after(:each) block. Never set a before(:all) block that creates persisted records without a matching cleanup. Use rspec --seed <N> to reproduce failures and rspec --bisect to isolate the minimal failing set. The rubocop-rspec cop RSpec/BeforeAfterAll warns when before(:all) is used."
+why = "The adopted default. Random order + DatabaseCleaner eliminates the two most common sources of flakiness."
+
+[[option]]
+id = "fixed-order-no-cleanup"
+label = "Run tests in defined order; rely on AR rollback implicitly"
+directive = "Tests run in definition order (default before config.order = :random was added). No explicit DatabaseCleaner configuration; rely on ActiveRecord rollback happening automatically."
+why = "Simpler setup but hides order-dependent failures and can leak database state across examples in the same transaction group."
+
+[[sources]]
+url = "https://www.fastruby.io/blog/rspec/debug/how-to-debug-non-deterministic-specs.html"
+title = "FastRuby.io — How to Debug Non-Deterministic Test Failures With RSpec"
+
+[[sources]]
+url = "https://evilmartians.com/chronicles/flaky-tests-be-gone-long-lasting-relief-chronic-ci-retry-irritation"
+title = "Evil Martians — Flaky tests, be gone"
+
+[[sources]]
+url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
+title = "RuboCop RSpec — RSpec/BeforeAfterAll cop (warns on before(:all) state leakage)"
+linter = "rubocop-rspec: RSpec/BeforeAfterAll"
