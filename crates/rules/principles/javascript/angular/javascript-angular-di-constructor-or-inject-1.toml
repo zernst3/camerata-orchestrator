@@ -5,6 +5,20 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/di"
+title = "Angular Dependency Injection Guide — inject() function"
+
+[[sources]]
+url = "https://angular.dev/style-guide"
+title = "Angular Style Guide — Prefer the inject function over constructor parameter injection"
+
+[[sources]]
+url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/src/rules/prefer-inject.ts"
+title = "angular-eslint — prefer-inject"
+linter = "@angular-eslint/prefer-inject"
 
 [decision]
 question = "What position does the project take on: Services are injected via constructor parameters or the inject() function, never manually instantiated?"

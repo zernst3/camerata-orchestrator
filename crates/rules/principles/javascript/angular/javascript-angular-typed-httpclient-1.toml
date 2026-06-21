@@ -5,6 +5,11 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/guide/http/making-requests"
+title = "Angular HttpClient — Making requests: use reusable injectable services"
 
 [decision]
 question = "What position does the project take on: HTTP requests are made through typed services, not directly from components?"

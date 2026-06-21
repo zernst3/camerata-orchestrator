@@ -5,6 +5,16 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://angular.dev/ecosystem/rxjs-interop/take-until-destroyed"
+title = "Angular — Unsubscribing with takeUntilDestroyed"
+
+[[sources]]
+url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/README.md"
+title = "angular-eslint — no-implicit-take-until-destroyed"
+linter = "@angular-eslint/no-implicit-take-until-destroyed"
 
 [decision]
 question = "What position does the project take on: Observable subscriptions are cleaned up using takeUntilDestroyed or the async pipe?"

@@ -5,6 +5,20 @@ domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://vuejs.org/guide/extras/composition-api-faq"
+title = "Vue.js — Composition API FAQ"
+
+[[sources]]
+url = "https://vuejs.org/api/sfc-script-setup"
+title = "Vue.js — <script setup> SFC Syntax Sugar"
+
+[[sources]]
+url = "https://eslint.vuejs.org/rules/component-api-style.html"
+title = "eslint-plugin-vue — vue/component-api-style"
+linter = "eslint-plugin-vue: vue/component-api-style"
 
 [decision]
 question = "What position does the project take on: Composition API and <script setup>?"

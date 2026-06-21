@@ -5,6 +5,15 @@ domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.nestjs.com/controllers"
+title = "NestJS Docs — Controllers: delegate business logic to providers"
+
+[[sources]]
+url = "https://docs.nestjs.com/providers"
+title = "NestJS Docs — Providers: services encapsulate business logic"
 
 [decision]
 question = "What position does the project take on: Controllers stay thin?"

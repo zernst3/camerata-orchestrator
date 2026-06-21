@@ -5,6 +5,15 @@ domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://nextjs.org/docs/app/api-reference/file-conventions/route-groups"
+title = "Next.js — Route Groups: (folderName) convention for layout opt-in"
+
+[[sources]]
+url = "https://nextjs.org/docs/app/getting-started/project-structure#route-groups"
+title = "Next.js — Project Structure: route groups for layout sharing"
 
 [decision]
 question = "What position does the project take on: App Router pages live under the gated route group, not at the top level?"
