@@ -848,10 +848,15 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 // are ALWAYS suggested by design (they govern how the AI fleet builds,
                 // regardless of stack). The rest are available but not recommended here.
                 recommended: is_suggested || r.domain == "agentic",
-                // AUTO-RECOMMENDED = grounded or verified (backed by a cited source).
-                // Draft and needs_recheck rules are listed but not pre-checked: the
-                // architect must explicitly opt in. Mirrors Rule::is_auto_recommended().
-                is_auto_recommended: r.is_auto_recommended(),
+                // AUTO-RECOMMENDED (pre-checked) = stack-relevant AND grounded/verified.
+                // Stack-relevant means the rule's domain matches the scanned stack (or it's
+                // an `agentic` rule, which governs the AI fleet regardless of stack). A
+                // grounded rule for a language the repo does NOT use must never be pre-checked
+                // (e.g. Go/Ruby/Python rules on a TS/Node repo); and a draft/needs_recheck
+                // rule is never pre-checked even when stack-relevant. Without the stack gate,
+                // every grounded rule in the whole corpus was auto-recommended on every repo.
+                is_auto_recommended: (is_suggested || r.domain == "agentic")
+                    && r.is_auto_recommended(),
             }
         })
         .collect::<Vec<_>>();
