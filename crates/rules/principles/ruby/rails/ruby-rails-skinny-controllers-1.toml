@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does business logic live in a Rails application: in controllers, models, or a dedicated service layer?"
@@ -28,3 +29,7 @@ id = "fat-model-only"
 label = "all logic goes into model classes, no service objects"
 directive = "All business logic lives in ActiveRecord model methods; no separate service layer exists. Controllers delegate to model methods exclusively."
 why = "Works for single-resource operations but creates God-object models when cross-resource orchestration is pushed into one model's methods."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html"
+title = "Rails Guides — Action Controller Overview (controllers as HTTP adapters)"

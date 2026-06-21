@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by RuboCop with the FrozenStringLiteral cop enabled (default in modern Rails). Conformance holds when all .rb files begin with # frozen_string_literal: true and CI rejects files without it."
+verification = "grounded"
 
 [decision]
 question = "Are string literals frozen by default to prevent accidental mutations?"
@@ -23,3 +24,12 @@ id = "mutable-strings"
 label = "Allow string literals to be mutable by default"
 directive = "String literals are not frozen and can be mutated in place."
 why = "Simplifies code that needs mutable strings but introduces subtle mutation bugs across references."
+
+[[sources]]
+url = "https://github.com/rubocop/rubocop/blob/master/lib/rubocop/cop/style/frozen_string_literal_comment.rb"
+title = "RuboCop — Style/FrozenStringLiteralComment cop source"
+linter = "RuboCop: Style/FrozenStringLiteralComment"
+
+[[sources]]
+url = "https://rubystyle.guide/#magic-comments"
+title = "Ruby Style Guide — Magic Comments"

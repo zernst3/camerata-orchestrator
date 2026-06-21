@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where are data integrity rules (required fields, format constraints, uniqueness) enforced?"
@@ -28,3 +29,7 @@ id = "database-constraints-only"
 label = "enforce integrity purely through database constraints"
 directive = "Integrity rules are expressed only as database-level constraints (NOT NULL, UNIQUE, CHECK); the application layer has no `validates` calls."
 why = "Catches violations at the deepest layer but returns raw database errors rather than user-friendly validation messages, and fires after an attempted write rather than before."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_validations.html"
+title = "Rails Guides — Active Record Validations"

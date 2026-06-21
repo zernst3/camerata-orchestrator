@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where are request inputs validated and sanitized?"
@@ -22,3 +23,11 @@ id = "client-side-only"
 label = "Rely on client-side (JavaScript) validation with minimal server-side checks"
 directive = "Validation is implemented primarily in JavaScript; the server trusts the client to send valid data."
 why = "Convenient for the happy path but offers no protection against forged requests or attackers."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_validations.html"
+title = "Rails Guides — Active Record Validations (model-level validation)"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
+title = "Rails Guides — Action Controller Overview: Strong Parameters"

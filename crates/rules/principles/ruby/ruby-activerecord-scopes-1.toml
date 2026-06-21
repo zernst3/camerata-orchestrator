@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are repeated or complex query conditions organized?"
@@ -22,3 +23,7 @@ id = "inline-where-clauses"
 label = "Write where() conditions inline at each call site"
 directive = "Query conditions are written inline wherever needed, without scope abstraction. Example: User.where(is_active: true, created_at: ...) is written in each controller or service that needs it."
 why = "Reads naturally but couples business rules to multiple code locations, making changes error-prone and inconsistent."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_querying.html#scopes"
+title = "Rails Guides — Active Record Query Interface: Scopes"

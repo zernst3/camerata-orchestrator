@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where do business rules and database queries live?"
@@ -22,3 +23,7 @@ id = "fat-controllers"
 label = "Controllers contain business logic and data access; business logic lives inline in request handlers"
 directive = "Controllers handle validation, queries, business rules, and rendering all in the action method, rather than delegating to models or services."
 why = "A defensible alternative the project considered and did not adopt; mixes transport concerns with domain concerns, inhibits reuse and testing."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html"
+title = "Rails Guides — Action Controller Overview (MVC pattern; controllers handle HTTP)"

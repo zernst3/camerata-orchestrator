@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Brakeman which flags eval, instance_eval, class_eval, and send/public_send with string or symbol parameters derived from user input. Conformance holds when the linter runs in CI and these patterns fail the build."
+verification = "grounded"
 
 [decision]
 question = "How are method names or code dynamically invoked?"
@@ -29,3 +30,13 @@ id = "eval-with-user-input"
 label = "Use eval() or send() with user input"
 directive = "Dynamic code or method names are dispatched directly from user input via eval(), instance_eval(), class_eval(), or send() with a string parameter."
 why = "Arbitrary code execution or method invocation vulnerability; every site is a vector for an attacker."
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/dangerous_eval/"
+title = "Brakeman — Dangerous Evaluation warning type"
+linter = "Brakeman: Dangerous Evaluation"
+
+[[sources]]
+url = "https://brakemanscanner.org/docs/warning_types/dangerous_send/"
+title = "Brakeman — Dangerous Send warning type"
+linter = "Brakeman: Dangerous Send"

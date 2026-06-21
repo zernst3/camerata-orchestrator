@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a runtime detection linter (Bullet gem, or custom N+1 detection in CI) that flags queries where a loop over a collection issues a separate query for each item. Conformance holds when CI runs the detector and rejects N+1 patterns."
+verification = "grounded"
 
 [decision]
 question = "How are associated records loaded alongside a parent collection?"
@@ -23,3 +24,12 @@ id = "lazy-load-on-access"
 label = "Allow ActiveRecord to load associations lazily on first access"
 directive = "Associations are accessed on demand without explicit eager loading; each access triggers a separate query if the data is not already loaded."
 why = "Defensible for small datasets or simple views but creates an N+1 pattern when iterated in a loop. Most applications prefer eager loading for predictable performance."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_record_querying.html#eager-loading-associations"
+title = "Rails Guides — Active Record Query Interface: Eager Loading Associations"
+
+[[sources]]
+url = "https://github.com/flyerhzm/bullet"
+title = "Bullet gem — N+1 query detection for Rails"
+linter = "Bullet: N+1 query detection"

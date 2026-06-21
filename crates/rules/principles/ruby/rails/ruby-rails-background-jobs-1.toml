@@ -5,6 +5,7 @@ domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "Where does work that is slow, external, or unreliable (email sending, image processing, external API calls, report generation) run?"
@@ -28,3 +29,7 @@ id = "thread-spawn"
 label = "spawn a background thread from the controller"
 directive = "Slow work is performed by spawning a new thread (`Thread.new { ... }`) inside the controller action, outside the request cycle."
 why = "Avoids blocking the request thread but bypasses the job queue's retry, observability, and backpressure mechanisms; unhandled errors in the spawned thread are swallowed silently."
+
+[[sources]]
+url = "https://guides.rubyonrails.org/active_job_basics.html"
+title = "Rails Guides — Active Job Basics"
