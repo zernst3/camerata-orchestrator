@@ -31,16 +31,16 @@ why = "Preventive gatekeeping catches issues before they compound downstream, wh
 id = "autonomously-generated-code-ships-directly-from"
 label = "autonomously-generated code ships directly from the author's machine to …"
 directive = "autonomously-generated code ships directly from the author's machine to the user-facing environment without passing a local quality bar or progressing through any pre-production environment; issues are caught by post-hoc monitoring in production"
-why = "A defensible alternative the project considered."
+why = "Skipping pre-merge gates and pre-production environments entirely shifts the discovery surface to live users, where each issue costs more to triage, more to roll back, and consumes user trust in the process."
 
 [[option]]
 id = "autonomously-generated-code-passes-a-local-quali"
 label = "autonomously-generated code passes a local quality bar before merge …"
 directive = "autonomously-generated code passes a local quality bar before merge but goes directly from merge to the user-facing environment, with no pre-production environment between them"
-why = "A defensible alternative the project considered."
+why = "CI catches what it can catch, but anything that depends on real data, real config, or real load is discovered by users rather than in a pre-production environment shaped like the real one."
 
 [[option]]
 id = "autonomously-generated-code-progresses-through-o"
 label = "autonomously-generated code progresses through one or more pre-production environments, …"
 directive = "autonomously-generated code progresses through one or more pre-production environments, but advancement through each one is gated by manual reviewer approval rather than by automated checks"
-why = "A defensible alternative the project considered."
+why = "Manual approval gates reintroduce the human bottleneck the rule exists to remove, and the gating decision drifts as reviewer attention waxes and wanes."

@@ -26,16 +26,16 @@ why = "Makes drift detection and review fast."
 id = "commits-and-pr-descriptions-omit-any-reference-t"
 label = "commits and PR descriptions omit any reference to the …"
 directive = "commits and PR descriptions omit any reference to the convention ID being applied, leaving the rule citation entirely out of the project's written record"
-why = "A defensible alternative the project considered."
+why = "Omitting citation forces slow archaeology when a pattern needs to be traced and turns reviewers into detectives asking 'is this following X or contradicting it?' instead of seeing the answer in the commit body."
 
 [[option]]
 id = "commits-omit-the-convention-id-citation-and-only"
 label = "commits omit the convention ID citation and only the …"
 directive = "commits omit the convention ID citation and only the PR description carries it"
-why = "A defensible alternative the project considered."
+why = "PR-only citation works during the PR review pass but breaks down once the change is merged; someone reading commit history later finds the PR description one click further away, and grepping the repo history misses the citation entirely."
 
 [[option]]
 id = "the-convention-id-is-cited-in-a-code-comment-nex"
 label = "the convention ID is cited in a code comment …"
 directive = "the convention ID is cited in a code comment next to the application site rather than in the commit body"
-why = "A defensible alternative the project considered."
+why = "Code-comment citation couples the reference to the source location permanently, moves around with refactors, and goes stale after the convention evolves, so it anchors neither the change nor the history."

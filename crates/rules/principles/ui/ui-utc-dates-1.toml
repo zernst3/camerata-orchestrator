@@ -22,16 +22,16 @@ why = "When the timezone is left implicit, the server renders the date in the ho
 id = "feature-code-formats-dates-inline-at-each-call-s"
 label = "feature code formats dates inline at each call site …"
 directive = "feature code formats dates inline at each call site using the platform's locale-aware formatting (toLocaleString, strftime, Intl.DateTimeFormat) without going through a project-level helper that pins the timezone"
-why = "A defensible alternative the project considered."
+why = "Inline formatting lets every site drift on timezone handling; the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time."
 
 [[option]]
 id = "feature-code-renders-dates-only-on-the-client-vi"
 label = "feature code renders dates only on the client via …"
 directive = "feature code renders dates only on the client via a post-mount effect, with the server rendering a placeholder until the client picks up the value"
-why = "A defensible alternative the project considered."
+why = "Client-only rendering via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode."
 
 [[option]]
 id = "feature-code-calls-the-platform-s-date-formattin"
 label = "feature code calls the platform's date-formatting APIs without specifying …"
 directive = "feature code calls the platform's date-formatting APIs without specifying a timezone, letting the platform's default locale and timezone control the result at each site"
-why = "A defensible alternative the project considered."
+why = "Platform-default timezone varies by browser, OS, region, and browser version; the rule's outcome becomes 'whatever the platform happened to decide today'."

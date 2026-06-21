@@ -21,16 +21,16 @@ why = "Per-aggregate abstractions let services depend on the shape of the data t
 id = "the-domain-layer-declares-a-single-generic-repos"
 label = "the domain layer declares a single generic Repository-of-T abstraction …"
 directive = "the domain layer declares a single generic Repository-of-T abstraction that every aggregate consumes through type parameters, rather than declaring a separate abstraction per aggregate"
-why = "A defensible alternative the project considered."
+why = "A single generic Repository-of-T does not fit aggregate-specific finder methods like find_by_slug or find_active_by_org; it either degrades to find_by_id only or grows methods that some aggregates do not implement."
 
 [[option]]
 id = "the-domain-layer-declares-one-repository-abstrac"
 label = "the domain layer declares one repository abstraction per use …"
 directive = "the domain layer declares one repository abstraction per use case (find-user-by-email, find-active-projects-in-org) rather than per aggregate"
-why = "A defensible alternative the project considered."
+why = "Per-use-case abstractions proliferate across the codebase, lose aggregate cohesion, and produce a large surface of one-method interfaces with no grouping by domain boundary."
 
 [[option]]
 id = "the-domain-layer-declares-no-repository-abstract"
 label = "the domain layer declares no repository abstraction at all; …"
 directive = "the domain layer declares no repository abstraction at all; services call the persistence library directly, with no boundary between domain logic and persistence implementation"
-why = "A defensible alternative the project considered."
+why = "No abstraction couples every service to the chosen persistence library; the domain layer recompiles or breaks on every library upgrade."

@@ -26,16 +26,16 @@ why = "Robustness is plural; picking one dimension unilaterally silently accepts
 id = "when-options-are-each-robust-against-different-f"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent treats the first robust option it encounters as the winner and proceeds"
-why = "A defensible alternative the project considered."
+why = "Picking the first robust option found reduces the decision to search order rather than judgment, and silently accepts the unaddressed failure mode every time an option comes up first by accident."
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f-2"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent picks autonomously based on which option's failure mode has a cheaper recovery in the project's context"
-why = "A defensible alternative the project considered."
+why = "Recovery-cost estimation is a defensible heuristic but requires domain knowledge the agent rarely has; that lens is exactly what a human reviewer should apply, not the agent."
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f-3"
 label = "when options are each robust against different failures, the …"
 directive = "when options are each robust against different failures, the agent combines every option's protections in the same artifact rather than picking one"
-why = "A defensible alternative the project considered."
+why = "Combining both protections doubles the complexity surface and trades a single conscious decision for ongoing maintenance of every code path, which is usually worse than picking one deliberately."

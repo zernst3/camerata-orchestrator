@@ -21,16 +21,16 @@ why = "Modern query libraries solve a list of problems that components otherwise
 id = "each-component-manages-its-own-fetch-and-store-c"
 label = "each component manages its own fetch-and-store cycle (useState, useEffect, …"
 directive = "each component manages its own fetch-and-store cycle (useState, useEffect, fetch, manual error handling) with no shared cache, no de-duplication, and no library-provided invalidation"
-why = "A defensible alternative the project considered."
+why = "Ad-hoc fetch-and-store has no de-dup, no shared cache between components reading the same data, manual invalidation everywhere, and subtle bugs around effect dependencies and race conditions on remounts."
 
 [[option]]
 id = "data-lives-in-a-global-store-with-imperative-loa"
 label = "data lives in a global store with imperative loaders …"
 directive = "data lives in a global store with imperative loaders that components call to populate the store, with no library-provided cache, revalidation, or per-key invalidation"
-why = "A defensible alternative the project considered."
+why = "A global store with imperative loaders works for slow-moving data but requires every component that reads to subscribe explicitly, and invalidation and refetch policy bolt on awkwardly and are easy to get wrong."
 
 [[option]]
 id = "the-ui-relies-on-server-side-rendering-for-all-d"
 label = "the UI relies on server-side rendering for all data …"
 directive = "the UI relies on server-side rendering for all data and maintains no client-side cache, so any value that needs to update after the initial render triggers a full re-render or a separate ad-hoc fetch"
-why = "A defensible alternative the project considered."
+why = "SSR-only is acceptable for fully-static or fully-streamed UIs but falls over the moment a single interaction needs to re-read a value without a full page render."

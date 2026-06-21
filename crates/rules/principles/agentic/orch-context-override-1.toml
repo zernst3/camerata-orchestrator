@@ -20,16 +20,16 @@ why = "Documented rules exist because an architect made an explicit commit; over
 id = "rule-overrides-driven-by-project-context-require"
 label = "Rule overrides driven by project context require explicit human sign-off"
 directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project, the agent pauses and escalates the override to a human reviewer before either updating the rule or producing any artifact that diverges from it. Wrong-shaped output here means context-fit failures such as: the rule's stance conflicts with the project's positioning, a downstream constraint defeats the rule's rationale, an ecosystem convention diverges from the rule's stance, or similar misalignments between the rule's assumptions and the project's actual context. The escalation cites the rule by identifier and proposes the override. The agent resumes only after explicit sign-off. Silent override of a documented rule is forbidden."
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Pausing preserves rule authority while still allowing rules to evolve; the override and the deviating artifact together represent an architectural shift that warrants the same review the original rule received."
 
 [[option]]
 id = "when-the-agent-identifies-that-applying-a-docume"
 label = "When the agent identifies that applying a documented rule …"
 directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project (context-fit failures such as the rule's stance conflicting with the project's positioning, a downstream constraint defeating the rule's rationale, an ecosystem convention diverging from the rule's stance, or similar misalignments), the agent applies the override autonomously, updates the rule's text in the same change, and records the override for asynchronous human review later."
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Overriding then reviewing later trades pause cost for review-cadence cost, but lets architectural shifts ship before the architect sees them; subsequent work may build on a divergence that the eventual review would have caught."
 
 [[option]]
 id = "documented-rules-are-absolute-the-agent-never-ov"
 label = "Documented rules are absolute; the agent never overrides them …"
 directive = "Documented rules are absolute; the agent never overrides them based on local context, and a poor-fit rule is filed to the decisions log for human revision without the agent producing any artifact in the meantime."
-why = "A defensible position on this decision; with no default, the project must choose deliberately at curation time."
+why = "Absolute rules buy stability and can be right in regulated or safety-critical contexts, but they strand the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."

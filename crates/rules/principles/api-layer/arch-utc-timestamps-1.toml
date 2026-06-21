@@ -21,16 +21,16 @@ why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is ses
 id = "the-domain-holds-timestamps-as-offset-bearing-va"
 label = "the domain holds timestamps as offset-bearing values that carry …"
 directive = "the domain holds timestamps as offset-bearing values that carry whatever offset the storage layer returned, and downstream code normalizes case by case"
-why = "A defensible alternative the project considered."
+why = "Letting timestamps carry their fixed offset through the domain propagates a representational detail past the boundary; every consumer becomes responsible for normalizing the same way, which they will not."
 
 [[option]]
 id = "the-domain-holds-timestamps-as-naive-timezone-le"
 label = "the domain holds timestamps as naive (timezone-less) values with …"
 directive = "the domain holds timestamps as naive (timezone-less) values with no timezone information attached, and consumers assume UTC by convention rather than by type"
-why = "A defensible alternative the project considered."
+why = "Naive timestamps lose the UTC fact entirely and produce silent off-by-hours bugs when the storage layer or a downstream consumer assumes a different timezone."
 
 [[option]]
 id = "the-domain-holds-timestamps-as-raw-integers-epoc"
 label = "the domain holds timestamps as raw integers (epoch seconds …"
 directive = "the domain holds timestamps as raw integers (epoch seconds or milliseconds) or as strings, bypassing the language's date-time type entirely"
-why = "A defensible alternative the project considered."
+why = "Raw integers or strings shed the language's date-time API and add a parsing or conversion bug surface at every layer that touches the value."

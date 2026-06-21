@@ -22,16 +22,16 @@ why = "Image delivery carries several policy decisions baked in: which CDN URL p
 id = "feature-code-renders-images-directly-through-the"
 label = "feature code renders images directly through the framework's image …"
 directive = "feature code renders images directly through the framework's image primitive (next/image, Vue's Image, Flutter's Image, or equivalent) at every call site, with no project-level wrapper component"
-why = "A defensible alternative the project considered."
+why = "Using the framework primitive everywhere leaves delivery policy implicit and spread across the codebase; any future strategy change (CDN, format, A11Y default) becomes a codebase-wide refactor."
 
 [[option]]
 id = "feature-code-renders-images-as-raw-html-img-elem"
 label = "feature code renders images as raw HTML img elements …"
 directive = "feature code renders images as raw HTML img elements or platform-native image widgets, without going through the framework's image primitive or a project-level component"
-why = "A defensible alternative the project considered."
+why = "Raw img elements lose framework-provided lazy loading, responsive variants, and format negotiation, and produce measurable cumulative-layout-shift and bandwidth regressions."
 
 [[option]]
 id = "the-project-provides-a-project-level-image-compo"
 label = "the project provides a project-level image component but its …"
 directive = "the project provides a project-level image component but its use is optional, and some call sites continue to use the framework primitive directly while others wrap it"
-why = "A defensible alternative the project considered."
+why = "Optional use makes the rule a culture rather than a contract; new code drifts back to the raw primitive whenever an author has not internalized the rule."

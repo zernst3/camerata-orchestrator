@@ -22,10 +22,10 @@ why = "Coupling the wire format to the domain model means every internal refacto
 id = "endpoints-return-domain-types-directly-in-the-re"
 label = "endpoints return domain types directly in the response body …"
 directive = "endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between"
-why = "A defensible alternative the project considered."
+why = "Returning domain types directly is cheaper to write at first but turns every internal refactor into a breaking API change, since the wire shape moves whenever the internal model moves."
 
 [[option]]
 id = "the-project-uses-a-single-shared-model-type-acro"
 label = "the project uses a single shared model type across …"
 directive = "the project uses a single shared model type across both the wire format and the domain core, rather than maintaining separate DTOs and domain types"
-why = "A defensible alternative the project considered."
+why = "A single shared type pulls API concerns into the domain core and ties release cadence to client tolerance, so internal evolution waits on external upgrades."

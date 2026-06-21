@@ -26,16 +26,16 @@ why = "Per-decision gates miss aggregate drift; many small calls can drift heavy
 id = "every-self-made-clear-winner-call-is-logged-with"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject daily, and further autonomous runs hold until the batch is cleared"
-why = "A defensible alternative the project considered."
+why = "A daily cadence offers more granular review and catches drift sooner, but interrupts forward progress more often; that trade is wrong for routines whose value comes from sustained autonomous runs."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-2"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject monthly, and further autonomous runs hold until the batch is cleared"
-why = "A defensible alternative the project considered."
+why = "A monthly cadence accumulates drift across a longer window and makes each review heavier when it arrives; both properties work against the rule's goal of catching aggregate drift while it is still cheap to correct."
 
 [[option]]
 id = "every-self-made-clear-winner-call-is-logged-with-3"
 label = "every self-made clear-winner call is logged with date, rule, …"
 directive = "every self-made clear-winner call is logged with date, rule, decision, alternatives, and why, the agent surfaces the accumulated batch for human accept/modify/reject weekly, and autonomous runs continue freely between reviews rather than holding until the batch is cleared"
-why = "A defensible alternative the project considered."
+why = "Allowing runs to continue between reviews speeds forward progress but accepts that drift can compound past a missed review window, defeating the hold-until-cleared mechanism that makes the rule self-correcting."

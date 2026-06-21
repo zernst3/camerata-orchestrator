@@ -27,4 +27,4 @@ why = "Prevents business logic hiding inside the query layer; keeps each layer t
 id = "controllers-services-and-repositories-are-not-se"
 label = "controllers, services, and repositories are not separated by lint …"
 directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
-why = "A defensible alternative the project considered."
+why = "Mixing layers leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."

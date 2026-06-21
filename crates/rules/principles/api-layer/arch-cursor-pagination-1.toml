@@ -21,16 +21,16 @@ why = "Offset pagination has a correctness bug under concurrent writes that the 
 id = "list-endpoints-paginate-by-offset-page-n-page-si"
 label = "list endpoints paginate by offset (page=N, page_size=K) regardless of …"
 directive = "list endpoints paginate by offset (page=N, page_size=K) regardless of whether the underlying list can grow"
-why = "A defensible alternative the project considered."
+why = "Offset pagination is simpler to implement but silently drops or duplicates records when the underlying list changes mid-session, which is the correctness bug cursors exist to fix."
 
 [[option]]
 id = "list-endpoints-return-the-full-result-set-in-a-s"
 label = "list endpoints return the full result set in a …"
 directive = "list endpoints return the full result set in a single response and do not paginate at all, regardless of list size"
-why = "A defensible alternative the project considered."
+why = "No pagination breaks at scale: the response grows without bound and the client has to handle arbitrarily large payloads."
 
 [[option]]
 id = "list-endpoints-expose-both-cursor-and-offset-pag"
 label = "list endpoints expose both cursor and offset pagination shapes …"
 directive = "list endpoints expose both cursor and offset pagination shapes and let the client choose which to use per request"
-why = "A defensible alternative the project considered."
+why = "Exposing both shapes doubles the surface area and the testing burden for marginal client convenience, and the simpler offset shape becomes the path of least resistance for clients that should be using cursors."
