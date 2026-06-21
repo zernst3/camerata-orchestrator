@@ -26,7 +26,7 @@ why = "Thin controllers keep the domain logic in the service layer where it is i
 id = "fat-controllers-inline-logic"
 label = "Business logic inline in @RestController methods"
 directive = "Controller methods contain the full business rule implementation: validate inputs, apply domain rules, call repositories directly, and construct the response. Services are not introduced unless the same logic is needed in multiple controllers."
-why = "A defensible alternative the project considered. Inline logic in controllers is reachable only via HTTP, bypasses @Transactional semantics on the service layer, and mixes HTTP protocol concerns with domain concerns."
+why = "Inline controller logic is reachable only via an HTTP request, so it cannot be unit-tested without spinning up the web layer, cannot be reused from a scheduled job or message listener, and entangles domain rule changes with HTTP-layer code. @Transactional on a controller method also produces ambiguous AOP proxy semantics compared to the unambiguous service-layer placement."
 
 [[option]]
 id = "command-handler-per-request"
