@@ -1,0 +1,35 @@
+id = "PYTHON-TESTING-AAA-STRUCTURE-1"
+title = "Each test follows Arrange-Act-Assert: one act, one assertion focus"
+tag = "stack"
+domain = "python:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "Conformance holds when each test function has a discernible arrange phase (setup/fixtures), a single act (the call under test), and an assert phase that checks the outcome of that act; composite assertions on independent conditions are split into separate tests or expressed with assert on a single logical value. Fails when a test function exercises multiple unrelated behaviors in one body (multiple act+assert cycles) or uses composite assert statements that obscure which condition failed."
+verification = "grounded"
+
+[decision]
+question = "What internal structure should a test function body follow?"
+default = "aaa-one-act"
+why = "pytest's own anatomy documentation names the four phases of a test: Arrange (prepare), Act (the singular state-changing action), Assert (verify the outcome), and optionally Cleanup. The documentation states: 'the test is ultimately the act and assert steps, with the arrange step only providing the context.' Having a single act per test makes failures unambiguous: when the test goes red, exactly one behavior is in question. Multiple act+assert cycles in one test body turn a failure into a debugging puzzle (which act failed?). pytest's linter (Ruff PT018) additionally flags composite assertions — `assert a and b` — because when a composite assertion fails it does not tell you which sub-condition was false. Separating concerns into one-behavior-per-test also makes test names self-documenting and failures self-explaining."
+
+[[option]]
+id = "aaa-one-act"
+label = "Arrange-Act-Assert with a single act per test"
+directive = "Each test function body is organized in three phases. Arrange: prepare all preconditions (create objects, set up fakes, seed data) using fixtures or local setup; this phase may be empty when fixtures cover it entirely. Act: a single call that exercises the behavior under test (one function call, one method invocation, one HTTP request). Assert: verify the outcome of the act; a test may have multiple assert statements as long as they all check the same behavior — use pytest.approx() for floats and pytest.raises() for expected exceptions. If two unrelated behaviors need testing, write two test functions. Never put a second act+assert cycle inside the same test body."
+why = "The adopted default. A single act makes failures unambiguous; self-documenting test names map one-to-one with behaviors; fits pytest's phase model precisely."
+
+[[option]]
+id = "multi-step"
+label = "multi-step test bodies with several act+assert cycles"
+directive = "A test function may exercise multiple behaviors in sequence, checking intermediate state after each step."
+why = "Produces cheaper tests at the cost of ambiguous failures: when the test fails it is unclear which step broke without reading the full body."
+
+[[sources]]
+url = "https://docs.pytest.org/en/stable/explanation/anatomy.html"
+title = "pytest — Anatomy of a test (Arrange-Act-Assert-Cleanup)"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/pytest-composite-assertion/"
+title = "Ruff PT018 — pytest-composite-assertion"
+linter = "Ruff: PT018"

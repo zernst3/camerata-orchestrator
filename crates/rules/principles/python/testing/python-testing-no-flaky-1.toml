@@ -1,0 +1,30 @@
+id = "PYTHON-TESTING-NO-FLAKY-1"
+title = "Tests are deterministic: no time, random, or external-state dependencies without explicit control"
+tag = "stack"
+domain = "python:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "Conformance holds when every test either (a) mocks or overrides all sources of non-determinism (datetime.now, random, uuid4, network, filesystem) before acting, or (b) uses deterministic seeding/fakes so the same inputs always produce the same assertions. Fails when a test passes or fails depending on wall-clock time, random values, test execution order, or external system state."
+verification = "grounded"
+
+[decision]
+question = "How must tests handle non-deterministic inputs such as time, randomness, and external state?"
+default = "mock-nondeterminism"
+why = "pytest's flaky-test explanation states: 'A flaky test is one that exhibits intermittent or sporadic failure, that seems to have non-deterministic behaviour. Sometimes it passes, sometimes it fails, and it's not clear why.' The documentation identifies the root cause as insufficient environment isolation: 'a flaky test indicates that the test relies on some system state that is not being appropriately controlled — the test environment is not sufficiently isolated.' Non-deterministic inputs — wall-clock time (datetime.now()), random.random(), uuid4(), network responses, filesystem contents — are by definition uncontrolled external state. A test that asserts on an uncontrolled value can only pass by coincidence. The remedy is to make all non-deterministic sources injectable (pass a clock, a random seed, or a fake repository as a parameter or fixture) and replace them in tests with controlled fakes or mocks. Test ordering is a separate axis: pytest documentation recommends running the suite with pytest-randomly to expose tests that accidentally depend on execution order, indicating hidden shared state."
+
+[[option]]
+id = "mock-nondeterminism"
+label = "mock or inject all non-deterministic sources; tests must pass in any order"
+directive = "Do not call datetime.datetime.now(), time.time(), random.random(), uuid.uuid4(), or any network or filesystem API directly inside the production code under test without making it injectable. In tests, replace these sources: use monkeypatch or unittest.mock.patch to freeze time, seed random with a fixed value, provide deterministic UUIDs, and stub external I/O. Tests must not assume any particular file-system state on CI that is not created by a fixture. Tests must not depend on execution order: each test arranges its own preconditions and cleans up after itself (via fixture teardown or monkeypatch auto-revert). If a test fails intermittently, treat it as a P1 bug: quarantine it (pytest.mark.skip with a tracking-issue reference) rather than ignoring it."
+why = "The adopted default. A deterministic suite is a trustworthy suite; intermittent failures erode confidence in CI and obscure real regressions."
+
+[[option]]
+id = "allow-nondeterminism"
+label = "allow tests to call live time/random/network without control"
+directive = "Tests may call datetime.now(), random, or real network endpoints directly; flaky failures are investigated only when they recur frequently."
+why = "Produces a suite that can and will fail for reasons unrelated to the code under test; erodes CI signal and blocks PRs on noise."
+
+[[sources]]
+url = "https://docs.pytest.org/en/stable/explanation/flaky.html"
+title = "pytest — Flaky tests (definition, root causes, recommendations)"

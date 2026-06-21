@@ -1,0 +1,40 @@
+id = "PYTHON-TESTING-MOCK-BOUNDARIES-1"
+title = "Mocks replace dependencies at the boundary where the code under test imports them, not at the definition site"
+tag = "stack"
+domain = "python:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "Conformance holds when unittest.mock.patch or pytest monkeypatch targets the name as it is looked up by the code under test (e.g., patch('mymodule.requests.get') when mymodule does import requests), never the canonical definition path of the object; and when mocks are applied at external boundaries only (I/O, network, database, time, randomness) rather than to implementation details inside the unit. Fails when patch targets the wrong namespace (causing the real object to be called in production paths) or when mocks are used to stub out non-boundary internal functions."
+verification = "grounded"
+
+[decision]
+question = "Where and how should mocks be applied in unit tests?"
+default = "patch-at-usage-namespace"
+why = "Python's unittest.mock documentation states explicitly: 'The key is to do the patching in the right namespace. patch where an object is looked up, which is not necessarily the same place as where it is defined.' When a module does `from requests import get` and you patch `requests.get`, the module's local name `get` still points to the real function — the patch has no effect. You must patch `mymodule.get`, the name in the namespace where the code under test looks it up. Beyond the namespace rule, mocks should only replace external dependencies: network calls, file I/O, database queries, system time, and random sources. Mocking internal functions ties tests to the implementation rather than the contract, making them brittle: every internal refactor breaks the test even though the externally observable behavior did not change. pytest's monkeypatch fixture provides a test-scoped alternative to patch() that automatically reverts the patch after the test without requiring a context manager or decorator, making it suitable for simpler attribute and environment-variable substitutions."
+
+[[option]]
+id = "patch-at-usage-namespace"
+label = "patch at the import namespace of the module under test; mock only external I/O boundaries"
+directive = "When using unittest.mock.patch, target the fully-qualified path of the name as it appears in the module under test: if mymodule.py contains `from lib import helper`, patch `mymodule.helper`, not `lib.helper`. For simple attribute replacement, prefer pytest's monkeypatch fixture over patch() to avoid context-manager boilerplate and guarantee cleanup. Mock only external boundaries: network, filesystem, database, clock (datetime.now, time.time), and randomness. Do not mock internal functions, private helpers, or anything whose only purpose is to break up a large function — that is a sign the design needs refactoring, not mocking. Use create_autospec() or spec= when creating a mock of a class or function so that the mock enforces the real signature and catches drift."
+why = "The adopted default. Patch in the right namespace or the real code runs; mock only boundaries or tests break on every refactor."
+
+[[option]]
+id = "patch-at-definition-site"
+label = "patch at the canonical definition path regardless of import style"
+directive = "Always target the canonical module where the object is defined (e.g., patch('lib.helper') even when mymodule does `from lib import helper`)."
+why = "Incorrect: when the consuming module has already bound the name, patching the origin has no effect on the code under test."
+
+[[option]]
+id = "mock-internals"
+label = "mock internal functions to isolate the unit"
+directive = "Replace internal private helpers and implementation details with mocks to narrow the unit under test."
+why = "Ties tests to implementation structure; every refactor breaks tests even when external behavior is preserved."
+
+[[sources]]
+url = "https://docs.python.org/3/library/unittest.mock.html"
+title = "Python stdlib — unittest.mock (Where to patch)"
+
+[[sources]]
+url = "https://docs.pytest.org/en/stable/how-to/monkeypatch.html"
+title = "pytest — How to monkeypatch/mock modules and environments"
