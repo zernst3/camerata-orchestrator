@@ -31,6 +31,13 @@ pub mod subprocess;
 /// See `docs/decisions/2026-06-15_process_rules_and_vcs_action_gate.md`.
 pub mod vcs_action;
 
+/// The verification-mechanics gates over the rule corpus: the deny-gate that
+/// keeps `verification = "verified"` human-only (agents may set at most
+/// `grounded`), and the staleness pass that demotes a drifted `verified` rule to
+/// `needs_recheck`. The dogfood of the grounding ladder in `camerata-rules`.
+/// See `docs/decisions/2026-06-20_verification_mechanics.md`.
+pub mod verification_gate;
+
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_core::{CheckRunner, Role, RuleId};

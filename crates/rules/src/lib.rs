@@ -147,6 +147,12 @@ impl std::fmt::Display for EnforcementKind {
 /// - `verified` — a human (the maintainer) has confirmed the grounding is
 ///   correct. **Only a human sets this** — no automated process may ever emit
 ///   `verified`. It is the strongest assertion the corpus can make about a rule.
+/// - `needs_recheck` — a rule that WAS `verified`, but the cited source or
+///   linter it was verified against has since drifted (a version bump moved the
+///   ground out from under the human confirmation). It is still at-least-grounded
+///   and usable, but the human verification is stale and must be re-confirmed.
+///   Emitted by the [`crate`]'s staleness pass (in `camerata-checks`), never set
+///   by hand in a TOML file under normal authoring.
 ///
 /// `serde(default)` resolves to [`Verification::Draft`], so every existing rule
 /// TOML (which predates this field) and any rule that omits `verification`
@@ -161,6 +167,10 @@ pub enum Verification {
     Grounded,
     /// A human maintainer has confirmed the grounding. Human-only; never automated.
     Verified,
+    /// Was `verified`, but the cited source/linter has since drifted; the human
+    /// confirmation is stale and needs re-checking. Still at-least-grounded and
+    /// usable. Serialised as `needs_recheck`.
+    NeedsRecheck,
 }
 
 impl Verification {
@@ -170,6 +180,7 @@ impl Verification {
             Verification::Draft => "draft",
             Verification::Grounded => "grounded",
             Verification::Verified => "verified",
+            Verification::NeedsRecheck => "needs_recheck",
         }
     }
 
@@ -179,8 +190,32 @@ impl Verification {
             "draft" => Some(Verification::Draft),
             "grounded" => Some(Verification::Grounded),
             "verified" => Some(Verification::Verified),
+            "needs_recheck" => Some(Verification::NeedsRecheck),
             _ => None,
         }
+    }
+
+    /// Whether this status is exactly `verified` — the strongest, human-only
+    /// assertion. `NeedsRecheck` returns `false`: a drifted verification is no
+    /// longer a live human confirmation.
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Verification::Verified)
+    }
+
+    /// Whether this status is at-least-grounded — i.e. `grounded`, `verified`, or
+    /// `needs_recheck`. All three are backed by a cited source and are usable;
+    /// only `draft` is not.
+    pub fn is_grounded(&self) -> bool {
+        matches!(
+            self,
+            Verification::Grounded | Verification::Verified | Verification::NeedsRecheck
+        )
+    }
+
+    /// Whether a rule at this status is shippable — true for every at-least-grounded
+    /// status (`grounded`, `verified`, `needs_recheck`), false for `draft`.
+    pub fn is_shippable(&self) -> bool {
+        self.is_grounded()
     }
 }
 
@@ -222,6 +257,37 @@ pub struct RuleSource {
     pub linter: Option<String>,
 }
 
+/// Provenance for a human verification: who verified the rule, when, and which
+/// source / linter versions it was verified against.
+///
+/// This is the durable record behind a [`Verification::Verified`] status. The
+/// `against` list captures the exact versions of the cited sources/linters at the
+/// time of verification (e.g. `"clippy 1.83"`, `"Checkstyle 10.12"`). A later
+/// staleness pass compares these against the *current* versions: if any cited
+/// version has drifted, the verification is no longer trustworthy and the rule is
+/// demoted to [`Verification::NeedsRecheck`].
+///
+/// In TOML this is a `[verified]` table:
+///
+/// ```toml
+/// [verified]
+/// by = "zach"
+/// at = "2026-06-20"
+/// against = ["clippy 1.83", "Google Java Style Guide 2024-01"]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct VerifiedProvenance {
+    /// Who confirmed the verification (a human identifier — name / handle).
+    pub by: String,
+    /// When it was verified (an ISO-8601 date/timestamp string; stored verbatim).
+    pub at: String,
+    /// The source/linter versions the rule was verified against. Each entry is a
+    /// free-form `"<name> <version>"` string the staleness pass compares against a
+    /// current-versions map. Empty when no versioned sources were pinned.
+    #[serde(default)]
+    pub against: Vec<String>,
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Raw TOML shape (private; only the fields we need)
 // ────────────────────────────────────────────────────────────────────────────
@@ -258,6 +324,11 @@ struct RuleToml {
     /// empty.
     #[serde(default)]
     sources: Vec<RuleSource>,
+    /// Verified provenance (`[verified]` table). Absent → `None`. Present only on
+    /// rules a human has confirmed; carries the versions verified against so a
+    /// staleness pass can demote on drift.
+    #[serde(default)]
+    verified: Option<VerifiedProvenance>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,6 +401,10 @@ pub struct Rule {
     /// Authoritative sources backing this rule's grounding. Empty for a `draft`
     /// rule that has not yet been mapped to any external authority.
     pub sources: Vec<RuleSource>,
+    /// Verified provenance, present only when a human has confirmed the rule
+    /// (`[verified]` TOML table). Carries who/when + the source/linter versions
+    /// verified against, used by the staleness pass to detect drift.
+    pub verified: Option<VerifiedProvenance>,
 }
 
 impl Rule {
@@ -343,20 +418,23 @@ impl Rule {
         self.verification
     }
 
-    /// Whether this rule is grounded in an authoritative source — i.e. its
-    /// status is `grounded` OR `verified` (verified implies grounded).
-    pub fn is_grounded(&self) -> bool {
-        matches!(
-            self.verification,
-            Verification::Grounded | Verification::Verified
-        )
+    /// Whether this rule is exactly `verified` (a live human confirmation).
+    /// `needs_recheck` returns `false` — a drifted verification is stale.
+    pub fn is_verified(&self) -> bool {
+        self.verification.is_verified()
     }
 
-    /// Whether this rule is shippable — true ONLY for `grounded` or `verified`.
-    /// Used later to keep `draft` (un-grounded, AI-designed) rules out of the
-    /// demo'd / armed ruleset.
+    /// Whether this rule is at-least-grounded — `grounded`, `verified`, or
+    /// `needs_recheck`. Delegates to [`Verification::is_grounded`].
+    pub fn is_grounded(&self) -> bool {
+        self.verification.is_grounded()
+    }
+
+    /// Whether this rule is shippable — true for every at-least-grounded status,
+    /// false for `draft`. Used to keep `draft` (un-grounded, AI-designed) rules
+    /// out of the demo'd / armed ruleset.
     pub fn is_shippable(&self) -> bool {
-        self.is_grounded()
+        self.verification.is_shippable()
     }
 }
 
@@ -611,6 +689,7 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         default_option,
         verification: raw.verification,
         sources: raw.sources,
+        verified: raw.verified,
     })
 }
 
@@ -842,6 +921,7 @@ mod tests {
             default_option: None,
             verification: Verification::Draft,
             sources: Vec::new(),
+            verified: None,
         }
     }
 
@@ -890,6 +970,7 @@ mod tests {
             default_option: None,
             verification: raw.verification,
             sources: raw.sources,
+            verified: raw.verified,
         }
     }
 
@@ -964,7 +1045,11 @@ mod tests {
             Verification::Grounded,
             Verification::Verified,
         ] {
-            assert_eq!(Verification::from_tag(v.as_str()), Some(v), "round-trip {v}");
+            assert_eq!(
+                Verification::from_tag(v.as_str()),
+                Some(v),
+                "round-trip {v}"
+            );
         }
         assert_eq!(Verification::from_tag("nonsense"), None);
         // Display matches the wire string.
@@ -974,6 +1059,106 @@ mod tests {
     #[test]
     fn verification_default_is_draft() {
         assert_eq!(Verification::default(), Verification::Draft);
+    }
+
+    #[test]
+    fn needs_recheck_round_trips_and_is_grounded_not_verified() {
+        // Wire round-trip.
+        assert_eq!(
+            Verification::from_tag("needs_recheck"),
+            Some(Verification::NeedsRecheck)
+        );
+        assert_eq!(Verification::NeedsRecheck.as_str(), "needs_recheck");
+        assert_eq!(Verification::NeedsRecheck.to_string(), "needs_recheck");
+
+        // is_verified() is true ONLY for Verified.
+        assert!(Verification::Verified.is_verified());
+        assert!(!Verification::NeedsRecheck.is_verified());
+        assert!(!Verification::Grounded.is_verified());
+        assert!(!Verification::Draft.is_verified());
+
+        // is_grounded()/is_shippable() are true for Grounded, Verified, NeedsRecheck.
+        for v in [
+            Verification::Grounded,
+            Verification::Verified,
+            Verification::NeedsRecheck,
+        ] {
+            assert!(v.is_grounded(), "{v} should be at-least-grounded");
+            assert!(v.is_shippable(), "{v} should be shippable");
+        }
+        // Draft is neither.
+        assert!(!Verification::Draft.is_grounded());
+        assert!(!Verification::Draft.is_shippable());
+    }
+
+    #[test]
+    fn needs_recheck_deserializes_from_toml() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            verification: Verification,
+        }
+        let w: Wrapper = toml::from_str(r#"verification = "needs_recheck""#)
+            .expect("needs_recheck should deserialize");
+        assert_eq!(w.verification, Verification::NeedsRecheck);
+    }
+
+    #[test]
+    fn verified_provenance_table_round_trips() {
+        let src = r#"
+            id = "RULE-VERIFIED-1"
+            title = "A human-verified rule"
+            enforcement = "mechanical"
+            domain = "rust"
+            verification = "verified"
+
+            [verified]
+            by = "zach"
+            at = "2026-06-20"
+            against = ["clippy 1.83", "Google Java Style Guide 2024-01"]
+        "#;
+        let rule = parse_rule(src);
+        assert_eq!(rule.verification(), Verification::Verified);
+        assert!(rule.is_verified());
+        let prov = rule.verified.as_ref().expect("[verified] table present");
+        assert_eq!(prov.by, "zach");
+        assert_eq!(prov.at, "2026-06-20");
+        assert_eq!(
+            prov.against,
+            vec!["clippy 1.83", "Google Java Style Guide 2024-01"]
+        );
+    }
+
+    #[test]
+    fn verified_provenance_absent_yields_none() {
+        let src = r#"
+            id = "RULE-NO-VERIFIED-1"
+            title = "A rule with no [verified] table"
+            enforcement = "structured"
+            domain = "rust"
+            verification = "grounded"
+        "#;
+        let rule = parse_rule(src);
+        assert!(rule.verified.is_none(), "absent [verified] table → None");
+        assert!(!rule.is_verified());
+        assert!(rule.is_grounded());
+    }
+
+    #[test]
+    fn verified_provenance_against_defaults_to_empty() {
+        let src = r#"
+            id = "RULE-VERIFIED-NOAGAINST-1"
+            title = "Verified but no versions pinned"
+            enforcement = "structured"
+            domain = "rust"
+            verification = "verified"
+
+            [verified]
+            by = "zach"
+            at = "2026-06-20"
+        "#;
+        let rule = parse_rule(src);
+        let prov = rule.verified.as_ref().expect("[verified] present");
+        assert!(prov.against.is_empty(), "against defaults to empty");
     }
 
     #[tokio::test]

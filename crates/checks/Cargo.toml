@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-rules = { path = "../rules" }
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
