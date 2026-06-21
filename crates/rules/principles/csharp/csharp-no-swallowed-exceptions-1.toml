@@ -29,3 +29,10 @@ id = "catch-all-ignore"
 label = "use catch blocks with empty bodies to prevent crashes"
 directive = "Exceptions are caught but not handled, logged, or rethrown; the catch body is empty or only contains a comment."
 why = "Silently masks all errors, leading to undefined state and invisible failures."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca1031"
+title = "CA1031: Do not catch general exception types"
+linter = "CA1031"

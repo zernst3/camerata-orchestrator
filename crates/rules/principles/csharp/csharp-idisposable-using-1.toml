@@ -29,3 +29,15 @@ id = "manual-dispose"
 label = "manage Dispose manually via try-finally"
 directive = "IDisposable objects are created and then released in an explicit try-finally block: `try { ... } finally { resource?.Dispose(); }`."
 why = "Verbose and error-prone; easy to forget Dispose() in one code path, leading to resource leaks. Only used when using is unavailable (legacy C# versions)."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca2000"
+title = "CA2000: Dispose objects before losing scope"
+linter = "CA2000"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca1001"
+title = "CA1001: Types that own disposable fields should be disposable"
+linter = "CA1001"

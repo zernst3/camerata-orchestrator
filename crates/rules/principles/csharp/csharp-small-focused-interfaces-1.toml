@@ -3,9 +3,8 @@ title = "Interfaces are narrow and focused on a single responsibility; fat inter
 tag = "stack"
 domain = "csharp"
 layer = "architecture"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and optional Roslyn analyzers that flag interfaces with >5-7 methods or unrelated responsibilities. Conformance holds when each interface defines a cohesive set of methods and implementations do not use default methods to stub unneeded operations."
 
 [decision]
 question = "How large and how cohesive are interfaces?"
@@ -29,3 +28,13 @@ id = "default-method-stubs"
 label = "use default interface methods to provide no-op implementations"
 directive = "A fat interface defines many methods, but implementations use C# 8.0 default methods to stub out unrelated operations with no-op or throw implementations."
 why = "Masks the ISP violation but does not solve it. Clients still depend on unrelated methods, and the interface contract is still vague."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/interface"
+title = "Interface Design — Framework Design Guidelines | Microsoft Learn"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/archive/msdn-magazine/2014/may/csharp-best-practices-dangers-of-violating-solid-principles-in-csharp"
+title = "C# Best Practices: Dangers of Violating SOLID Principles in C# — MSDN Magazine"

@@ -29,3 +29,9 @@ id = "partial-nrt"
 label = "enable NRT in some files or use #nullable directives but not globally"
 directive = "#nullable enable/disable directives are used on a per-file basis, or NRT is enabled in only some projects in a multi-project solution."
 why = "Inconsistent null safety; some code is checked, some is not. Mixing both styles increases cognitive load and is likely to introduce null-reference bugs at boundaries where nullable and non-nullable code interact."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/null-safety/nullable-reference-types"
+title = "Nullable reference types — C# | Microsoft Learn"

@@ -3,9 +3,8 @@ title = "Lazy loading is disabled; all navigation property access is intentional
 tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
-qualifies = "Enforced by verifying UseLazyLoadingProxies() is absent from DbContext configuration, and that no navigation properties are declared virtual (the signal for proxy-based lazy loading). A Roslyn or Semgrep rule that flags virtual navigation properties on entity classes catches inadvertent re-enablement."
 
 [decision]
 question = "What position does the project take on: Lazy loading is disabled; all navigation property access is intentional and explicit?"
@@ -29,3 +28,9 @@ id = "lazy-loading-enabled-interfaces"
 label = "Lazy loading enabled via ILazyLoader injection (non-proxy)"
 directive = "Entities implement lazy loading via constructor injection of ILazyLoader. Navigation properties call _lazyLoader.Load(this, ref _field) before returning their value."
 why = "Less magic than proxy-based lazy loading (no virtual requirement, no proxy class) but retains the same silent round-trip behavior and disposed-context risk."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/ef/core/querying/related-data/lazy"
+title = "Lazy Loading of Related Data — EF Core | Microsoft Learn"
