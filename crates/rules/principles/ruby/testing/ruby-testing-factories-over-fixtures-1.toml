@@ -1,0 +1,43 @@
+id = "RUBY-TESTING-FACTORIES-OVER-FIXTURES-1"
+title = "Use FactoryBot factories for test data; avoid Rails fixtures and bare ActiveRecord.create calls in specs"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[decision]
+question = "How should test data (ActiveRecord objects) be created in specs?"
+default = "factorybot-factories"
+why = "Rails fixtures are YAML files that are loaded as a bulk INSERT before the suite runs. Their problems: (1) they couple test expectations to specific fixture ids and attribute values that are invisible in the test body, making the test unreadable without jumping to a separate file; (2) they cannot express dynamic values like unique emails or computed dates; (3) adding a new required column means touching every fixture file. Bare ActiveRecord.create calls scattered across examples repeat attribute boilerplate and must be individually updated when the model's validations change. FactoryBot (previously FactoryGirl) solves both problems: a factory defines the minimal valid state for a model in one place, dynamic values are produced via sequences and lambdas, and test-specific attribute overrides are passed as a hash at the call site (create(:user, email: 'admin@example.com')). build_stubbed produces an ActiveRecord-like object that never touches the database, making unit tests that do not need persistence significantly faster. FactoryBot.lint run in CI catches factory definition errors before any spec exercises them."
+
+[[option]]
+id = "factorybot-factories"
+label = "Define one factory per model in spec/factories/; use create/build/build_stubbed at call sites"
+directive = "Define factories in spec/factories/<model_name>.rb (one file per model). Each factory specifies the minimal set of attributes that satisfies validations; traits extend the base factory for variant states (e.g. trait :admin do role { 'admin' } end). At call sites: use create(:model) for persisted records, build(:model) for in-memory instances, and build_stubbed(:model) for unit tests that do not need DB I/O. Override attributes inline: create(:user, name: 'Alice'). Avoid fixtures (test/fixtures/) and bare Model.create calls in spec bodies. Run FactoryBot.lint in a dedicated spec (or as a CI step) to catch invalid factory definitions early."
+why = "The adopted default. Expressive, co-located, and overrideable test data with no hidden fixture coupling."
+
+[[option]]
+id = "rails-fixtures"
+label = "Use Rails YAML fixtures for all test data"
+directive = "All test data lives in test/fixtures/*.yml and is loaded via fixtures :all in every test class."
+why = "Ships with Rails and requires no gems, but creates invisible coupling between tests and fixed attribute values in a separate file."
+
+[[option]]
+id = "bare-active-record-create"
+label = "Create test objects with Model.create or Model.new inline in each test"
+directive = "Each test creates its own objects with explicit ActiveRecord calls and attribute hashes."
+why = "Fully explicit and self-contained but duplicates boilerplate across all tests and diverges silently when model validations change."
+
+[[sources]]
+url = "https://github.com/thoughtbot/factory_bot"
+title = "FactoryBot — GitHub repository (fixtures replacement, build strategies)"
+
+[[sources]]
+url = "https://github.com/thoughtbot/factory_bot/blob/main/GETTING_STARTED.md"
+title = "FactoryBot — GETTING_STARTED.md (factory definition, build/create/build_stubbed)"
+
+[[sources]]
+url = "https://www.betterspecs.org/"
+title = "Better Specs — Use factories instead of fixtures"

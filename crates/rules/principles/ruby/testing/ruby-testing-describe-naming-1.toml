@@ -1,0 +1,49 @@
+id = "RUBY-TESTING-DESCRIBE-NAMING-1"
+title = "describe uses the class constant; nested describe uses #method or .method; context starts with when/with/without"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by rubocop-rspec cops RSpec/DescribeClass (top-level describe must be a constant), RSpec/DescribeMethod (#/. prefix on method name), RSpec/ContextWording (context prefix list), and RSpec/ExampleWording (no 'should'/'will' in it blocks). Conformance holds when all four cops report no offenses."
+verification = "grounded"
+
+[decision]
+question = "How should describe, context, and it blocks be named in RSpec?"
+default = "class-and-method-naming"
+why = "RSpec generates human-readable failure messages by concatenating the describe, context, and it strings: 'User#authenticate when the password is correct returns the token'. This sentence only makes grammatical sense if the describe block names the class (User), the nested describe names the method with the Ruby-doc prefix (#authenticate for instance methods, .find for class methods), and the context block starts with a conditional phrase (when/with/without). Using # and . mirrors Ruby's own documentation conventions (ri User#authenticate) and makes the spec tree a literate index of the API surface. Contexts starting with 'logged in' instead of 'when logged in' produce ambiguous output. it blocks that begin with 'should return' add a word ('should') that belongs to the expectation style already expressed by expect().to, not to the description string. The rubocop-rspec cops RSpec/DescribeClass, RSpec/DescribeMethod, RSpec/ContextWording, and RSpec/ExampleWording mechanically enforce all four conventions."
+
+[[option]]
+id = "class-and-method-naming"
+label = "describe ClassName; nested describe '#method'/.method; context 'when ...'; it 'returns ...'"
+directive = "Top-level describe takes the class constant (never a string like 'User'): describe User do. Nested describe blocks that zoom in on a method use '#method_name' for instance methods or '.method_name' for class methods: describe '#authenticate' do. Context blocks explain the precondition and start with 'when', 'with', or 'without': context 'when the password is correct' do. The it block description states the outcome in present tense without leading 'should' or 'will': it 'returns a signed JWT' do. Use is_expected.to rather than expect(subject).to in one-liner examples. Keep it descriptions under 40 characters; if longer, extract a context."
+why = "The adopted default. Produces readable failure messages, mirrors Ruby docs conventions, and is enforced by rubocop-rspec."
+
+[[option]]
+id = "freeform-strings"
+label = "Use arbitrary strings for all describe/context/it blocks"
+directive = "Describe blocks take any string; no convention on # vs . prefix or context wording."
+why = "Flexible but loses readable failure messages and breaks rubocop-rspec naming cops."
+
+[[sources]]
+url = "https://www.betterspecs.org/"
+title = "Better Specs — Testing Guidelines (describe naming, context wording, it descriptions)"
+
+[[sources]]
+url = "https://rspec.rubystyle.guide/"
+title = "RSpec Style Guide — Method naming with # and . prefixes"
+
+[[sources]]
+url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/DescribeClass"
+title = "rubocop-rspec — RSpec/DescribeClass cop"
+linter = "rubocop-rspec: RSpec/DescribeClass"
+
+[[sources]]
+url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/ContextWording"
+title = "rubocop-rspec — RSpec/ContextWording cop"
+linter = "rubocop-rspec: RSpec/ContextWording"
+
+[[sources]]
+url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
+title = "RuboCop RSpec — full cop reference"
+linter = "rubocop-rspec: RSpec/ExampleWording"

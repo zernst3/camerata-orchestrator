@@ -1,0 +1,39 @@
+id = "RUBY-TESTING-UNIT-FILE-LOCATION-1"
+title = "Unit test files mirror the source tree under spec/ (RSpec) or test/ (Minitest) with matching names"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by RuboCop RSpec/SpecFilePathFormat (rubocop-rspec) for RSpec projects. Conformance holds when every spec file lives in a spec/<subdirectory>/ path that mirrors the source file's app/ or lib/ path and is named <subject>_spec.rb; for Minitest, every test file lives in test/<subdirectory>/ and is named <subject>_test.rb. CI rejects files that deviate."
+verification = "grounded"
+
+[decision]
+question = "Where do unit test files live and how are they named relative to the source files they exercise?"
+default = "mirror-source-tree"
+why = "When spec/models/user_spec.rb mirrors app/models/user.rb (and test/models/user_test.rb mirrors app/models/user.rb for Minitest), any developer or tool can locate the test for a given source file in O(1) by replacing the path prefix and suffix. This eliminates the cognitive overhead of hunting for which spec covers which class and is the convention enforced by rspec-rails scaffolding, the Rails test generator, and rubocop-rspec's RSpec/SpecFilePathFormat cop. Deviating from the mirror convention creates a corpus that is impossible to navigate without grep, forces ad-hoc naming decisions on every new file, and breaks tooling such as bundle exec rspec <path> inferred from the edited source file."
+
+[[option]]
+id = "mirror-source-tree"
+label = "Mirror source tree under spec/ or test/; name files <subject>_spec.rb or <subject>_test.rb"
+directive = "Each spec file lives at spec/<path-relative-to-app-or-lib>/<subject>_spec.rb, exactly mirroring the source. For RSpec: app/models/user.rb → spec/models/user_spec.rb; app/services/payment_processor.rb → spec/services/payment_processor_spec.rb; lib/importers/csv_importer.rb → spec/lib/importers/csv_importer_spec.rb. For Minitest: app/models/user.rb → test/models/user_test.rb. New generators must place files in the mirror path. RuboCop RSpec/SpecFilePathFormat enforces this automatically; add it to .rubocop.yml."
+why = "The adopted default. O(1) file discovery, consistent scaffolding, and enforced by rubocop-rspec."
+
+[[option]]
+id = "flat-spec-directory"
+label = "Place all specs in a flat spec/ directory with unique names"
+directive = "All spec files live directly in spec/ without subdirectories. Names include the module path to disambiguate (e.g. models_user_spec.rb)."
+why = "Eliminates nested directories but collapses the source-tree signal, making large codebases unnavigable and breaking inferred test paths."
+
+[[sources]]
+url = "https://rspec.info/features/6-0/rspec-rails/directory-structure/"
+title = "RSpec Rails — Directory Structure"
+
+[[sources]]
+url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/SpecFilePathFormat"
+title = "rubocop-rspec — RSpec/SpecFilePathFormat cop"
+linter = "rubocop-rspec: RSpec/SpecFilePathFormat"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/testing.html"
+title = "Rails Guides — A Guide to Testing Rails Applications"

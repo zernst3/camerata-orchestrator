@@ -1,0 +1,42 @@
+id = "RUBY-TESTING-AAA-STRUCTURE-1"
+title = "Each example follows Arrange-Act-Assert: let/subject for setup, a single action, then expect(); hooks appear before examples"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[decision]
+question = "How should the internal structure of an RSpec example and its example group be organized?"
+default = "aaa-with-let-before"
+why = "Arrange-Act-Assert (AAA) is a universal test-structure principle: set up state (Arrange), invoke the unit under test (Act), then assert the outcome (Assert). In RSpec, the three phases map cleanly: let/let!/subject blocks declare Arranged data; the call inside the it block or a before hook is the Act; and expect().to is the Assert. Keeping these phases visually separated — let blocks at the top, subject next, before hooks below, then examples — makes it obvious at a glance what state is needed, what is exercised, and what is verified. The rubocop-rspec cops RSpec/LetBeforeExamples and RSpec/HooksBeforeExamples enforce hook/let placement; RSpec/LeadingSubject enforces that subject is the first definition. Interleaving setup inside the it block's body is allowed but tends to repeat across examples and obscures what the example is actually testing. Each example should make a single assertion so that a failure identifies the exact broken invariant without ambiguity."
+
+[[option]]
+id = "aaa-with-let-before"
+label = "let/subject → before → it with one expect(); hooks placed before examples"
+directive = "Within each describe or context block, declarations appear in this order: (1) subject (the unit under test, using described_class when applicable); (2) let and let! blocks for lazy and eager Arrange data; (3) before(:each) / after(:each) hooks for imperative setup; (4) shared_examples_for or it_behaves_like; (5) it examples. Inside an it block, aim for one expect() or use aggregate_failures { } when multiple related assertions belong together. The it block describes the outcome, not the method call: it 'returns the signed token' do / expect(result).to be_a(String) / end. Use before(:all) only for truly class-level setup that cannot create state leakage (prefer before(:each) by default). rubocop-rspec cops RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, and RSpec/LeadingSubject enforce placement order."
+why = "The adopted default. Produces visually separable AAA phases, minimal duplication, and is enforceable by rubocop-rspec."
+
+[[option]]
+id = "inline-setup"
+label = "Inline all setup inside each it block"
+directive = "All Arrange, Act, and Assert code lives inside the it block body. No let, no before hooks."
+why = "Explicit and self-contained per example, but creates significant duplication across examples that share setup and buries the Act/Assert signal."
+
+[[sources]]
+url = "https://www.fastruby.io/blog/testing/the-aaa-pattern-writing-robust-tests-for-any-project-with-confidence.html"
+title = "FastRuby.io — The AAA Pattern: Writing Robust Tests"
+
+[[sources]]
+url = "https://www.betterspecs.org/"
+title = "Better Specs — let, before, subject structure"
+
+[[sources]]
+url = "https://rspec.rubystyle.guide/"
+title = "RSpec Style Guide — Sequence: subject → let → before"
+
+[[sources]]
+url = "https://docs.rubocop.org/rubocop-rspec/latest/cops_rspec.html"
+title = "RuboCop RSpec — RSpec/LetBeforeExamples, RSpec/HooksBeforeExamples, RSpec/LeadingSubject cops"
+linter = "rubocop-rspec: RSpec/LetBeforeExamples"

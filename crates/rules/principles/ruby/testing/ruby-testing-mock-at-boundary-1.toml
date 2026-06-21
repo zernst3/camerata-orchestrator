@@ -1,0 +1,43 @@
+id = "RUBY-TESTING-MOCK-AT-BOUNDARY-1"
+title = "Mock only at architectural boundaries (external services, I/O); use instance_double/class_double to keep doubles verified"
+tag = "stack"
+domain = "ruby:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by rubocop-rspec cop RSpec/VerifiedDoubles, which flags plain double('ClassName') in favor of instance_double/class_double/object_double. Conformance holds when RSpec/VerifiedDoubles reports no offenses and mocks appear only at the outermost layer of the unit under test."
+verification = "grounded"
+
+[decision]
+question = "When and how should test doubles (stubs, mocks, spies) be introduced in RSpec examples?"
+default = "mock-at-boundary-verified-doubles"
+why = "Test doubles exist to decouple a unit under test from its collaborators during an example. The question of WHEN to mock is as important as HOW. Mocking internal collaborators (e.g. mocking a private model method while testing that same model) couples the test to implementation detail: the test breaks when the internal structure changes even if the public behavior is identical. The correct boundary for mocking is the seam between the application and an external system (HTTP client, mailer, queue, clock) or between major architectural layers (service layer mocking a repository, controller mocking a service). Within a layer, prefer using real objects. HOW to mock: plain double('ClassName') creates an anonymous object that passes no method verification. If PaymentGateway is later renamed or its #charge method signature changes, the spec still passes. instance_double(PaymentGateway) (a verifying double) checks that the stubbed methods actually exist on the real class. RuboCop's RSpec/VerifiedDoubles cop flags plain doubles and is the mechanical enforcement. allow(obj).to receive(:method) is preferred over expect(obj).to receive(:method) except when the interaction itself is the thing being tested."
+
+[[option]]
+id = "mock-at-boundary-verified-doubles"
+label = "Mock only external/I/O boundaries; use instance_double/class_double for all doubles"
+directive = "Introduce doubles only at system boundaries: HTTP clients (stub with WebMock or VCR), mailers (use ActionMailer::Base.deliveries or the deliveries matcher), background jobs (assert enqueueing rather than execution), and third-party SDKs. Within the application, use real objects and FactoryBot-created records. When a double is necessary, use a verifying form: instance_double(ClassName) for instances, class_double(ClassName) for class-method stubs. Partial doubles on real objects use allow(real_object).to receive(:method). Enable verify_partial_doubles: true in your RSpec configuration. The rubocop-rspec cop RSpec/VerifiedDoubles enforces the verified-doubles requirement. Do not mock the model layer when testing models themselves; do not mock in unit tests what can be tested with the real object at acceptable speed."
+why = "The adopted default. Verified doubles prevent phantom specs that pass despite API drift; boundary-only mocking preserves confidence in internal behavior."
+
+[[option]]
+id = "mock-freely-with-plain-doubles"
+label = "Mock any collaborator with plain double() to maximize isolation"
+directive = "Use plain double('Name', method: value) freely throughout all spec layers. Every collaborator beyond the immediate unit under test is mocked."
+why = "Maximum speed and isolation, but creates phantom specs that diverge from the real object's API silently."
+
+[[sources]]
+url = "https://rspec.info/features/3-12/rspec-mocks/verifying-doubles/"
+title = "RSpec — Verifying Doubles documentation"
+
+[[sources]]
+url = "https://www.rubydoc.info/gems/rubocop-rspec/RuboCop/Cop/RSpec/VerifiedDoubles"
+title = "rubocop-rspec — RSpec/VerifiedDoubles cop"
+linter = "rubocop-rspec: RSpec/VerifiedDoubles"
+
+[[sources]]
+url = "https://www.betterspecs.org/"
+title = "Better Specs — mock judiciously; test real behavior when possible"
+
+[[sources]]
+url = "https://github.com/rspec/rspec-mocks"
+title = "rspec-mocks — instance_double, allow/expect usage"
