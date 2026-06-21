@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: Controllers contain no business logic; they translate HTTP to service calls and service results to HTTP?"
 default = "thin-controllers-service-layer"
@@ -23,7 +24,6 @@ label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
 why = "Inlining logic in controller actions avoids the extra file and indirection of a service layer, which can seem like unnecessary ceremony for simple endpoints. The cost is that the logic is only reachable through an HTTP request, cannot be unit-tested without framework infrastructure, cannot be reused across a background job or a second endpoint without copying, and causes the controller to change for two unrelated reasons: HTTP contract changes and domain rule changes."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/architecture/modern-web-apps-azure/common-web-application-architectures"

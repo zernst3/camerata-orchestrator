@@ -7,6 +7,7 @@ enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Roslyn analyzer rules (CA1001, CA1816, IDE0090) that flag IDisposable objects created without using and missing explicit Dispose calls. Conformance holds when the rule runs in CI and resources not wrapped in using fail the build."
 
+verification = "grounded"
 [decision]
 question = "How are IDisposable resources managed?"
 default = "using-declarations"
@@ -30,7 +31,6 @@ label = "manage Dispose manually via try-finally"
 directive = "IDisposable objects are created and then released in an explicit try-finally block: `try { ... } finally { resource?.Dispose(); }`."
 why = "Verbose and error-prone; easy to forget Dispose() in one code path, leading to resource leaks. Only used when using is unavailable (legacy C# versions)."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca2000"

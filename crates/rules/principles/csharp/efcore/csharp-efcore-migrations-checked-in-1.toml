@@ -6,6 +6,7 @@ layer = "library"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: EF Core migrations are checked into source control and applied as part of the deployment process?"
 default = "migrations-in-source-control"
@@ -29,7 +30,6 @@ label = "Database.EnsureCreated() instead of migrations"
 directive = "Database.EnsureCreated() is called at startup to create the schema from the current model if the database does not exist. No migration files are generated or committed."
 why = "Creates the database schema from the model snapshot without any migration history; subsequent schema changes require dropping and recreating the database or manual SQL, since no migration can be applied to a database created this way. Appropriate only for throw-away test databases."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/managing-schemas/migrations/applying"

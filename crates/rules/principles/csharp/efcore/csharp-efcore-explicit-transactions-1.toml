@@ -6,6 +6,7 @@ layer = "library"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: Multi-write operations are wrapped in an explicit transaction; partial writes are not observable?"
 default = "explicit-transaction-for-multi-write"
@@ -29,7 +30,6 @@ label = "Multiple SaveChanges calls without an explicit transaction"
 directive = "Service methods call SaveChangesAsync multiple times within a logical operation without wrapping them in an explicit transaction. Each SaveChanges has its own implicit per-call transaction."
 why = "Leaves the database in partial state if any call after the first fails; the committed rows from the first call remain, requiring compensating writes or manual cleanup. Forbidden when the second call's success is required for the first call's result to be valid."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/saving/transactions"

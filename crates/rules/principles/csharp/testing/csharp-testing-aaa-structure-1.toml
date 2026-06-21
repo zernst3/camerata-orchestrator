@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "Test methods are organized into three named sections: // Arrange (set up objects and state), // Act (invoke the behavior under test — exactly one call), and // Assert (verify the outcome — one logical assertion or one Assert per behavior). Multiple Act blocks in a single test are forbidden. Tests that naturally share Act inputs should use [Theory] + [InlineData] rather than loops or multiple Assert calls."
 
+verification = "grounded"
 [decision]
 question = "What internal structure must every test method follow?"
 default = "aaa-one-act-one-assert"
@@ -30,7 +31,6 @@ label = "control flow (loops, if) inside test bodies to cover multiple cases"
 directive = "Test methods use foreach or if/else to cover multiple inputs in a single test."
 why = "Logic in tests introduces the risk of bugs in the test itself; a bug in the loop could silently pass an invalid test case. Prefer [Theory] + [InlineData] for parameterized cases."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"

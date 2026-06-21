@@ -6,6 +6,7 @@ layer = "library"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: Lazy loading is disabled; all navigation property access is intentional and explicit?"
 default = "lazy-loading-disabled"
@@ -29,7 +30,6 @@ label = "Lazy loading enabled via ILazyLoader injection (non-proxy)"
 directive = "Entities implement lazy loading via constructor injection of ILazyLoader. Navigation properties call _lazyLoader.Load(this, ref _field) before returning their value."
 why = "Less magic than proxy-based lazy loading (no virtual requirement, no proxy class) but retains the same silent round-trip behavior and disposed-context risk."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/related-data/lazy"

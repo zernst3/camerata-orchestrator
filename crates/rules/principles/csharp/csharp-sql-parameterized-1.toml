@@ -7,6 +7,7 @@ enforcement = "mechanical"
 default = true
 qualifies = "Enforced by static analysis (Roslyn analyzers, Semgrep) that detect string concatenation or string interpolation in SQL queries flowing to execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 
+verification = "grounded"
 [decision]
 question = "How are dynamic values incorporated into SQL queries?"
 default = "parameterized-queries"
@@ -24,7 +25,6 @@ label = "build query strings by concatenating with manual escaping"
 directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
 why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca2100"

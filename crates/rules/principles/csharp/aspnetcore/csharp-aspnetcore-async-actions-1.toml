@@ -7,6 +7,7 @@ enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Roslyn analyzers (AsyncFixer, Microsoft.VisualStudio.Threading.Analyzers) that flag synchronous action methods whose bodies call async code via .Result or .Wait(). Conformance holds when all actions that perform I/O are declared async Task<IActionResult> (or async Task<T> for Minimal API handlers) and no .Result or .Wait() appears on a Task inside the request pipeline."
 
+verification = "grounded"
 [decision]
 question = "How are I/O-bound operations performed inside ASP.NET Core action methods and endpoint handlers?"
 default = "async-task-actions"
@@ -30,7 +31,6 @@ label = "Synchronous actions that call only synchronous service methods"
 directive = "Actions are declared synchronously and service methods they call are also synchronous; async is introduced only at the data-access layer and wrapped synchronously before crossing the service boundary."
 why = "Avoids async complexity at the cost of blocking threads for every I/O call; scales poorly beyond low concurrency. Acceptable for truly CPU-only endpoints with no I/O dependency."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/best-practices?view=aspnetcore-10.0"

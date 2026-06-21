@@ -6,6 +6,7 @@ layer = "library"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated?"
 default = "asnotracking-for-read-only"
@@ -29,7 +30,6 @@ label = "All queries tracked; AsNoTracking never used"
 directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
 why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/tracking"

@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "Test method names consist of three underscore-separated parts: (1) the name of the method or behavior under test, (2) the scenario or input condition, and (3) the expected result. Test classes are named after the production class they test with a 'Tests' suffix (e.g. OrderServiceTests for OrderService). This naming makes a failing test self-documenting without opening the test body."
 
+verification = "grounded"
 [decision]
 question = "How are test methods and test classes named?"
 default = "method-scenario-result"
@@ -30,7 +31,6 @@ label = "freeform test names without a mandated pattern"
 directive = "Test methods are named with no enforced pattern; names like TestAdd or Verify_Stuff are allowed."
 why = "Freeform names degrade test-suite readability and make failure diagnosis harder; a failed test like 'TestAdd' reveals nothing about the failure mode."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"

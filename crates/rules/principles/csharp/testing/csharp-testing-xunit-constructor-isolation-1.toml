@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "xUnit creates a new instance of the test class for every [Fact] and [Theory] case. Per-test setup belongs in the constructor; per-test teardown belongs in Dispose() (implement IDisposable) or DisposeAsync() (implement IAsyncLifetime). Shared expensive resources (database connections, HTTP servers) are managed via IClassFixture<T> (one instance per test class) or ICollectionFixture<T> (one instance per named collection). [SetUp] and [TearDown] attributes do not exist in xUnit v2/v3; their equivalent is the constructor and Dispose."
 
+verification = "grounded"
 [decision]
 question = "How is per-test setup and teardown managed in xUnit, and when is shared context used?"
 default = "constructor-dispose-then-fixture"
@@ -30,7 +31,6 @@ label = "use [TestInitialize]/[SetUp] + [TestCleanup]/[TearDown] attributes (MST
 directive = "Annotate setup methods with [TestInitialize] (MSTest) or [SetUp] (NUnit) and teardown with [TestCleanup]/[TearDown]."
 why = "These attributes don't exist in xUnit; their NUnit/MSTest equivalents produce hidden shared state that breaks test isolation. xUnit's constructor+Dispose pattern is explicit and safer."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://xunit.net/docs/shared-context"

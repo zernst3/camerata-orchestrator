@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "Unit tests and integration tests are kept in separate csproj files that mirror the production project name (e.g. MyApp.UnitTests, MyApp.IntegrationTests). The unit-test project must never reference infrastructure packages (databases, HTTP clients, file-system I/O); the integration-test project may. Separate projects allow CI to run unit tests on every commit while deferring slower integration runs."
 
+verification = "grounded"
 [decision]
 question = "Where do unit tests and integration tests live relative to the production code?"
 default = "separate-test-projects"
@@ -24,7 +25,6 @@ label = "one combined Tests project with [Trait] or category filters to distingu
 directive = "A single MyApp.Tests project houses both unit and integration tests. Tests are tagged with [Trait(\"Category\", \"Unit\")] or [Trait(\"Category\", \"Integration\")] and CI filters with --filter."
 why = "Requires discipline to keep infrastructure packages from contaminating unit-test compilation; filter expressions are easy to misconfigure, allowing integration tests to run in unit-only CI jobs accidentally."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"

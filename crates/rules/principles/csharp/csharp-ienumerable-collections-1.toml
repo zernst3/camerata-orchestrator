@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What types do public methods return when returning collections?"
 default = "return-abstract-collections"
@@ -29,7 +30,6 @@ label = "return a new List<T> copy of the internal collection"
 directive = "Public methods return a new List<T> or array copy of the internal collection, protecting the original from modification."
 why = "Safe but inefficient; every call allocates a new collection. Acceptable for small collections or when safety outweighs performance; use IEnumerable<T> for better efficiency and the same safety guarantee."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/guidelines-for-collections"

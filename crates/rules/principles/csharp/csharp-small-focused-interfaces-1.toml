@@ -6,6 +6,7 @@ layer = "architecture"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "How large and how cohesive are interfaces?"
 default = "small-focused-interfaces"
@@ -29,7 +30,6 @@ label = "use default interface methods to provide no-op implementations"
 directive = "A fat interface defines many methods, but implementations use C# 8.0 default methods to stub out unrelated operations with no-op or throw implementations."
 why = "Masks the ISP violation but does not solve it. Clients still depend on unrelated methods, and the interface contract is still vague."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/standard/design-guidelines/interface"

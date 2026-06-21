@@ -7,6 +7,7 @@ enforcement = "mechanical"
 default = true
 qualifies = "Enforced by the C# compiler when <Nullable>enable</Nullable> is set in the project file (.csproj). Conformance holds when nullable reference types are enabled globally (not just in files via #nullable) and the build treats warnings as errors."
 
+verification = "grounded"
 [decision]
 question = "How are null references handled?"
 default = "nullable-ref-types-enabled"
@@ -30,7 +31,6 @@ label = "enable NRT in some files or use #nullable directives but not globally"
 directive = "#nullable enable/disable directives are used on a per-file basis, or NRT is enabled in only some projects in a multi-project solution."
 why = "Inconsistent null safety; some code is checked, some is not. Mixing both styles increases cognitive load and is likely to introduce null-reference bugs at boundaries where nullable and non-nullable code interact."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/null-safety/nullable-reference-types"

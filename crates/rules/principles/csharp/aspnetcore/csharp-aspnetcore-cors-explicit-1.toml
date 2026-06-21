@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: CORS policy is declared explicitly with named origins; wildcard origin is forbidden on non-public APIs?"
 default = "explicit-named-origins"
@@ -29,7 +30,6 @@ label = "No CORS middleware configured; cross-origin requests blocked by default
 directive = "No UseCors or AddCors is registered. All cross-origin requests are blocked by the browser's same-origin policy. Server-to-server requests (no browser, no CORS preflight) are unaffected."
 why = "Correct for an API that is consumed only server-to-server and never directly from a browser; wrong for any API that a browser-based frontend calls."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/security/cors?view=aspnetcore-10.0"

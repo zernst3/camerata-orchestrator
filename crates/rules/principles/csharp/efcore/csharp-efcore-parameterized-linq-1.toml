@@ -6,6 +6,7 @@ layer = "library"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "How are user-controlled values passed into EF Core queries, including raw SQL escapes?"
 default = "linq-parameters-and-interpolated-sql"
@@ -29,7 +30,6 @@ label = "String concatenation or interpolation of user values into raw SQL"
 directive = "Raw SQL queries are assembled via string interpolation or concatenation of user-provided values, passed to FromSqlRaw or ExecuteSqlRaw as a pre-built string."
 why = "Produces SQL injection vulnerabilities whenever a user-controlled value reaches the concatenation. Forbidden."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/sql-queries"

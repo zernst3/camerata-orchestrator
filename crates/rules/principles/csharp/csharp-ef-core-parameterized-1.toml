@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "How are dynamic values passed to Entity Framework queries?"
 default = "parameterized-linq"
@@ -29,7 +30,6 @@ label = "build raw SQL by string concatenation with manual escaping"
 directive = "Raw SQL is constructed by concatenating or interpolating user input directly into the query string, with optional manual escaping or quoting logic."
 why = "Canonical SQL-injection vulnerability; every site is a latent injection waiting for unsanitized input."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/ef/core/querying/sql-queries"

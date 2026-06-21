@@ -7,6 +7,7 @@ enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Roslyn analyzers (CA1031, CA1068) that flag empty catch bodies and catch-all blocks that do not log or rethrow. Conformance holds when the rule runs in CI and swallowed exceptions fail the build."
 
+verification = "grounded"
 [decision]
 question = "What must every catch block do?"
 default = "catch-specific-log-or-rethrow"
@@ -30,7 +31,6 @@ label = "use catch blocks with empty bodies to prevent crashes"
 directive = "Exceptions are caught but not handled, logged, or rethrown; the catch body is empty or only contains a comment."
 why = "Silently masks all errors, leading to undefined state and invisible failures."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca1031"

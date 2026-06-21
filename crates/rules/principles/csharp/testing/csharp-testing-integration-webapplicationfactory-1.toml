@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "Integration tests that exercise the full HTTP request/response pipeline use WebApplicationFactory<TProgram> from Microsoft.AspNetCore.Mvc.Testing to start the application in-process. Production infrastructure (database, external services) is replaced inside a subclass that overrides ConfigureWebHost. The test project references Microsoft.AspNetCore.Mvc.Testing and specifies Sdk=\"Microsoft.NET.Sdk.Web\". Tests implement IClassFixture<CustomWebApplicationFactory<Program>> to share the factory across tests in one class."
 
+verification = "grounded"
 [decision]
 question = "How is the ASP.NET Core application bootstrapped for integration tests?"
 default = "webapplicationfactory-in-process"
@@ -30,7 +31,6 @@ label = "rely solely on unit tests; skip integration tests"
 directive = "Only unit tests are written; the HTTP pipeline and DI registrations are never integration-tested."
 why = "Skips an entire class of bugs — middleware ordering, routing, DI wiring — that only manifest in the real pipeline. Microsoft's documentation explicitly states that integration tests should complement unit tests, not be skipped."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/test/integration-tests"

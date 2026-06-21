@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: Middleware is registered in the canonical ASP.NET Core order; auth always follows routing and precedes endpoint execution?"
 default = "canonical-middleware-order"
@@ -23,7 +24,6 @@ label = "Middleware is ordered by developer discretion at the time of addition"
 directive = "Middleware is added to the pipeline in the order that seems reasonable at the time, without enforcing a canonical sequence. Developers rely on documentation or runtime errors to discover incorrect ordering."
 why = "Ad-hoc ordering gives developers flexibility to place middleware where it seems contextually appropriate and avoids the overhead of learning and enforcing a canonical sequence. The cost is that correctness becomes accidental: when the sequence happens to be right nothing fails, but a single out-of-order addition produces silent auth bypass or broken CORS preflight that is invisible at startup and surfaces only under specific request patterns in production."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/?view=aspnetcore-10.0"

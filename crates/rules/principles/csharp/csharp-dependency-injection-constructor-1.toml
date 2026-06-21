@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "prose"
 default = true
 
+verification = "grounded"
 [decision]
 question = "How are dependencies injected into classes?"
 default = "constructor-injection"
@@ -29,7 +30,6 @@ label = "use a service locator or manual resolution from IServiceProvider"
 directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
 why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/guidelines"

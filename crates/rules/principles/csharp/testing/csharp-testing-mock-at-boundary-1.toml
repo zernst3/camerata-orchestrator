@@ -7,6 +7,7 @@ enforcement = "prose"
 default = true
 qualifies = "Moq (or NSubstitute) is used exclusively for interfaces and abstractions that represent external dependencies: repositories, HTTP clients, email providers, clocks, message queues. Production classes that contain pure logic are never mocked — they are tested directly. When production code depends on a static reference (DateTime.Now, File.Exists) that makes tests non-deterministic, a seam interface (e.g. IDateTimeProvider) is introduced and injected via the constructor, then stubbed in tests."
 
+verification = "grounded"
 [decision]
 question = "When should mocks and stubs be used, and what should they target?"
 default = "mock-at-infrastructure-boundary"
@@ -30,7 +31,6 @@ label = "spin up real in-process infrastructure (SQLite, in-memory buses) even f
 directive = "Unit tests instantiate real database connections (in-memory SQLite), real HTTP servers (TestServer), or real queue implementations."
 why = "These are integration tests, not unit tests; they are slower, order-dependent, and require environment setup. Reserve real infrastructure for the IntegrationTests project."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"

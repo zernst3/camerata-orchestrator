@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 default = true
 
+verification = "grounded"
 [decision]
 question = "What position does the project take on: [Authorize] is applied at the controller or route-group level; protected endpoints never rely on the absence of [AllowAnonymous] for security?"
 default = "authorize-at-controller-or-group-level"
@@ -29,7 +30,6 @@ label = "Global authorization filter applied to all routes via AddControllers op
 directive = "A global authorization filter is registered via builder.Services.AddControllers(options => options.Filters.Add(new AuthorizeFilter())), making all routes require authentication by default. [AllowAnonymous] is applied to intentionally public endpoints."
 why = "Achieves the same opt-out guarantee as class-level [Authorize] but via infrastructure rather than attribute convention; requires documenting the global filter clearly so developers understand why unattributed actions are not public."
 
-verification = "grounded"
 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/aspnet/core/security/authorization/simple?view=aspnetcore-10.0"
