@@ -2622,9 +2622,25 @@ async fn project_suppressions(
     Ok(Json(crate::onboard::suppression_registry(&sources).await))
 }
 
+/// One CI-tier rule sent by the UI for story generation. Carries the rule id and title
+/// for display in the issue body, plus the linter hint (first source with one) so the
+/// mechanical story can name the exact off-the-shelf tool without looking it up.
+#[derive(serde::Deserialize)]
+struct CiStoryRule {
+    id: String,
+    title: String,
+    #[serde(default)]
+    linter: Option<String>,
+}
+
 #[derive(serde::Deserialize)]
 struct CiRulesReq {
     repo: String,
+    /// "mechanical" or "architectural" — which tier this story covers.
+    tier: String,
+    /// The rules of that tier to list in the issue body.
+    #[serde(default)]
+    rules: Vec<CiStoryRule>,
 }
 
 /// Finish onboarding for the active project. The post-scan steps (audit, triage, Apply,
@@ -2736,15 +2752,33 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     Json(serde_json::json!({ "ok": true, "onboarded": repos }))
 }
 
-/// Emit the "wire mechanical rules into CI" task as a STORY on the tracker — a GitHub
-/// issue — NOT a governed run launched from onboarding. Onboarding's job is to produce
-/// stories; the dev layer (Pillar 2) picks the issue up and does the work (every write
-/// gated). Arming already emits `.camerata/ci-checks.json` (the declared mechanical rules);
-/// this issue is the development task of turning each declared check into a real CI gate.
+/// Emit a tier-specific "wire CI rules" story as a GitHub issue.
+///
+/// Two tiers are supported:
+/// - "mechanical"   — rules that map 1:1 to an off-the-shelf linter/analyzer. Wiring is
+///   straightforward: enable the cited linter rule in CI. This story is safe to implement
+///   immediately without team refinement.
+/// - "architectural" — rules that are also deterministic but require a bespoke AST or static-
+///   analysis checker the team must DESIGN before implementing. This story should be scoped
+///   and refined first; it should NOT ride with the mechanical story.
+///
+/// The UI files each story separately so the two tracks land as distinct GitHub issues.
 async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
     };
+    if req.tier != "mechanical" && req.tier != "architectural" {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("unknown tier '{}': must be 'mechanical' or 'architectural'", req.tier)
+        }));
+    }
+    if req.rules.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("no {} rules to wire", req.tier)
+        }));
+    }
     let token = std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
         .filter(|v| !v.is_empty());
@@ -2753,22 +2787,79 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
             serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }),
         );
     };
-    let title = format!("Wire mechanical rules into CI — {}", req.repo);
-    let body = format!(
-        "Camerata onboarding story: wire the mechanical governance rules into **{repo}**'s CI so \
-         a pull request that violates one FAILS the build.\n\n\
-         The rules to enforce are declared in `.camerata/ci-checks.json` (id, title, directive, \
-         conformance). For EACH rule:\n\
-         1. Check whether it is ALREADY enforced in CI (inspect `.github/workflows/`, the linter \
-         config, package scripts).\n\
-         2. If it is, leave it.\n\
-         3. If not, implement the enforcement using this repo's stack — an ESLint rule, a \
-         migration/index audit step, or an AST lint — per the rule's `conformance`, wired into \
-         the CI workflow so it runs on every PR.\n\n\
-         Do not weaken or delete existing checks. When the dev layer (Pillar 2) is wired, this \
-         story is picked up and run as a governed development task; for now it's filed as a \
-         tracked issue.\n\n_Filed by Camerata onboarding._"
-    );
+
+    // The preamble is identical for both tiers — it sets up the distinction once and up
+    // front so the reader doesn't have to infer it from the title alone.
+    let preamble = "Mechanical and architectural rules are both deterministic CI-tier checks. \
+        Mechanical rules map to an existing off-the-shelf linter (simple to wire). \
+        Architectural rules require a custom checker and team refinement before implementing.";
+
+    let (title, body) = match req.tier.as_str() {
+        "mechanical" => {
+            let t = format!("Wire mechanical (off-the-shelf linter) rules into CI — {}", req.repo);
+            let rule_lines: String = req
+                .rules
+                .iter()
+                .map(|r| {
+                    if let Some(ref linter) = r.linter {
+                        format!("- {} — {} (linter: {})\n", r.id, r.title, linter)
+                    } else {
+                        format!("- {} — {}\n", r.id, r.title)
+                    }
+                })
+                .collect();
+            let b = format!(
+                "{preamble}\n\n\
+                 **This story covers the MECHANICAL tier only.** Each rule listed below maps to a \
+                 real off-the-shelf linter or analyzer — enabling the cited tool rule in CI is the \
+                 entire implementation. No bespoke checker is needed.\n\n\
+                 **Repo:** `{repo}`\n\n\
+                 **Rules to wire:**\n\
+                 {rule_lines}\n\
+                 For each rule:\n\
+                 1. Check whether it is already enforced in CI (inspect `.github/workflows/`, the \
+                 linter config, package scripts).\n\
+                 2. If it is, leave it.\n\
+                 3. If not, enable the cited linter rule and wire it into the CI workflow so it \
+                 runs on every PR — a failing PR means the rule is violated.\n\n\
+                 Do not weaken or delete existing checks.\n\n\
+                 _Filed by Camerata onboarding._"
+            );
+            (t, b)
+        }
+        _ => {
+            // architectural
+            let t = format!(
+                "Wire architectural (custom-checker) rules into CI — {}",
+                req.repo
+            );
+            let rule_lines: String = req
+                .rules
+                .iter()
+                .map(|r| format!("- {} — {}\n", r.id, r.title))
+                .collect();
+            let b = format!(
+                "{preamble}\n\n\
+                 **This story covers the ARCHITECTURAL tier only.** Each rule below is \
+                 deterministic but has NO off-the-shelf linter. Each one needs a bespoke AST or \
+                 static-analysis checker designed by the team. **This story is more involved than \
+                 the mechanical story and should be scoped and refined with the team before \
+                 implementation begins.**\n\n\
+                 **Repo:** `{repo}`\n\n\
+                 **Rules to wire (each needs a custom checker):**\n\
+                 {rule_lines}\n\
+                 For each rule:\n\
+                 1. Agree on a checker strategy (AST transform, grep pattern, Semgrep rule, etc.).\n\
+                 2. Implement and test the checker in isolation.\n\
+                 3. Wire it into the CI workflow so it runs on every PR.\n\n\
+                 Do not weaken or delete existing checks. Scope each checker as a sub-task if the \
+                 list is long — do not block the mechanical CI story on this work.\n\n\
+                 _Filed by Camerata onboarding._"
+            );
+            (t, b)
+        }
+    };
+
     match crate::onboard::create_issue(owner, repo, &token, &title, &body).await {
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),

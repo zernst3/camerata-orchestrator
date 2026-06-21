@@ -1797,7 +1797,10 @@ fn RulesView() -> Element {
 
                         SuppressionsPanel { project_id: pid_sup }
 
-                        CiRulesPanel { repos: p_owned.repos.clone() }
+                        CiRulesPanel {
+                            repos: p_owned.repos.clone(),
+                            rules: ci_rule_items_from_selections(&p_owned.ruleset.selections, &corpus),
+                        }
 
                         // Re-emit: rebuild the source-of-truth emit from this project's
                         // ruleset (base selections + custom) and open a PR per repo.
@@ -4168,61 +4171,202 @@ fn finding_state(
         .unwrap_or(TriageState::Unresolved)
 }
 
-/// Wire the mechanical (CI-tier) governance rules into a repo's CI as a governed dev run.
-/// Returns `(run_id, mode)`.
-/// Emit the "wire mechanical rules into CI" story as a GitHub issue. Returns the issue URL.
-async fn wire_ci_rules(repo: &str) -> Option<String> {
-    let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/ci-rules", crate::BFF_URL))
-        .json(&serde_json::json!({ "repo": repo }))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return None;
-    }
-    v.get("url").and_then(|u| u.as_str()).map(String::from)
+/// A CI-tier rule item for display in `CiRulesPanel` and for posting to the server.
+/// Constructed at each call site from `ProposedRuleView` (onboarding) or from the
+/// corpus + project selections (Rules panel). Only `enforcement == "mechanical"` or
+/// `enforcement == "architectural"` items are CI-tier; structured/prose are excluded.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct CiRuleItem {
+    id: String,
+    title: String,
+    enforcement: String,
+    #[serde(default)]
+    linter: Option<String>,
 }
 
-/// The "add CI-enforced rules" panel: per repo, emit the CI-wiring task as a STORY (a
-/// GitHub issue), not a dev run launched from onboarding. Onboarding produces stories; the
-/// dev layer (Pillar 2) picks the issue up and does the work. Reused in onboarding + Rules.
+/// Extract the first linter hint from a `ProposedRuleView`'s sources, if any.
+fn first_linter(rule: &ProposedRuleView) -> Option<String> {
+    rule.sources
+        .iter()
+        .find_map(|s| s.linter.clone().filter(|l| !l.is_empty()))
+}
+
+/// Build `CiRuleItem`s from a proposed-rules list, keeping only CI-tier enforcement
+/// levels ("mechanical" and "architectural"). Used at the onboarding call sites where
+/// `proposed_rules` is already available on the scan report.
+fn ci_rule_items_from_proposed(rules: &[ProposedRuleView]) -> Vec<CiRuleItem> {
+    rules
+        .iter()
+        .filter(|r| r.enforcement == "mechanical" || r.enforcement == "architectural")
+        .map(|r| CiRuleItem {
+            id: r.id.clone(),
+            title: r.title.clone(),
+            enforcement: r.enforcement.clone(),
+            linter: first_linter(r),
+        })
+        .collect()
+}
+
+/// Build `CiRuleItem`s from the project's applied selections joined with the corpus.
+/// Used at the Rules-panel call site where we have `RuleSelectionView`s (rule_id only)
+/// and must look up enforcement + title from the corpus `Vec<ProposedRuleView>`.
+fn ci_rule_items_from_selections(
+    selections: &[RuleSelectionView],
+    corpus: &[ProposedRuleView],
+) -> Vec<CiRuleItem> {
+    let corpus_map: std::collections::HashMap<&str, &ProposedRuleView> =
+        corpus.iter().map(|r| (r.id.as_str(), r)).collect();
+    selections
+        .iter()
+        .filter_map(|s| corpus_map.get(s.rule_id.as_str()).copied())
+        .filter(|r| r.enforcement == "mechanical" || r.enforcement == "architectural")
+        .map(|r| CiRuleItem {
+            id: r.id.clone(),
+            title: r.title.clone(),
+            enforcement: r.enforcement.clone(),
+            linter: first_linter(r),
+        })
+        .collect()
+}
+
+/// POST /api/onboard/ci-rules for a single tier. Returns the GitHub issue URL on success.
+async fn wire_ci_rules_tier(
+    repo: &str,
+    tier: &str,
+    rules: Vec<CiRuleItem>,
+) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "repo": repo,
+        "tier": tier,
+        "rules": rules,
+    });
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/onboard/ci-rules", crate::BFF_URL))
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("invalid response: {e}"))?;
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    if !ok {
+        let msg = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(msg.to_string());
+    }
+    v.get("url")
+        .and_then(|u| u.as_str())
+        .map(String::from)
+        .ok_or_else(|| "server returned ok but no url".to_string())
+}
+
+/// The "add CI-enforced rules" panel, split by enforcement tier.
+///
+/// Mechanical and architectural rules are both deterministic CI-tier checks. Mechanical
+/// rules map to an existing off-the-shelf linter (simple to wire). Architectural rules
+/// require a custom checker and team refinement before implementing.
+///
+/// The panel renders TWO separate "Create story" buttons — one per tier — so the two
+/// tracks land as distinct GitHub issues and can be scheduled independently. A button
+/// is shown only when that tier has at least one rule. Both buttons are per-repo.
 #[component]
-fn CiRulesPanel(repos: Vec<String>) -> Element {
+fn CiRulesPanel(repos: Vec<String>, rules: Vec<CiRuleItem>) -> Element {
     let mut msg = use_signal(String::new);
     let mut busy = use_signal(|| false);
+
+    let mechanical: Vec<CiRuleItem> = rules
+        .iter()
+        .filter(|r| r.enforcement == "mechanical")
+        .cloned()
+        .collect();
+    let architectural: Vec<CiRuleItem> = rules
+        .iter()
+        .filter(|r| r.enforcement == "architectural")
+        .cloned()
+        .collect();
+
+    let has_mechanical = !mechanical.is_empty();
+    let has_architectural = !architectural.is_empty();
+
     rsx! {
         div { class: "fix-panel",
             p { class: "scan-section-h", "Add CI-enforced rules" }
-            p { class: "scan-section-sub", "Mechanical rules are declared in .camerata/ci-checks.json at arm time, but a config doesn't enforce itself. This files a story (a GitHub issue) to wire each declared check into CI (ESLint rule, query-plan/migration audit, AST lint). The dev layer picks it up and does the work — onboarding just writes the story." }
+            p { class: "scan-section-sub",
+                "Mechanical and architectural rules are both deterministic CI-tier checks. \
+                 Mechanical rules map to an existing off-the-shelf linter (simple to wire). \
+                 Architectural rules require a custom checker and team refinement before implementing. \
+                 Each tier files a separate GitHub issue so the two tracks can be scheduled independently."
+            }
             for repo in repos.iter() {
                 {
                     let repo = repo.clone();
-                    let repo_click = repo.clone();
+                    let mech_rules = mechanical.clone();
+                    let arch_rules = architectural.clone();
                     rsx! {
                         div { class: "fix-row", key: "{repo}",
                             span { class: "fix-repo", "{repo}" }
-                            button {
-                                class: "btn-run",
-                                disabled: busy(),
-                                onclick: move |_| {
-                                    let repo = repo_click.clone();
-                                    busy.set(true);
-                                    msg.set(String::new());
-                                    spawn(async move {
-                                        match wire_ci_rules(&repo).await {
-                                            Some(url) => msg.set(format!(
-                                                "Filed a CI-wiring story for {repo}: {url}"
-                                            )),
-                                            None => msg.set(format!("Could not file the CI-wiring story for {repo} (is GitHub connected?).")),
+                            if has_mechanical {
+                                {
+                                    let repo_m = repo.clone();
+                                    let rules_m = mech_rules.clone();
+                                    rsx! {
+                                        button {
+                                            class: "btn-run",
+                                            disabled: busy(),
+                                            onclick: move |_| {
+                                                let r = repo_m.clone();
+                                                let rules = rules_m.clone();
+                                                busy.set(true);
+                                                msg.set(String::new());
+                                                spawn(async move {
+                                                    match wire_ci_rules_tier(&r, "mechanical", rules).await {
+                                                        Ok(url) => msg.set(format!(
+                                                            "Filed mechanical CI-rules story for {r}: {url}"
+                                                        )),
+                                                        Err(e) => msg.set(format!(
+                                                            "Could not file mechanical story for {r}: {e}"
+                                                        )),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            },
+                                            "Create mechanical-rules CI story"
                                         }
-                                        busy.set(false);
-                                    });
-                                },
-                                "Create CI-rules story"
+                                    }
+                                }
+                            }
+                            if has_architectural {
+                                {
+                                    let repo_a = repo.clone();
+                                    let rules_a = arch_rules.clone();
+                                    rsx! {
+                                        button {
+                                            class: "btn-run",
+                                            disabled: busy(),
+                                            onclick: move |_| {
+                                                let r = repo_a.clone();
+                                                let rules = rules_a.clone();
+                                                busy.set(true);
+                                                msg.set(String::new());
+                                                spawn(async move {
+                                                    match wire_ci_rules_tier(&r, "architectural", rules).await {
+                                                        Ok(url) => msg.set(format!(
+                                                            "Filed architectural CI-rules story for {r}: {url}"
+                                                        )),
+                                                        Err(e) => msg.set(format!(
+                                                            "Could not file architectural story for {r}: {e}"
+                                                        )),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            },
+                                            "Create architectural-rules CI story"
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -8065,9 +8209,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                 // CI-story affordance here too, so it's reachable straight after rule selection.
                 if report.code_chars == 0 {
                     div { class: "onboard-final-step",
-                        span { class: "onboard-step-eyebrow", "Optional: wire mechanical rules into CI" }
-                        CiRulesPanel { repos: report.repos.clone() }
-                        p { class: "section-hint", "You can file the CI-wiring story (a GitHub issue) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
+                        span { class: "onboard-step-eyebrow", "Optional: wire CI rules into CI" }
+                        CiRulesPanel {
+                            repos: report.repos.clone(),
+                            rules: ci_rule_items_from_proposed(&report.proposed_rules),
+                        }
+                        p { class: "section-hint", "You can file the CI-wiring stories (GitHub issues) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
                     }
                 }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
@@ -8441,16 +8588,21 @@ fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
 
-                // ── Optional: wire mechanical rules into CI (#32) ──────────────────
-                // Files a STORY (GitHub issue) per repo to add the selected mechanical rules
-                // to that repo's existing CI as enforced lint gates. This is OPTIONAL — it does
-                // NOT gate "onboarded". Use "Complete onboarding" above to finish at any point;
-                // the dev layer picks the CI story up later.
+                // ── Optional: wire CI rules into CI (#32) ─────────────────────────
+                // Files per-tier STORIES (GitHub issues) per repo to add the selected CI-tier
+                // rules to that repo's existing CI as enforced lint gates. Mechanical and
+                // architectural land as SEPARATE issues — architectural needs team refinement
+                // first. This is OPTIONAL — it does NOT gate "onboarded". Use "Complete
+                // onboarding" above to finish at any point; the dev layer picks up each CI
+                // story independently.
                 if n_unresolved == 0 {
                     div { class: "onboard-final-step",
-                        span { class: "onboard-step-eyebrow", "Optional: wire mechanical rules into CI" }
-                        CiRulesPanel { repos: report.repos.clone() }
-                        p { class: "section-hint", "Optional, and independent of the tech-debt work above. This files a CI-wiring story (a GitHub issue); it is not required to finish onboarding — use \u{201c}Complete onboarding\u{201d} whenever you're ready." }
+                        span { class: "onboard-step-eyebrow", "Optional: wire CI rules into CI" }
+                        CiRulesPanel {
+                            repos: report.repos.clone(),
+                            rules: ci_rule_items_from_proposed(&report.proposed_rules),
+                        }
+                        p { class: "section-hint", "Optional, and independent of the tech-debt work above. This files per-tier CI-wiring stories (GitHub issues — one mechanical, one architectural); neither is required to finish onboarding — use \u{201c}Complete onboarding\u{201d} whenever you're ready." }
                     }
                 }
             }
@@ -10139,5 +10291,138 @@ mod tests {
         assert_eq!(item.number, 42);
         assert_eq!(item.labels, vec!["enhancement".to_string(), "ui".to_string()]);
         assert_eq!(labels_summary(&item.labels), "enhancement, ui");
+    }
+
+    // ── CiRulesPanel helpers ───────────────────────────────────────────────────
+
+    use super::{
+        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter, CiRuleItem,
+        RuleSelectionView,
+    };
+
+    fn make_rule(id: &str, enforcement: &str, linter: Option<&str>) -> ProposedRuleView {
+        ProposedRuleView {
+            id: id.to_string(),
+            title: format!("{id} title"),
+            kind: "structural".to_string(),
+            enforcement: enforcement.to_string(),
+            options: vec![],
+            default_option: None,
+            decision_question: None,
+            decision_why: None,
+            scope: "repo".to_string(),
+            domain: "test".to_string(),
+            repos: vec![],
+            placement: "CONVENTIONS.md".to_string(),
+            finding_count: 0,
+            recommended: false,
+            is_auto_recommended: false,
+            verification: "draft".to_string(),
+            sources: linter
+                .map(|l| vec![RuleSourceView {
+                    url: "https://example.com".to_string(),
+                    title: "Source".to_string(),
+                    linter: Some(l.to_string()),
+                }])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Only mechanical and architectural rules pass the CI-tier filter.
+    #[test]
+    fn ci_rule_items_from_proposed_filters_to_ci_tier_only() {
+        let rules = vec![
+            make_rule("MECH-1", "mechanical", Some("eslint: rule")),
+            make_rule("ARCH-1", "architectural", None),
+            make_rule("STRUCT-1", "structured", None),
+            make_rule("PROSE-1", "prose", None),
+        ];
+        let items = ci_rule_items_from_proposed(&rules);
+        assert_eq!(items.len(), 2, "only mechanical + architectural should pass");
+        assert!(items.iter().any(|i| i.id == "MECH-1"));
+        assert!(items.iter().any(|i| i.id == "ARCH-1"));
+        assert!(!items.iter().any(|i| i.id == "STRUCT-1"));
+        assert!(!items.iter().any(|i| i.id == "PROSE-1"));
+    }
+
+    /// The linter is carried through from the first source with one.
+    #[test]
+    fn ci_rule_items_from_proposed_carries_linter_from_first_source() {
+        let rules = vec![make_rule("MECH-1", "mechanical", Some("eslint: no-unused-vars"))];
+        let items = ci_rule_items_from_proposed(&rules);
+        assert_eq!(items[0].linter.as_deref(), Some("eslint: no-unused-vars"));
+    }
+
+    /// Rules with no linter source yield None.
+    #[test]
+    fn ci_rule_items_from_proposed_none_linter_when_no_source() {
+        let rules = vec![make_rule("ARCH-1", "architectural", None)];
+        let items = ci_rule_items_from_proposed(&rules);
+        assert!(items[0].linter.is_none());
+    }
+
+    /// Empty input produces empty output.
+    #[test]
+    fn ci_rule_items_from_proposed_empty_input() {
+        assert!(ci_rule_items_from_proposed(&[]).is_empty());
+    }
+
+    /// `ci_rule_items_from_selections` joins by rule_id and filters to CI tier.
+    #[test]
+    fn ci_rule_items_from_selections_joins_and_filters() {
+        let corpus = vec![
+            make_rule("MECH-1", "mechanical", Some("eslint: rule")),
+            make_rule("ARCH-1", "architectural", None),
+            make_rule("PROSE-1", "prose", None),
+        ];
+        let selections = vec![
+            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView { rule_id: "ARCH-1".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView { rule_id: "PROSE-1".to_string(), chosen_option: None, repos: vec![] },
+        ];
+        let items = ci_rule_items_from_selections(&selections, &corpus);
+        assert_eq!(items.len(), 2, "prose should be excluded");
+        assert!(items.iter().any(|i| i.id == "MECH-1"));
+        assert!(items.iter().any(|i| i.id == "ARCH-1"));
+    }
+
+    /// A selection whose rule_id is not in the corpus is silently dropped.
+    #[test]
+    fn ci_rule_items_from_selections_drops_unknown_rule_ids() {
+        let corpus = vec![make_rule("MECH-1", "mechanical", None)];
+        let selections = vec![
+            RuleSelectionView { rule_id: "MECH-1".to_string(), chosen_option: None, repos: vec![] },
+            RuleSelectionView { rule_id: "GHOST-99".to_string(), chosen_option: None, repos: vec![] },
+        ];
+        let items = ci_rule_items_from_selections(&selections, &corpus);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "MECH-1");
+    }
+
+    /// `first_linter` returns the linter from the first matching source.
+    #[test]
+    fn first_linter_returns_first_nonempty_linter() {
+        let rule = ProposedRuleView {
+            sources: vec![
+                RuleSourceView { url: "u1".to_string(), title: "S1".to_string(), linter: None },
+                RuleSourceView { url: "u2".to_string(), title: "S2".to_string(), linter: Some("mypy".to_string()) },
+            ],
+            ..make_rule("R-1", "mechanical", None)
+        };
+        assert_eq!(first_linter(&rule).as_deref(), Some("mypy"));
+    }
+
+    /// `first_linter` skips empty-string linters.
+    #[test]
+    fn first_linter_skips_empty_string() {
+        let rule = ProposedRuleView {
+            sources: vec![RuleSourceView {
+                url: "u".to_string(),
+                title: "S".to_string(),
+                linter: Some(String::new()),
+            }],
+            ..make_rule("R-1", "mechanical", None)
+        };
+        assert!(first_linter(&rule).is_none());
     }
 }
