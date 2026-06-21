@@ -27,7 +27,7 @@ why = "The right choice for projects with deep existing investment in controller
 id = "mixed-minimal-and-controller"
 label = "Both Minimal APIs and MVC controllers coexist in the same project"
 directive = "Some endpoints are registered via Map* and others live in ControllerBase classes; the mix is determined per-endpoint by what is convenient at the time of authoring."
-why = "A defensible alternative the project considered. Two routing models in one project multiply the mental model surface without adding capability either model lacks."
+why = "Allowing both styles lets each developer or team use whichever model they prefer and avoids a forced migration when the project was started with one style and a new endpoint naturally fits the other. The cost is that two separate programming models now coexist for identical work: filter wiring, validation hooks, response-shaping conventions, and endpoint discovery differ between the models, and every new developer must learn both and track which applies to any given endpoint, doubling the mental model surface with no gain in capability."
 
 verification = "grounded"
 

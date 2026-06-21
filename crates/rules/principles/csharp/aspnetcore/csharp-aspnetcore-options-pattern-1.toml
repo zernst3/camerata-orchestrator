@@ -21,7 +21,7 @@ why = "Typed binding exposes configuration requirements in the constructor signa
 id = "raw-iconfiguration-injection"
 label = "IConfiguration injected into services; values read by string key"
 directive = "Services accept IConfiguration in their constructor and read values via configuration['Section:Key'] or configuration.GetValue<T>('Key'). No POCO binding or startup validation."
-why = "A defensible alternative the project considered. String-keyed reads are untyped, invisible to callers of the constructor, and surface missing keys as null at runtime rather than as a startup error."
+why = "Injecting IConfiguration directly is simpler to set up and avoids the POCO and registration boilerplate, which makes it attractive for small services or early prototypes. The cost is significant: string-keyed reads are untyped, the service's configuration requirements are invisible from its constructor signature, and missing or misspelled keys produce silent null values at runtime rather than a startup failure that surfaces before any requests are served."
 
 [[option]]
 id = "hardcoded-fallbacks"

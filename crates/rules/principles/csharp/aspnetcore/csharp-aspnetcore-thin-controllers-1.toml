@@ -21,7 +21,7 @@ why = "Controllers that translate protocol to service calls are independently te
 id = "fat-controllers-inline-logic"
 label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
-why = "A defensible alternative the project considered. Inline logic is reachable only through HTTP, is not reusable across entry points, and conflates protocol concerns with domain concerns in a single method."
+why = "Inlining logic in controller actions avoids the extra file and indirection of a service layer, which can seem like unnecessary ceremony for simple endpoints. The cost is that the logic is only reachable through an HTTP request, cannot be unit-tested without framework infrastructure, cannot be reused across a background job or a second endpoint without copying, and causes the controller to change for two unrelated reasons: HTTP contract changes and domain rule changes."
 
 verification = "grounded"
 
