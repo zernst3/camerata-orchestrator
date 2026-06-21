@@ -294,7 +294,7 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
         "  plan tasks (governed fleet stages):       {}",
         plan.task_count()
     );
-    println!("  layer-2 gate during fleet:                RustCheckRunner (fmt + clippy + test)");
+    println!("  layer-2 gate during fleet:                language-matched runner (Rust: fmt+clippy+test; JS/Py/Go: lint+test)");
     println!(
         "  per-stage layer-2 bounces:                {}",
         outcome.total_bounces
@@ -514,15 +514,30 @@ mod tests {
     }
 
     #[test]
-    fn po_demo_uses_a_real_rust_check_runner_for_layer2() {
-        // Compile-level guarantee that the demo's layer-2 gate is the REAL
-        // RustCheckRunner (fmt + clippy + test), not a no-op. The fleet-level proof
-        // that this runner actually bounces a violation mid-fleet lives in
-        // crates/core/tests/fleet_real_check.rs.
-        use camerata_checks::RustCheckRunner;
+    fn po_demo_uses_a_language_matched_check_runner_for_layer2() {
+        // Compile-level guarantee that the demo's layer-2 gate is the REAL,
+        // language-matched runner (via runner_for_worktree), not a no-op. A
+        // Cargo.toml worktree resolves to the Rust runner (fmt + clippy + test);
+        // a package.json / go.mod / pyproject tree resolves to its language's
+        // runner. The fleet-level proof that this runner actually bounces a
+        // violation mid-fleet lives in crates/core/tests/fleet_real_check.rs.
+        use camerata_checks::{detect_language, runner_for_worktree, WorktreeLanguage};
         use camerata_core::FleetCoordinator;
-        let checks = RustCheckRunner::new();
-        let _fleet = FleetCoordinator::new(&checks, std::env::temp_dir());
+
+        let dir = std::env::temp_dir().join(format!(
+            "po-demo-layer2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::Rust);
+
+        let checks = runner_for_worktree(&dir);
+        let _fleet = FleetCoordinator::new(&*checks, &dir);
     }
 
     #[test]
