@@ -1390,6 +1390,9 @@ html, body {
 .audit-cost-val { font-size: 22px; font-weight: 800; color: var(--ink); }
 .audit-cost-meta { font-size: 12px; color: var(--ink-faint); }
 .audit-cost-note { margin: 6px 0 0; font-size: 12px; line-height: 1.5; color: var(--ink-faint); }
+/* Deep-tier callout inside the cost note: amber + bold so the priciest option reads as a
+   deliberate, expensive choice that's already baked into the figure above it. */
+.audit-cost-deep-note { color: #854d0e; font-weight: 600; }
 .live-run { border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding: 14px 16px; }
 .live-run-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
 .live-run-title { font-size: 15px; font-weight: 700; color: var(--ink); }
@@ -2102,9 +2105,12 @@ html, body {
   background: #dcfce7; color: #166534; border: 1px solid #bbf7d0;
 }
 
-/* grounded: BLUE — cited source, machine-grounded, fully usable. */
+/* grounded: BLUE + circled source-dot (⦿) — cited source, machine-grounded, fully usable.
+   The glyph (set in the label) makes grounded a CLEAR table status distinct from the verified
+   checkmark and the symbol-less draft / needs-re-check badges, not just a faint blue tint.
+   Solid border + saturated text keep it legible at the 10px table size. */
 .verif-badge-grounded {
-  background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe;
+  background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd;
 }
 
 /* draft: GRAY + italic — de-emphasized; these are NOT in the armed ruleset. */
