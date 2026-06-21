@@ -50,13 +50,31 @@
 //! Fine-grained per-tool rule ids can be layered in later without touching the
 //! coordinator contract.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_core::{CheckRunner, Role, RuleId};
 
 use crate::subprocess::{run_command, CommandOutput};
+
+/// Directory names pruned while walking a worktree for manifests. These are
+/// build outputs, vendored deps, VCS metadata, and virtualenvs — scanning them
+/// would (a) be slow and (b) misclassify a vendored `package.json` deep inside
+/// `node_modules/` as a separate JS project. Kept in one place so the prune list
+/// and the docs stay in sync.
+const PRUNED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".git",
+    ".camerata-venv",
+    "vendor",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".venv",
+];
 
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
 
@@ -551,13 +569,19 @@ impl CheckRunner for NoopChecks {
     }
 }
 
-/// Detect the worktree's language from its manifest files.
+/// Detect the worktree's language from the manifest files in its ROOT only.
 ///
 /// Precedence is by manifest specificity. `Cargo.toml` -> Rust, `package.json`
 /// -> JavaScript/TypeScript, `go.mod` -> Go, any of
 /// `pyproject.toml`/`requirements.txt`/`Pipfile` -> Python. Rust is checked
 /// first because a polyglot repo with a Cargo.toml is, for our fleet's
 /// purposes, a Rust build.
+///
+/// This is the single-language, root-only helper. The selector now uses
+/// [`detect_languages`] (recursive, every-language) instead; this helper is
+/// retained for callers that genuinely want the single best-guess language of a
+/// directory (e.g. precedence-ordered classification of one directory's
+/// manifests).
 pub fn detect_language(worktree: &Path) -> WorktreeLanguage {
     if worktree.join("Cargo.toml").is_file() {
         return WorktreeLanguage::Rust;
@@ -577,29 +601,229 @@ pub fn detect_language(worktree: &Path) -> WorktreeLanguage {
     WorktreeLanguage::Unknown
 }
 
-/// Pick the right layer-2 [`CheckRunner`] for `worktree` by detecting its
-/// language from manifest files. This is the single injection point the fleet
-/// and the po-demo use in place of the old hardcoded `RustCheckRunner::new()`.
+/// The manifest filenames that mark each language, in precedence order within a
+/// single directory. The DIRECTORY is the unit of a "project": a directory that
+/// holds several manifests for the same language (e.g. `pyproject.toml` +
+/// `requirements.txt`) yields ONE entry for that language; a directory that
+/// holds manifests for different languages yields one entry per language.
+fn language_for_manifest(file_name: &str) -> Option<WorktreeLanguage> {
+    match file_name {
+        "Cargo.toml" => Some(WorktreeLanguage::Rust),
+        "package.json" => Some(WorktreeLanguage::JavaScript),
+        "go.mod" => Some(WorktreeLanguage::Go),
+        "pyproject.toml" | "requirements.txt" | "Pipfile" => Some(WorktreeLanguage::Python),
+        _ => None,
+    }
+}
+
+/// Recursively scan `worktree` for every language present, pairing each detected
+/// language with the DIRECTORY whose manifest declared it.
 ///
-/// An [`WorktreeLanguage::Unknown`] worktree gets [`NoopChecks`] AND a logged
-/// warning: the loop degrades, but visibly (no silent loss of layer-2 for a
-/// tree we just could not classify).
-pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
-    match detect_language(worktree) {
-        WorktreeLanguage::Rust => Box::new(crate::RustCheckRunner::new()),
-        WorktreeLanguage::JavaScript => Box::new(JsCheckRunner::new()),
-        WorktreeLanguage::Python => Box::new(PythonCheckRunner::new()),
-        WorktreeLanguage::Go => Box::new(GoCheckRunner),
-        WorktreeLanguage::Unknown => {
-            eprintln!(
-                "[camerata-checks] no layer-2 runner matched worktree {} \
-                 (no Cargo.toml / package.json / go.mod / pyproject.toml|requirements.txt|Pipfile); \
-                 degrading to NoopChecks — layer-2 bounce-and-revise is INACTIVE for this tree",
-                worktree.display()
-            );
-            Box::new(NoopChecks)
+/// # Why every-language
+///
+/// A polyglot monorepo (e.g. `apps/ui/package.json`, `services/api/pyproject.toml`,
+/// and `tools/x/go.mod`) is one worktree but several projects. The old
+/// [`detect_language`] returned a single precedence-winning language and the
+/// selector ran exactly one runner, silently skipping the rest. This function
+/// detects ALL of them so the selector can run a runner per project.
+///
+/// # Pruning
+///
+/// While walking, the directories in [`PRUNED_DIRS`] are skipped entirely. This
+/// keeps the walk fast and — crucially — prevents a vendored manifest deep in
+/// `node_modules/` (or `vendor/`, `target/`, etc.) from being misread as a
+/// separate project.
+///
+/// # Dedup
+///
+/// Results are deduped on `(language, dir)`: a directory with several manifests
+/// for the SAME language yields one entry; a directory with manifests for
+/// DIFFERENT languages yields one entry each. Order is deterministic: entries
+/// are sorted by directory path, then by language, so callers and tests see a
+/// stable sequence regardless of filesystem iteration order.
+pub fn detect_languages(worktree: &Path) -> Vec<(WorktreeLanguage, PathBuf)> {
+    let mut found: Vec<(WorktreeLanguage, PathBuf)> = Vec::new();
+    walk_for_manifests(worktree, &mut found);
+
+    // Dedup on (language, dir). Sort first so dedup collapses adjacents and the
+    // output order is stable.
+    found.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| lang_ord(a.0).cmp(&lang_ord(b.0))));
+    found.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    found
+}
+
+/// Total order over languages for deterministic sorting of detection results.
+fn lang_ord(lang: WorktreeLanguage) -> u8 {
+    match lang {
+        WorktreeLanguage::Rust => 0,
+        WorktreeLanguage::JavaScript => 1,
+        WorktreeLanguage::Python => 2,
+        WorktreeLanguage::Go => 3,
+        WorktreeLanguage::Unknown => 4,
+    }
+}
+
+/// Recursive helper for [`detect_languages`]. Reads `dir`, records any manifest
+/// files it holds as `(language, dir)` pairs, then descends into non-pruned
+/// subdirectories.
+///
+/// Unreadable directories are skipped silently rather than aborting the whole
+/// scan — a permission error on one subtree must not blind the gate to the rest
+/// of the worktree. (The fail-closed honesty stance lives in the runners: if a
+/// detected project cannot be VERIFIED, its runner returns `Err`. Detection
+/// itself is best-effort breadth.)
+fn walk_for_manifests(dir: &Path, out: &mut Vec<(WorktreeLanguage, PathBuf)>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if PRUNED_DIRS.contains(&name.as_ref()) {
+                continue;
+            }
+            subdirs.push(path);
+        } else if file_type.is_file() {
+            let name = entry.file_name();
+            if let Some(lang) = language_for_manifest(&name.to_string_lossy()) {
+                out.push((lang, dir.to_path_buf()));
+            }
         }
     }
+
+    for sub in subdirs {
+        walk_for_manifests(&sub, out);
+    }
+}
+
+/// Composite layer-2 [`CheckRunner`] that runs one sub-runner per detected
+/// `(language, dir)` project and UNIONS their violations.
+///
+/// # Semantics
+///
+/// - Each sub-runner runs against ITS directory (the manifest's subtree), not
+///   the worktree root. A `services/api/pyproject.toml` project is checked at
+///   `services/api`, so `ruff`/`pytest` see the right tree.
+/// - ALL sub-runners run; none aborts the others early. The composite collects
+///   every result before deciding the verdict.
+/// - **Fail-closed aggregation**: if ANY sub-runner returns `Err`
+///   (could-not-run / toolchain missing / install failure), the composite
+///   returns `Err` too, with a message naming every language/dir that could not
+///   be verified. It NEVER reports clean just because the other projects passed
+///   — a half-verified polyglot tree is not a verified one.
+/// - Otherwise it returns the UNION of every sub-runner's violated [`RuleId`]s
+///   (deduped). Empty means every project was clean.
+pub struct PolyglotCheckRunner {
+    /// One `(language, dir, runner)` per detected project.
+    sub: Vec<(WorktreeLanguage, PathBuf, Box<dyn CheckRunner>)>,
+}
+
+impl PolyglotCheckRunner {
+    /// Build a composite from detected `(language, dir)` pairs, constructing the
+    /// matching runner for each. `Unknown` pairs are skipped (they never appear
+    /// from [`detect_languages`], but the match stays exhaustive).
+    pub fn from_detected(detected: Vec<(WorktreeLanguage, PathBuf)>) -> Self {
+        let sub = detected
+            .into_iter()
+            .filter_map(|(lang, dir)| {
+                let runner: Box<dyn CheckRunner> = match lang {
+                    WorktreeLanguage::Rust => Box::new(crate::RustCheckRunner::new()),
+                    WorktreeLanguage::JavaScript => Box::new(JsCheckRunner::new()),
+                    WorktreeLanguage::Python => Box::new(PythonCheckRunner::new()),
+                    WorktreeLanguage::Go => Box::new(GoCheckRunner),
+                    WorktreeLanguage::Unknown => return None,
+                };
+                Some((lang, dir, runner))
+            })
+            .collect();
+        Self { sub }
+    }
+
+    /// Number of detected projects this composite will check. Exposed for tests.
+    pub fn project_count(&self) -> usize {
+        self.sub.len()
+    }
+}
+
+#[async_trait]
+impl CheckRunner for PolyglotCheckRunner {
+    async fn check(&self, role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        let mut violations: Vec<RuleId> = Vec::new();
+        // Aggregate could-not-run failures across ALL sub-runners; we run every
+        // one before deciding the verdict (fail-closed, but never abort-early).
+        let mut failures: Vec<String> = Vec::new();
+
+        for (lang, dir, runner) in &self.sub {
+            // Each sub-runner checks ITS subtree, not the worktree root.
+            match runner.check(role, dir).await {
+                Ok(rules) => violations.extend(rules),
+                Err(e) => failures.push(format!("{lang:?} @ {}: {e}", dir.display())),
+            }
+        }
+
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "PolyglotCheckRunner: {} of {} sub-runner(s) could not verify their project \
+                 (fail-closed: NOT reporting clean despite any that passed):\n  - {}",
+                failures.len(),
+                self.sub.len(),
+                failures.join("\n  - ")
+            );
+        }
+
+        violations.dedup_by(|a, b| a.0 == b.0);
+        Ok(violations)
+    }
+}
+
+/// Pick the right layer-2 [`CheckRunner`] for `worktree` by detecting EVERY
+/// language present (recursively). This is the single injection point the fleet
+/// and the po-demo use in place of the old hardcoded `RustCheckRunner::new()`.
+///
+/// - Zero languages detected -> [`NoopChecks`] AND a logged warning: the loop
+///   degrades, but visibly (no silent loss of layer-2 for a tree we could not
+///   classify).
+/// - One or more -> a [`PolyglotCheckRunner`] over all detected `(language, dir)`
+///   pairs. A single-language repo simply has one entry; behavior is unchanged
+///   for it. A polyglot monorepo gets a runner per project, all run, violations
+///   unioned, fail-closed if any could not run.
+///
+/// The fleet wiring is untouched: this still returns `Box<dyn CheckRunner>`.
+pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
+    let detected = detect_languages(worktree);
+    if detected.is_empty() {
+        eprintln!(
+            "[camerata-checks] no layer-2 runner matched worktree {} \
+             (no Cargo.toml / package.json / go.mod / pyproject.toml|requirements.txt|Pipfile \
+             found anywhere outside pruned dirs {PRUNED_DIRS:?}); \
+             degrading to NoopChecks — layer-2 bounce-and-revise is INACTIVE for this tree",
+            worktree.display()
+        );
+        return Box::new(NoopChecks);
+    }
+
+    eprintln!(
+        "[camerata-checks] layer-2 detected {} project(s) in worktree {}: {}",
+        detected.len(),
+        worktree.display(),
+        detected
+            .iter()
+            .map(|(l, d)| format!("{l:?}@{}", d.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Box::new(PolyglotCheckRunner::from_detected(detected))
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -1167,5 +1391,281 @@ mod tests {
         std::env::split_paths(&path)
             .map(|p| p.join(bin))
             .find(|p| p.is_file())
+    }
+
+    // ── polyglot detection (recursive, every-language, pruned) ────────────────
+
+    fn role() -> Role {
+        Role {
+            name: "x".into(),
+            rule_subset: vec![],
+            allowed_paths: vec![],
+        }
+    }
+
+    #[test]
+    fn detect_languages_finds_all_three_with_correct_dirs() {
+        let dir = tmp();
+        let ui = dir.join("apps").join("ui");
+        let api = dir.join("services").join("api");
+        let tool = dir.join("tools").join("x");
+        fs::create_dir_all(&ui).unwrap();
+        fs::create_dir_all(&api).unwrap();
+        fs::create_dir_all(&tool).unwrap();
+        fs::write(ui.join("package.json"), "{}").unwrap();
+        fs::write(api.join("pyproject.toml"), "[project]\nname=\"a\"\n").unwrap();
+        fs::write(tool.join("go.mod"), "module x\n").unwrap();
+
+        let detected = detect_languages(&dir);
+        assert_eq!(detected.len(), 3, "should detect all three: {detected:?}");
+        assert!(detected.contains(&(WorktreeLanguage::JavaScript, ui)));
+        assert!(detected.contains(&(WorktreeLanguage::Python, api)));
+        assert!(detected.contains(&(WorktreeLanguage::Go, tool)));
+    }
+
+    #[test]
+    fn detect_languages_dedups_multiple_python_manifests_in_one_dir() {
+        let dir = tmp();
+        // Same dir, two Python manifests -> exactly ONE Python entry.
+        fs::write(dir.join("pyproject.toml"), "[project]\nname=\"a\"\n").unwrap();
+        fs::write(dir.join("requirements.txt"), "pytest\n").unwrap();
+
+        let detected = detect_languages(&dir);
+        let py: Vec<_> = detected
+            .iter()
+            .filter(|(l, _)| *l == WorktreeLanguage::Python)
+            .collect();
+        assert_eq!(py.len(), 1, "two Python manifests in one dir -> one entry: {detected:?}");
+        assert_eq!(py[0].1, dir);
+    }
+
+    #[test]
+    fn detect_languages_one_dir_multiple_languages_yields_one_each() {
+        let dir = tmp();
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        fs::write(dir.join("go.mod"), "module x\n").unwrap();
+
+        let detected = detect_languages(&dir);
+        assert_eq!(detected.len(), 2, "{detected:?}");
+        assert!(detected.contains(&(WorktreeLanguage::JavaScript, dir.clone())));
+        assert!(detected.contains(&(WorktreeLanguage::Go, dir.clone())));
+    }
+
+    #[test]
+    fn detect_languages_prunes_node_modules() {
+        let dir = tmp();
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        // A nested package.json inside node_modules must NOT be detected.
+        let nm = dir.join("node_modules").join("some-dep");
+        fs::create_dir_all(&nm).unwrap();
+        fs::write(nm.join("package.json"), "{}").unwrap();
+
+        let detected = detect_languages(&dir);
+        let js: Vec<_> = detected
+            .iter()
+            .filter(|(l, _)| *l == WorktreeLanguage::JavaScript)
+            .collect();
+        assert_eq!(js.len(), 1, "node_modules nested manifest must be pruned: {detected:?}");
+        assert_eq!(js[0].1, dir, "only the root package.json should be detected");
+    }
+
+    #[test]
+    fn detect_languages_prunes_all_noise_dirs() {
+        let dir = tmp();
+        // Real project at root.
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        // Plant a manifest inside each pruned dir; none should be detected.
+        for pruned in PRUNED_DIRS {
+            let p = dir.join(pruned).join("nested");
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("package.json"), "{}").unwrap();
+        }
+
+        let detected = detect_languages(&dir);
+        assert_eq!(detected.len(), 1, "only root Cargo.toml: {detected:?}");
+        assert_eq!(detected[0], (WorktreeLanguage::Rust, dir));
+    }
+
+    #[test]
+    fn detect_languages_single_language_repo_one_entry() {
+        let dir = tmp();
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let detected = detect_languages(&dir);
+        assert_eq!(detected, vec![(WorktreeLanguage::Rust, dir)]);
+    }
+
+    #[test]
+    fn detect_languages_no_manifest_is_empty() {
+        let dir = tmp();
+        assert!(detect_languages(&dir).is_empty());
+    }
+
+    // ── composite runner: runs all, unions, fail-closed ───────────────────────
+
+    /// A fake sub-runner that records the path it was checked against and returns
+    /// a fixed result (violations or an error).
+    struct FakeRunner {
+        result: std::sync::Mutex<Option<anyhow::Result<Vec<RuleId>>>>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+
+    impl FakeRunner {
+        fn ok(rules: Vec<RuleId>, seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
+            Self {
+                result: std::sync::Mutex::new(Some(Ok(rules))),
+                seen,
+            }
+        }
+        fn err(msg: &str, seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
+            Self {
+                result: std::sync::Mutex::new(Some(Err(anyhow::anyhow!(msg.to_string())))),
+                seen,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CheckRunner for FakeRunner {
+        async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+            self.seen.lock().unwrap().push(worktree.to_path_buf());
+            self.result.lock().unwrap().take().unwrap()
+        }
+    }
+
+    fn composite(
+        subs: Vec<(WorktreeLanguage, PathBuf, Box<dyn CheckRunner>)>,
+    ) -> PolyglotCheckRunner {
+        PolyglotCheckRunner { sub: subs }
+    }
+
+    #[tokio::test]
+    async fn composite_runs_all_subruns_over_their_subtrees_and_unions() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ui = PathBuf::from("/work/apps/ui");
+        let api = PathBuf::from("/work/services/api");
+        let tool = PathBuf::from("/work/tools/x");
+
+        let runner = composite(vec![
+            (
+                WorktreeLanguage::JavaScript,
+                ui.clone(),
+                Box::new(FakeRunner::ok(vec![js_checks_rule()], seen.clone())),
+            ),
+            (
+                WorktreeLanguage::Python,
+                api.clone(),
+                Box::new(FakeRunner::ok(vec![python_checks_rule()], seen.clone())),
+            ),
+            (
+                WorktreeLanguage::Go,
+                tool.clone(),
+                Box::new(FakeRunner::ok(vec![], seen.clone())),
+            ),
+        ]);
+
+        let violations = runner.check(&role(), Path::new("/work")).await.unwrap();
+
+        // Union of all sub-runner violations.
+        assert!(violations.contains(&js_checks_rule()));
+        assert!(violations.contains(&python_checks_rule()));
+        assert_eq!(violations.len(), 2, "go was clean: {violations:?}");
+
+        // Each sub-runner was checked against ITS own subtree, not the root.
+        let seen = seen.lock().unwrap();
+        assert!(seen.contains(&ui));
+        assert!(seen.contains(&api));
+        assert!(seen.contains(&tool));
+        assert!(!seen.contains(&PathBuf::from("/work")), "must not run against root");
+    }
+
+    #[tokio::test]
+    async fn composite_fails_closed_if_one_subrun_fails_and_still_runs_others() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ui = PathBuf::from("/work/apps/ui");
+        let api = PathBuf::from("/work/services/api");
+        let tool = PathBuf::from("/work/tools/x");
+
+        let runner = composite(vec![
+            (
+                WorktreeLanguage::JavaScript,
+                ui.clone(),
+                Box::new(FakeRunner::ok(vec![], seen.clone())),
+            ),
+            (
+                WorktreeLanguage::Python,
+                api.clone(),
+                Box::new(FakeRunner::err("ruff not installed", seen.clone())),
+            ),
+            (
+                WorktreeLanguage::Go,
+                tool.clone(),
+                Box::new(FakeRunner::ok(vec![], seen.clone())),
+            ),
+        ]);
+
+        let err = runner.check(&role(), Path::new("/work")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("fail-closed"), "{msg}");
+        assert!(msg.contains("Python"), "names the failing language: {msg}");
+        assert!(msg.contains("ruff not installed"), "carries the cause: {msg}");
+
+        // Critically: the OTHER sub-runners still ran (no abort-early).
+        let seen = seen.lock().unwrap();
+        assert!(seen.contains(&ui), "JS sub-runner must still have run");
+        assert!(seen.contains(&tool), "Go sub-runner must still have run");
+        assert!(seen.contains(&api));
+        assert_eq!(seen.len(), 3, "all three ran despite the failure");
+    }
+
+    #[tokio::test]
+    async fn composite_all_clean_returns_empty() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = composite(vec![
+            (
+                WorktreeLanguage::JavaScript,
+                PathBuf::from("/a"),
+                Box::new(FakeRunner::ok(vec![], seen.clone())),
+            ),
+            (
+                WorktreeLanguage::Go,
+                PathBuf::from("/b"),
+                Box::new(FakeRunner::ok(vec![], seen.clone())),
+            ),
+        ]);
+        let violations = runner.check(&role(), Path::new("/")).await.unwrap();
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    // ── selector: polyglot -> composite; single -> one entry; none -> noop ────
+
+    #[tokio::test]
+    async fn selector_builds_composite_over_all_detected() {
+        let dir = tmp();
+        let ui = dir.join("apps").join("ui");
+        let api = dir.join("services").join("api");
+        fs::create_dir_all(&ui).unwrap();
+        fs::create_dir_all(&api).unwrap();
+        fs::write(ui.join("package.json"), "{}").unwrap();
+        fs::write(api.join("pyproject.toml"), "[project]\nname=\"a\"\n").unwrap();
+
+        let detected = detect_languages(&dir);
+        let composite = PolyglotCheckRunner::from_detected(detected);
+        assert_eq!(composite.project_count(), 2, "composite over both projects");
+    }
+
+    #[tokio::test]
+    async fn selector_single_language_repo_unchanged() {
+        let dir = tmp();
+        fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let composite = PolyglotCheckRunner::from_detected(detect_languages(&dir));
+        assert_eq!(composite.project_count(), 1, "single Rust project");
+    }
+
+    #[tokio::test]
+    async fn selector_no_manifest_returns_noop_reporting_clean() {
+        let dir = tmp(); // no manifest anywhere
+        let runner = runner_for_worktree(&dir);
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert_eq!(violations, vec![], "noop reports clean for no-manifest tree");
     }
 }
