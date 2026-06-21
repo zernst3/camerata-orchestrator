@@ -268,6 +268,120 @@ rules it has not implemented, and adding enforcement is purely additive.
 
 ---
 
+## 5a. Rule type model: two axes
+
+This section is the precise reference for the rule type system. The in-app assistant is grounded on it;
+`chat.rs` includes both this file and `USER_GUIDE.md` at compile time via `include_str!`. The user-facing
+overview is in `USER_GUIDE.md §13`.
+
+### Axis A — the corpus `enforcement` field (what KIND of conformance check the rule needs)
+
+`EnforcementKind` in `crates/rules/src/lib.rs` has four variants. The `enforcement` field in each corpus
+TOML file maps to one of them:
+
+| Value | `EnforcementKind` variant | Conformance test | Plain-English meaning | Render target |
+|---|---|---|---|---|
+| `prose` | `Prose` | Human judgment / matter of degree | A principle or idiom where reasonable engineers weigh conformance (e.g. "interfaces are small and cohesive," "optimization by default"). | `AGENTS.md` |
+| `structured` | `Structured` | Human, binary, but not machine-automatable | A concrete design contract with a clear conform/violate answer (e.g. "repositories return domain types," "API version lives in the URL prefix," "cursor not offset pagination"). Objectively reviewable; not lint-able. | `CONVENTIONS.md` |
+| `mechanical` | `Mechanical` | An **existing linter** decides it | Maps to a real, named linter rule in a per-language tool (clippy, ruff/bandit, eslint, ts-eslint, golangci-lint, rubocop, checkstyle/spotbugs, roslyn). Every mechanical rule in the current corpus cites a concrete linter rule; rules with no off-the-shelf match are reclassified to `architectural` or `structured`. | `CONVENTIONS.md` + CI / check-runner |
+| `architectural` | `Architectural` | Machine-decidable but needs a **bespoke AST check** | Deterministic in principle, but no off-the-shelf linter expresses it (e.g. `handler_no_direct_db` — "handlers never touch the DB"). Camerata ships or builds a custom checker; falls back to an agent directive while the checker is being written. See `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`. | `CONVENTIONS.md` + custom CI check |
+
+**The unifying insight:** the four modalities are one spectrum of *how objectively conformance can be determined*. That single property decides both where the rule is written and how it is enforced.
+
+| Modality | Conformance test | Written to | Enforced by |
+|---|---|---|---|
+| prose | human judgment / degree | `AGENTS.md` | PR review (human) |
+| structured | human, binary contract | `CONVENTIONS.md` | PR review (human) |
+| mechanical | existing linter | `CONVENTIONS.md` + CI | layer-2 check runner + CI |
+| architectural | bespoke AST check | `CONVENTIONS.md` + CI | custom check |
+
+**Prose vs. structured — the exact line** (the most common source of confusion; the chatbot must get this right):
+- **Prose** = a human has to *judge* it. Conformance is a matter of degree; no single fact settles it. Emitted to `AGENTS.md` as spirit/principles the agent reads.
+- **Structured** = a human can *verify* it against a clear binary contract. Any engineer can look at the code and give a definite yes/no — the contract just cannot be expressed as a lint rule. Emitted to `CONVENTIONS.md` as citable conventions.
+
+Both carry identical TOML shape (`[decision]` + `[[option]]` blocks). The difference is the judgment required, not the file format.
+
+**Current corpus counts** (counts drift as rules are added; describe kinds, not hard numbers, when citing):
+prose ~84, structured ~190, mechanical ~57, architectural ~9.
+
+**Render-target routing source of truth:** `crates/server/src/arm.rs` lines 8–10, 136–160 — `prose` → `AGENTS.md`; `structured | mechanical | architectural` → `CONVENTIONS.md`. This is also confirmed in `crates/server/src/onboard.rs` at the `ProposedRule.enforcement` comment (lines 101–103): "prose -> AGENTS.md, the rest -> CONVENTIONS.md, matching camerata-ai's emit partitioning."
+
+### Axis B — where/when rules are actually enforced (the enforcement points)
+
+Axis B is a deployment fact, not a corpus field. The same rule can be enforced at multiple points.
+
+1. **MCP gate (layer-1) — pre-execution, deny-before-write.** A hardwired set of rule-ids in
+   `crates/gateway/src/lib.rs` (`RULE_REGISTRY`). Membership criterion: decidable from one file's
+   path or content with a regex, no build needed. The six current gate rules are:
+   `GOV-1`, `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
+   `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1`.
+
+   **The gate is a deployment point, not a rule type.** Proof: 5 of these 6 rule-ids are NOT in the
+   corpus at all — they are gate-internal primitives. Only `ARCH-NO-SECRETS-IN-URL-1` is also a
+   corpus rule (tagged `structured`). The gate enforces a rule by its id string; a corpus rule with
+   the same id gets layer-1 enforcement automatically. Adding a gate arm is one `check_*` fn +
+   one `RuleEntry` in `RULE_REGISTRY`; it propagates everywhere via `enforced_gate_rules()`.
+
+   The verified runtime default subset is `["GOV-1"]` unless configured. `evaluate_call` is
+   fail-closed: unknown session → deny; unknown rule id → permissive no-op (not a false deny).
+
+2. **Layer-2 post-task check runner — deterministic, on the agent's output.** `CheckRunner` trait
+   (`crates/core/src/lib.rs`), run by the `Coordinator` after the agent finishes. If a rule is
+   violated, ONE bounce-and-revise pass runs. The runner is now polyglot:
+   `crates/checks/src/multilang.rs` implements `JsCheckRunner`, `PythonCheckRunner`,
+   `GoCheckRunner`, and the existing `RustCheckRunner` (`crates/checks/src/lib.rs`). The
+   `runner_for_worktree(worktree)` function detects EVERY language present in the worktree
+   (recursively, via `detect_languages`), constructs a `PolyglotCheckRunner` that runs one
+   sub-runner per detected `(language, dir)` project, unions their violations, and is
+   **fail-closed**: if any sub-runner cannot run (missing toolchain, no lint/test script, install
+   failure), the composite returns `Err` — it never reports clean for a half-verified tree. Each
+   runner uses the REPO's own lockfile-pinned toolchain, so layer-2 == the repo's CI toolchain.
+   Unknown worktrees degrade to `NoopChecks` with a logged warning; this is the one explicit
+   exception, not the fail-closed path (there is no toolchain to be missing for an unrecognised tree).
+
+   Layer-2 is **fast and in-loop** (runs against the agent's draft, before commit). Layer-3 is the
+   authoritative backstop. This is intentional redundancy: client-side validation (layer-2) catches
+   violations immediately so the agent can self-correct; server-side validation (layer-3) catches
+   anything that bypassed the agent, including human commits and other tools. Neither substitutes
+   for the other.
+
+3. **Layer-3 CI — the target repo's own pipeline.** Language-agnostic. Onboarding grounds each
+   mechanical rule to the repo's real linter and files a GitHub issue to wire it into CI. The CI
+   config itself is not generated — Camerata files the story; the dev layer does the wiring work.
+   Layer-3 persists even if Camerata is removed from the project.
+
+4. **Agent directive — in-context.** prose + structured rules are injected into the agent's context
+   at spawn. The agent follows them. Drift is low with concise directives but not zero; PR review is
+   the human backstop.
+
+5. **Human review — the backstop for prose and structured, and the only path to `verified`.**
+   See the verification ladder below.
+
+### The verification ladder
+
+Every rule carries a `verification` field:
+
+| Value | Meaning |
+|---|---|
+| `draft` | AI-generated rule; no supporting citation was found. Advisory only; never auto-recommended during onboarding. |
+| `grounded` | The onboarding agents found at least one citation from a trusted source (language docs, style guides, real linter rule ids). Linter-id existence is validated by `crates/linter-registry/`. |
+| `verified` | A human has checked the cited findings and approved the rule. **No agent may set this, by design.** This is a deliberate trust boundary: the machine can ground a claim, only a human certifies it. |
+
+Current state (honest): the mechanical rules in the corpus are grounded (each maps to a real linter rule). Zero are `verified` yet — that is a human-only step the maintainer has not yet completed. Grounded is the shippable baseline. Verified is the gold standard for citing a rule in a compliance context. The app surfaces these as read-only badges; the maintainer-side verifier tool is the only write path to `verified`.
+
+### Chatbot grounding confirmation
+
+`crates/ui/src/chat.rs` includes both documentation files at compile time:
+
+```rust
+const TECHNICAL_DOC: &str = include_str!("../../../docs/TECHNICAL.md");
+const USER_GUIDE: &str    = include_str!("../../../docs/USER_GUIDE.md");
+```
+
+Both are baked into the unified system prompt assembled for every chat turn (layer-1 of the prompt, static and cache-eligible). A doc change recompiles `camerata-ui` but does not require any other wiring change. The chatbot's canonical probe — "what is the difference between a prose and a structured rule?" — is answerable from this section: prose requires human judgment (matter of degree); structured requires human verification against a binary contract. Both live outside CI; the difference is judgment, not format.
+
+---
+
 ## 6. Onboarding scan pipeline
 
 The brownfield onboarding pipeline lives in two files in `crates/server/src/`:

@@ -404,6 +404,61 @@ Flags let us:
 
 ---
 
+## 13. Understanding rule types
+
+Every rule in Camerata's corpus carries an `enforcement` field that answers one question: **how objectively can conformance be checked?** That single property decides where the rule is written and how it's enforced. Five buckets are useful for everyday work; the first is special.
+
+### The five buckets
+
+**Security gate rules** are not a corpus category you author into. They are a small, hardwired set of rule-ids built directly into the MCP gate (see §7). They run before any write touches disk, require no build, and are always on. You do not select them; they cannot be turned off per-repo. The audit surface them as "deterministic floor" findings because they are the same checks the gate enforces on new writes. There are currently six gate rules; only one of them (`ARCH-NO-SECRETS-IN-URL-1`) also lives in the corpus as a `structured` rule — the rest are gate-internal primitives.
+
+The remaining four are the corpus enforcement modalities, from most human-judgment to most automated:
+
+| Bucket | What it means for you | Where it's enforced |
+|---|---|---|
+| **Mechanical** | An existing linter catches it. Every mechanical rule maps to a real, named linter rule in a per-language tool (clippy, ruff, eslint, golangci-lint, etc.). | Local layer-2 check runner (fast, in the dev loop, across all detected languages) **and** CI (authoritative backstop). |
+| **Architectural** | Machine-decidable but needs a custom AST check — no off-the-shelf linter expresses it (e.g. "handlers never touch the DB directly"). | Custom CI check (or agent directive as a fallback while the checker is being built). |
+| **Structured** | A concrete design contract with a clear conform/violate answer — but not lint-able. Examples: "repositories return domain types," "API version lives in the URL prefix," "cursor not offset pagination." A human can verify it objectively; a linter cannot. | PR review (human, binary yes/no). |
+| **Prose** | A principle or idiom where a human must judge conformance: "interfaces are small and cohesive," "optimization by default," "errors are wrapped with context." Reasonable engineers may weigh these differently on the margin. | PR review (human judgment). |
+
+### The objectivity spectrum
+
+One way to read the four modalities is as a single spectrum: how far can the conformance check shift from human to machine?
+
+| Modality | Conformance test | Written to | Enforced by |
+|---|---|---|---|
+| prose | human judgment / matter of degree | `AGENTS.md` | PR review |
+| structured | human, binary contract | `CONVENTIONS.md` | PR review |
+| mechanical | existing linter | `CONVENTIONS.md` + CI | local check runner + CI |
+| architectural | bespoke AST check | `CONVENTIONS.md` + CI | custom check |
+
+### Prose vs. structured: the line that matters most
+
+Both prose and structured rules carry the same TOML shape and both live outside CI — they are directives the agent follows and that engineers review. The difference is one of judgment:
+
+- **Prose** rules require a human to *judge* conformance. They live in `AGENTS.md` because they are principles the agent reads and applies by spirit.
+- **Structured** rules require a human to *verify* conformance against a clear binary contract. They live in `CONVENTIONS.md` because they are concrete, citable conventions.
+
+"The API version lives in the URL prefix" is structured: you can check any endpoint and give a definite yes/no. "Interfaces are small and cohesive" is prose: engineers weigh it and the answer is a matter of degree.
+
+### Where rules are written
+
+`arm.rs` routes rules to files at emit time: `prose` → `AGENTS.md`, everything else (`structured`, `mechanical`, `architectural`) → `CONVENTIONS.md`. That routing is the live source of truth (see `crates/server/src/arm.rs`). The format string at the top of each generated file explains this for anyone reading the repo without Camerata open.
+
+### Rule provenance badges
+
+Every rule also carries a `verification` badge (shown in the Rules view):
+
+| Badge | Meaning |
+|---|---|
+| **Verified** | A human explicitly checked the rule and its cited sources. No agent may set this. |
+| **Grounded** | The onboarding agents found and cited at least one real source (linter rule id, language spec, framework best practice). |
+| **Draft** | AI-generated, not yet grounded. Advisory only; never auto-recommended during onboarding. |
+
+The mechanical rules in the current corpus are grounded (each maps to a real, named linter rule that was validated to exist). None are verified yet — that is a deliberate human-only step the maintainer keeps. Grounded is the baseline for a shippable rule; verified is the gold standard you can cite to an auditor.
+
+---
+
 ## The whole loop, in one line
 
 **Create/open a project → onboard each repo (browse to its local folder → scan the local code → pick
