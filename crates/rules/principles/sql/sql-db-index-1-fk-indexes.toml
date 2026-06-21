@@ -3,9 +3,18 @@ title = "Every foreign-key column gets an index in the same migration"
 tag = "stack"
 domain = "sql"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "prose"
 default = true
 qualifies = "Enforced by a migration linter that scans each migration for foreign-key declarations (REFERENCES clauses or the ORM's FK helper) and verifies a matching index on the same column lands in the same change. The linter can also run as a one-shot audit query against the live schema that lists every FK-constrained column with no covering index and returns rows for any gap. Conformance holds when the per-migration check runs in CI and the audit query returns zero rows; it fails when an FK column ships with no index in the same migration."
+verification = "grounded"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
+title = "PostgreSQL — 5.5.5 Foreign Keys: 'the declaration of a foreign key constraint does not automatically create an index on the referencing columns'"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/indexes-intro.html"
+title = "PostgreSQL — 11.1 Introduction to Indexes: indexes on join-condition columns significantly speed up queries with joins"
 
 [decision]
 question = "What position does the project take on: Every foreign-key column gets an index in the same migration?"
