@@ -1,0 +1,40 @@
+id = "PYTHON-TESTING-PARAMETRIZE-1"
+title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-paste test functions"
+tag = "stack"
+domain = "python:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Ruff PT006 (wrong argnames type) and PT007 (wrong values type in parametrize). Conformance holds when a test function that validates the same logic with N different inputs is expressed as a single test function decorated with @pytest.mark.parametrize, with each case as a tuple in the values list; it fails when the same assertion logic is copy-pasted into N distinct test functions differing only in their inputs."
+verification = "grounded"
+
+[decision]
+question = "How should a test that validates the same logic across multiple input/output combinations be written?"
+default = "parametrize-decorator"
+why = "pytest's @pytest.mark.parametrize decorator enables a single test function to run independently for each set of parameters, producing a separate result line in the output for each case (with the parameter values shown in brackets). This eliminates copy-paste duplication: adding a new case requires one more tuple in the params list, not a new test function. Each parametrized case fails or passes independently, so a failure in case 3 does not prevent cases 4 onward from running, giving maximum diagnostic information in a single test run. Ruff's PT006 rule flags the common mistake of wrapping a single-parameter argnames in a tuple (use a string instead), and PT007 flags wrong value types, keeping parametrize calls idiomatic. The alternative — copy-pasting test functions with hardcoded values — scales quadratically with case count, diverges over time as one copy is updated but not others, and adds noise to test output without adding diagnostic signal."
+
+[[option]]
+id = "parametrize-decorator"
+label = "single test function with @pytest.mark.parametrize"
+directive = "When the same test logic must run with multiple different inputs and expected outputs, express it as a single test function decorated with @pytest.mark.parametrize('arg1,arg2,...', [...]) where each element of the list is a (input, expected) tuple or a pytest.param(). For a single parameter, pass a plain string as the argnames argument (not a one-element tuple). Mark individual cases with pytest.param(..., marks=pytest.mark.xfail) when a known-failing case must be included. Do not copy-paste the test body into multiple functions differing only in their literals."
+why = "The adopted default. Each case produces an independent result; adding a new case is a one-line change; Ruff PT006/PT007 keep the decorator call idiomatic."
+
+[[option]]
+id = "copy-pasted-test-functions"
+label = "one test function per input combination"
+directive = "Write a separate test function for each input/output combination, repeating the assertion logic in each body."
+why = "Duplicates logic that will diverge; scales poorly; adding a case requires a new function, not a new tuple."
+
+[[sources]]
+url = "https://docs.pytest.org/en/stable/how-to/parametrize.html"
+title = "pytest — How to parametrize fixtures and test functions"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/pytest-parametrize-names-wrong-type/"
+title = "Ruff PT006 — pytest-parametrize-names-wrong-type"
+linter = "Ruff: PT006"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/pytest-parametrize-values-wrong-type/"
+title = "Ruff PT007 — pytest-parametrize-values-wrong-type"
+linter = "Ruff: PT007"

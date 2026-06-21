@@ -1,0 +1,30 @@
+id = "PYTHON-TESTING-FILE-NAMING-1"
+title = "Test files follow test_*.py naming so pytest auto-discovers them"
+tag = "stack"
+domain = "python:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by pytest's default test-discovery configuration: pytest searches for test_*.py (or *_test.py) files and collects functions prefixed test_ and classes prefixed Test. Conformance holds when every test file matches test_*.py (or *_test.py) and every test function is prefixed test_; it fails when files or functions use an arbitrary naming scheme that requires manual configuration to discover."
+verification = "grounded"
+
+[decision]
+question = "What naming convention must test files and test functions follow?"
+default = "test-prefix-convention"
+why = "pytest's test-collection algorithm relies on naming conventions: it searches for files matching test_*.py or *_test.py, then within those files collects functions prefixed test_ and classes prefixed Test (without __init__). This convention is baked into pytest's defaults and is therefore the industry standard for Python projects using pytest. Deviating from it forces custom python_files / python_functions configuration in pyproject.toml, creates friction for new contributors, and risks tests being silently skipped when the config drift is overlooked. The test_<subject>.py pattern (prefix form) is the overwhelmingly dominant convention because it groups test files alphabetically near the files they cover when sorted."
+
+[[option]]
+id = "test-prefix-convention"
+label = "test_*.py files, test_ functions, Test classes"
+directive = "Every test file is named test_<subject>.py (e.g. test_user_service.py). Every test function is named test_<behavior>() (e.g. test_create_user_returns_id). Every test class is named Test<Subject> and contains no __init__ method. The *_test.py suffix form is acceptable but should be chosen consistently within the project. No custom python_files or python_functions settings are required."
+why = "The adopted default. Matches pytest's built-in discovery; no extra configuration required; universally familiar to Python contributors."
+
+[[option]]
+id = "custom-naming"
+label = "custom file and function naming configured via pytest.ini / pyproject.toml"
+directive = "Test files and functions use a project-specific naming scheme declared in python_files and python_functions settings."
+why = "Requires every contributor to understand the custom configuration; risks silent test-skip when config is misconfigured."
+
+[[sources]]
+url = "https://docs.pytest.org/en/stable/explanation/goodpractices.html"
+title = "pytest — Good Integration Practices (Conventions for Python test discovery)"
