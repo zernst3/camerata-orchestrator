@@ -1,0 +1,46 @@
+id = "JAVA-TESTING-AAA-STRUCTURE-1"
+title = "Every test method follows Arrange-Act-Assert: set up preconditions, invoke the single behavior under test, then assert the outcome; each test covers exactly one behavior"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Partially enforced by PMD's UnitTestShouldIncludeAssert (flags test methods with no assertions) and UnitTestContainsTooManyAsserts (flags tests with too many assertions, indicating multiple behaviors under test). The structural three-phase shape is prose-reviewed. Conformance holds when each test has a visible Arrange section (field or local setup), a single Act call, and one or more assertions covering exactly that call's outcome."
+verification = "grounded"
+
+[decision]
+question = "How is a test method body structured so it is readable, minimal, and covers exactly one behavior?"
+default = "arrange-act-assert"
+why = "Arrange-Act-Assert (AAA) is the canonical three-phase structure for unit tests: Arrange sets up all preconditions and test doubles; Act invokes exactly the one method or behavior being verified; Assert checks the outcome. Keeping these three phases visually distinct (separated by blank lines or // Arrange / // Act / // Assert comments) makes it immediately obvious what is being tested, what state is assumed, and what the expected result is. Tests that contain multiple Act calls verify multiple behaviors and should be split. Tests with no assertions (PMD: UnitTestShouldIncludeAssert) provide no value — they pass even when the code is broken. Tests with excessive assertions (PMD: UnitTestContainsTooManyAsserts) indicate the test is verifying multiple independent behaviors and should be split."
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"
+title = "PMD Best Practices — UnitTestShouldIncludeAssert: unit tests should include at least one assertion"
+linter = "PMD: UnitTestShouldIncludeAssert"
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestcontainstoomanyasserts"
+title = "PMD Best Practices — UnitTestContainsTooManyAsserts: refactor tests with excessive assertions into multiple focused scenarios"
+linter = "PMD: UnitTestContainsTooManyAsserts"
+
+[[sources]]
+url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
+title = "JUnit 5 User Guide — Annotations (@Test, @BeforeEach, @AfterEach lifecycle)"
+
+[[option]]
+id = "arrange-act-assert"
+label = "three-phase Arrange / Act / Assert structure, one behavior per test"
+directive = "Structure every test method as three distinct phases separated by blank lines: (1) Arrange — create objects, configure mocks, set inputs; (2) Act — call exactly one method or trigger exactly one behavior; (3) Assert — assert the outcome with explicit assertions (never assume success from no-exception). Use @BeforeEach for setup shared across all tests in the class. Each @Test method covers exactly one behavior: if you need to verify two independent behaviors, write two test methods. Do not mix multiple Act invocations in one test body."
+why = "The adopted default. AAA makes the intent of each test legible at a glance, eliminates hidden assumptions, and ensures each failure maps to exactly one broken behavior."
+
+[[option]]
+id = "given-when-then"
+label = "Given / When / Then (BDD variant)"
+directive = "Structure test methods as Given (preconditions) / When (the action) / Then (assertions), optionally using // Given / // When / // Then comments. Functionally equivalent to AAA; preferred when the team follows a BDD vocabulary."
+why = "Equivalent to AAA in structure; the naming convention differs. Acceptable alternative when the team uses BDD vocabulary consistently. Both approaches are captured in the same linter gates."
+
+[[option]]
+id = "monolithic-scenario"
+label = "long multi-act test method"
+directive = "A single test method exercises multiple behaviors in sequence, asserting after each step."
+why = "A failure in the first Act masks all subsequent steps (they are skipped). The failure message names the test method, not the step that failed. Violates single-responsibility for tests; PMD's UnitTestContainsTooManyAsserts will flag these."

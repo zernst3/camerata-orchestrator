@@ -1,0 +1,41 @@
+id = "JAVA-TESTING-ASSERTIONS-ASSERTJ-1"
+title = "Assertions use AssertJ's assertThat() fluent API; JUnit's assertEquals/assertTrue/assertNull are not used in new test code"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by code review and optionally by a Checkstyle or Semgrep rule that flags calls to org.junit.jupiter.api.Assertions.assertEquals/assertTrue/assertFalse/assertNull in favor of AssertJ. PMD's UnitTestShouldIncludeAssert ensures at least one assertion is present; AssertJ's assertThat() satisfies this check. Conformance holds when all assertion calls use org.assertj.core.api.Assertions.assertThat (or BDDAssertions.then) rather than JUnit's static assertion methods."
+verification = "grounded"
+
+[decision]
+question = "Which assertion library is used in unit and integration tests?"
+default = "assertj-fluent"
+why = "AssertJ's assertThat() fluent API produces failure messages that include the actual value, the expected value, and a plain-English description of the condition that failed — without any effort from the test author. JUnit's assertEquals(expected, actual) produces a terse diff; assertTrue(user.getName().equals('Alice')) on failure reports only 'expected true but was false', losing all context. AssertJ's chained assertions (assertThat(user).extracting('name', 'age').containsExactly('Alice', 30)) express complex structural assertions in a single readable statement. IDE completion on assertThat() surfaces all available assertions for the type, making test authoring faster. AssertJ is the de-facto standard assertion library for Java in 2024+ and is included by default in Spring Boot's spring-boot-starter-test."
+
+[[sources]]
+url = "https://assertj.github.io/doc/"
+title = "AssertJ — Fluent testing assertions for Java: 'provides a rich set of assertions and truly helpful error messages, improves test code readability'"
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldincludeassert"
+title = "PMD Best Practices — UnitTestShouldIncludeAssert: unit tests should include at least one assertion (assertThat satisfies this)"
+linter = "PMD: UnitTestShouldIncludeAssert"
+
+[[option]]
+id = "assertj-fluent"
+label = "AssertJ assertThat() fluent assertions"
+directive = "All assertions use AssertJ: import static org.assertj.core.api.Assertions.assertThat; (or BDDAssertions.then for BDD style). Never use org.junit.jupiter.api.Assertions.assertEquals, assertTrue, assertFalse, assertNull, or assertNotNull in new test code. For exception assertions, use assertThatThrownBy(() -> ...).isInstanceOf(X.class).hasMessageContaining('...'). For soft assertions (check all conditions before reporting), use SoftAssertions.assertSoftly(softly -> { ... })."
+why = "The adopted default. AssertJ failure messages are self-describing; the fluent API composes complex structural assertions without custom message strings."
+
+[[option]]
+id = "junit-assertions"
+label = "JUnit 5 Assertions.assertEquals / assertTrue / assertThrows"
+directive = "Assertions use org.junit.jupiter.api.Assertions static methods directly."
+why = "Available without an extra dependency but produces opaque failure messages (e.g., 'expected true but was false'). assertThat(value).isTrue() fails with 'expected: true but was: false for <value>'. The additional context is significant for debugging CI failures."
+
+[[option]]
+id = "hamcrest"
+label = "Hamcrest assertThat / Matchers"
+directive = "Assertions use org.hamcrest.MatcherAssert.assertThat with Hamcrest matchers."
+why = "Older library superseded by AssertJ. Less expressive type-safe chaining; error messages are comparable to AssertJ but matcher combinators are less readable. New projects prefer AssertJ; existing Hamcrest tests need not be migrated unless touched."

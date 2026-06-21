@@ -1,0 +1,40 @@
+id = "JAVA-TESTING-MOCK-BOUNDARIES-1"
+title = "Mocks are used only at architectural boundaries (external services, repositories, HTTP clients); concrete classes and value objects are never mocked"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by code review. Mockito's own documentation explicitly warns against mocking concrete List implementations ('please don't mock the List class; use a real instance instead') and cautions that mocking a value object is a 'well known anti-pattern' (RETURNS_DEEP_STUBS section). Conformance holds when mocks appear only on interfaces or abstract types that represent external system boundaries: repositories, HTTP clients, message brokers, clocks, random sources."
+verification = "grounded"
+
+[decision]
+question = "Which collaborators in a unit test should be replaced with Mockito mocks, and which should remain real instances?"
+default = "mock-only-external-boundaries"
+why = "Mocking a collaborator couples the test to the internal implementation (how many times method X was called, in what order) rather than the observable behavior. Mockito warns that mocking a value object is a 'well known anti-pattern' (RETURNS_DEEP_STUBS section), and that 'please don't mock the List class — use a real instance instead.' When concrete classes are mocked, every internal refactor breaks the test even if the public behavior is unchanged. The correct boundary is the interface or abstract type that represents a dependency the class under test does not own: a repository that talks to a database, an HTTP client that calls an external service, a Clock that reads wall time. These are the points where real behavior is expensive, slow, or non-deterministic in a unit context. Everything the class does own — collections, value objects, domain objects — uses real instances."
+
+[[sources]]
+url = "https://site.mockito.org/javadoc/current/org/mockito/Mockito.html"
+title = "Mockito Javadoc — Mockito class: 'please don't mock the List class; use a real instance instead' + RETURNS_DEEP_STUBS anti-pattern warning"
+
+[[sources]]
+url = "https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html"
+title = "Mockito Core Javadoc (latest) — mocking guidelines and anti-patterns"
+
+[[option]]
+id = "mock-only-external-boundaries"
+label = "mock only interfaces/abstract types at system boundaries; use real instances for everything else"
+directive = "Use Mockito (mock(), @Mock, @ExtendWith(MockitoExtension.class)) only on interfaces or abstract types that represent external system boundaries: repository interfaces, HTTP client interfaces, message broker clients, Clock, SecureRandom, or any collaborator whose real implementation requires network/disk/external-process access. Use real instances for: collections, Strings, primitive wrappers, domain value objects, internal utility classes. Never mock a concrete class that the class under test owns or controls. Prefer constructor injection so mocks are easy to pass without reflection."
+why = "The adopted default. Mocks at boundaries make unit tests fast and deterministic; real instances for owned collaborators keep tests refactoring-safe."
+
+[[option]]
+id = "mock-all-collaborators"
+label = "mock every collaborator regardless of type"
+directive = "Every dependency of the class under test — including concrete utility classes, collections, domain objects — is replaced with a Mockito mock."
+why = "Couples tests to internal implementation rather than observable behavior. Any internal refactor breaks tests. Mockito explicitly warns against mocking concrete classes and value objects."
+
+[[option]]
+id = "no-mocks-integration-style"
+label = "no mocks; use real implementations for all dependencies (integration test style)"
+directive = "Unit tests use real implementations of all dependencies, starting a full application context or embedded database."
+why = "Correct for integration tests; wrong for unit tests. Starting a database or HTTP server per test makes the test suite slow, fragile (depends on external state), and hard to run offline. Integration tests live in *IT.java per JAVA-TESTING-INTEGRATION-TEST-LOCATION-1."
