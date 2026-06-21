@@ -1,5 +1,7 @@
 # Camerata Orchestrator
 
+I set out to build Camerata because managing multiple AI agents across multiple projects through conversational chat alone became unwieldy, and frankly cognitively tiring. The governance itself worked: my rules held and code quality stayed high. But routines would fail silently, and I often wouldn't know a run had failed until I went and asked the agent about it. The missing piece was never the governance, it was a structured place for it to live: status and state visible and managed in a real interface, instead of buried in chat. That is what Camerata is: a structured management layer for orchestrating AI agents across any number of projects.
+
 > Working name. "Conductor" is a candidate, fitting the Camerata / Chorale musical
 > theme: Camerata writes the rules, Chorale renders the tables, the Conductor leads
 > the ensemble.
