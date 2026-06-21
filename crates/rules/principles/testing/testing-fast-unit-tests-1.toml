@@ -1,0 +1,37 @@
+id = "TESTING-FAST-UNIT-TESTS-1"
+title = "Unit tests complete in milliseconds and require no external process or I/O"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/practical-test-pyramid.html#WriteTests"
+title = "Ham Vocke / Martin Fowler — Practical Test Pyramid: unit tests must be fast and not use I/O"
+
+[[sources]]
+url = "http://xunitpatterns.com/Slow%20Tests.html"
+title = "xUnit Test Patterns (Meszaros) — Slow Tests (causes and fixes)"
+
+[[sources]]
+url = "https://testing.googleblog.com/2010/12/test-sizes.html"
+title = "Google Testing Blog — Test Sizes (Small / Medium / Large; Small = no I/O, single process)"
+
+[decision]
+question = "What resource constraints apply to a unit test?"
+default = "unit-tests-no-io-milliseconds"
+why = "A unit test suite that takes minutes to run stops being run on every save and commit. Developers batch their runs, catch failures later, and lose the tight feedback loop that makes unit testing valuable. The speed constraint is achievable only if each test is isolated from external I/O: a test that opens a real database connection, hits a real HTTP endpoint, or reads a real file is bounded by network and disk latency rather than CPU, and its runtime becomes unpredictable. Google's Small/Medium/Large taxonomy formalizes this: a Small test (the unit-test tier) runs in a single process, uses no real network or filesystem, has no sleep/wait, and completes in under one second. The in-process fake or in-memory substitute is the standard tool for keeping a unit test fast: it replaces the slow, external dependency with a synchronous, deterministic stand-in."
+
+[[option]]
+id = "unit-tests-no-io-milliseconds"
+label = "Unit tests: no real I/O, no external processes, completes in milliseconds"
+directive = "A unit test runs in the same process as the code under test, uses no real database connections, network calls, file system reads/writes, or sleep/wait calls, and completes in well under one second (target: milliseconds). Replace external dependencies with in-process fakes, stubs, or in-memory implementations. If a test requires a real external resource to be meaningful, classify it as an integration test and run it in the integration suite, not the unit suite."
+why = "The adopted default. Millisecond unit tests keep the feedback loop tight enough to run on every save; tests that hit real I/O drift toward minutes-per-suite and stop being run frequently."
+
+[[option]]
+id = "unit-tests-may-use-real-io"
+label = "Unit tests may use real I/O if it makes the test simpler to write"
+directive = "Unit tests are free to open real database connections, read from the filesystem, or call localhost services if that is more straightforward than setting up a fake."
+why = "A defensible alternative the project considered and did not adopt as the default."

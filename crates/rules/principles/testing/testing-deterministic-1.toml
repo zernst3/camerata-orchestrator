@@ -1,0 +1,43 @@
+id = "TESTING-DETERMINISTIC-1"
+title = "Tests are deterministic: same code always produces the same pass/fail outcome"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/practical-test-pyramid.html#WriteTests"
+title = "Ham Vocke / Martin Fowler — Practical Test Pyramid: avoid flaky tests"
+
+[[sources]]
+url = "http://xunitpatterns.com/Erratic%20Test.html"
+title = "xUnit Test Patterns (Meszaros) — Erratic Test (flakiness root causes and fixes)"
+
+[[sources]]
+url = "https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html"
+title = "Google Testing Blog — Flaky Tests at Google and How We Mitigate Them"
+
+[decision]
+question = "What behavior is required when the same test is run repeatedly on unchanged code?"
+default = "always-deterministic-no-flaky"
+why = "A flaky test — one that sometimes passes and sometimes fails on the same code — destroys trust in the entire suite. When any test can fail for reasons unrelated to the code under test (timing, network, random seeds, shared mutable state, wall-clock dependencies), developers learn to ignore or re-run failures instead of investigating them. A red build that might 'just be a flake' stops being a reliable signal. Google's testing research documented that even a small number of flaky tests in a suite degrades developer confidence across all tests. Erratic tests (Meszaros's term) stem from: shared global/static state, uncontrolled time or randomness, real network or filesystem I/O, test-order dependencies, and concurrency with non-deterministic scheduling. Each root cause has a deterministic fix: injectable clock/RNG, hermetic in-process fakes, per-test state isolation."
+
+[[option]]
+id = "always-deterministic-no-flaky"
+label = "Tests are deterministic: same code, same outcome every run"
+directive = "A test must produce the same pass or fail outcome on every run against the same source code, regardless of run order, machine, time of day, or number of retries. Achieve this by: (1) injecting clocks and random-number generators so tests control time and randomness; (2) using in-process fakes or stubs instead of real network, filesystem, or external services; (3) isolating mutable state so each test starts from a clean baseline; (4) making test order irrelevant (no test depends on a side-effect left by a prior test). Never merge a test that is known to be flaky; fix the root cause before committing."
+why = "The adopted default. A flaky test destroys trust in the suite; developers learn to ignore failures rather than investigate them, turning the suite from a safety net into noise."
+
+[[option]]
+id = "retry-on-failure"
+label = "Allow flaky tests; re-run on failure up to N times before reporting red"
+directive = "Permit tests that are inherently timing- or environment-sensitive; compensate with automatic retry logic that re-runs a failing test up to N times and only marks it failed if all retries fail."
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "quarantine-flaky"
+label = "Quarantine known-flaky tests outside the main suite rather than fixing them"
+directive = "Tag or move tests known to be flaky into a separate quarantine suite that does not block CI; run it separately with relaxed expectations."
+why = "A defensible alternative the project considered and did not adopt as the default."

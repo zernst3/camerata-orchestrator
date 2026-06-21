@@ -1,0 +1,37 @@
+id = "TESTING-BEHAVIOR-NOT-IMPLEMENTATION-1"
+title = "Test observable behavior and contracts, not internal implementation details"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/practical-test-pyramid.html#TheImportanceOfDecoupling"
+title = "Ham Vocke / Martin Fowler — Practical Test Pyramid: decouple tests from implementation"
+
+[[sources]]
+url = "http://xunitpatterns.com/Fragile%20Test.html"
+title = "xUnit Test Patterns (Meszaros) — Fragile Test (overcoupled to implementation)"
+
+[[sources]]
+url = "https://testing.googleblog.com/2013/08/testing-on-toilet-test-behavior-not.html"
+title = "Google Testing Blog — TotT: Test Behavior, Not Implementation"
+
+[decision]
+question = "What should a test assert against: observable behavior (inputs → outputs / side-effects) or internal structure (which private methods are called, how state is stored internally)?"
+default = "behavior-and-contracts"
+why = "A test that asserts on internal implementation details — which private method was called, how many times a private field was mutated, the exact order of internal calls — breaks every time the implementation is refactored even when the behavior is unchanged. This creates a false-positive failure signal: the test goes red not because something broke, but because the internals moved. Meszaros calls these 'fragile tests' (Overspecified Software); they impose a maintenance tax that grows with codebase churn. Tests tied to behavior (public inputs and observable outputs, returned values, emitted events, observable side-effects, error types) survive refactors by design and give the author the freedom to change the how without changing the what. The rule does not prohibit mocking collaborators: mocking at a public boundary (e.g. injecting a fake repository) is fine; asserting on the count of private internal calls is not."
+
+[[option]]
+id = "behavior-and-contracts"
+label = "Assert on observable behavior and public contracts only"
+directive = "Tests assert on the observable outputs and side-effects of the system under test — returned values, thrown/returned errors, published events, state visible through the public API — not on private fields, internal call counts, or private method invocations. Refactoring the implementation without changing the public behavior must leave the test suite green. Mocks and fakes are acceptable at collaboration boundaries (injected dependencies), not as spies on internal calls."
+why = "The adopted default. Behavior-coupled tests are refactor-safe; implementation-coupled tests create a maintenance tax that grows with every internal change."
+
+[[option]]
+id = "whitebox-internal-assertions"
+label = "Assert on internal implementation details (white-box) for complete coverage"
+directive = "Tests verify internal call order, private field values, and implementation-specific side-effects to achieve fine-grained coverage of every execution path."
+why = "A defensible alternative the project considered and did not adopt as the default."

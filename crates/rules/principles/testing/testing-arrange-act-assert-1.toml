@@ -1,0 +1,37 @@
+id = "TESTING-ARRANGE-ACT-ASSERT-1"
+title = "Structure every test as Arrange / Act / Assert with no interleaving"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "http://xunitpatterns.com/Four-Phase%20Test.html"
+title = "xUnit Test Patterns (Meszaros) — Four-Phase Test (Setup / Exercise / Verify / Teardown)"
+
+[[sources]]
+url = "https://testing.googleblog.com/2008/12/as-always-dont-repeat-yourself-dry.html"
+title = "Google Testing Blog — DRY and test clarity (AAA framing)"
+
+[[sources]]
+url = "https://martinfowler.com/bliki/GivenWhenThen.html"
+title = "Martin Fowler — GivenWhenThen (Given / When / Then as the BDD spelling of AAA)"
+
+[decision]
+question = "How should the internal structure of an individual test be organized?"
+default = "arrange-act-assert-no-interleaving"
+why = "A test that mixes setup, action, and assertion is hard to read at a glance: the reader cannot immediately see what is being set up, what the system under test is doing, or what the expected outcome is. Separating the three phases (sometimes marked with blank lines or comments) makes each test a scannable, self-documenting unit. The pattern is universal: it is known as Arrange / Act / Assert (AAA) in the xUnit world, Given / When / Then in BDD, and Setup / Exercise / Verify in Meszaros's Four-Phase Test. The 'no interleaving' constraint is the load-bearing part: interleaved assertions inside a multi-step action sequence obscure causality and make failures harder to attribute."
+
+[[option]]
+id = "arrange-act-assert-no-interleaving"
+label = "Arrange / Act / Assert with no interleaving of phases"
+directive = "Each test has exactly one setup block (Arrange), one action block (Act), and one assertion block (Assert), in that order, with no assertion before the action and no additional action after the first assertion. Separate blocks with a blank line or a comment when it aids readability. Shared setup belongs in a before-each fixture, not copied into every test's Arrange block. The BDD equivalents (Given / When / Then) are accepted spellings of the same structure."
+why = "The adopted default. A consistent three-phase shape makes every test a self-documenting, scannable unit; interleaving phases obscures which action caused which outcome."
+
+[[option]]
+id = "freeform-no-required-structure"
+label = "No required internal structure; write tests in whatever order is natural"
+directive = "Tests may freely interleave setup, action, and assertion in whatever order the author finds clearest for the scenario."
+why = "A defensible alternative the project considered and did not adopt as the default."

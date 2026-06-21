@@ -1,0 +1,37 @@
+id = "TESTING-AS-DOCUMENTATION-1"
+title = "Test names and structure communicate intent so tests serve as living documentation"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "http://xunitpatterns.com/Tests%20as%20Documentation.html"
+title = "xUnit Test Patterns (Meszaros) — Tests as Documentation"
+
+[[sources]]
+url = "https://testing.googleblog.com/2014/10/testing-on-toilet-writing-descriptive.html"
+title = "Google Testing Blog — TotT: Writing Descriptive Test Names"
+
+[[sources]]
+url = "https://martinfowler.com/bliki/GivenWhenThen.html"
+title = "Martin Fowler — GivenWhenThen: test structure communicates intent"
+
+[decision]
+question = "Should tests be written so that they communicate intent and serve as living documentation of the system's behavior?"
+default = "tests-as-living-documentation"
+why = "A test whose name is `test1` or `testFoo` documents nothing when it fails; the reader must read the test body, understand the scenario, infer the expected behavior, and figure out why the current code violates it. Meszaros identifies 'Tests as Documentation' as a core xUnit pattern: a well-named test suite is the only up-to-date spec of how the system actually behaves, because it runs against real code and fails when the behavior diverges. Documentation prose rots; a passing test does not. The naming convention `should_<behavior>_when_<condition>` (or the BDD Given/When/Then equivalent) makes the test name a complete sentence describing a system rule. This pays off most visibly in failure output: a CI report listing `FAIL: user_cannot_withdraw_more_than_balance` pinpoints the broken contract without requiring anyone to open the test file."
+
+[[option]]
+id = "tests-as-living-documentation"
+label = "Tests are named and structured to serve as living documentation"
+directive = "Test names are complete sentences or structured phrases that describe the behavior being verified, not the method being called. Prefer patterns like `<unit>_<expected_behavior>_when_<condition>` or BDD-style `given_<state>_when_<action>_then_<outcome>`. The test body's Arrange section is minimal enough that a reader can scan the scenario in seconds. The full suite, read as a list of test names, should read as a readable specification of what the system does and does not do. Never name a test after the implementation detail it happens to exercise (e.g., `test_process_internal_queue`)."
+why = "The adopted default. A test suite whose names read as a spec is the only always-current documentation of system behavior; a suite of opaque names documents nothing when tests fail."
+
+[[option]]
+id = "test-names-reflect-method-under-test"
+label = "Test names mirror the method under test (e.g. testProcessOrder)"
+directive = "Test names identify the method or class being called; the expected behavior is apparent from reading the test body."
+why = "A defensible alternative the project considered and did not adopt as the default."
