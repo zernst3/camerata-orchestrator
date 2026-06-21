@@ -22,19 +22,19 @@ why = "SeaORM's generator emits one file per table; matching that shape keeps ge
 id = "entities-are-grouped-by-domain-concept-inside-th"
 label = "entities are grouped by domain concept inside the entities …"
 directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
-why = "A defensible alternative the project considered."
+why = "Forces a reader who knows the table name to first map it to whichever grouping the project chose, adding a project-specific lookup step that the flat shape does not require; domain-concept groupings also diverge from generator output, making regenerating a table a merge rather than a file replacement."
 
 [[option]]
 id = "the-entities-crate-exposes-a-prelude-module-that"
 label = "the entities crate exposes a prelude module that re-exports …"
 directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
-why = "A defensible alternative the project considered."
+why = "Extra indirection that buys nothing until the crate becomes a published public API, which an internal entities crate generally never is; the prelude must be kept in sync as entities are added or removed, adding a maintenance surface for no practical gain."
 
 [[option]]
 id = "multiple-small-related-entities-are-inlined-into"
 label = "multiple small related entities are inlined into a single …"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
-why = "A defensible alternative the project considered."
+why = "Saves a few files but breaks the table-name-to-file-name lookup the generator output relies on: every navigation event to an entity requires knowing which multi-entity file it lives in rather than simply opening the file named for the table."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"

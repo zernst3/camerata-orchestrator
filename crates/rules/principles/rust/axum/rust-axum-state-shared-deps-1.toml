@@ -22,7 +22,7 @@ why = "State makes dependencies explicit in handler signatures and simplifies te
 id = "use-global-statics-for-dependencies"
 label = "Use global static variables for application dependencies"
 directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
-why = "A defensible alternative the project considered."
+why = "Global state is invisible to the type system: a handler that depends on a database pool does not declare that dependency anywhere a linter or reviewer can see; testing becomes complex because tests must initialize and reset the global without interfering with each other; and initialization-order bugs produce failures that are hard to attribute because there is no structured way to handle initialization errors."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"

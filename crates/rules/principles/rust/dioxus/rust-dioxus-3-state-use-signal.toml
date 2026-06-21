@@ -22,19 +22,19 @@ why = "Signals are the framework's reactivity primitive: they automatically subs
 id = "local-component-state-uses-the-legacy-hook-based"
 label = "local component state uses the legacy hook-based state APIs …"
 directive = "local component state uses the legacy hook-based state APIs from earlier framework versions rather than the current signal primitive"
-why = "A defensible alternative the project considered."
+why = "Deprecated or removed in 0.7-era code: the APIs produce subtly different change-tracking behavior, the framework no longer maintains their error messages, and an AI agent must not introduce them because they may fail silently on framework upgrade."
 
 [[option]]
 id = "local-component-state-is-held-in-a-lock-protecte"
 label = "local component state is held in a lock-protected value …"
 directive = "local component state is held in a lock-protected value wrapped in a shared pointer (Arc/Mutex or equivalent) inside props, rather than in a signal"
-why = "A defensible alternative the project considered."
+why = "Compiles fine but loses automatic subscription tracking: the framework cannot observe when the value changes, so manual change notification becomes a per-component burden at every read site that the signal primitive was specifically designed to remove."
 
 [[option]]
 id = "a-dummy-signal-is-incremented-manually-to-force"
 label = "a dummy signal is incremented manually to force a …"
 directive = "a dummy signal is incremented manually to force a re-render whenever component state changes, rather than letting the signal primitive's automatic subscription tracking drive re-renders"
-why = "A defensible alternative the project considered."
+why = "An anti-pattern that acknowledges the rule was not followed: it re-renders the entire component on every increment regardless of which actual state changed, defeating the fine-grained reactivity signals provide and adding error-prone manual plumbing to every state mutation."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/essentials/state/"

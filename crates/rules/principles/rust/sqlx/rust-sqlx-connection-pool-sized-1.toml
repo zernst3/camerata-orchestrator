@@ -22,7 +22,7 @@ why = "A configured pool reuses connections and prevents resource exhaustion."
 id = "create-connection-per-query"
 label = "Create a new connection for each query"
 directive = "Each query creates a new database connection, uses it, and closes it, without connection pooling."
-why = "A defensible alternative the project considered."
+why = "A database connection involves a network round trip, authentication, and resource allocation on the server; creating one per query multiplies that overhead by the number of queries per second, which exhausts database connection limits under load and degrades latency in proportion to query volume."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.Pool.html"

@@ -30,10 +30,10 @@ why = "Mirrors the three-phase structure the Rust Book describes for test functi
 id = "free-form-test-body"
 label = "Free-form test body with no enforced phase structure"
 directive = "Test bodies may interleave setup, execution, and assertion in whatever order the test author finds clearest for the specific case."
-why = "A defensible alternative the project considered. Lower friction for trivial tests but inconsistent structure makes test-reading at scale harder."
+why = "Lower friction for trivial tests but produces inconsistent structure at scale: a reviewer reading many tests in a codebase with free-form bodies must re-derive the 'given' and 'when' boundaries each time, and the root cause of a failure is harder to attribute when setup, execution, and assertions are interleaved."
 
 [[option]]
 id = "given-when-then-bdd"
 label = "BDD-style Given-When-Then comments"
 directive = "Test bodies use // Given / // When / // Then comments instead of // Arrange / // Act / // Assert to match a BDD vocabulary."
-why = "A defensible alternative the project considered. Semantically equivalent to AAA; acceptable if the team prefers BDD vocabulary but not the adopted term for this project."
+why = "Semantically equivalent to AAA and acceptable if the team consistently prefers BDD vocabulary, but not the adopted term for this project: mixing Given-When-Then and Arrange-Act-Assert across the codebase produces inconsistency, and the Rust Book's language is AAA-shaped, not BDD-shaped, so new contributors arrive expecting AAA."

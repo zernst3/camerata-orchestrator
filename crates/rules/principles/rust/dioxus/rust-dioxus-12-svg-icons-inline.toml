@@ -21,16 +21,16 @@ why = "Inline SVG is the smallest-bundle, fastest-first-paint approach."
 id = "icons-come-from-a-rust-icon-library-crate-that-b"
 label = "icons come from a Rust icon-library crate that bundles …"
 directive = "icons come from a Rust icon-library crate that bundles every icon from a popular icon set, and the application imports specific icons from that crate"
-why = "A defensible alternative the project considered."
+why = "Grows the binary by the size of the full icon set regardless of how many icons the application actually uses, with no easy path to tree-shake unused icons out; the resulting binary is larger than necessary and the crate becomes a compile-time dependency that must be upgraded with the icon set."
 
 [[option]]
 id = "icons-are-rendered-as-glyphs-from-a-web-font-con"
 label = "icons are rendered as glyphs from a web font …"
 directive = "icons are rendered as glyphs from a web font containing the icon set, with the font fetched at runtime and the icons rendered through CSS class names"
-why = "A defensible alternative the project considered."
+why = "Adds a runtime font fetch, produces a flash of invisible text on slow networks, and breaks the server-rendered first paint: none of those costs exist with inline SVG, and the glyph approach also limits icon customization to whatever the font file encodes."
 
 [[option]]
 id = "icons-are-loaded-from-an-external-svg-sprite-she"
 label = "icons are loaded from an external SVG sprite sheet …"
 directive = "icons are loaded from an external SVG sprite sheet served over HTTP, with the application referencing each icon by its fragment identifier"
-why = "A defensible alternative the project considered."
+why = "Adds a separate HTTP request and a cache-invalidation surface that inline SVG eliminates entirely; it is rarely worth the operational overhead for the small number of icons most applications actually use, and a stale or missing sprite sheet silently blanks all icons."

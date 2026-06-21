@@ -30,16 +30,16 @@ why = "Removes 'is this validated?' as a question at every call site; moves it f
 id = "every-call-site-that-needs-a-validated-string-ru"
 label = "every call site that needs a validated string runs …"
 directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
-why = "A defensible alternative the project considered."
+why = "Repetitive and easy to miss: the validation rule's existence becomes a discipline check at every consumer rather than a guarantee carried by the type, so a forgotten check at any one call site produces a silent invalid-state bug rather than a build failure."
 
 [[option]]
 id = "validation-status-is-recorded-as-a-metadata-tag"
 label = "validation status is recorded as a metadata tag attached …"
 directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
-why = "A defensible alternative the project considered."
+why = "Holds validation status at runtime but not at compile time: the type system stops helping and a forgotten check produces a silent invalid-state bug rather than a build failure, which is exactly the guarantee the newtype constructor gives back."
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
 label = "the codebase makes no distinction between validated and raw …"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
-why = "A defensible alternative the project considered."
+why = "Loses the guarantee entirely: there is no signal in the type system that a string was ever validated, and downstream consumers must re-check or trust without any compiler help, producing the widest possible surface for invalid-data bugs."

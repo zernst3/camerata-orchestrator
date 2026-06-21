@@ -22,7 +22,7 @@ why = "Cancellation-safe code prevents resource leaks and inconsistent state."
 id = "select-branches-not-validated"
 label = "Do not validate cancellation safety of select! branches"
 directive = "select! is used without explicit reasoning about what happens if a branch is cancelled or times out. The application relies on cleanup code or eventual consistency to handle any partial state."
-why = "A defensible alternative the project considered."
+why = "If a cancelled branch was midway through a database transaction, a partial write, or updating shared state, the system is left in an inconsistent state; eventual consistency is not guaranteed in all cases, and the resulting bugs are notoriously hard to reproduce since they surface only under specific timing conditions."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/macro.select.html"

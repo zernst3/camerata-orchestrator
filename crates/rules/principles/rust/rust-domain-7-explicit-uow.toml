@@ -25,16 +25,16 @@ why = "Compile-time visibility of transactional posture at every call site."
 id = "repository-write-methods-take-a-generic-tx-param"
 label = "Repository write methods take a generic Tx parameter, and …"
 directive = "Repository write methods take a generic Tx parameter, and every consumer of the repository must carry that generic through its type graph"
-why = "A defensible alternative the project considered."
+why = "Bureaucratically compile-time correct but forces every consumer to carry Tx through the type graph, and the ceremony compounds badly across service composition: each additional layer of abstraction inherits the generic and the noise accumulates well before any real benefit materializes."
 
 [[option]]
 id = "transactional-context-is-provided-as-a-closure-b"
 label = "Transactional context is provided as a closure-based ambient via …"
 directive = "Transactional context is provided as a closure-based ambient via task-local storage, so the repository trait carries no transaction parameter and the transaction is read from task-local state at call time"
-why = "A defensible alternative the project considered."
+why = "Cleaner-looking in TypeScript or Node but runs into ownership friction in Rust (the database transaction is owned, not Clone), and produces silent partial-commit failures when a service forgets to wrap its body; the ambient context trades visible call-site noise for invisible correctness risk."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"
 label = "Repository write methods take a parameter typed as the …"
 directive = "Repository write methods take a parameter typed as the concrete ORM transaction type directly, with the ORM type appearing in the domain trait surface"
-why = "A defensible alternative the project considered."
+why = "Violates the hexagonal-architecture commitment that domain has zero framework deps: the domain crate then transitively depends on the ORM, and swapping drivers later requires changing domain signatures, not just infrastructure."

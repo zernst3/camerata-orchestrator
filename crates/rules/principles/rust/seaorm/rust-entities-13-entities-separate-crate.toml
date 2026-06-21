@@ -22,13 +22,13 @@ why = "Without separation, the import graph cycles: infrastructure needs mappers
 id = "the-entities-live-in-the-infrastructure-crate-al"
 label = "the entities live in the infrastructure crate alongside the …"
 directive = "the entities live in the infrastructure crate alongside the DB pool, driver, and repository implementations, with mappers inlined into infrastructure or dropped entirely"
-why = "A defensible alternative the project considered."
+why = "Forms exactly the import cycle that the separate entities crate exists to break: infrastructure needs mappers, mappers need entities, and putting entities in infrastructure makes mappers depend on infrastructure, which cargo rejects at compile time."
 
 [[option]]
 id = "repository-implementations-live-in-the-mapper-cr"
 label = "repository implementations live in the mapper crate alongside the …"
 directive = "repository implementations live in the mapper crate alongside the translation logic, rather than in the infrastructure crate"
-why = "A defensible alternative the project considered."
+why = "Non-standard and conflates translation with adapter logic: the two have different lifecycles and different test surfaces, and the conflation makes both harder to evolve since a change to translation logic is co-located with a change to data access and the two blend in review."
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"

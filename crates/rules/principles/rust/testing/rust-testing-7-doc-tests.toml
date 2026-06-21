@@ -34,10 +34,10 @@ why = "Doc-tests are a first-class Rust feature that keep documentation examples
 id = "examples-dir-only-no-doc-tests"
 label = "Usage examples live in examples/ only; doc-tests are optional"
 directive = "Usage examples for public API items live in the examples/ directory as standalone runnable programs, not in /// comment code blocks. Doc-tests in comments are optional and not enforced."
-why = "A defensible alternative the project considered. examples/ programs are richer and can express multi-step workflows, but they do not enforce that the documentation comment stays in sync with the API."
+why = "examples/ programs are richer and can express multi-step workflows, but they do not enforce that the documentation comment stays in sync with the API: prose /// comments can become stale silently after a signature change, because there is no build-time check that the comment's example is still correct the way a doc-test code block is."
 
 [[option]]
 id = "no-examples-prose-doc-only"
 label = "Documentation comments are prose only; no code examples required"
 directive = "Public API items are documented with prose /// comments. No code examples are required in either documentation comments or the examples/ directory."
-why = "A defensible alternative the project considered. Minimal investment but leaves consumers with no executable demonstration of usage and loses the build-time sync guarantee."
+why = "Minimal investment but leaves consumers with no executable demonstration of usage and loses the build-time sync guarantee entirely: when the implementation changes, prose-only documentation can silently describe an API that no longer exists, and consumers discover the mismatch only when they try to use the code."

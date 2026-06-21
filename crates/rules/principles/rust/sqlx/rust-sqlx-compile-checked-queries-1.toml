@@ -22,7 +22,7 @@ why = "Compile-time validation and parameterized binding prevent SQL errors and 
 id = "use-format-or-string-interpolation"
 label = "Build SQL strings with format! or string interpolation"
 directive = "SQL queries are built using format!, string concatenation, or template interpolation at runtime. Parameters are inserted directly into the SQL string or bound afterward."
-why = "A defensible alternative the project considered."
+why = "Bypasses compile-time SQL validation entirely: typos in column names, missing joins, and SQL injection vulnerabilities all slip past the compiler and surface only at runtime, often in production; there is no structural defense against inserting user input directly into the SQL string."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/macro.query.html"

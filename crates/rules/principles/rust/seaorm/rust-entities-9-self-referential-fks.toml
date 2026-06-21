@@ -22,13 +22,13 @@ why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity
 id = "the-self-referential-entity-declares-both-a-belo"
 label = "the self-referential entity declares both a belongs_to and a …"
 directive = "the self-referential entity declares both a belongs_to and a has_many variant on the same pair, attempting bidirectional macro-driven traversal"
-why = "A defensible alternative the project considered."
+why = "Blocked by the macro's coherence rule and will not compile: DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to, so this is not a viable alternative even if it reads as the more uniform shape."
 
 [[option]]
 id = "the-self-referential-entity-declares-the-belongs"
 label = "the self-referential entity declares the belongs_to but omits impl …"
 directive = "the self-referential entity declares the belongs_to but omits impl Related, and every caller spells out the join inline at the call site"
-why = "A defensible alternative the project considered."
+why = "Mechanically possible but produces worse ergonomics: every caller that wants to traverse the relation has to spell out the join inline at the call site, adding repetitive boilerplate for what the impl Related block expresses once."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"

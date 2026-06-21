@@ -38,10 +38,10 @@ why = "snake_case is mechanically enforced by the compiler; scenario-description
 id = "test-prefix-then-function-name"
 label = "test_<function_name> pattern only"
 directive = "Test functions are named by prepending 'test_' to the function under test (e.g., 'test_add', 'test_greet'). No additional scenario description is required."
-why = "A defensible alternative the project considered. Acceptable but produces uninformative failure output when a function has multiple test cases."
+why = "Acceptable for a single-scenario function but produces uninformative failure output when a function has multiple test cases: 'test_add FAILED' tells a reader nothing about which scenario failed or what the expected behavior was, requiring them to open the file to diagnose the failure."
 
 [[option]]
 id = "bdd-style-it-should-prefix"
 label = "BDD-style 'it_' or 'should_' prefix"
 directive = "Test functions are named with an 'it_' or 'should_' prefix in BDD style, e.g., 'it_returns_zero_for_empty_input', 'should_panic_when_key_absent'."
-why = "A defensible alternative the project considered. Readable but not endorsed by The Rust Book; adds a prefix convention that is redundant in a test module where every function is already known to be a test."
+why = "Readable but not endorsed by The Rust Book and adds a prefix that is redundant in a test module where every function is already known to be a test: the 'it_' or 'should_' prefix conveys information the module context already provides, making names longer without adding semantic content."

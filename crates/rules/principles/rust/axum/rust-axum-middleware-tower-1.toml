@@ -22,7 +22,7 @@ why = "Middleware centralizes cross-cutting logic, avoids duplication, and ensur
 id = "cross-cutting-concerns-inline-in-handlers"
 label = "Implement cross-cutting concerns inline in handlers"
 directive = "Each handler is responsible for implementing logging, authentication, rate limiting, and other cross-cutting concerns directly in the handler body or by calling helper functions from the handler."
-why = "A defensible alternative the project considered."
+why = "A new route added by a contributor who forgets the inline concern becomes immediately invisible to observability or unauthenticated; the concern duplicates across every handler so a change to the logging format or rate-limit threshold must be made in multiple places; and handler code grows cluttered with non-business concerns that make the core request logic harder to read."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/middleware/index.html"

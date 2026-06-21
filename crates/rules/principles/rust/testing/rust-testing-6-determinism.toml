@@ -34,10 +34,10 @@ why = "Parallel-by-default (cargo test) and process-per-test (cargo-nextest) exe
 id = "sequential-tests-with-global-state"
 label = "Allow global state; run tests sequentially (--test-threads=1)"
 directive = "Tests may share global mutable state; the test suite is run with --test-threads=1 to prevent concurrency issues."
-why = "A defensible alternative the project considered. Correct but slow; does not scale with test suite size, and a future contributor running cargo test without the flag will see non-deterministic failures."
+why = "Correct in that it prevents concurrent failures, but slow: the entire test suite runs sequentially so wall time scales linearly with test count; a future contributor running cargo test without the flag will see non-deterministic failures with no obvious cause, and the workaround's presence anywhere in CI makes the suite permanently slower than it needs to be."
 
 [[option]]
 id = "per-test-cleanup-with-mutex"
 label = "Serialize access to shared state via a test Mutex"
 directive = "Tests that must share global mutable state serialize access via a shared Mutex in the test module, acquiring the lock at the start of each test and releasing on drop."
-why = "A defensible alternative the project considered. Safer than --test-threads=1 for concurrent tests, but still couples tests to a shared resource and does not compose with process-per-test runners."
+why = "Safer than --test-threads=1 for concurrent tests because other tests can still run in parallel, but still couples the test to a shared resource: the lock must be acquired and released correctly in every test that touches the state, and the coupling does not compose with process-per-test runners like cargo-nextest where each test gets its own process and the in-process Mutex provides no isolation."
