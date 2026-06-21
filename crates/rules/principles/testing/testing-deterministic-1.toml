@@ -34,10 +34,10 @@ why = "A flaky test destroys trust in the suite; developers learn to ignore fail
 id = "retry-on-failure"
 label = "Allow flaky tests; re-run on failure up to N times before reporting red"
 directive = "Permit tests that are inherently timing- or environment-sensitive; compensate with automatic retry logic that re-runs a failing test up to N times and only marks it failed if all retries fail."
-why = "A defensible alternative the project considered."
+why = "Masks flakiness without fixing it: retries hide the root cause (shared mutable state, uncontrolled time, real network I/O) and train developers to treat intermittent failures as non-events. The underlying non-determinism stays in the codebase and resurfaces under heavier load or different timing."
 
 [[option]]
 id = "quarantine-flaky"
 label = "Quarantine known-flaky tests outside the main suite rather than fixing them"
 directive = "Tag or move tests known to be flaky into a separate quarantine suite that does not block CI; run it separately with relaxed expectations."
-why = "A defensible alternative the project considered."
+why = "Keeps the main suite green without fixing root causes, which is useful as a short-term triage measure. The cost is that quarantined tests accumulate: the quarantine suite grows, nobody fixes the root causes because the main suite is green, and the tests that most likely cover recently-broken behavior stop blocking CI."

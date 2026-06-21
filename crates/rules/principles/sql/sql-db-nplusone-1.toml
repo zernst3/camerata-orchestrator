@@ -31,4 +31,4 @@ why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at
 id = "code-fetches-a-list-of-rows-and-then-loops-over"
 label = "code fetches a list of rows and then loops …"
 directive = "code fetches a list of rows and then loops over the list, issuing a database call per item to fetch related data, rather than using a single batched query or an eager-load with a join"
-why = "A defensible alternative the project considered."
+why = "Natural to write because per-item queries appear correct on small datasets, but degrades by orders of magnitude as production row counts grow. The slowdown is invisible in unit tests with five rows, then surfaces in latency dashboards once the list endpoint is serving real users, with no warning before it becomes an incident."

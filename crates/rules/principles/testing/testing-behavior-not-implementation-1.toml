@@ -34,4 +34,4 @@ why = "Behavior-coupled tests are refactor-safe; implementation-coupled tests cr
 id = "whitebox-internal-assertions"
 label = "Assert on internal implementation details (white-box) for complete coverage"
 directive = "Tests verify internal call order, private field values, and implementation-specific side-effects to achieve fine-grained coverage of every execution path."
-why = "A defensible alternative the project considered."
+why = "Provides fine-grained coverage of every execution path and can catch bugs in internal coordination, but creates fragile tests that break on every internal refactor even when the public behavior is unchanged. The resulting maintenance tax grows with codebase churn and trains developers to treat red builds as expected noise after structural changes."

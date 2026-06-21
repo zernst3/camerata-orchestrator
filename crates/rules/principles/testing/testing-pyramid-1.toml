@@ -34,10 +34,10 @@ why = "Fast, precise feedback at the unit layer drives short feedback loops; hig
 id = "inverted-pyramid-heavy-e2e"
 label = "Heavy E2E / integration bias (inverted pyramid)"
 directive = "Rely primarily on end-to-end and integration tests to give confidence that the system works as a whole; write unit tests sparingly."
-why = "A defensible alternative the project considered."
+why = "Gives high confidence that the full stack works together and catches integration bugs that unit tests miss, but produces suites that are slow to run, brittle to infrastructure changes, and expensive to debug: every failure implicates the entire stack rather than a single function, and the feedback cycle stretches from seconds to minutes."
 
 [[option]]
 id = "no-explicit-distribution-policy"
 label = "No explicit distribution policy; write tests at whichever layer feels natural"
 directive = "Let developers choose test layer freely with no prescribed distribution."
-why = "A defensible alternative the project considered."
+why = "Gives each developer maximum flexibility and avoids policy overhead, but tends to produce the ice-cream-cone antipattern over time: developers reach for integration and E2E tests because they feel more confidence-inspiring, until the suite is slow, brittle, and expensive to maintain without a fast unit base underneath."

@@ -31,16 +31,16 @@ why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not auto
 id = "the-project-relies-on-the-database-engine-to-aut"
 label = "the project relies on the database engine to auto-index …"
 directive = "the project relies on the database engine to auto-index foreign-key columns and does not declare explicit indexes on FK columns in migrations"
-why = "A defensible alternative the project considered."
+why = "Reduces migration boilerplate on MySQL with InnoDB, where auto-indexing holds, but is silently brittle on PostgreSQL, SQL Server, Oracle, and SQLite, which do not auto-index FK columns. The engine assumption is invisible in the migration file and breaks when the engine changes or the project deploys to a mixed environment."
 
 [[option]]
 id = "fk-indexes-are-added-reactively-in-later-migrati"
 label = "FK indexes are added reactively in later migrations after …"
 directive = "FK indexes are added reactively in later migrations after production performance degrades, rather than being added in the same migration that introduces the FK column"
-why = "A defensible alternative the project considered."
+why = "Avoids speculative migrations for FK columns that may never be queried at scale, but surfaces the slowdown in production where it affects users, and the fix is still a migration authored under incident pressure rather than at calm design time."
 
 [[option]]
 id = "fk-indexes-are-declared-in-a-follow-up-migration"
 label = "FK indexes are declared in a follow-up migration that …"
 directive = "FK indexes are declared in a follow-up migration that ships after the migration introducing the FK column, rather than in the same atomic change"
-why = "A defensible alternative the project considered."
+why = "Keeps each migration smaller and focused, but creates a window where the FK exists without the index. The second migration is easy to forget across context switches, and the pairing is not reviewable in a single diff."
