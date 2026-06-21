@@ -3,9 +3,9 @@ title = "Test files follow test_*.py naming so pytest auto-discovers them"
 tag = "stack"
 domain = "python:testing"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "Enforced by pytest's default test-discovery configuration: pytest searches for test_*.py (or *_test.py) files and collects functions prefixed test_ and classes prefixed Test. Conformance holds when every test file matches test_*.py (or *_test.py) and every test function is prefixed test_; it fails when files or functions use an arbitrary naming scheme that requires manual configuration to discover."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: pytest's default discovery globs test_*.py (or *_test.py) and collects test_-prefixed functions and Test-prefixed classes, but a misnamed file is SILENTLY SKIPPED rather than failing the build, and flake8-pytest-style (Ruff PT rules) has no rule for test-file naming (confirmed: astral-sh/ruff#8145, #8796). Enforcing it as a hard gate needs a custom CI check — a glob over the test tree asserting every test file matches the naming pattern, or a pytest --collect-only count compared against the file count. Conformance holds when such a check runs in CI and a misnamed (therefore uncollected) test file fails the build; it fails when discovery silently skips misnamed files with no gate catching them."
 verification = "grounded"
 
 [decision]

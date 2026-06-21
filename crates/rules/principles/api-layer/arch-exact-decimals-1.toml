@@ -3,9 +3,9 @@ title = "Monetary and quantity values use exact decimal types in code; never flo
 tag = "stack"
 domain = "api-layer"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "A disallowed-types lint or a grep gate fails the build if a binary floating-point type (f64, double, Number, and equivalents) appears in any type, field, or column whose role requires exact arithmetic, and a property test asserts that a long chain of additions and roundings over those values loses zero precision against an exact-decimal oracle. Conformance holds when the float ban runs in CI over the exactness-sensitive surface and the precision property test passes; it fails when float types reach those values or no precision oracle exists."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: deciding which type/field/column 'requires exact arithmetic' (money, regulated quantity) is project-specific domain knowledge no generic linter carries. It requires a custom AST/static-analysis CI gate that bans binary floating-point types (f64, double, Number, REAL/DOUBLE columns) on the exactness-sensitive surface the project annotates, paired with a property test asserting a long chain of additions and roundings loses zero precision against an exact-decimal oracle. Conformance holds when the float ban runs in CI over the exactness-sensitive surface and the precision property test passes; it fails when float types reach those values or no precision oracle exists."
 
 [decision]
 question = "What position does the project take on: Monetary and quantity values use exact decimal types in code; never floats?"

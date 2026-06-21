@@ -3,9 +3,9 @@ title = "Render dates through a project-level helper that pins UTC; never format
 tag = "stack"
 domain = "ui"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "Enforced by an ESLint no-restricted-syntax / no-restricted-properties rule (or the stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without a timeZone option, strftime with no timezone), routing all date rendering through the single project-level helper that pins the timezone. Conformance holds when that lint rule runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax / no-restricted-properties rule (or stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without a timeZone option, strftime with no timezone) and routes all date rendering through the single project-level helper. no-restricted-syntax is a generic AST-matcher with no built-in rule-id for this; the patterns and the helper exemption are hand-written per project, so it is a bespoke check rather than a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
 
 [decision]
 question = "What position does the project take on: Render dates through a project-level helper that pins UTC; never format inline?"

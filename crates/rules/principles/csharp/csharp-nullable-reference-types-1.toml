@@ -35,3 +35,8 @@ why = "Inconsistent null safety; some code is checked, some is not. Mixing both 
 [[sources]]
 url = "https://learn.microsoft.com/en-us/dotnet/csharp/fundamentals/null-safety/nullable-reference-types"
 title = "Nullable reference types — C# | Microsoft Learn"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/compiler-messages/nullable-warnings"
+title = "Nullable reference type warnings (CS8600, CS8602, CS8618, …) — C# reference | Microsoft Learn"
+linter = "Roslyn (csc): CS8600/CS8602/CS8618 nullable warnings + <Nullable>enable</Nullable> + TreatWarningsAsErrors"

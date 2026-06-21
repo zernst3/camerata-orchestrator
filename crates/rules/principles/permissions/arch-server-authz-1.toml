@@ -3,9 +3,9 @@ title = "Authorization on the server; UI renders permission hints"
 tag = "stack"
 domain = "permissions"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "Enforced by a lint rule (an ESLint no-restricted-imports / no-restricted-syntax rule or the stack equivalent) that blocks client-side permission introspection: the UI may not import the raw permission-code or role-membership helpers, only read the server-computed permission flags carried on each resource response. Conformance holds when that rule runs in CI and a client component that re-implements an authorization decision from raw codes fails the build; it fails when no rule blocks client-side introspection and the UI can recompute permissions in the browser."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a project-configured ESLint no-restricted-imports / no-restricted-syntax rule (or stack equivalent) wired to the project's specific permission-code and role-membership helper names, blocking the UI from importing them so client code reads only the server-computed permission flags carried on each resource response. The generic rule-id exists but carries no permission semantics until the project names its own helpers, so this is a bespoke configured check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a client component that re-implements an authorization decision from raw codes fails the build; it fails when no rule blocks client-side introspection and the UI can recompute permissions in the browser."
 verification = "grounded"
 
 [[sources]]

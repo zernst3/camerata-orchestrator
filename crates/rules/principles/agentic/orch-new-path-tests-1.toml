@@ -3,9 +3,9 @@ title = "AI-authored code paths carry tests, not just a passing existing suite"
 tag = "stack"
 domain = "agentic"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "structured"
 default = true
-qualifies = "Prose check: a change-time gate verifies that the new code paths a diff introduces are actually exercised by tests in the same diff, not merely that the pre-existing suite stays green. The realistic mechanism is a per-diff coverage check on the introduced lines (a patch-coverage gate that fails when newly-added lines are uncovered) or an equivalent mutation check on the new branches. Conformance holds when the pipeline runs such a per-diff check and a diff that adds an untested branch is rejected; it fails when the only gate is a whole-project coverage percentage or a green run of the existing suite, both of which can pass while the new branch is entirely uncovered."
+qualifies = "Not enforceable by any off-the-shelf linter (linters check source shape, not test-coverage-of-a-diff): this is a pipeline/coverage-tooling commitment, codified and enforced by the change pipeline itself. The realistic mechanism is a per-diff patch-coverage gate on the introduced lines (e.g. a coverage tool's diff/patch threshold) or an equivalent mutation check on the new branches. Conformance holds when the pipeline runs such a per-diff check and a diff that adds an untested branch is rejected; it fails when the only gate is a whole-project coverage percentage or a green run of the existing suite, both of which can pass while the new branch is entirely uncovered."
 verification = "grounded"
 
 [[sources]]

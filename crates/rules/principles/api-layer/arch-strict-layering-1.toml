@@ -3,9 +3,9 @@ title = "Strict layering — services orchestrate, repositories own data access"
 tag = "stack"
 domain = "api-layer"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "Prose check, enforced by an architecture-boundary lint rule that blocks direct database/query calls outside the repository layer (an ESLint rule restricting the DB client to repository files, a Rust visibility or clippy-style restriction, or the stack equivalent), with transaction flow-control in services exempted. Conformance holds when that rule runs in CI and a query issued from a controller or service is rejected; it fails when DB access can happen from any layer with no mechanical boundary."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the boundary is 'direct database/query CALLS (e.g. db.select, db.insert) are forbidden outside the repository layer, with transaction flow-control in services exempted', which is a call-site-and-layer predicate, not an import predicate. It is enforced by a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax rule scoped to non-repository directories, a bespoke ESLint rule, a Rust module-visibility constraint, or the stack equivalent. (import/no-restricted-paths blocks imports between directories, not the DB-client call itself, so it does not honestly cover this rule off the shelf.) Conformance holds when that custom gate runs in CI and a query issued from a controller or service is rejected; it fails when DB access can happen from any layer with no mechanical boundary."
 verification = "grounded"
 
 [[sources]]
