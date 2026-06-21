@@ -1,0 +1,41 @@
+id = "JAVA-TESTING-DETERMINISTIC-1"
+title = "Tests are deterministic: no Thread.sleep(), no wall-clock time (use injected Clock), no uncontrolled randomness, no ordering dependencies between test methods"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by SpotBugs (SIC_INNER_SHOULD_BE_STATIC_ANON, IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD) and PMD (DoNotCallGarbageCollectionExplicitly). Thread.sleep in tests can be caught by Checkstyle or Semgrep regex patterns. JUnit 5's @TestMethodOrder(MethodOrderer.Random.class) can reveal hidden ordering dependencies. Conformance holds when: no Thread.sleep() appears in test code; time-dependent logic uses an injected Clock mock; random inputs use a fixed seed; each @Test method is independent of every other @Test method in the class."
+verification = "grounded"
+
+[decision]
+question = "How are tests kept deterministic so they pass or fail consistently regardless of execution order, timing, or random state?"
+default = "no-sleep-no-clock-no-random"
+why = "A test that passes on one run and fails on the next (a 'flaky test') destroys trust in the test suite: engineers learn to re-run rather than fix, and real regressions hide behind the noise. The three most common sources of flakiness in Java tests are: (1) Thread.sleep() — the test waits for a real-time condition that may not hold under CPU load or GC pause; (2) Wall-clock time — code that calls LocalDateTime.now() or System.currentTimeMillis() produces different results on different days, breaking date-based assertions; (3) Ordering dependency — a @Test method mutates shared static state that the next test depends on. SpotBugs IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD flags assertions in Runnable.run() bodies (another threading anti-pattern). The fix for (1) is to use awaitility or to inject a controlled delay mechanism; for (2), inject a Clock that the test replaces with a fixed-time mock; for (3), ensure each @Test method leaves shared state unchanged or use @BeforeEach to reset it."
+
+[[sources]]
+url = "https://spotbugs.readthedocs.io/en/stable/bugDescriptions.html#iju-assert-method-invoked-from-run-method"
+title = "SpotBugs — IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD: JUnit assertion in run() will not be noticed by JUnit (threading anti-pattern)"
+linter = "SpotBugs: IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD"
+
+[[sources]]
+url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
+title = "JUnit 5 User Guide — Annotations (@BeforeEach resets per-test state; @AfterEach cleans up)"
+
+[[option]]
+id = "no-sleep-no-clock-no-random"
+label = "no Thread.sleep; inject Clock; fix random seeds; no inter-test ordering dependencies"
+directive = "Prohibit Thread.sleep() in all test code. Any production code that reads the current time must accept a java.time.Clock parameter (constructor-injected); tests pass Clock.fixed(...) to control time. Any production code that uses random values must accept a java.util.Random or equivalent; tests pass new Random(42) to fix the seed. Each @Test method must be independent: it must not read state written by another @Test method. Use @BeforeEach to set up fresh state before each test and @AfterEach to tear down. If a test involves asynchronous behavior, use Awaitility or CompletableFuture.get() with a timeout rather than Thread.sleep()."
+why = "The adopted default. Deterministic tests are the only tests worth having: they always give the same answer for the same code."
+
+[[option]]
+id = "sleep-based-timing"
+label = "Thread.sleep() to wait for async operations or time-based behavior"
+directive = "Tests use Thread.sleep(N) to wait for asynchronous callbacks, scheduled tasks, or time-based logic to complete."
+why = "Flaky: the sleep duration is an arbitrary guess. Under load, GC pause, or slow CI it may be too short. Over time it grows to mask real latency problems. Use Awaitility or inject a Clock/Scheduler instead."
+
+[[option]]
+id = "static-shared-state"
+label = "shared static or instance state mutated across multiple @Test methods"
+directive = "Test methods share mutable state through static fields or instance fields that are not reset between tests, implicitly depending on execution order."
+why = "JUnit 5 does not guarantee @Test execution order by default. Ordering-dependent tests produce intermittent failures that are nearly impossible to diagnose. Use @BeforeEach to reset all mutable state."

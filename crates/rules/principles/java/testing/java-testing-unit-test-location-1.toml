@@ -1,0 +1,35 @@
+id = "JAVA-TESTING-UNIT-TEST-LOCATION-1"
+title = "Unit tests live in src/test/java mirroring the production package hierarchy; every test class sits in the same package as the class under test"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by Maven Surefire Plugin (picks up **/*Test.java, **/Test*.java, **/*Tests.java, **/*TestCase.java from src/test/java) and by IDE conventions. Conformance holds when every unit-test class lives under src/test/java/<same-package-path-as-production-class> and is named <ProductionClass>Test.java."
+verification = "grounded"
+
+[decision]
+question = "Where do unit test source files live and how should they be organized relative to production code?"
+default = "mirror-package-in-src-test-java"
+why = "Maven's Standard Directory Layout defines src/test/java as the canonical root for test sources, mirroring the production tree under src/main/java. When a test class sits in the same package as the class under test (but in the test source tree), it gains access to package-private members without breaking encapsulation for external callers. Maven Surefire automatically discovers and executes these tests during the test phase. Deviating from this layout breaks IDE test runners, Surefire defaults, and confuses contributors unfamiliar with the project. The naming convention <ProductionClass>Test.java makes the intent obvious and keeps tests discoverable."
+
+[[sources]]
+url = "https://maven.apache.org/guides/introduction/introduction-to-the-standard-directory-layout.html"
+title = "Apache Maven — Introduction to the Standard Directory Layout (src/test/java)"
+
+[[sources]]
+url = "https://maven.apache.org/surefire/maven-surefire-plugin/examples/inclusion-exclusion.html"
+title = "Maven Surefire Plugin — Inclusions and Exclusions of Tests (default *Test.java patterns)"
+linter = "Maven Surefire: default *Test.java inclusion pattern"
+
+[[option]]
+id = "mirror-package-in-src-test-java"
+label = "src/test/java/<package>/ProductionClassTest.java, same package as production"
+directive = "Place every unit test class under src/test/java, in the identical package as the class under test (e.g., com/example/service/UserServiceTest.java tests com/example/service/UserService.java). Name test classes <ProductionClass>Test.java. Use src/test/resources for test-only resource files. Do not create a separate top-level test package hierarchy that diverges from production."
+why = "The adopted default. Mirrors Maven conventions, enables Surefire auto-discovery, and gives tests package-private visibility without leaking internals."
+
+[[option]]
+id = "separate-test-package"
+label = "src/test/java/<different-package>/ProductionClassTest.java"
+directive = "Test classes live in a different package from the class under test (e.g., com/example/test/service/UserServiceTest.java)."
+why = "Breaks package-private access, requires reflection or public exposure of internals to test them, diverges from Maven convention, and confuses contributors. Avoid unless the project predates Maven or has unusual constraints."

@@ -1,0 +1,36 @@
+id = "JAVA-TESTING-INTEGRATION-TEST-LOCATION-1"
+title = "Integration tests are named *IT.java (or *ITCase.java) and tagged @Tag(\"integration\") so they can be separated from unit tests in CI"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by Maven Failsafe Plugin (default inclusion patterns **/IT*.java, **/*IT.java, **/*ITCase.java) and by the JUnit @Tag annotation, which CI build tools filter on. Conformance holds when every test that touches an external process (database, HTTP endpoint, message broker, file system) is named with the IT suffix and annotated @Tag(\"integration\"), while plain unit tests use the *Test.java suffix and have no @Tag(\"integration\")."
+verification = "grounded"
+
+[decision]
+question = "How are integration tests distinguished from unit tests and placed so CI can run them on separate gates?"
+default = "it-suffix-plus-tag"
+why = "Maven Failsafe Plugin runs integration tests (verify phase) using the default inclusion patterns **/IT*.java, **/*IT.java, and **/*ITCase.java — distinct from Surefire's *Test.java unit test patterns. Using the IT suffix means Failsafe picks up integration tests automatically without any custom configuration. The JUnit 5 @Tag annotation provides a second axis: build tools (Maven Surefire/Failsafe tagExpression, Gradle useJUnitPlatform tagsFilter) can filter by tag to run only fast unit tests on PR, deferring slow integration tests to a post-merge gate. Keeping integration tests separate prevents a slow database or external-service startup from blocking the unit-test gate."
+
+[[sources]]
+url = "https://maven.apache.org/surefire/maven-failsafe-plugin/examples/inclusion-exclusion.html"
+title = "Maven Failsafe Plugin — Inclusions and Exclusions (default IT*.java / *IT.java / *ITCase.java patterns)"
+linter = "Maven Failsafe: default *IT.java inclusion pattern"
+
+[[sources]]
+url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
+title = "JUnit 5 User Guide — Annotations (@Tag: Used to declare tags for filtering tests)"
+linter = "JUnit 5: @Tag"
+
+[[option]]
+id = "it-suffix-plus-tag"
+label = "*IT.java suffix and @Tag(\"integration\") annotation"
+directive = "Name integration test classes with the IT suffix (e.g., UserRepositoryIT.java, OrderServiceIT.java). Annotate the class with @Tag(\"integration\"). Use Maven Failsafe Plugin to run them in the verify phase. Configure Maven Surefire to exclude *IT.java files from the test phase so they never mix with unit tests. Add a CI gate for the verify phase that can be skipped for fast PR runs."
+why = "The adopted default. Failsafe picks them up by convention; @Tag enables fine-grained CI filtering independent of file naming."
+
+[[option]]
+id = "separate-source-set"
+label = "separate src/integration-test/java source root"
+directive = "Place integration tests in a dedicated source root (e.g., src/it/java or src/integration-test/java) separate from src/test/java. Configure build tooling to compile and run them separately."
+why = "Provides strong separation but requires custom Maven/Gradle source-set configuration, increasing build complexity. The IT-suffix convention inside src/test/java is simpler and equally effective when Failsafe patterns are respected."

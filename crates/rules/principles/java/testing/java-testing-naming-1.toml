@@ -1,0 +1,41 @@
+id = "JAVA-TESTING-NAMING-1"
+title = "Test methods use descriptive snake_case or camelCase names that state the scenario and expected outcome; @DisplayName provides the human-readable label in reports"
+tag = "stack"
+domain = "java:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Enforced by code review and optionally by JUnit 5's @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class), which converts snake_case method names to readable sentences. Conformance holds when test method names follow a consistent pattern (e.g., shouldReturn404_whenUserNotFound or givenExpiredToken_whenRefresh_thenThrowsUnauthorized) and @DisplayName is added when the auto-generated name is ambiguous."
+verification = "grounded"
+
+[decision]
+question = "What naming pattern do test methods follow so that a failing test name immediately reveals what broke and why?"
+default = "descriptive-snake-or-camel-with-display-name"
+why = "A test method name is the first line of a failure report. A name like testUser() tells an engineer nothing; shouldThrowNotFoundException_whenUserIdIsNegative() tells them exactly what invariant was violated. JUnit 5 supports snake_case method names with DisplayNameGenerator.ReplaceUnderscores, turning should_return_empty_list_when_no_results into 'should return empty list when no results' in the IDE and CI report. This removes the tension between Java naming conventions and readable test output. The @DisplayName annotation provides an escape hatch for complex descriptions with spaces or special characters. PMD's UnitTestShouldUseTestAnnotation rule catches methods starting with 'test' that lack @Test, catching legacy JUnit 3 naming patterns that would not run under JUnit 5."
+
+[[sources]]
+url = "https://docs.junit.org/6.0.2/writing-tests/display-names.html"
+title = "JUnit User Guide — Display Names (@DisplayName and DisplayNameGenerator.ReplaceUnderscores)"
+
+[[sources]]
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestsshouldincludeassert"
+title = "PMD Best Practices — UnitTestShouldUseTestAnnotation (catches legacy 'test' prefix naming without @Test)"
+linter = "PMD: UnitTestShouldUseTestAnnotation"
+
+[[option]]
+id = "descriptive-snake-or-camel-with-display-name"
+label = "descriptive snake_case or camelCase method name, with @DisplayName for complex labels"
+directive = "Test method names follow one consistent pattern across the codebase: either snake_case (should_return_empty_when_list_is_null) or camelCase (shouldReturnEmptyWhenListIsNull). The name encodes at minimum the scenario and expected outcome. Add @DisplayName only when the auto-generated name would be ambiguous or when the description needs natural prose (spaces, punctuation). If using snake_case, annotate the test class with @DisplayNameGeneration(DisplayNameGenerator.ReplaceUnderscores.class) so CI and IDE reports render readable sentences."
+why = "The adopted default. Descriptive names are the fastest diagnostic tool when a test fails in CI: the test name tells you what broke without reading the test body."
+
+[[option]]
+id = "legacy-test-prefix"
+label = "testSomething() JUnit 3 style"
+directive = "Test methods are named with the test prefix (e.g., testCreateUser(), testDeleteOrder()). No scenario or expected outcome is encoded in the name."
+why = "Legacy JUnit 3 convention where test prefix was required for discovery. JUnit 5 uses @Test for discovery; the prefix is now noise. PMD's UnitTestShouldUseTestAnnotation flags leftover 'test' prefix methods that lack @Test."
+
+[[option]]
+id = "display-name-only"
+label = "short method name, rely entirely on @DisplayName"
+directive = "Test method names are terse identifiers (e.g., case1(), case2()); all human-readable context is in @DisplayName."
+why = "Splits context across two locations; the method name is useless without reading @DisplayName. Grep and stack-trace output show only the method name, losing the human context."
