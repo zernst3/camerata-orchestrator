@@ -806,7 +806,7 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
         .with("process", BadgeVariant::new("Process", "gray"));
     let verif_badges = BadgeVariantMap::new()
         .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
         .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
         .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
@@ -869,7 +869,7 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         .with("process", BadgeVariant::new("Process", "gray"));
     let verif_badges = BadgeVariantMap::new()
         .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
         .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
         .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
@@ -1465,7 +1465,12 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
                 }
                 if let Some(w) = r.decision_why.as_ref().filter(|s| !s.is_empty()) {
                     div { class: "rule-modal-section",
-                        span { class: "rule-modal-label", "Why the default" }
+                        // "Why the default" only makes sense when the rule HAS a default; a rule
+                        // with no default has a rationale for the decision itself, not for a
+                        // default that doesn't exist. Label it plainly "Why" in that case.
+                        span { class: "rule-modal-label",
+                            if r.default_option.is_some() { "Why the default" } else { "Why" }
+                        }
                         p { class: "rule-modal-why", "{w}" }
                     }
                 }
@@ -4172,14 +4177,18 @@ fn default_draft() -> String {
 ///
 /// CSS modifiers correspond to `.verif-badge.<modifier>` rules in GLOBAL_CSS:
 /// - `verified`     -> green checkmark badge ("Verified")
-/// - `grounded`     -> blue source-dot badge ("Grounded")
+/// - `grounded`     -> blue source-dot badge ("\u{29bf} Grounded")
 /// - `draft`        -> muted italic badge ("Draft")
 /// - `needs_recheck`-> amber warning badge ("Needs re-check")
 /// - anything else  -> same as `draft`
 fn verif_badge(verif: &str) -> (&'static str, &'static str) {
     match verif {
-        "verified"     => ("\u{2713} Verified",   "verified"),
-        "grounded"     => ("Grounded",             "grounded"),
+        "verified"     => ("\u{2713} Verified",    "verified"),
+        // Grounded carries its OWN distinct glyph (a circled source-dot, ⦿) so it reads as a
+        // clear status on the rule tables, not just a faint blue tint — and is visually
+        // distinct from the verified checkmark and the symbol-less draft / needs-re-check
+        // badges. See `docs/decisions/2026-06-20_ui_bugfixes.md`.
+        "grounded"     => ("\u{29bf} Grounded",    "grounded"),
         "needs_recheck"=> ("Needs re-check",       "needs-recheck"),
         _              => ("Draft",                "draft"),
     }
@@ -4564,6 +4573,17 @@ async fn fetch_audit_models() -> Option<AuditModelsResp> {
 /// The FUDGE factor keeps the estimate conservative overall even after the cache discount,
 /// since the calibration pass (over aggregated findings) and the resolution round are
 /// modeled at full price.
+/// `code_chars` is the in-scope code size. The caller is responsible for passing the size of
+/// the SCANNED file set: the whole repo for a full scan. For an incremental re-scan only the
+/// CHANGED files are actually sent to the AI, but the client has no per-file / changed-file
+/// token breakdown today (`ScanReportView` carries only the repo-total `code_chars`), so we
+/// price the FULL set and flag `incremental` in the readout as a known over-estimate. See the
+/// followup in `docs/decisions/2026-06-20_ui_bugfixes.md`.
+///
+/// `deep` (the SOC-2 / deep-security / threat-model tier) adds three EXTRA whole-repo prose
+/// passes at the AUDIT model on top of the standard scan + calibration: each re-reads the full
+/// `code_chars` as input and emits a long prose report. Deep is therefore the priciest option
+/// and the returned dollar figure reflects that, not just a prose warning.
 #[allow(clippy::too_many_arguments)]
 fn estimate_audit_cost(
     code_chars: usize,
@@ -4574,6 +4594,8 @@ fn estimate_audit_cost(
     calib_in: f64,
     calib_out: f64,
     thorough: bool,
+    incremental: bool,
+    deep: bool,
 ) -> (u64, f64, usize) {
     const CHUNK_DIGEST_CHARS: usize = 350_000;
     const RULE_BATCH_SIZE: usize = 15;
@@ -4595,6 +4617,11 @@ fn estimate_audit_cost(
     //   read  (subsequent batches):    0.10× input
     const CACHE_WRITE_MULT: f64 = 1.25;
     const CACHE_READ_MULT: f64 = 0.10;
+    // Deep tier (#55): three EXTRA whole-repo passes (SOC-2 gap, deep security, threat model).
+    // Each reads the full code once and emits a long prose report. Priced at the audit model.
+    const DEEP_PASSES: f64 = 3.0;
+    // A deep pass emits far more prose than a per-rule finding pass (full report per lens).
+    const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
 
     // Batch mode (#61): the Anthropic Message Batches API charges a flat 50% discount on
     // ALL input and output tokens for the SCAN passes (which are submitted as a batch).
@@ -4650,11 +4677,33 @@ fn estimate_audit_cost(
     let cal_in = scan_out * cal_passes;
     let cal_out = scan_out * cal_passes;
 
+    // ── Deep tier: three EXTRA whole-repo prose passes at the AUDIT model. Each reads the
+    // full code (no per-rule batching, no caching discount — distinct prompts per lens) and
+    // emits a long prose report. This is the dominant cost when enabled, which is why deep is
+    // surfaced as the priciest option in the readout. Batch discount does NOT apply (these run
+    // real-time as part of the deep lens flow, not in the scan batch).
+    let (deep_in, deep_out) = if deep {
+        let full_code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
+        let din = full_code_tokens * DEEP_PASSES;
+        let dout = DEEP_OUT_TOKENS_PER_PASS * DEEP_PASSES;
+        (din, dout)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Incremental scope (only changed files actually billed) would lower the scan portion, but
+    // the client has no changed-file token breakdown today (see fn doc + followup), so we keep
+    // the full-scan price and let the readout flag incremental as an over-estimate. Bind the
+    // flag so its role is explicit even though the number is unchanged here.
+    let _ = incremental;
+
     let dollars = ((scan_in * eff_audit_in + scan_out * eff_audit_out)
-        + (cal_in * eff_calib_in + cal_out * eff_calib_out))
+        + (cal_in * eff_calib_in + cal_out * eff_calib_out)
+        + (deep_in * audit_in + deep_out * audit_out))
         / 1_000_000.0
         * FUDGE;
-    let total_tokens = ((scan_in + scan_out + cal_in + cal_out) * FUDGE) as u64;
+    let total_tokens =
+        ((scan_in + scan_out + cal_in + cal_out + deep_in + deep_out) * FUDGE) as u64;
     (total_tokens, dollars, passes)
 }
 
@@ -5128,7 +5177,7 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
     // `draft`         -> gray   (AI-generated, not yet grounded; default)
     let verif_badges = BadgeVariantMap::new()
         .with("verified",      BadgeVariant::new("\u{2713} Verified",  "green"))
-        .with("grounded",      BadgeVariant::new("Grounded",          "blue"))
+        .with("grounded",      BadgeVariant::new("\u{29bf} Grounded", "blue"))
         .with("needs_recheck", BadgeVariant::new("Needs re-check",    "yellow"))
         .with("draft",         BadgeVariant::new("Draft",             "gray"));
     vec![
@@ -5607,6 +5656,26 @@ fn chosen_key(repo: &str, rule_id: &str) -> String {
     format!("{repo}\u{0}{rule_id}")
 }
 
+/// Sentinel key under which the SINGLE-repo scan stores its rule selection in the lifted
+/// `repo -> selected rule ids` map. A real `owner/repo` can never contain a NUL byte, so this
+/// can't collide with a multi-repo entry. Using a stable map key (instead of skipping the map
+/// entirely when `view_repo` is empty) is what lets a single-repo selection survive a remount:
+/// the map is what's serialized into the auto-saved onboarding draft, so without an entry here
+/// the architect's manual (non-recommended) picks were dropped on navigate-away-and-back and
+/// the table re-seeded to recommended-only. See `docs/decisions/2026-06-20_ui_bugfixes.md`.
+const SINGLE_REPO_SELECTION_KEY: &str = "\u{0}__single_repo__";
+
+/// The map key a `ProposedRulesTable` reads/writes its selection under. Multi-repo tables key
+/// by their `view_repo`; the single-repo case (`view_repo` empty) uses the sentinel so its
+/// picks persist through the draft like every other repo's do. Pure + unit-tested.
+fn selection_key(view_repo: &str) -> String {
+    if view_repo.is_empty() {
+        SINGLE_REPO_SELECTION_KEY.to_string()
+    } else {
+        view_repo.to_string()
+    }
+}
+
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -5662,14 +5731,14 @@ fn ProposedRulesTable(
     // otherwise fall back to the recommended rules (the first-view default). Derived BEFORE
     // use_table consumes `rows`.
     let suggested_ids: Vec<RowId> = {
-        let saved: Option<std::collections::HashSet<String>> = if view_repo.is_empty() {
-            None
-        } else {
-            repo_selection
-                .peek()
-                .get(&view_repo)
-                .map(|ids| ids.iter().cloned().collect())
-        };
+        // Look up THIS table's saved selection under its map key (the sentinel for the
+        // single-repo case, the repo name otherwise). Both paths persist into the same lifted
+        // map, so both survive a remount via the auto-saved draft. Manual non-recommended picks
+        // are restored exactly, not re-derived from `recommended`.
+        let saved: Option<std::collections::HashSet<String>> = repo_selection
+            .peek()
+            .get(&selection_key(&view_repo))
+            .map(|ids| ids.iter().cloned().collect());
         match saved {
             Some(ids) => rows
                 .iter()
@@ -5740,18 +5809,15 @@ fn ProposedRulesTable(
             .iter()
             .filter_map(|rid| id_map_writeback.get(rid).map(|r| r.id.clone()))
             .collect();
-        if view_repo_wb.is_empty() {
-            // Single-repo / non-split: no per-repo map, count is just this table's picks.
-            selected_count.set(live_ids.len());
-        } else {
-            // Write this repo's selection, then report the cross-repo total so the cost
-            // estimate reflects every repo that will be scanned, not just the visible one.
-            let mut map = repo_selection_wb.peek().clone();
-            map.insert(view_repo_wb.clone(), live_ids);
-            let total: usize = map.values().map(|v| v.len()).sum();
-            repo_selection_wb.set(map);
-            selected_count.set(total);
-        }
+        // ALWAYS write this table's live selection into the lifted map (under its key), then
+        // report the cross-repo total for the cost estimate. The single-repo case writes under
+        // the sentinel key so its picks — recommended AND manual — persist into the auto-saved
+        // draft and are restored on remount, instead of resetting to recommended-only.
+        let mut map = repo_selection_wb.peek().clone();
+        map.insert(selection_key(&view_repo_wb), live_ids);
+        let total: usize = map.values().map(|v| v.len()).sum();
+        repo_selection_wb.set(map);
+        selected_count.set(total);
     });
     let mut arming = use_signal(|| false);
     let mut opening_pr = use_signal(|| false);
@@ -6261,7 +6327,12 @@ fn RuleDetailModal() -> Element {
                 // The rationale for the adopted default (decision.why).
                 if let Some(w) = r.decision_why.as_ref().filter(|s| !s.is_empty()) {
                     div { class: "rule-modal-section",
-                        span { class: "rule-modal-label", "Why the default" }
+                        // "Why the default" only makes sense when the rule HAS a default; a rule
+                        // with no default has a rationale for the decision itself, not for a
+                        // default that doesn't exist. Label it plainly "Why" in that case.
+                        span { class: "rule-modal-label",
+                            if r.default_option.is_some() { "Why the default" } else { "Why" }
+                        }
                         p { class: "rule-modal-why", "{w}" }
                     }
                 }
@@ -6431,7 +6502,19 @@ fn CustomRulesPanel(all_repos: Vec<String>) -> Element {
                                             }
                                         }
                                         // Auto-select the rule for its repo(s) so it's included by default.
-                                        let repos: Vec<String> = if global { all_repos.clone() } else { vec![cur_repo.clone()] };
+                                        // The single-repo case (one repo) stores its selection under the
+                                        // sentinel key — same key the single-repo ProposedRulesTable seeds
+                                        // from — so the new rule is actually pre-checked on the table's
+                                        // remount (and survives the draft) instead of being written under a
+                                        // repo name the table never reads.
+                                        let multi_repo = all_repos.len() > 1;
+                                        let repos: Vec<String> = if !multi_repo {
+                                            vec![SINGLE_REPO_SELECTION_KEY.to_string()]
+                                        } else if global {
+                                            all_repos.clone()
+                                        } else {
+                                            vec![cur_repo.clone()]
+                                        };
                                         let mut m = repo_selection.peek().clone();
                                         for r in &repos {
                                             let e = m.entry(r.clone()).or_default();
@@ -7791,7 +7874,12 @@ fn ScanResults(report: ScanReportView) -> Element {
                         let (a_in, a_out) = price(&audit_model(), (3.0, 15.0));
                         let (c_in, c_out) = price(&calibration_model(), (a_in, a_out));
                         let sel = selected_count();
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough());
+                        // Mirror the request flags the audit will actually send: incremental
+                        // scope (only changed files cost tokens unless Full scan is ticked) and
+                        // the deep SOC-2/security tier (three extra whole-repo passes).
+                        let incremental = !audit_full_scan();
+                        let deep = audit_deep();
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -7837,11 +7925,18 @@ fn ScanResults(report: ScanReportView) -> Element {
                                     }
                                     p { class: "audit-cost-note",
                                         "Approximate, biased high (input + output priced separately; output bills ~5× and dominates findings-heavy scans). "
-                                        "One-time baseline over ~{code_toks} tokens of code ({report.files_scanned} files); prompt-caching can make the actual bill lower. "
+                                        if incremental {
+                                            "Scope: INCREMENTAL — only files changed since the last scan are billed, so the real cost is usually well below this whole-repo figure (priced over ~{code_toks} tokens, {report.files_scanned} files). Tick Full scan to re-audit everything. "
+                                        } else {
+                                            "Scope: FULL — every file is re-audited (~{code_toks} tokens, {report.files_scanned} files). "
+                                        }
+                                        "Prompt-caching can make the actual bill lower. "
                                         "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
                                         "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
-                                        if audit_deep() {
-                                            " Deep tier is checked: ~3 extra whole-repo passes (SOC-2 gap, deep security, threat model) will run after the standard audit. This is the most expensive tier — expect the actual bill to be significantly higher than this estimate."
+                                        if deep {
+                                            span { class: "audit-cost-deep-note",
+                                                " Deep tier is ON and INCLUDED above: ~3 extra whole-repo passes (SOC-2 gap, deep security, threat model) at the audit model. This is the MOST EXPENSIVE option — it dominates the figure. Untick Deep to drop it."
+                                            }
                                         }
                                     }
                                 }
@@ -8951,7 +9046,7 @@ mod tests {
     fn sequential_mode_no_cache_discount() {
         // Small repo: 100k chars, 0 rules, sequential.
         let (toks, dollars, passes) =
-            estimate_audit_cost(100_000, 0, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(100_000, 0, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert_eq!(passes, 1, "0 rules + sequential = one pass");
         assert!(toks > 0, "some tokens");
         assert!(dollars > 0.0, "some cost");
@@ -8963,13 +9058,13 @@ mod tests {
     fn parallel_multi_batch_cheaper_than_sequential_sum() {
         // 30 rules -> ceil(30/15)=2 batches; 350k chars = 1 chunk.
         let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert_eq!(passes_parallel, 2, "2 batches for 30 rules");
 
         // If we ran sequential with 30 rules we get 1 pass; run twice to simulate
         // the naive "pay full price twice" baseline.
         let (_, dollars_seq_single, _) =
-            estimate_audit_cost(350_000, 30, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 30, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
         let naive_two_passes = dollars_seq_single * 2.0;
 
         assert!(
@@ -8984,9 +9079,9 @@ mod tests {
     fn parallel_single_batch_no_discount() {
         // 1 rule -> 1 batch in parallel mode.
         let (toks1, dollars1, passes1) =
-            estimate_audit_cost(350_000, 1, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 1, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
         let (toks_seq, dollars_seq, passes_seq) =
-            estimate_audit_cost(350_000, 1, "sequential", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 1, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert_eq!(passes1, 1);
         assert_eq!(passes_seq, 1);
         // Token counts should be in the same ballpark (both are 1 pass over the same chunk).
@@ -9004,9 +9099,9 @@ mod tests {
     #[test]
     fn thorough_mode_costs_more_than_default() {
         let (_, dollars_default, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, false);
+            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, false, false, false);
         let (_, dollars_thorough, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, true);
+            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, true, false, false);
         assert!(
             dollars_thorough > dollars_default,
             "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
@@ -9020,9 +9115,9 @@ mod tests {
     fn batch_mode_cheaper_than_parallel_due_to_scan_discount() {
         // 30 rules, 350k chars = 1 chunk, 2 rule-batches. Calibration = same model.
         let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
         let (_, dollars_batch, passes_batch) =
-            estimate_audit_cost(350_000, 30, "batch", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(350_000, 30, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert_eq!(
             passes_parallel, passes_batch,
             "same pass count in parallel and batch (only pricing differs)"
@@ -9046,13 +9141,67 @@ mod tests {
     #[test]
     fn batch_mode_zero_rules_cheaper_than_parallel() {
         let (_, dollars_parallel, _) =
-            estimate_audit_cost(200_000, 0, "parallel", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(200_000, 0, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
         let (_, dollars_batch, _) =
-            estimate_audit_cost(200_000, 0, "batch", 3.0, 15.0, 3.0, 15.0, false);
+            estimate_audit_cost(200_000, 0, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert!(
             dollars_batch < dollars_parallel,
             "batch cheaper even with 0 rules: {dollars_batch:.4} < {dollars_parallel:.4}"
         );
+    }
+
+    /// Deep tier (three extra whole-repo passes) must ADD to the dollar figure, and it must be
+    /// the single priciest option vs. thorough or full-vs-incremental on the same config.
+    #[test]
+    fn deep_tier_costs_more_and_is_the_priciest_option() {
+        let base = |deep: bool, thorough: bool| {
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, thorough, false, deep).1
+        };
+        let standard = base(false, false);
+        let thorough = base(false, true);
+        let deep = base(true, false);
+        assert!(deep > standard, "deep adds cost: {deep:.4} > {standard:.4}");
+        assert!(
+            deep > thorough,
+            "deep is the priciest option (more than thorough): {deep:.4} > {thorough:.4}"
+        );
+    }
+
+    /// The incremental flag is plumbed through but, with no changed-file breakdown available
+    /// client-side, prices the same full-scan figure (over-estimate by design). It must not
+    /// blow up the estimate and must equal the full-scan number for the same inputs.
+    #[test]
+    fn incremental_flag_prices_same_as_full_today() {
+        let full =
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        let incremental =
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, true, false);
+        assert_eq!(
+            full.1, incremental.1,
+            "incremental prices the full set today (no changed-file data): {} vs {}",
+            full.1, incremental.1
+        );
+    }
+
+    // ── selection_key() unit tests ────────────────────────────────────────────
+
+    use super::{selection_key, SINGLE_REPO_SELECTION_KEY};
+
+    #[test]
+    fn selection_key_empty_view_repo_uses_sentinel() {
+        assert_eq!(selection_key(""), SINGLE_REPO_SELECTION_KEY);
+    }
+
+    #[test]
+    fn selection_key_named_repo_is_passthrough() {
+        assert_eq!(selection_key("owner/repo"), "owner/repo");
+    }
+
+    #[test]
+    fn selection_key_sentinel_cannot_collide_with_a_real_repo() {
+        // A real `owner/repo` never contains a NUL byte, so the sentinel can't be a repo name.
+        assert!(SINGLE_REPO_SELECTION_KEY.contains('\u{0}'));
+        assert_ne!(selection_key("a/b"), SINGLE_REPO_SELECTION_KEY);
     }
 
     // ── verif_badge() unit tests ──────────────────────────────────────────────
@@ -9072,7 +9221,11 @@ mod tests {
     #[test]
     fn verif_badge_grounded_returns_grounded_label_and_blue_class() {
         let (label, cls) = verif_badge("grounded");
-        assert_eq!(label, "Grounded");
+        assert!(label.contains("Grounded"), "label should mention Grounded, got: {label}");
+        // Grounded must carry its own distinct symbol (the circled source-dot), separate from
+        // the verified checkmark, so it's a clear table status not a faint tint.
+        assert!(label.contains('\u{29bf}'), "grounded label should carry its source-dot symbol");
+        assert!(!label.contains('\u{2713}'), "grounded must NOT reuse the verified checkmark");
         assert_eq!(cls, "grounded");
     }
 
