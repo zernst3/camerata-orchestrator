@@ -237,42 +237,24 @@ Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo**
 
 ---
 
-## 8. The in-app assistant (four context modes)
+## 8. The in-app assistant
 
-The floating chat bubble has **four modes**, each grounded in different context:
+The floating chat bubble is a single, context-rich assistant. There are no modes to pick. Every turn it is grounded in all of its sources at once, and your prompt decides which it leans on: ask "how do I onboard a repo" and it draws on the docs; ask "what did my last audit find" and it draws on the live project state; ask "where are we at" and it draws on the development state across every Unit of Work.
 
-| Mode | Grounding | Best for |
-|---|---|---|
-| **Research** | None (open AI chat) | Any question; smoke test that the model backend works |
-| **Guide** | `docs/USER_GUIDE.md` (this document) + corpus rules listing | "How do I do X in Camerata?" — operational how-tos |
-| **Technical** | `docs/TECHNICAL.md` — architecture, internals, extensibility | Deep dives into how Camerata works under the hood |
-| **Project** | Live project state — onboarding phase, findings, selected ruleset, findings summary | "What findings did my audit surface?" "What rules are in scope?" — data-driven questions about the active project |
+### What the assistant can see
 
-### The unified chat assistant
+A **"What this assistant can see"** strip at the top of the panel lists its four context sources and whether each is currently loaded:
 
-The assistant draws on **four context sources**, prioritized by the mode you select:
+1. **Canonical docs** (`USER_GUIDE.md`, `TECHNICAL.md`), baked in: the source of truth for features and how things work.
+2. **Project rules** (the corpus plus the active project's selections): what is actually in scope.
+3. **Live development state**, fetched from the development-context endpoint: every Unit of Work with its lifecycle stage, gate/bounce status, and sign-off state, so a "where are we at" question returns a real cross-project status report.
+4. **Active finding**, injected additively when you click **"Ask"** on a specific audit finding, to zoom into one violation without losing the rest of the context.
 
-1. **Canonical docs** (USER_GUIDE.md, TECHNICAL.md) — the source of truth for features and operations.
-2. **Project rules** (the corpus + the active project's selections) — what's actually in scope.
-3. **Live development state** (current scan findings, onboarded repos, in-flight stories) — the actual data.
-4. **Active finding** (when you click "Ask" on a specific audit finding) — zoomed view of one violation.
-
-The assistant **only answers from its grounding source** and says "That isn't covered by [mode name]" for out-of-scope questions, so it won't invent features that don't exist.
-
-### Project mode in detail
-
-When you open the **Project** tab:
-- The panel fetches the active project's scan state, findings, and ruleset.
-- The system prompt includes:
-  - **Onboarding phase** (blank, in-progress, onboarded) and a status label.
-  - **Selected ruleset** — all repo-local + project-level rules currently in scope, with their enforcement kind.
-  - **Up to 50 findings** from the last audit, rendered as `[severity] rule_id in repo/path:line — detail`.
-- Ask "what findings did the last audit find?" or "why was this flagged?" and get answers grounded in real data.
-- **Click "Ask" on a finding row** (when the cockpit wiring is complete) to zoom into a specific violation — the panel opens in Project mode with that finding in focus.
+The docs and rules form a stable prefix that is cached for cheap reuse; the development snapshot refreshes each turn.
 
 ### Honesty guardrail
 
-All modes include a **critical guardrail phrase** that the assistant must say verbatim when you ask something outside its scope — e.g., "That isn't covered by the current project context." This ensures the assistant never bluffs.
+The assistant answers **only** from those sources. When a question is covered by none of them, it says so verbatim rather than guessing, so it never invents features or facts that do not exist. That is the same honesty line drawn everywhere else in Camerata.
 
 ---
 
@@ -417,5 +399,5 @@ per-repo rules → Add rules to repo(s): local branch+push → optionally audit 
 manage the ruleset in the Rules view → adopt stories and run governed work in Governed Development →
 review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
 push/PR and the AI audit + governed dev. Export/import a project to move it between machines; resolve
-local repo paths on the receiving side. Use the chat bubble's Project mode to ask data-driven questions
+local repo paths on the receiving side. Use the chat bubble to ask data-driven questions
 about your active project.
