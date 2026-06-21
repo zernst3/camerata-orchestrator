@@ -1,0 +1,43 @@
+id = "GO-TESTING-INTEGRATION-BUILD-TAGS-1"
+title = "Integration tests are gated behind a //go:build integration build tag and live in *_integration_test.go files"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+qualifies = "Integration tests — tests that require a live database, external service, or network — are placed in *_integration_test.go files and gated with //go:build integration at the top. go test ./... runs only unit tests by default; go test -tags=integration ./... includes integration tests. This keeps the unit-test suite fast and runnable offline."
+
+[[sources]]
+url = "https://pkg.go.dev/cmd/go#hdr-Build_constraints"
+title = "cmd/go — Build constraints (//go:build)"
+qualifies = "cmd/go documents the //go:build directive: custom tags specified via -tags flag at build/test time. A file with //go:build integration is only compiled when go test -tags=integration is passed."
+
+[[sources]]
+url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
+title = "cmd/go — Test packages"
+qualifies = "go test documentation: build tags (//go:build) control which files are compiled for a given test run, enabling separation of fast unit tests from slow integration tests."
+
+[decision]
+question = "How are tests that require external infrastructure (DB, network, queues) separated from unit tests?"
+default = "integration-build-tag"
+why = "go test ./... is the first command a developer runs to check correctness. If integration tests that require a running Postgres or external API are included in the default run, the suite becomes slow and fails in offline / CI-without-infra environments. The //go:build integration tag is the idiomatic Go mechanism for opt-in test categories. The *_integration_test.go file name convention communicates intent without opening the file. CI runs two steps: go test ./... for fast feedback and go test -tags=integration ./... for the full suite, each in its own stage."
+
+[[option]]
+id = "integration-build-tag"
+label = "//go:build integration tag on *_integration_test.go files"
+directive = "Tests that require live infrastructure (database, message queue, HTTP service) are placed in files named *_integration_test.go. Each such file begins with //go:build integration (followed by a blank line) before the package declaration. Unit tests have no build tag and run by default. CI runs integration tests separately with go test -tags=integration ./..."
+why = "The adopted default. Fast unit tests run by default; integration tests are opt-in. Standard //go:build syntax (Go 1.17+, replacing the deprecated // +build syntax)."
+
+[[option]]
+id = "testmain-flag"
+label = "integration flag via TestMain and a -integration flag"
+directive = "A TestMain function reads a -integration command-line flag; integration tests are skipped unless the flag is set. No build tags used."
+why = "Avoids build tag syntax but requires every integration test to call t.Skip() manually; forgetting one skips it in the wrong direction."
+
+[[option]]
+id = "no-separation"
+label = "no separation: all tests run together"
+directive = "Unit and integration tests are interleaved in the same _test.go files with no tagging or skipping."
+why = "go test ./... becomes slow and dependent on external infrastructure; CI without the infrastructure fails."

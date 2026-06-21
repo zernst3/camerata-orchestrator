@@ -1,0 +1,48 @@
+id = "GO-TESTING-TABLE-DRIVEN-T-RUN-1"
+title = "Tests with multiple input/output cases use table-driven structure with t.Run subtests"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+qualifies = "When a test exercises the same function across many input/output combinations, Go idiom is to declare a slice (or map) of structs, each holding the inputs and expected outputs for one case, then iterate with t.Run to give each case a name and a separate subtest. This produces clear -v output, allows -run filtering to a single case, and avoids copying test logic per case."
+
+[[sources]]
+url = "https://go.dev/wiki/TableDrivenTests"
+title = "Go Wiki — Table Driven Tests"
+qualifies = "Canonical Go Wiki guidance: 'Table driven testing is not a tool, package or anything else, it's just a way and perspective to write cleaner tests.' Recommends a slice/map of structs with t.Run for each case. Shows the tt / tc loop variable convention."
+
+[[sources]]
+url = "https://pkg.go.dev/testing#hdr-Subtests_and_Sub_benchmarks"
+title = "pkg.go.dev/testing — Subtests and Sub-benchmarks"
+qualifies = "Official testing package docs for t.Run: each subtest has a hierarchical name (TestFoo/A=1), runs in its own goroutine, and can be run in isolation via -run TestFoo/A=1."
+
+[[sources]]
+url = "https://go.dev/wiki/TestComments"
+title = "Go Wiki — Test Comments (testing conventions)"
+qualifies = "Go testing wiki guidance: use t.Run subtests for table-driven tests; use t.Error not t.Fatal inside the loop so all cases are reported in one run."
+
+[decision]
+question = "How are tests with many similar cases structured?"
+default = "table-driven-with-t-run"
+why = "Copying a test function for each case produces duplication and is hard to extend. A table-driven test amortizes the test logic once across all cases; adding a new case is one line in the slice. t.Run gives each case a named subtest, which is addressable individually with go test -run TestFoo/CaseName and produces clear pass/fail attribution in -v output. Without t.Run the loop index becomes the only way to identify which case failed — the Go test wiki explicitly says never use the index as a substitute for a name."
+
+[[option]]
+id = "table-driven-with-t-run"
+label = "slice-of-structs table with named t.Run subtests"
+directive = "Tests with multiple input/output cases declare a slice (or map) of anonymous structs, each with a `name` field and the relevant input/expected fields. The loop variable is named `tt` or `tc` by convention. Each iteration calls t.Run(tt.name, func(t *testing.T) { ... }). Inside the subtest, t.Errorf reports failures with format 'FuncName(%v) = %v, want %v' (actual before expected). t.Fatal is reserved for setup failures; t.Error is used for assertion failures so all cases run."
+why = "The adopted default. Canonical Go idiom (Go Wiki TableDrivenTests). Clear failure attribution via subtest names. Individually runnable cases. Zero duplication of test logic."
+
+[[option]]
+id = "one-function-per-case"
+label = "a separate TestXxx function for each case"
+directive = "Each distinct test case is implemented as its own TestXxx function with a descriptive name (e.g., TestAbs_Negative, TestAbs_Zero)."
+why = "Acceptable for truly distinct scenarios with different setup/teardown needs, but creates test function proliferation for simple input/output variation."
+
+[[option]]
+id = "loop-without-subtests"
+label = "loop over cases without t.Run subtests"
+directive = "Test cases are looped without t.Run; failures are attributed by printing the loop index or the input value in the error message."
+why = "Cases are not individually addressable via -run and the failure index is opaque. The Go wiki explicitly discourages using the index as a substitute for a name."

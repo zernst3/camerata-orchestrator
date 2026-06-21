@@ -1,0 +1,42 @@
+id = "GO-TESTING-COLOCATED-TEST-FILES-1"
+title = "Unit test files are co-located with the source they test, named with the _test.go suffix"
+tag = "stack"
+domain = "go:testing"
+layer = "testing"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in the same directory. The _test.go suffix is the signal to the go tool: those files are excluded from production builds and included only when go test runs. Tests placed in a separate sibling directory or named without the suffix are not picked up by go test."
+
+[[sources]]
+url = "https://pkg.go.dev/testing"
+title = "pkg.go.dev/testing — Go testing package"
+
+[[sources]]
+url = "https://go.dev/doc/code#Testing"
+title = "How to Write Go Code — Testing section"
+qualifies = "The official Go tutorial shows test files co-located with source files in the same directory, using the _test.go suffix (e.g., morestrings/reverse_test.go alongside morestrings/reverse.go)."
+
+[[sources]]
+url = "https://pkg.go.dev/cmd/go#hdr-Test_packages"
+title = "cmd/go — Test packages"
+linter = "go build: _test.go exclusion"
+qualifies = "go test documentation: 'Files whose names begin with _ or . (including _test.go) are ignored by the go tool.' Test files with the _test.go suffix are compiled and run only by go test."
+
+[decision]
+question = "Where do unit test files live relative to the code they test?"
+default = "colocated"
+why = "Placing _test.go files in the same directory as the code they test is the universal Go convention enforced by the go tool itself. The _test.go suffix is not just a naming suggestion — it is the mechanism by which go build excludes test code from production binaries and by which go test finds tests. Any other placement (e.g., a separate tests/ directory) requires build tags or manual linkage, breaking the go test ./... idiom. Co-location also keeps tests close to the code they test, making them easy to find and maintain."
+
+[[option]]
+id = "colocated"
+label = "unit tests in foo_test.go alongside foo.go in the same directory"
+directive = "Every Go source file foo.go has its tests in foo_test.go in the same directory. The file name matches the source file name with the _test.go suffix appended. go test ./... discovers and runs all tests automatically."
+why = "The adopted default. Required by the go tool for automatic test discovery. Keeps tests adjacent to the code they test."
+
+[[option]]
+id = "separate-test-directory"
+label = "tests in a separate tests/ or test/ sibling directory"
+directive = "Test files live in a separate directory (e.g., tests/, test/, or a mirrored package structure) rather than alongside the source they test."
+why = "Not idiomatic Go. Breaks go test ./... discovery. Requires manual coordination to keep tests aligned with their source."
