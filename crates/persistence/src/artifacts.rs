@@ -402,7 +402,15 @@ fn row_to_revision(row: &sqlx::sqlite::SqliteRow) -> Result<ArtifactRevision, Pe
         .ok_or_else(|| sqlx::Error::Decode(format!("unknown edit actor: {actor_str}").into()))?;
     let op = RevisionOp::parse_str(&op_str)
         .ok_or_else(|| sqlx::Error::Decode(format!("unknown revision op: {op_str}").into()))?;
-    let created_at: DateTime<Utc> = created_at_str.parse().unwrap_or_else(|_| Utc::now());
+    // BUG-AS-1: propagate a timestamp parse failure instead of silently substituting
+    // Utc::now(). Silently using the retrieval time as `created_at` undermines the
+    // audit-trail integrity guarantee — a corrupt row would carry a factually wrong
+    // timestamp with no observable error. Map the parse error to sqlx::Error::Decode
+    // (the same pattern used for kind/actor/op above) so the caller can decide whether
+    // to surface or skip the row.
+    let created_at: DateTime<Utc> = created_at_str
+        .parse()
+        .map_err(|e| sqlx::Error::Decode(format!("invalid created_at timestamp '{created_at_str}': {e}").into()))?;
 
     Ok(ArtifactRevision {
         revision_id,
@@ -1226,5 +1234,66 @@ mod tests {
             .expect("current_artifact ok");
 
         assert!(result.is_none(), "deleted artifact must return None");
+    }
+
+    // -----------------------------------------------------------------------
+    // BUG-AS-1 regression: timestamp parse failure must propagate as an error
+    // -----------------------------------------------------------------------
+
+    /// BUG-AS-1: before the fix, a corrupt `created_at` timestamp in a row caused
+    /// `row_to_revision` to silently substitute `Utc::now()` via `unwrap_or_else`.
+    /// After the fix it returns a `PersistenceError` via `sqlx::Error::Decode`, making
+    /// the parse failure observable instead of masking it with a wrong timestamp.
+    ///
+    /// We inject a row with an invalid `created_at` value directly into the DB and
+    /// verify that `current_artifact` / `history` / `revision_at` surface an error
+    /// rather than returning a row with a fabricated timestamp.
+    #[tokio::test]
+    async fn bug_as1_corrupt_timestamp_propagates_error_not_utc_now() {
+        let store = in_memory_store().await;
+
+        // Write a valid row first (so we know the artifact ID and the table exists).
+        let t = Utc::now();
+        store
+            .record_revision(&NewRevision::new(
+                "proj-ts",
+                ArtifactKind::UserStory,
+                "us-ts",
+                EditActor::User,
+                RevisionOp::Create,
+                r#"{"title":"corrupt-ts test"}"#,
+                t,
+            ))
+            .await
+            .expect("create valid row");
+
+        // Directly corrupt the created_at column for that revision.
+        sqlx::query(
+            "UPDATE artifact_revisions \
+             SET created_at = 'NOT-A-TIMESTAMP' \
+             WHERE project_id = 'proj-ts' AND artifact_id = 'us-ts'",
+        )
+        .execute(store.pool())
+        .await
+        .expect("corrupt timestamp update");
+
+        // current_artifact must return an Err, not Ok(Some(...)) with a wrong timestamp.
+        let result = store
+            .current_artifact("proj-ts", ArtifactKind::UserStory, "us-ts")
+            .await;
+        assert!(
+            result.is_err(),
+            "BUG-AS-1: a corrupt created_at timestamp must produce a PersistenceError, \
+             not a silently-substituted Utc::now(); got: {result:?}"
+        );
+
+        // history() must also error.
+        let history_result = store
+            .history("proj-ts", ArtifactKind::UserStory, "us-ts")
+            .await;
+        assert!(
+            history_result.is_err(),
+            "BUG-AS-1: history() with corrupt timestamp must return PersistenceError"
+        );
     }
 }
