@@ -229,22 +229,33 @@ fn default_max_iterations() -> usize {
     1
 }
 
+/// GET a JSON resource from the BFF, retrying on a connection failure so a fetch that
+/// races the embedded server's startup is not rendered as "empty". The desktop app boots
+/// its server in-process; the first request(s) can land before it accepts connections,
+/// which previously showed the projects list empty until a remount re-fetched. Retries for
+/// ~2.5s, then gives up (returns None) so a genuinely-down server still fails. A successful
+/// request whose body is empty / `null` is NOT retried — that is real data, not a race.
+async fn bff_get_json<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
+    let url = format!("{}{}", crate::BFF_URL, path);
+    for attempt in 0..10u32 {
+        match reqwest::get(url.as_str()).await {
+            Ok(resp) => return resp.json::<T>().await.ok(),
+            Err(_) if attempt < 9 => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 async fn fetch_projects() -> Option<Vec<ProjectView>> {
-    reqwest::get(format!("{}/api/projects", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<Vec<ProjectView>>()
-        .await
-        .ok()
+    bff_get_json::<Vec<ProjectView>>("/api/projects").await
 }
 
 async fn fetch_active_project() -> Option<ProjectView> {
-    reqwest::get(format!("{}/api/projects/active", crate::BFF_URL))
+    bff_get_json::<Option<ProjectView>>("/api/projects/active")
         .await
-        .ok()?
-        .json::<Option<ProjectView>>()
-        .await
-        .ok()
         .flatten()
 }
 
