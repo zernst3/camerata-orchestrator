@@ -30,4 +30,4 @@ why = "Express routes thrown and next(err) errors to the four-argument error mid
 id = "each-route-handles-its-own-errors-with-local-try"
 label = "each route handles its own errors with local try/catch …"
 directive = "each route handles its own errors with local try/catch blocks that format and send their own error responses, rather than forwarding to a single central error-handling middleware via throw or next(err)"
-why = "A defensible alternative the project considered."
+why = "Each route inventing its own try/catch and error-response logic produces inconsistent status codes and response shapes across the API, scatters logging, and still misses the async-rejection case unless every handler remembers its async wrapper. The result is N partial reimplementations of the same error contract, with the gap surfacing as a 200 with an error body or a request that hangs forever on a rejected promise."

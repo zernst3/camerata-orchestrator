@@ -31,4 +31,4 @@ why = "Modern Angular (14+) standalone components are explicit, tree-shakeable, 
 id = "all-components-are-declared-in-ngmodules-with-tran"
 label = "All components are declared in NgModules with transitive …"
 directive = "all components are declared in NgModules, and dependencies are managed transitively through module declarations rather than explicit imports on each component. Standalone: true is not used."
-why = "A defensible alternative the project considered."
+why = "NgModule-based components resolve their dependencies transitively through module declarations, which means a missing dependency is not surfaced at the component level and the module hierarchy must be traversed to audit what any component can access. NgModules introduce an additional abstraction layer between a component and its dependencies that is difficult to audit and test, and transitive imports from shared modules can pull in far more code than any single component needs, limiting tree-shaking effectiveness."

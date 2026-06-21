@@ -27,4 +27,4 @@ why = "With strictNullChecks off, null and undefined are assignable to every typ
 id = "the-compiler-runs-with-strict-mode-off-or-with-i"
 label = "the compiler runs with strict mode off, or with …"
 directive = "the compiler runs with strict mode off, or with individual strict flags such as strictNullChecks or noImplicitAny disabled, rather than enabling the full strict family and keeping it on"
-why = "A defensible alternative the project considered."
+why = "Running with strict mode off, or cherry-picking individual strict flags, buys a smaller initial migration diff at the cost of a type system that claims to verify code it does not actually verify: with strictNullChecks off, null and undefined are assignable to every type and the compiler reports nothing on the null-dereference bugs that are most common at runtime; with noImplicitAny off, an un-annotated parameter becomes any and disables checking for everything downstream. Retrofitting strict onto a large untyped-by-default codebase later is far more expensive than starting strict and never accumulating the debt."

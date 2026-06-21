@@ -28,4 +28,4 @@ why = "A floating promise still runs but nothing waits for it and nothing observ
 id = "promise-returning-calls-may-be-left-floating-whe"
 label = "Promise-returning calls may be left floating when the …"
 directive = "Promise-returning calls may be left floating when the result is not needed, relying on the author to await only where a value is consumed, rather than requiring every promise to be awaited, returned, or explicitly voided-and-handled"
-why = "A defensible alternative the project considered."
+why = "Leaving a Promise-returning call floating when the result is not needed conflates not needing the value with not needing the completion or the error: a rejection in a floating promise becomes an unhandled rejection that no try/catch can reach, and the surrounding function continues past the un-awaited call as though the work were done, silently violating ordering guarantees (write completes before read, transaction commits before response) in ways that surface as flaky, timing-dependent production failures rather than local errors."

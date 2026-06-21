@@ -35,4 +35,4 @@ why = "Composition API with <script setup> improves code organization and reusab
 id = "options-api"
 label = "Use the Options API"
 directive = "Component logic is organized using the Options API: data(), computed, methods, lifecycle hooks (mounted, created, etc.). Component state, derived values, and handlers are separated into different sections."
-why = "A defensible alternative the project considered."
+why = "The Options API spreads related code across data, computed, methods, and lifecycle-hook sections, so a reviewer must jump between sections to understand a single feature in a large component. This makes large components difficult to follow and makes extracting reusable logic into composables harder because the logic is fragmented across option sections rather than co-located by feature."

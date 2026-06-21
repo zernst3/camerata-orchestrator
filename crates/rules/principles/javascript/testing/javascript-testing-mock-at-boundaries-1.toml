@@ -36,4 +36,4 @@ why = "Boundary mocks keep tests fast and infrastructure-free while leaving real
 id = "mocks-used-liberally-for-any-dependency"
 label = "Mocks are used liberally to isolate the unit under test from any dependency"
 directive = "Every dependency of the unit under test is mocked regardless of whether it is an external boundary or own domain code, maximising isolation of the single function under test."
-why = "A defensible alternative the project considered. Classic London-school TDD isolation; preferred by teams that want strict class-level unit tests."
+why = "Mocking every dependency of the unit under test maximizes isolation and is the classic London-school TDD approach: each class is tested without its collaborators, and the test verifies that the unit calls its dependencies correctly. The trade-off is that such tests assert wiring rather than correctness, break on safe internal refactors without catching real bugs, and pass even when the mocked dependency's behavior is wrong; the suite grows in coverage numbers while producing less confidence that the integrated system works."

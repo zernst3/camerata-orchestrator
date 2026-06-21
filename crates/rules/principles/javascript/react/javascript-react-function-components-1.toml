@@ -26,4 +26,4 @@ why = "Function components with hooks are the shape React's tooling and newer AP
 id = "class-components-are-written-alongside-function"
 label = "class components are written alongside function components …"
 directive = "class components are written alongside function components at the author's discretion, maintaining lifecycle-method and hook-based idioms in parallel, rather than standardizing on function components with hooks for new code"
-why = "A defensible alternative the project considered."
+why = "Writing class components alongside function components maintains two parallel idioms for the same concerns: lifecycle methods versus effects, this.state versus useState. Shared logic cannot be extracted into a custom hook if half the components cannot consume it, so the codebase accumulates two parallel idiom sets and cuts class-based components off from the hook-based patterns the rest of the app and the wider ecosystem use. Class components are a maintained-but-legacy form that React's documentation and tooling are steadily leaving behind."

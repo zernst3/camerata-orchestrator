@@ -37,4 +37,4 @@ why = "Unique, behaviour-descriptive names make failing CI output self-explanato
 id = "test-names-are-free-form-no-convention-enforced"
 label = "Test names are free-form; no naming convention is enforced beyond uniqueness"
 directive = "Test titles are free-form. Only jest/no-identical-title is enforced to prevent duplicate names; content and style are left to the author."
-why = "A defensible alternative the project considered."
+why = "Free-form names with only a uniqueness constraint mean a developer reads 'test 1 FAILED' in CI and cannot tell what behavior broke without opening the file, navigating to the test, and reading its body. The no-identical-title rule prevents duplicate names but does nothing to make names self-explanatory; a suite of tests named 'handles input', 'works correctly', and 'test case' all pass the uniqueness constraint while providing no information about what the test verifies."

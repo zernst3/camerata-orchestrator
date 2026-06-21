@@ -31,4 +31,4 @@ why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memor
 id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
 label = "manual subscribe calls are tracked and unsubscribed …"
 directive = "Observable subscriptions are handled manually using .subscribe() calls, tracked in fields, and cleaned up by calling .unsubscribe() in ngOnDestroy()"
-why = "A defensible alternative the project considered."
+why = "Manually tracking subscriptions in fields and unsubscribing in ngOnDestroy is error-prone: the cleanup hook is easy to forget when adding a new subscription, and a subscription that is active longer than needed fires handlers on a destroyed component, producing 'ExpressionChangedAfterItHasBeenChecked' errors, memory leaks, and duplicate event listeners. The manual pattern is also more verbose and requires the developer to remember the cleanup obligation at every new subscribe call."

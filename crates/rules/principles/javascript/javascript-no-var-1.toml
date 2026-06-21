@@ -28,4 +28,4 @@ why = "var is function-scoped and hoisted, producing closure-capture and tempora
 id = "var-remains-permitted-alongside-const-and-let-le"
 label = "var remains permitted alongside const and let, leaving …"
 directive = "var remains permitted alongside const and let, leaving the choice of declaration keyword to the author rather than forbidding the function-scoped, hoisted var form outright"
-why = "A defensible alternative the project considered."
+why = "Permitting var alongside const and let reintroduces function-scoping and hoisting exactly where they produce closure-capture and temporal bugs: a var in a loop body is shared across every iteration rather than rebound, and a var in a conditional is visible from the top of the function as undefined before it is reached. There is no capability var has that let lacks; allowing it trades a structural block-scoping guarantee for backward compatibility at the cost of the footguns the block-scoped forms were designed to eliminate."

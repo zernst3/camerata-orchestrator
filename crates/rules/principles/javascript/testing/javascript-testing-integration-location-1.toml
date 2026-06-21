@@ -35,4 +35,4 @@ why = "Integration tests have a different cost model (slower, require infra), ne
 id = "integration-tests-co-located-with-test-suffix"
 label = "Integration tests are co-located with source using a .integration.test.ts suffix"
 directive = "Integration tests live next to the source under test, distinguished from unit tests by a .integration.test.ts (or .e2e.test.ts) suffix, and excluded from the fast unit-test run via a glob filter on that suffix."
-why = "A defensible alternative the project considered. Keeps all tests near source but blurs the unit/integration boundary."
+why = "Co-locating integration tests with source using a suffix keeps all tests near the module under test, which reduces navigation cost; a glob filter on the suffix can still exclude them from the fast unit-test run. The cost is that co-location implies ownership by the adjacent source file, which is false for an integration test that exercises multiple modules, and the unit/integration boundary becomes blurry enough that the CI split between fast and slow test runs is harder to maintain consistently."

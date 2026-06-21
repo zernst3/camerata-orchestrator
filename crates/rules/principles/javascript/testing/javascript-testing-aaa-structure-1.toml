@@ -32,4 +32,4 @@ why = "AAA makes the intent of each test readable at a glance, the single-act co
 id = "test-body-is-free-form-no-required-structure"
 label = "Test body structure is free-form; no required phase ordering"
 directive = "Test bodies have no required phase structure; each author organises setup, exercise, and assertion in whatever order is convenient for the scenario."
-why = "A defensible alternative the project considered."
+why = "A free-form test body requires the reader to reconstruct the Arrange/Act/Assert phases mentally before understanding what the test does, adding cognitive load that compounds across a large suite. Without the single-act constraint, a failing test points to a sequence of operations rather than a single cause, forcing the reader to bisect the compound case to determine which act introduced the failure."

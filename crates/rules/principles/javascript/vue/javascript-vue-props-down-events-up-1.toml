@@ -35,4 +35,4 @@ why = "Unidirectional data flow makes component interactions predictable and deb
 id = "direct-method-calls-and-shared-state"
 label = "Direct method calls and shared mutable state"
 directive = "Parent components call child methods directly via template refs. Parent and child components share and mutate the same state object. Data flow is bidirectional."
-why = "A defensible alternative the project considered."
+why = "Direct parent-to-child method calls and shared mutable state create bidirectional data flow: debugging requires searching all places that mutate shared state rather than following a single direction, and a change to shared state can have effects in multiple components simultaneously, making the flow unpredictable. The unidirectional alternative (props down, events up) makes every state change traceable to its source."

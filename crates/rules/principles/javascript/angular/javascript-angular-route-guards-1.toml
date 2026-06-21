@@ -30,4 +30,4 @@ why = "Route guards authorize at the boundary before the component instantiates,
 id = "authorization-is-checked-in-component-oninitonaf"
 label = "authorization is checked in component ngOnInit or …"
 directive = "authorization checks are performed inside component lifecycle hooks (ngOnInit) or component methods, redirecting to a login or access-denied page if the user lacks permission"
-why = "A defensible alternative the project considered."
+why = "Checking authorization inside ngOnInit or component methods means the component is already loaded and its lifecycle is already running when the authorization decision is made: the user may see a partial render before being redirected, and the component's subscriptions and state initialization have already executed for an unauthorized user. A wrong or missing check in one ngOnInit cannot be caught structurally; every new component must independently remember to include the check."
