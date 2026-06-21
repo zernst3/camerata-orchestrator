@@ -13,6 +13,48 @@
 use std::path::Path;
 use tokio::process::Command;
 
+/// Raw output from an arbitrary check command.
+///
+/// The multi-language runners share this shape: they shell out to a tool, then
+/// the per-language runner interprets `success` + `combined`. `tool_missing` is
+/// the load-bearing distinction for the honesty stance (see crate docs): a tool
+/// that could not be spawned at all is NOT a clean result, it is "could not
+/// verify", which the runner surfaces as an `Err` so the coordinator fails
+/// closed instead of falsely reporting a clean worktree.
+pub struct CommandOutput {
+    /// Combined stdout + stderr text.
+    pub combined: String,
+    /// True when the command exited 0.
+    pub success: bool,
+}
+
+/// Run `program args...` in `worktree`, returning combined output + success.
+///
+/// A non-zero exit is NOT an error here (it is the normal "lint/test failed"
+/// signal the caller maps to a RuleId). A failure to SPAWN the program (e.g.
+/// the binary is not on PATH) IS an error: it propagates as `std::io::Error`,
+/// which the per-language runner turns into an `Err` rather than a false clean.
+pub async fn run_command(
+    worktree: &Path,
+    program: &str,
+    args: &[&str],
+) -> std::io::Result<CommandOutput> {
+    let out = Command::new(program)
+        .args(args)
+        .current_dir(worktree)
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let combined = format!("{stdout}\n{stderr}");
+
+    Ok(CommandOutput {
+        combined,
+        success: out.status.success(),
+    })
+}
+
 /// Raw output from `cargo fmt --check`.
 ///
 /// Contains stdout + stderr concatenated with a newline separator so the parse

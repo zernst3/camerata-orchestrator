@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
-use camerata_checks::RustCheckRunner;
+use camerata_checks::runner_for_worktree;
 use camerata_core::{CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
 use camerata_gateway::enforced_gate_rules;
 use camerata_intake::{Plan, PlanTask, TaskKind};
@@ -403,9 +403,13 @@ pub async fn build_from_plan_with_model_and_iterations(
         stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
     }
 
-    // ── Run the governed fleet with the REAL RustCheckRunner ─────────────────
-    let checks = RustCheckRunner::new();
-    let fleet = FleetCoordinator::new(&checks, &worktree);
+    // ── Run the governed fleet with the language-matched layer-2 runner ──────
+    // `runner_for_worktree` detects the worktree language (Cargo.toml -> Rust,
+    // package.json -> JS/TS, go.mod -> Go, pyproject/requirements/Pipfile ->
+    // Python) and returns the matching CheckRunner; unknown trees degrade to a
+    // logged NoopChecks. The coordinator still takes &dyn CheckRunner.
+    let checks = runner_for_worktree(&worktree);
+    let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
     // ── Emit per-stage finished events ───────────────────────────────────────
@@ -545,9 +549,13 @@ pub async fn build_from_plan_with_tier_map(
         stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
     }
 
-    // ── Run the governed fleet with the REAL RustCheckRunner ─────────────────
-    let checks = RustCheckRunner::new();
-    let fleet = FleetCoordinator::new(&checks, &worktree);
+    // ── Run the governed fleet with the language-matched layer-2 runner ──────
+    // `runner_for_worktree` detects the worktree language (Cargo.toml -> Rust,
+    // package.json -> JS/TS, go.mod -> Go, pyproject/requirements/Pipfile ->
+    // Python) and returns the matching CheckRunner; unknown trees degrade to a
+    // logged NoopChecks. The coordinator still takes &dyn CheckRunner.
+    let checks = runner_for_worktree(&worktree);
+    let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
     // ── Emit per-stage finished events ───────────────────────────────────────

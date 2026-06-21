@@ -21,6 +21,17 @@
 /// `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`.
 pub mod architectural;
 
+/// Per-language layer-2 [`camerata_core::CheckRunner`]s (JS/TS, Python, Go) plus
+/// the worktree language-detect selector ([`multilang::runner_for_worktree`])
+/// that injects the right one. Closes the cross-language layer-2 gap where the
+/// coordinator was hardcoded to the Rust-only [`RustCheckRunner`].
+/// See `docs/decisions/2026-06-21_multilang_layer2_checkrunner.md`.
+pub mod multilang;
+pub use multilang::{
+    detect_language, runner_for_worktree, GoCheckRunner, JsCheckRunner, PythonCheckRunner,
+    WorktreeLanguage,
+};
+
 pub mod parse;
 pub mod subprocess;
 
