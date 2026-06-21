@@ -18,8 +18,6 @@
 
 use dioxus::prelude::*;
 
-use camerata_worktracker::{CanonicalStory, FeatureStatus};
-
 // Chorale (crates.io, headless table) backs the brownfield audit-findings and
 // proposed-rules tables — the surfaces where the data genuinely scales.
 use chorale_core::{
@@ -27,113 +25,6 @@ use chorale_core::{
     RenderKind, RowId, TableState,
 };
 use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
-
-/// One enforced gate rule, as returned by the BFF `/api/rules` endpoint (GOV-1 is
-/// filtered out server-side). The cockpit just renders what the BFF returns.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct CockpitRule {
-    id: String,
-    statement: String,
-}
-
-/// Fetch the canonical story spine from the BFF.
-async fn fetch_stories() -> Option<Vec<CanonicalStory>> {
-    reqwest::get(format!("{}/api/stories", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<Vec<CanonicalStory>>()
-        .await
-        .ok()
-}
-
-/// Fetch the gate's enforced rules from the BFF.
-async fn fetch_rules() -> Option<Vec<CockpitRule>> {
-    reqwest::get(format!("{}/api/rules", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<Vec<CockpitRule>>()
-        .await
-        .ok()
-}
-
-/// One open GitHub issue from `GET /api/github/issues` (#20), as the adopt picker
-/// renders it. Mirrors the server's `IssueSummary`.
-#[derive(Clone, PartialEq, serde::Deserialize)]
-struct IssueRow {
-    number: u64,
-    title: String,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    url: String,
-}
-
-/// The `GET /api/github/issues` envelope: `ok` plus the issues, or a hint when the
-/// token is missing / the call failed. The endpoint never errors at the HTTP layer
-/// (it degrades gracefully), so a `None` here means the BFF itself was unreachable.
-#[derive(Clone, PartialEq, serde::Deserialize)]
-struct IssuesResult {
-    #[serde(default)]
-    ok: bool,
-    #[serde(default)]
-    issues: Vec<IssueRow>,
-    #[serde(default)]
-    message: Option<String>,
-}
-
-/// List a repo's open GitHub issues for the adopt picker. `None` only when the BFF
-/// itself is unreachable; a token-less / failed GitHub call still returns `Some`
-/// with `ok: false` and a message.
-async fn fetch_github_issues(repo: &str) -> Option<IssuesResult> {
-    reqwest::get(format!(
-        "{}/api/github/issues?repo={}",
-        crate::BFF_URL,
-        urlencoding_encode(repo)
-    ))
-    .await
-    .ok()?
-    .json::<IssuesResult>()
-    .await
-    .ok()
-}
-
-/// Adopt one GitHub issue onto the spine via `POST /api/stories/adopt-issue`. The
-/// issue fields travel in the body (already fetched), so this needs no token.
-/// Returns the adopted story id on success.
-async fn adopt_github_issue(repo: &str, issue: &IssueRow) -> Option<String> {
-    let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/stories/adopt-issue", crate::BFF_URL))
-        .json(&serde_json::json!({
-            "repo": repo,
-            "number": issue.number,
-            "title": issue.title,
-            "body": issue.body,
-        }))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string())
-}
-
-/// Minimal percent-encoding for the `repo` query value (`owner/repo`). Encodes the
-/// `/` and a few other reserved chars so the query parses; avoids pulling in a new
-/// dependency for a single tiny value.
-fn urlencoding_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            // RFC 3986 unreserved set only — everything else (incl. `/`) is encoded.
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 
@@ -2266,16 +2157,6 @@ struct ClarificationView {
     state: Option<String>,
 }
 
-/// Fetch all OPEN clarifications across stories (the NEEDS YOU queue).
-async fn fetch_open_clarifications() -> Option<Vec<ClarificationView>> {
-    reqwest::get(format!("{}/api/clarifications", crate::BFF_URL))
-        .await
-        .ok()?
-        .json::<Vec<ClarificationView>>()
-        .await
-        .ok()
-}
-
 /// Fetch the clarifications on a story.
 async fn fetch_clarifications(story_id: &str) -> Option<Vec<ClarificationView>> {
     reqwest::get(format!(
@@ -2349,65 +2230,6 @@ async fn answer_clarification(
         .ok()
 }
 
-/// A proposed child story from decomposition (editable before commit). Serializes
-/// back to the BFF on commit.
-#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct ProposedChildView {
-    kind: String,
-    title: String,
-    description: String,
-}
-
-/// Propose the component children for a parent (not yet created).
-async fn fetch_proposal(story_id: &str) -> Option<Vec<ProposedChildView>> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/api/stories/{}/decompose",
-            crate::BFF_URL,
-            story_id
-        ))
-        .send()
-        .await
-        .ok()?
-        .json::<Vec<ProposedChildView>>()
-        .await
-        .ok()
-}
-
-/// Commit the edited children; returns the created child stories.
-async fn commit_children(
-    story_id: &str,
-    children: &[ProposedChildView],
-) -> Option<Vec<CanonicalStory>> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/api/stories/{}/decompose/commit",
-            crate::BFF_URL,
-            story_id
-        ))
-        .json(&serde_json::json!({ "children": children }))
-        .send()
-        .await
-        .ok()?
-        .json::<Vec<CanonicalStory>>()
-        .await
-        .ok()
-}
-
-/// The committed children of a parent.
-async fn fetch_children(story_id: &str) -> Option<Vec<CanonicalStory>> {
-    reqwest::get(format!(
-        "{}/api/stories/{}/children",
-        crate::BFF_URL,
-        story_id
-    ))
-    .await
-    .ok()?
-    .json::<Vec<CanonicalStory>>()
-    .await
-    .ok()
-}
-
 // ── Unit of Work (issue #39) ──────────────────────────────────────────────────
 
 /// The dev status of a Unit of Work. Shown alongside the story's tracker status.
@@ -2427,15 +2249,6 @@ impl DevStatus {
             Self::New => "New",
             Self::InProgress => "In progress",
             Self::Done => "Done",
-        }
-    }
-
-    /// CSS modifier for the `uow-dev-badge` class.
-    fn badge_cls(self) -> &'static str {
-        match self {
-            Self::New => "neutral",
-            Self::InProgress => "accent",
-            Self::Done => "green",
         }
     }
 
@@ -2544,17 +2357,6 @@ struct UowView {
     updated: String,
 }
 
-/// Fetch all UoWs from the BFF and return them indexed by `story_id`.
-async fn fetch_uow_map() -> std::collections::HashMap<String, UowView> {
-    let Ok(resp) = reqwest::get(format!("{}/api/uow", crate::BFF_URL)).await else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(list) = resp.json::<Vec<UowView>>().await else {
-        return std::collections::HashMap::new();
-    };
-    list.into_iter().map(|u| (u.story_id.clone(), u)).collect()
-}
-
 /// Fetch the UoW for a single story (get-or-create semantics).
 async fn fetch_uow(story_id: &str) -> Option<UowView> {
     reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, story_id))
@@ -2612,37 +2414,211 @@ async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome 
     }
 }
 
-/// Map a canonical status to a short label + a badge CSS modifier.
-fn status_badge(status: FeatureStatus) -> (&'static str, &'static str) {
-    match status {
-        FeatureStatus::Intake => ("INTAKE", "neutral"),
-        FeatureStatus::Investigating => ("INVESTIGATING", "active"),
-        FeatureStatus::AwaitingClarification => ("NEEDS ANSWER", "warn"),
-        FeatureStatus::Planned => ("PLANNED", "neutral"),
-        FeatureStatus::Executing => ("EXECUTING", "active"),
-        FeatureStatus::Gating => ("GATING", "active"),
-        FeatureStatus::AwaitingQa => ("AWAITING QA", "warn"),
-        FeatureStatus::SignedOff => ("SIGNED OFF", "done"),
-        FeatureStatus::Done => ("DONE", "done"),
-        FeatureStatus::Blocked => ("BLOCKED", "block"),
-        FeatureStatus::Rejected => ("REJECTED", "block"),
+// ── Provider-agnostic Work-Item + Unit-of-Work surface (Governed Development) ────
+//
+// PROVIDER-ADAPTER SEAM. The types and rendering in this block are deliberately
+// provider-AGNOSTIC: they operate only on the normalized `WorkItem` DTO (a stable id,
+// a repo, a number, title/body/state/url/labels). The *connection + pull* is the only
+// GitHub-specific piece, isolated in `GithubConnection` / `IssueManagementPanel`. To add
+// a Jira / Azure-DevOps adapter later, drop in a sibling connection component that pulls
+// the same `WorkItem` shape; the table, the UoW card list, the detail view, and every dev
+// control downstream keep working unchanged because they never name a provider.
+
+/// A normalized work item from any tracker provider (`POST /api/workitems/pull`,
+/// `POST /api/workitems/refresh`). The server maps a provider's native issue (today:
+/// the worktracker GitHub adapter's `CanonicalStory`) into this shape so the UI never
+/// touches a provider-specific payload.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+struct WorkItem {
+    /// Stable cross-provider id, e.g. `"github:OWNER/REPO#123"`. The dedup key for UoWs.
+    id: String,
+    /// The provider that owns this item (today always `"github"`).
+    #[serde(default)]
+    provider: String,
+    /// `OWNER/REPO` the item belongs to. Each pulled item carries its own repo.
+    #[serde(default)]
+    repo: String,
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    /// `"open"` | `"closed"`.
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    labels: Vec<String>,
+}
+
+/// The `POST /api/workitems/pull` envelope.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct PullWorkItemsResult {
+    #[serde(default)]
+    items: Vec<WorkItem>,
+}
+
+/// One Unit of Work as `GET /api/uows` reports it: the UoW id, the WorkItem it
+/// references, and its lifecycle stage. The `id` doubles as the key the existing
+/// governed-dev endpoints are keyed by (the server reconciles UoW id ↔ story id), so
+/// the reused dev controls below address this UoW through it.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+struct UowListEntry {
+    id: String,
+    work_item: WorkItem,
+    #[serde(default)]
+    stage: UowStage,
+}
+
+/// The `GET /api/uows` envelope.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct UowsResult {
+    #[serde(default)]
+    uows: Vec<UowListEntry>,
+}
+
+/// The `POST /api/uow/from-workitem` result. `created=false` means a UoW already
+/// existed for that work item (dedup by external ref) and was returned as-is.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct FromWorkItemResult {
+    #[serde(default)]
+    uow_id: String,
+    #[serde(default)]
+    created: bool,
+}
+
+// ── Pure helpers (unit-tested) ──────────────────────────────────────────────────
+
+/// The label a work item's State badge shows. Pure mapping over the wire string so
+/// any casing / unknown value still renders sensibly. Returns (display, css-modifier).
+fn work_item_state_badge(state: &str) -> (&'static str, &'static str) {
+    match state.to_ascii_lowercase().as_str() {
+        "open" => ("OPEN", "active"),
+        "closed" => ("CLOSED", "done"),
+        _ => ("UNKNOWN", "neutral"),
     }
 }
 
-/// Which of the five read-only stage tabs is the active one for a given status.
-/// The tabs are indicators driven by the engine, not free navigation.
-fn active_stage_index(status: FeatureStatus) -> usize {
-    match status {
-        FeatureStatus::Intake => 0,
-        FeatureStatus::Investigating | FeatureStatus::AwaitingClarification => 1,
-        FeatureStatus::Planned => 2,
-        FeatureStatus::Executing | FeatureStatus::Gating | FeatureStatus::Blocked => 3,
-        FeatureStatus::AwaitingQa | FeatureStatus::SignedOff | FeatureStatus::Done => 4,
-        FeatureStatus::Rejected => 0,
+/// The compact label one work item's row shows in the table's Labels column. Joins
+/// with commas; empty -> an em-dash placeholder. Pure so it is unit-testable.
+fn labels_summary(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "—".to_string()
+    } else {
+        labels.join(", ")
     }
 }
 
-const STAGE_TABS: &[&str] = &["INTAKE", "INVESTIGATION", "PLAN", "STATUS", "QA"];
+/// Whether a work item already has a UoW (dedup display logic). When true, the detail
+/// view shows "Open Unit of Work" (and the existing UoW id) instead of a Create button.
+/// Matching is by the work item's stable id against each UoW's referenced work item id.
+fn existing_uow_for<'a>(uows: &'a [UowListEntry], work_item_id: &str) -> Option<&'a UowListEntry> {
+    uows.iter().find(|u| u.work_item.id == work_item_id)
+}
+
+/// The button label for the create/open affordance, given whether a UoW already exists.
+/// Pure: drives both the table-row action and the detail view consistently.
+fn create_or_open_label(has_uow: bool) -> &'static str {
+    if has_uow {
+        "Open Unit of Work"
+    } else {
+        "Create Unit of Work from this issue"
+    }
+}
+
+// ── Client functions for the work-item / UoW endpoints ──────────────────────────
+
+/// Pull ALL open issues across ALL the active project's repos (`POST /api/workitems/pull`).
+/// Manual / user-triggered; no cache. Body is empty (the server uses the active project).
+async fn pull_work_items() -> Option<Vec<WorkItem>> {
+    reqwest::Client::new()
+        .post(format!("{}/api/workitems/pull", crate::BFF_URL))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .ok()?
+        .json::<PullWorkItemsResult>()
+        .await
+        .ok()
+        .map(|r| r.items)
+}
+
+/// List all Units of Work with their referenced WorkItem + lifecycle stage
+/// (`GET /api/uows`).
+async fn fetch_uows() -> Option<Vec<UowListEntry>> {
+    reqwest::get(format!("{}/api/uows", crate::BFF_URL))
+        .await
+        .ok()?
+        .json::<UowsResult>()
+        .await
+        .ok()
+        .map(|r| r.uows)
+}
+
+/// Create a UoW referencing a work item (`POST /api/uow/from-workitem`). Dedups by
+/// external ref server-side: an existing UoW comes back with `created=false`.
+async fn create_uow_from_work_item(work_item_id: &str) -> Option<FromWorkItemResult> {
+    reqwest::Client::new()
+        .post(format!("{}/api/uow/from-workitem", crate::BFF_URL))
+        .json(&serde_json::json!({ "work_item_id": work_item_id }))
+        .send()
+        .await
+        .ok()?
+        .json::<FromWorkItemResult>()
+        .await
+        .ok()
+}
+
+/// Re-pull a single work item (`POST /api/workitems/refresh`).
+async fn refresh_work_item(work_item_id: &str) -> Option<WorkItem> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/workitems/refresh", crate::BFF_URL))
+        .json(&serde_json::json!({ "work_item_id": work_item_id }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    serde_json::from_value(v.get("item")?.clone()).ok()
+}
+
+/// Comment back onto the source issue (`POST /api/workitems/comment`). Returns the
+/// comment url on success.
+async fn comment_on_work_item(work_item_id: &str, body: &str) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/workitems/comment", crate::BFF_URL))
+        .json(&serde_json::json!({ "work_item_id": work_item_id, "body": body }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    // `ok` must be truthy; surface the url it returns.
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        Some(
+            v.get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Which sub-view of the Governed Development page is selected in the left nav:
+/// the top-level Issue Management panel, or a specific UoW's dev controls.
+#[derive(Clone, PartialEq, Eq)]
+enum GovDevSel {
+    /// The Issue Management panel (connection summary + pull + work-item table).
+    IssueManagement,
+    /// A selected UoW (by its id), showing that UoW's dev controls.
+    Uow(String),
+}
 
 /// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit
 /// (it's an architect tool), reached via the cockpit's own nav, not a top-level app.
@@ -3151,114 +3127,6 @@ async fn fetch_gate_probe() -> Option<GateProbeView> {
         .ok()
 }
 
-/// Adopt-from-GitHub affordance (#20): type a repo, list its open issues (including the
-/// ones onboarding emitted), and adopt one onto the spine. Token-optional and degrades
-/// gracefully — with no `CAMERATA_GITHUB_TOKEN` the BFF returns `ok:false` + a hint, which
-/// this renders instead of erroring. On adopt success it bumps `spine_refresh` so the parent
-/// re-fetches the spine and the new story appears.
-#[component]
-fn AdoptFromGithub(spine_refresh: Signal<u32>) -> Element {
-    let mut repo = use_signal(String::new);
-    let mut listing = use_signal(|| false);
-    let mut result = use_signal(|| Option::<IssuesResult>::None);
-    let mut adopting = use_signal(|| Option::<u64>::None);
-    let mut status = use_signal(|| Option::<String>::None);
-
-    let do_list = move |_| {
-        let r = repo().trim().to_string();
-        if r.is_empty() {
-            status.set(Some("Enter a repo as owner/name.".to_string()));
-            return;
-        }
-        listing.set(true);
-        status.set(None);
-        spawn(async move {
-            result.set(fetch_github_issues(&r).await);
-            listing.set(false);
-        });
-    };
-
-    rsx! {
-        div { class: "gate-selfcheck",
-            div { class: "gate-selfcheck-head",
-                span { class: "gate-selfcheck-title", "Adopt from GitHub" }
-                span { class: "gate-selfcheck-sub", "List a repo's open issues (including ones onboarding filed) and adopt one onto the spine. Needs GitHub connected." }
-            }
-            div { class: "adopt-gh-controls",
-                input {
-                    class: "adopt-gh-repo",
-                    r#type: "text",
-                    placeholder: "owner/name",
-                    value: "{repo}",
-                    oninput: move |e| repo.set(e.value()),
-                }
-                button {
-                    class: "btn-edit-sm",
-                    disabled: listing(),
-                    onclick: do_list,
-                    if listing() { "Listing…" } else { "List issues" }
-                }
-            }
-            if let Some(msg) = status() {
-                p { class: "section-hint", "{msg}" }
-            }
-            match result() {
-                None => rsx! {},
-                Some(res) if !res.ok => rsx! {
-                    p { class: "section-hint",
-                        {res.message.clone().unwrap_or_else(|| "Connect GitHub to list issues.".to_string())}
-                    }
-                },
-                Some(res) if res.issues.is_empty() => rsx! {
-                    p { class: "section-hint", "No open issues on this repo." }
-                },
-                Some(res) => {
-                    let current_repo = repo().trim().to_string();
-                    rsx! {
-                        div { class: "adopt-gh-list",
-                            for issue in res.issues.iter().cloned() {
-                                {
-                                    let n = issue.number;
-                                    let is_adopting = adopting() == Some(n);
-                                    let repo_for_click = current_repo.clone();
-                                    let issue_for_click = issue.clone();
-                                    rsx! {
-                                        div { class: "adopt-gh-row",
-                                            span { class: "adopt-gh-num", "#{issue.number}" }
-                                            span { class: "adopt-gh-title", "{issue.title}" }
-                                            button {
-                                                class: "btn-edit-sm",
-                                                disabled: is_adopting,
-                                                onclick: move |_| {
-                                                    let repo = repo_for_click.clone();
-                                                    let issue = issue_for_click.clone();
-                                                    adopting.set(Some(n));
-                                                    status.set(None);
-                                                    spawn(async move {
-                                                        match adopt_github_issue(&repo, &issue).await {
-                                                            Some(id) => {
-                                                                status.set(Some(format!("Adopted {id} onto the spine.")));
-                                                                spine_refresh.set(spine_refresh() + 1);
-                                                            }
-                                                            None => status.set(Some("Could not adopt that issue.".to_string())),
-                                                        }
-                                                        adopting.set(None);
-                                                    });
-                                                },
-                                                if is_adopting { "Adopting…" } else { "Adopt" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// In-app gate self-check (#14): runs the deterministic end-to-end gate-loop probe and shows a
 /// GO/NO-GO — deny-before-execute denied a forbidden write, and the bounce-and-revise loop
 /// resolved a planted violation. The thesis, verifiable in one click (no model, no network out).
@@ -3415,9 +3283,6 @@ fn LoopGuardControl() -> Element {
 
 #[component]
 pub fn CockpitApp() -> Element {
-    // Toast surface for transient feedback (e.g. a blocked governed run telling the
-    // architect exactly which decisions still need approval).
-    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Which cockpit view (control surface vs routines). Declared first so all hooks
     // below run unconditionally in a stable order regardless of the view.
     let mut view = use_signal(|| CockpitView::Stories);
@@ -3446,50 +3311,8 @@ pub fn CockpitApp() -> Element {
         }
     });
 
-    // Spine refresh tick: bumped after adopting a GitHub issue (#20) so the spine
-    // re-fetches and the freshly-adopted story appears without a manual reload.
-    let spine_refresh = use_signal(|| 0u32);
-    // Both data sets come from the BFF over HTTP. `use_resource` runs the fetch when
-    // the cockpit mounts; the embedded server (see main.rs) is up by then. The spine
-    // also re-runs whenever `spine_refresh` bumps.
-    let stories_res = use_resource(move || {
-        let _dep = spine_refresh();
-        async move { fetch_stories().await }
-    });
-    let rules_res = use_resource(fetch_rules);
-    // The active connection (native vs GitHub), shown honestly in the topbar.
+    // The active connection (native vs GitHub), shown honestly in the Onboard view.
     let provider_res = use_resource(fetch_provider);
-
-    // UoW refresh tick: bumped whenever the architect changes a UoW dev-status so the
-    // spine row badges update immediately. The UoW map is fetched once on mount and
-    // re-fetched whenever this tick bumps.
-    let uow_refresh = use_signal(|| 0u32);
-    let uow_res = use_resource(move || {
-        let _dep = uow_refresh();
-        async move { fetch_uow_map().await }
-    });
-
-    let mut selected = use_signal(|| 0usize);
-    let mut selected_rule = use_signal(|| 0usize);
-    // Which stage tab the user is previewing. `None` follows the selected story's
-    // actual lifecycle stage; clicking a tab overrides it so the tabs navigate.
-    let mut viewed_stage = use_signal(|| Option::<usize>::None);
-    // The live run for the selected story, if one has been started. Polled to
-    // completion; its gate events are REAL verdicts from the BFF run engine.
-    let mut active_run = use_signal(|| Option::<RunView>::None);
-    // Model the operator pins for governed-fleet runs (`CAMERATA_LIVE_BUILD=1`).
-    // Seeded from the /api/models default; harmlessly forwarded for the scripted
-    // path too so the UI state is consistent regardless of build mode.
-    let run_models_res = use_resource(fetch_audit_models);
-    let mut run_model = use_signal(String::new);
-    {
-        let resp = run_models_res.read().clone().flatten();
-        if run_model().is_empty() {
-            if let Some(m) = resp {
-                run_model.set(m.default.clone());
-            }
-        }
-    }
 
     // Ask-a-finding (#54): the signal is provided by App (in main.rs) so that
     // ChatBubble — which is a sibling of CockpitShell, not a descendant — can
@@ -3498,7 +3321,7 @@ pub fn CockpitApp() -> Element {
     let _ask_finding_present = use_context::<Signal<Option<crate::chat::FindingContext>>>();
 
     // A shared refresh tick: bumped whenever a clarification is posted or answered,
-    // so both the NEEDS YOU queue here and the per-story thread refetch together.
+    // so the per-UoW clarify thread refetches. Shared via context with ClarifySection.
     let clarify_refresh = use_signal(|| 0u32);
     use_context_provider(|| clarify_refresh);
 
@@ -3510,15 +3333,6 @@ pub fn CockpitApp() -> Element {
     use_context_provider(|| onboard_scan);
     let active_audit_job = use_signal(|| Option::<String>::None);
     use_context_provider(|| active_audit_job);
-    let open_clars_res = use_resource(move || {
-        let _dep = clarify_refresh();
-        async move { fetch_open_clarifications().await }
-    });
-
-    let stories_loaded = stories_res.read().clone();
-    let rules_loaded = rules_res.read().clone();
-    // A resolved-but-None fetch means the BFF was unreachable / returned junk.
-    let errored = matches!(&stories_loaded, Some(None)) || matches!(&rules_loaded, Some(None));
 
     // Routines + Onboard live inside the cockpit (architect tools). All hooks above
     // have run, so branching here is safe.
@@ -3579,328 +3393,268 @@ pub fn CockpitApp() -> Element {
         };
     }
 
-    match (stories_loaded, rules_loaded) {
-        (Some(Some(story_list)), Some(Some(rules))) => {
-            if story_list.is_empty() {
-                return rsx! {
-                    div { class: "cockpit",
-                        CockpitNav { view }
-                        CockpitNotice { kind: "empty".to_string() }
-                        // Adopt the first story straight from GitHub even with an empty spine (#20).
-                        AdoptFromGithub { spine_refresh }
-                    }
-                };
+    // The Governed Development page (work-item / UoW surface). It owns its own data
+    // fetching and selection state; CockpitApp just hosts it inside the shell chrome.
+    rsx! {
+        div { class: "cockpit",
+            AppUpdateBanner {}
+            CockpitNav { view }
+            div { class: "cockpit-scroll",
+                GovernedDevPage {}
             }
-            let current = story_list[selected().min(story_list.len() - 1)].clone();
-            let active_stage = active_stage_index(current.status);
-            // The tabs navigate: an explicit click overrides; otherwise we follow
-            // the story's real lifecycle stage.
-            let effective_stage = viewed_stage().unwrap_or(active_stage);
-            let conn = provider_res.read().clone().flatten();
-            // Gate tallies derived from the live run's REAL verdicts (not fixtures).
-            // No active run for this story -> no tallies (None), shown as "idle".
-            let gate_tally: Option<(usize, usize)> = match active_run() {
-                Some(ref r) if r.story_id == current.id => Some((
-                    r.events.iter().filter(|e| e.verdict == "deny").count(),
-                    r.events.iter().filter(|e| e.verdict == "allow").count(),
-                )),
-                _ => None,
-            };
+        }
+    }
+}
 
-            rsx! {
-                div { class: "cockpit",
-                    AppUpdateBanner {}
-                    CockpitNav { view }
-                    CockpitTopBar { story: current.clone(), connection: conn.clone() }
-                    GateSelfCheck {}
-                    AdoptFromGithub { spine_refresh }
+// ── Governed Development page ────────────────────────────────────────────────────
+//
+// The page is split into three provider-AGNOSTIC pieces plus one GitHub-specific one:
+//   - `GovernedDevPage`     — the shell: left nav (Issue Management + UoW cards) + main.
+//   - `IssueManagementPanel`— GITHUB-SPECIFIC connection + pull (the adapter seam), then
+//                             a provider-agnostic `WorkItemTable` + `WorkItemDetail`.
+//   - `WorkItemTable` / `WorkItemDetail` — operate purely on the `WorkItem` DTO.
+//   - `UowDevControls`      — the existing governed-dev mechanisms (run-through-the-gate,
+//                             clarify back-and-forth, sign-off) keyed to the selected UoW,
+//                             plus comment-to-issue + pull-latest. Provider-agnostic.
 
-                    div { class: "cockpit-body",
-                        // ── LEFT: story spine (from /api/stories) + NEEDS YOU queue ──
-                        aside { class: "cockpit-rail",
-                            p { class: "cockpit-rail-label", "STORY SPINE" }
-                            div { class: "spine-list",
-                                {
-                                    // Snapshot the UoW map once for the entire spine render.
-                                    let uow_map = uow_res.read().clone().unwrap_or_default();
-                                    rsx! {
-                                        for (i , s) in story_list.iter().enumerate() {
-                                            {
-                                                let (badge, badge_cls) = status_badge(s.status);
-                                                let sel = i == selected();
-                                                let cls = if sel { "spine-item sel" } else { "spine-item" };
-                                                // UoW dev-status for this story (default New if no UoW yet).
-                                                let dev_status = uow_map
-                                                    .get(&s.id)
-                                                    .map(|u| u.dev_status)
-                                                    .unwrap_or_default();
-                                                let dev_label = dev_status.label();
-                                                let dev_cls = dev_status.badge_cls();
-                                                rsx! {
-                                                    button {
-                                                        class: "{cls}",
-                                                        onclick: move |_| selected.set(i),
-                                                        span { class: "spine-title", "{s.title}" }
-                                                        // Story tracker status (existing).
-                                                        span { class: "spine-badge {badge_cls}", "{badge}" }
-                                                        // UoW dev status (new — shown alongside, visually distinct).
-                                                        span { class: "uow-dev-badge {dev_cls}", "{dev_label}" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                button { class: "spine-new", "+ New story" }
-                            }
+/// The Governed Development page. Left: "Issue Management" entry + a card per UoW.
+/// Right (main): the issue-management panel, or the selected UoW's dev controls.
+#[component]
+fn GovernedDevPage() -> Element {
+    // Selection in the left nav. Defaults to the Issue Management panel.
+    let mut sel = use_signal(|| GovDevSel::IssueManagement);
 
-                            {
-                                let open_clars = open_clars_res.read().clone().flatten().unwrap_or_default();
-                                let n = open_clars.len();
-                                rsx! {
-                                    p { class: "cockpit-rail-label needs", "NEEDS YOU ({n})" }
-                                    div { class: "needs-list",
-                                        if open_clars.is_empty() {
-                                            p { class: "needs-empty", "Nothing needs you right now." }
-                                        }
-                                        for c in open_clars.iter() {
-                                            {
-                                                let target = story_list.iter().position(|s| s.id == c.story_id);
-                                                let q = c.question.clone();
-                                                let who = c.addressee.clone();
-                                                rsx! {
-                                                    button {
-                                                        class: "needs-item",
-                                                        onclick: move |_| {
-                                                            if let Some(i) = target {
-                                                                selected.set(i);
-                                                            }
-                                                        },
-                                                        span { class: "needs-dot warn" }
-                                                        span {
-                                                            span { class: "needs-q", "{q}" }
-                                                            span { class: "needs-who", "asked {who}" }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+    // The UoW list (left-nav cards). Re-fetched whenever this tick bumps (e.g. after a
+    // UoW is created from a work item).
+    let uows_refresh = use_signal(|| 0u32);
+    let uows_res = use_resource(move || {
+        let _dep = uows_refresh();
+        async move { fetch_uows().await }
+    });
+
+    let uows = uows_res.read().clone().flatten().unwrap_or_default();
+
+    rsx! {
+        div { class: "govdev",
+            // ── LEFT NAV: Issue Management + one card per UoW ──────────────────
+            aside { class: "govdev-nav",
+                button {
+                    class: if sel() == GovDevSel::IssueManagement { "govdev-nav-top on" } else { "govdev-nav-top" },
+                    onclick: move |_| sel.set(GovDevSel::IssueManagement),
+                    span { class: "govdev-nav-top-title", "Issue Management" }
+                    span { class: "govdev-nav-top-sub", "Pull issues · create Units of Work" }
+                }
+                p { class: "govdev-nav-label", "UNITS OF WORK ({uows.len()})" }
+                div { class: "govdev-uow-list",
+                    if uows.is_empty() {
+                        p { class: "govdev-uow-empty", "No Units of Work yet. Pull work items and create one from an issue." }
+                    }
+                    for u in uows.iter() {
+                        {
+                            let uid = u.id.clone();
+                            let selected = sel() == GovDevSel::Uow(uid.clone());
+                            let cls = if selected { "govdev-uow-card sel" } else { "govdev-uow-card" };
+                            let title = u.work_item.title.clone();
+                            let repo = u.work_item.repo.clone();
+                            let stage = u.stage.label();
+                            rsx! {
+                                button {
+                                    class: "{cls}",
+                                    onclick: move |_| sel.set(GovDevSel::Uow(uid.clone())),
+                                    span { class: "govdev-uow-title", "{title}" }
+                                    div { class: "govdev-uow-meta",
+                                        span { class: "govdev-uow-repo", "{repo}" }
+                                        span { class: "govdev-uow-stage", "{stage}" }
                                     }
                                 }
                             }
                         }
+                    }
+                }
+            }
 
-                        // ── CENTER: stage tabs + active stage panel + status strip ──
-                        section { class: "cockpit-stage",
-                            div { class: "stage-tabs",
-                                for (i , tab) in STAGE_TABS.iter().enumerate() {
-                                    {
-                                        // "on" = the story's real stage; "view" = the tab the
-                                        // user is previewing. Clicking a tab previews that stage.
-                                        let mut cls = String::from("stage-tab");
-                                        if i == active_stage { cls.push_str(" on"); }
-                                        if i == effective_stage && effective_stage != active_stage { cls.push_str(" view"); }
-                                        rsx! {
-                                            button {
-                                                class: "{cls}",
-                                                onclick: move |_| viewed_stage.set(Some(i)),
-                                                "{tab}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "stage-panel",
-                                // Loop-guard control (#29): adjust the project's max
-                                // bounce-and-revise iterations before a run.
-                                LoopGuardControl {}
-
-                                // Run control: start a governed run for this story and
-                                // poll it to completion, streaming the real gate verdicts.
-                                {
-                                    let sid = current.id.clone();
-                                    // Snapshot the run-model catalog for the picker.
-                                    let run_models_snap = run_models_res.read().clone().flatten();
-                                    rsx! {
-                                        div { class: "run-control-row",
-                                            button {
-                                                class: "btn-run",
-                                                onclick: move |_| {
-                                                    let sid = sid.clone();
-                                                    let md = run_model();
-                                                    let mut uow_refresh = uow_refresh;
-                                                    let toasts = toasts;
-                                                    spawn(async move {
-                                                        match start_run(&sid, &md).await {
-                                                            StartRunOutcome::Started(rid) => {
-                                                                loop {
-                                                                    if let Some(rv) = fetch_run(&rid).await {
-                                                                        let done = rv.done;
-                                                                        active_run.set(Some(rv));
-                                                                        if done {
-                                                                            // The run finished: the server's provenance watcher
-                                                                            // stamps the UoW and advances the stage; bump the
-                                                                            // refresh tick so the UoW panel reflects it.
-                                                                            uow_refresh += 1;
-                                                                            break;
-                                                                        }
-                                                                    }
-                                                                    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                                                                }
-                                                            }
-                                                            StartRunOutcome::Blocked(reason) => {
-                                                                crate::toast::push_toast(
-                                                                    toasts,
-                                                                    crate::toast::ToastKind::Warning,
-                                                                    reason,
-                                                                );
-                                                            }
-                                                            StartRunOutcome::Failed => {
-                                                                crate::toast::push_toast(
-                                                                    toasts,
-                                                                    crate::toast::ToastKind::Warning,
-                                                                    "Could not start the governed run.".to_string(),
-                                                                );
-                                                            }
-                                                        }
-                                                    });
-                                                },
-                                                "▶ Run this story (governed)"
-                                            }
-                                            // Model picker: shown whenever the catalog has loaded.
-                                            // In scripted mode (default) the model is accepted but
-                                            // ignored server-side; in live-fleet mode it pins the
-                                            // model for every claude -p agent.
-                                            if let Some(m) = run_models_snap {
-                                                select {
-                                                    class: "run-model-select",
-                                                    value: "{run_model}",
-                                                    onchange: move |e| run_model.set(e.value()),
-                                                    for opt in m.models.iter() {
-                                                        option {
-                                                            value: "{opt.id}",
-                                                            selected: run_model() == opt.id,
-                                                            "{opt.label}"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Agent activity: peek at each agent's GENERATED prompt +
-                                // output for the active run (the otherwise-hidden prompting).
-                                {
-                                    let rid = match active_run() {
-                                        Some(ref r) if r.story_id == current.id => r.id.clone(),
-                                        _ => String::new(),
-                                    };
-                                    rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
-                                }
-
-                                // ── UoW panel: dev status + branch + AI history ──────
-                                // Shows the dev-side projection of the selected story.
-                                // Branch and history are designed to be auto-populated by
-                                // the governed run (Pillar 2); for now they are readable
-                                // here and settable via the API endpoints.
-                                UowPanel {
-                                    story_id: current.id.clone(),
-                                    uow_refresh,
-                                }
-
-                                // A live run for THIS story (when the user is on its actual
-                                // stage) shows the real gate stream; otherwise the panel for
-                                // whichever stage tab is being previewed.
-                                {
-                                    match active_run() {
-                                        Some(r) if r.story_id == current.id && viewed_stage().is_none() => {
-                                            rsx! { LiveRunPanel { run: r, uow_refresh } }
-                                        }
-                                        _ => rsx! { StagePanel { story: current.clone(), stage: effective_stage } },
-                                    }
-                                }
-
-                                // The clarify-bridge: ask the team a question, pick who
-                                // to ask, and see the thread. In-process now.
-                                ClarifySection { story_id: current.id.clone() }
-
-                                // Decomposition: split this story into component
-                                // children per the practice, review/edit, create.
-                                DecomposeSection { story_id: current.id.clone() }
-                            }
-
-                            div { class: "status-strip",
-                                div { class: "strip-fleet",
-                                    match active_run() {
-                                        Some(ref r) if r.story_id == current.id => {
-                                            let (label, badge_cls) = run_status_badge(&r.status);
-                                            rsx! {
-                                                span { class: "fleet-pill {badge_cls}",
-                                                    span { class: "fleet-role", "run" }
-                                                    span { class: "fleet-state", "{label}" }
-                                                }
-                                            }
-                                        }
-                                        _ => rsx! {
-                                            span { class: "fleet-idle", "No active run — press Run this story to start the governed fleet." }
-                                        },
-                                    }
-                                }
-                                div { class: "strip-gates",
-                                    match gate_tally {
-                                        Some((deny, allow)) => rsx! {
-                                            span { class: "gate-tally",
-                                                span { class: "gate-num", "{deny}" }
-                                                " gate denials"
-                                            }
-                                            span { class: "gate-tally",
-                                                span { class: "gate-num", "{allow}" }
-                                                " allowed writes"
-                                            }
-                                        },
-                                        None => rsx! {
-                                            span { class: "gate-tally idle", "gate: idle" }
-                                        },
-                                    }
-                                }
-                            }
+            // ── MAIN: the issue-management panel, or a UoW's dev controls ──────
+            section { class: "govdev-main",
+                match sel() {
+                    GovDevSel::IssueManagement => rsx! {
+                        IssueManagementPanel { uows: uows.clone(), uows_refresh, sel }
+                    },
+                    GovDevSel::Uow(uid) => {
+                        match uows.iter().find(|u| u.id == uid).cloned() {
+                            Some(u) => rsx! { UowDevControls { uow: u } },
+                            // The UoW vanished from the list (e.g. between refreshes): fall back.
+                            None => rsx! {
+                                p { class: "section-hint", "That Unit of Work is no longer available." }
+                            },
                         }
+                    }
+                }
+            }
+        }
+    }
+}
 
-                        // ── RIGHT: inspector. Enforced rules from /api/rules. ──
-                        aside { class: "cockpit-inspector",
-                            p { class: "cockpit-rail-label", "INSPECTOR" }
-                            p { class: "inspector-hint", "The rules this fleet is governed by. These are the gate's actual enforced rules." }
-                            div { class: "rule-list",
-                                for (i , r) in rules.iter().enumerate() {
-                                    {
-                                        let sel = i == selected_rule();
-                                        let cls = if sel { "rule-chip sel" } else { "rule-chip" };
-                                        rsx! {
-                                            button {
-                                                class: "{cls}",
-                                                onclick: move |_| selected_rule.set(i),
-                                                "{r.id}"
-                                            }
-                                        }
-                                    }
+/// The Issue Management panel: a GitHub-specific connection summary + a "Pull work items"
+/// button, then a provider-agnostic table of pulled `WorkItem`s and a row-detail view.
+///
+/// PROVIDER-ADAPTER SEAM: the connection summary + the pull action are the only
+/// GitHub-aware pieces here (the BFF resolves the active project's GitHub repos). The
+/// table and the detail view operate purely on `WorkItem`, so a future Jira/ADO panel
+/// reuses them verbatim.
+#[component]
+fn IssueManagementPanel(
+    uows: Vec<UowListEntry>,
+    uows_refresh: Signal<u32>,
+    sel: Signal<GovDevSel>,
+) -> Element {
+    let provider_res = use_resource(fetch_provider);
+    let active_proj = use_resource(fetch_active_project);
+
+    // The pulled work items (manual, no cache). None = not pulled yet.
+    let mut items = use_signal(|| Option::<Vec<WorkItem>>::None);
+    let mut pulling = use_signal(|| false);
+    // The work item whose detail is open (by stable id), if any.
+    let mut detail_id = use_signal(|| Option::<String>::None);
+
+    let conn = provider_res.read().clone().flatten();
+    let proj = active_proj.read().clone().flatten();
+    let repos = proj.as_ref().map(|p| p.repos.clone()).unwrap_or_default();
+
+    // GITHUB-SPECIFIC connection summary.
+    let (conn_cls, conn_label) = match &conn {
+        Some(p) if p.live => ("conn-ok", format!("● {} connected", p.provider)),
+        Some(p) => ("conn-warn", format!("● {} (no GitHub token)", p.provider)),
+        None => ("conn-warn", "● connecting…".to_string()),
+    };
+
+    let item_list = items.read().clone();
+    // Resolve the open detail item against the current pull.
+    let open_item = match (&item_list, detail_id()) {
+        (Some(list), Some(id)) => list.iter().find(|it| it.id == id).cloned(),
+        _ => None,
+    };
+
+    rsx! {
+        div { class: "issue-mgmt",
+            p { class: "govdev-h", "Issue Management" }
+
+            // ── Connection summary (GitHub adapter) ───────────────────────────
+            div { class: "issue-conn",
+                div { class: "issue-conn-line",
+                    span { class: "issue-conn-label", "Provider" }
+                    span { class: "issue-conn-prov", "GitHub" }
+                    span { class: "{conn_cls}", "{conn_label}" }
+                }
+                div { class: "issue-conn-line",
+                    span { class: "issue-conn-label", "Repositories" }
+                    if repos.is_empty() {
+                        span { class: "issue-conn-none", "No repos on the active project." }
+                    } else {
+                        span { class: "issue-conn-repos", "{repos.join(\", \")}" }
+                    }
+                }
+            }
+
+            div { class: "issue-pull-row",
+                button {
+                    class: "btn-run",
+                    disabled: pulling(),
+                    onclick: move |_| {
+                        pulling.set(true);
+                        spawn(async move {
+                            let pulled = pull_work_items().await.unwrap_or_default();
+                            items.set(Some(pulled));
+                            detail_id.set(None);
+                            pulling.set(false);
+                        });
+                    },
+                    if pulling() { "Pulling…" } else { "Pull work items" }
+                }
+                span { class: "section-hint", "Pulls all open issues across the active project's repos. Manual; no cache." }
+            }
+
+            // ── The work-item table (provider-agnostic) ───────────────────────
+            match item_list {
+                None => rsx! {
+                    p { class: "section-hint", "No work items pulled yet — press \u{201c}Pull work items\u{201d}." }
+                },
+                Some(list) if list.is_empty() => rsx! {
+                    p { class: "section-hint", "No open work items found across the active project's repos." }
+                },
+                Some(list) => rsx! {
+                    WorkItemTable {
+                        items: list,
+                        uows: uows.clone(),
+                        on_open: EventHandler::new(move |id: String| detail_id.set(Some(id))),
+                        uows_refresh,
+                        sel,
+                    }
+                },
+            }
+
+            // ── The detail view for a clicked row (provider-agnostic) ─────────
+            if let Some(it) = open_item {
+                WorkItemDetail {
+                    item: it,
+                    uows: uows.clone(),
+                    on_close: EventHandler::new(move |_| detail_id.set(None)),
+                    uows_refresh,
+                    sel,
+                }
+            }
+        }
+    }
+}
+
+/// A provider-agnostic table of `WorkItem`s: columns Repo, #, Title, State, Labels.
+/// Clicking a row opens its detail (via `on_open`). Each row also offers create/open of a
+/// UoW directly (dedup-aware) so the user can act on a selected row without the detail view.
+#[component]
+fn WorkItemTable(
+    items: Vec<WorkItem>,
+    uows: Vec<UowListEntry>,
+    on_open: EventHandler<String>,
+    uows_refresh: Signal<u32>,
+    sel: Signal<GovDevSel>,
+) -> Element {
+    rsx! {
+        table { class: "wi-table",
+            thead {
+                tr {
+                    th { class: "wi-col-repo", "Repo" }
+                    th { class: "wi-col-num", "#" }
+                    th { class: "wi-col-title", "Title" }
+                    th { class: "wi-col-state", "State" }
+                    th { class: "wi-col-labels", "Labels" }
+                    th { class: "wi-col-act", "" }
+                }
+            }
+            tbody {
+                for it in items.iter() {
+                    {
+                        let item = it.clone();
+                        let id_open = item.id.clone();
+                        let (state_label, state_cls) = work_item_state_badge(&item.state);
+                        let labels = labels_summary(&item.labels);
+                        let existing = existing_uow_for(&uows, &item.id).cloned();
+                        rsx! {
+                            tr {
+                                class: "wi-row",
+                                onclick: move |_| on_open.call(id_open.clone()),
+                                td { class: "wi-col-repo", "{item.repo}" }
+                                td { class: "wi-col-num", "#{item.number}" }
+                                td { class: "wi-col-title", "{item.title}" }
+                                td { class: "wi-col-state",
+                                    span { class: "wi-state {state_cls}", "{state_label}" }
                                 }
-                            }
-                            {
-                                let idx = selected_rule().min(rules.len().saturating_sub(1));
-                                let r = &rules[idx];
-                                rsx! {
-                                    div { class: "rule-detail",
-                                        p { class: "rule-id", "{r.id}" }
-                                        p { class: "rule-enforce",
-                                            span { class: "enforce-dot" }
-                                            "deterministic, active"
-                                        }
-                                        p { class: "rule-label", "Statement" }
-                                        p { class: "rule-statement", "{r.statement}" }
-                                        p { class: "rule-label", "Enforcement" }
-                                        p { class: "rule-statement", "Checked at the MCP tool boundary before the write executes (deny-before-execute), and re-checked out-of-process after the task. Binary pass/fail." }
+                                td { class: "wi-col-labels", "{labels}" }
+                                td { class: "wi-col-act",
+                                    CreateOrOpenUow {
+                                        item: item.clone(),
+                                        existing: existing.clone(),
+                                        uows_refresh,
+                                        sel,
+                                        compact: true,
                                     }
                                 }
                             }
@@ -3909,18 +3663,320 @@ pub fn CockpitApp() -> Element {
                 }
             }
         }
-        _ if errored => rsx! {
-            div { class: "cockpit",
-                CockpitNav { view }
-                CockpitNotice { kind: "error".to_string() }
+    }
+}
+
+/// The detail view for one work item: full title + body + state + a link to the issue,
+/// plus the create/open-UoW affordance (dedup-aware). Provider-agnostic.
+#[component]
+fn WorkItemDetail(
+    item: WorkItem,
+    uows: Vec<UowListEntry>,
+    on_close: EventHandler<()>,
+    uows_refresh: Signal<u32>,
+    sel: Signal<GovDevSel>,
+) -> Element {
+    let (state_label, state_cls) = work_item_state_badge(&item.state);
+    let existing = existing_uow_for(&uows, &item.id).cloned();
+    rsx! {
+        div { class: "wi-detail",
+            div { class: "wi-detail-head",
+                span { class: "wi-detail-repo", "{item.repo}" }
+                span { class: "wi-detail-num", "#{item.number}" }
+                span { class: "wi-state {state_cls}", "{state_label}" }
+                button {
+                    class: "wi-detail-close",
+                    onclick: move |_| on_close.call(()),
+                    "Close"
+                }
             }
-        },
-        _ => rsx! {
-            div { class: "cockpit",
-                CockpitNav { view }
-                CockpitNotice { kind: "loading".to_string() }
+            p { class: "wi-detail-title", "{item.title}" }
+            if item.body.is_empty() {
+                p { class: "wi-detail-body empty", "(no description)" }
+            } else {
+                p { class: "wi-detail-body", "{item.body}" }
             }
-        },
+            if !item.url.is_empty() {
+                a { class: "wi-detail-link", href: "{item.url}", target: "_blank", "Open issue ↗" }
+            }
+            div { class: "wi-detail-actions",
+                CreateOrOpenUow { item: item.clone(), existing, uows_refresh, sel, compact: false }
+            }
+        }
+    }
+}
+
+/// The dedup-aware create/open-UoW button shared by the table rows and the detail view.
+/// If a UoW already exists for the work item, it shows "Open Unit of Work" and selects it;
+/// otherwise it creates one (`POST /api/uow/from-workitem`), bumps the UoW list, and opens
+/// the new UoW. `compact` renders the small in-row variant.
+#[component]
+fn CreateOrOpenUow(
+    item: WorkItem,
+    existing: Option<UowListEntry>,
+    uows_refresh: Signal<u32>,
+    sel: Signal<GovDevSel>,
+    compact: bool,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut working = use_signal(|| false);
+    let has_uow = existing.is_some();
+    let label = create_or_open_label(has_uow);
+    let base_cls = if compact { "btn-edit-sm" } else { "btn-run" };
+
+    rsx! {
+        button {
+            class: "{base_cls}",
+            disabled: working(),
+            // Stop the row's onclick (open-detail) from also firing.
+            onclick: move |evt| {
+                evt.stop_propagation();
+                let mut sel = sel;
+                let mut uows_refresh = uows_refresh;
+                let toasts = toasts;
+                if let Some(ref u) = existing {
+                    sel.set(GovDevSel::Uow(u.id.clone()));
+                    return;
+                }
+                let wid = item.id.clone();
+                working.set(true);
+                spawn(async move {
+                    match create_uow_from_work_item(&wid).await {
+                        Some(res) => {
+                            uows_refresh += 1;
+                            sel.set(GovDevSel::Uow(res.uow_id.clone()));
+                            if !res.created {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    "A Unit of Work already existed for this issue — opened it.".to_string(),
+                                );
+                            }
+                        }
+                        None => {
+                            crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Warning,
+                                "Could not create a Unit of Work from this issue.".to_string(),
+                            );
+                        }
+                    }
+                    working.set(false);
+                });
+            },
+            if working() { "Working…" } else { "{label}" }
+        }
+    }
+}
+
+/// The dev controls for a selected Unit of Work. Reuses the EXISTING governed-dev
+/// mechanisms — run the governed fleet THROUGH THE GATE, the clarify back-and-forth, and
+/// sign-off — keyed to this UoW's id (the same key the existing endpoints use). Adds an
+/// "Add comment to issue" box (`POST /api/workitems/comment`) and a "Pull latest work item"
+/// button (`POST /api/workitems/refresh`). Provider-agnostic: it only reads the WorkItem DTO.
+#[component]
+fn UowDevControls(uow: UowListEntry) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The UoW id keys every reused governed-dev endpoint (run, clarify, sign-off, UoW panel).
+    let uow_key = uow.id.clone();
+
+    // A local copy of the work item so "Pull latest" can refresh the displayed metadata
+    // without re-fetching the whole UoW list.
+    let mut item = use_signal(|| uow.work_item.clone());
+    // Re-sync the displayed item when the selected UoW changes (prop change).
+    use_effect(use_reactive(&uow.work_item, move |wi| item.set(wi)));
+
+    // The reused per-UoW UoW panel / run live behind a refresh tick, same as the old page.
+    let uow_refresh = use_signal(|| 0u32);
+
+    // Live run state for THIS UoW (governed fleet through the gate).
+    let mut active_run = use_signal(|| Option::<RunView>::None);
+    let run_models_res = use_resource(fetch_audit_models);
+    let mut run_model = use_signal(String::new);
+    {
+        let resp = run_models_res.read().clone().flatten();
+        if run_model().is_empty() {
+            if let Some(m) = resp {
+                run_model.set(m.default.clone());
+            }
+        }
+    }
+
+    // Comment-to-issue composer.
+    let mut comment_body = use_signal(String::new);
+    let mut commenting = use_signal(|| false);
+    // Pull-latest state.
+    let mut refreshing = use_signal(|| false);
+
+    let it = item.read().clone();
+    let (state_label, state_cls) = work_item_state_badge(&it.state);
+    let run_models_snap = run_models_res.read().clone().flatten();
+
+    rsx! {
+        div { class: "uow-dev",
+            // ── Work-item header (provider-agnostic read of the DTO) ───────────
+            div { class: "uow-dev-head",
+                span { class: "uow-dev-repo", "{it.repo}" }
+                span { class: "uow-dev-num", "#{it.number}" }
+                span { class: "wi-state {state_cls}", "{state_label}" }
+                if !it.url.is_empty() {
+                    a { class: "wi-detail-link", href: "{it.url}", target: "_blank", "Open issue ↗" }
+                }
+            }
+            p { class: "uow-dev-title", "{it.title}" }
+
+            // ── Pull latest work item ─────────────────────────────────────────
+            div { class: "uow-dev-pull-row",
+                button {
+                    class: "btn-edit-sm",
+                    disabled: refreshing(),
+                    onclick: move |_| {
+                        let wid = item.read().id.clone();
+                        refreshing.set(true);
+                        spawn(async move {
+                            if let Some(updated) = refresh_work_item(&wid).await {
+                                item.set(updated);
+                            }
+                            refreshing.set(false);
+                        });
+                    },
+                    if refreshing() { "Pulling…" } else { "Pull latest work item" }
+                }
+                span { class: "section-hint", "Re-pull this issue from the tracker." }
+            }
+
+            // ── Gate self-check (reused) ──────────────────────────────────────
+            GateSelfCheck {}
+
+            // ── Loop-guard control (reused) ───────────────────────────────────
+            LoopGuardControl {}
+
+            // ── Run the governed fleet THROUGH THE GATE (reused path) ─────────
+            div { class: "run-control-row",
+                button {
+                    class: "btn-run",
+                    onclick: move |_| {
+                        let sid = uow_key.clone();
+                        let md = run_model();
+                        let mut uow_refresh = uow_refresh;
+                        let toasts = toasts;
+                        spawn(async move {
+                            match start_run(&sid, &md).await {
+                                StartRunOutcome::Started(rid) => {
+                                    loop {
+                                        if let Some(rv) = fetch_run(&rid).await {
+                                            let done = rv.done;
+                                            active_run.set(Some(rv));
+                                            if done {
+                                                uow_refresh += 1;
+                                                break;
+                                            }
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                                    }
+                                }
+                                StartRunOutcome::Blocked(reason) => {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        reason,
+                                    );
+                                }
+                                StartRunOutcome::Failed => {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not start the governed run.".to_string(),
+                                    );
+                                }
+                            }
+                        });
+                    },
+                    "▶ Run this work (governed)"
+                }
+                if let Some(m) = run_models_snap {
+                    select {
+                        class: "run-model-select",
+                        value: "{run_model}",
+                        onchange: move |e| run_model.set(e.value()),
+                        for opt in m.models.iter() {
+                            option {
+                                value: "{opt.id}",
+                                selected: run_model() == opt.id,
+                                "{opt.label}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Agent activity for the active run (reused) ────────────────────
+            {
+                let rid = match active_run() {
+                    Some(ref r) => r.id.clone(),
+                    None => String::new(),
+                };
+                rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+            }
+
+            // ── The UoW panel (reused), keyed to this UoW ─────────────────────
+            UowPanel { story_id: uow.id.clone(), uow_refresh }
+
+            // ── The live run + provenance + sign-off (reused) ─────────────────
+            if let Some(r) = active_run() {
+                LiveRunPanel { run: r, uow_refresh }
+            }
+
+            // ── Clarify back-and-forth (reused), keyed to this UoW ────────────
+            ClarifySection { story_id: uow.id.clone() }
+
+            // ── Add comment to the source issue ───────────────────────────────
+            div { class: "uow-comment",
+                p { class: "clarify-h", "Add comment to issue" }
+                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter." }
+                textarea {
+                    class: "clarify-q",
+                    value: "{comment_body}",
+                    rows: "3",
+                    placeholder: "Write a comment to post on the issue…",
+                    oninput: move |e| comment_body.set(e.value()),
+                }
+                button {
+                    class: "btn-run",
+                    disabled: commenting(),
+                    onclick: move |_| {
+                        let wid = item.read().id.clone();
+                        let body = comment_body();
+                        if body.trim().is_empty() {
+                            return;
+                        }
+                        let toasts = toasts;
+                        commenting.set(true);
+                        spawn(async move {
+                            match comment_on_work_item(&wid, &body).await {
+                                Some(_url) => {
+                                    comment_body.set(String::new());
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        "Comment posted to the issue.".to_string(),
+                                    );
+                                }
+                                None => {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not post the comment.".to_string(),
+                                    );
+                                }
+                            }
+                            commenting.set(false);
+                        });
+                    },
+                    if commenting() { "Posting…" } else { "Post comment" }
+                }
+            }
+        }
     }
 }
 
@@ -8402,111 +8458,6 @@ fn ScanResults(report: ScanReportView) -> Element {
     }
 }
 
-#[component]
-fn CockpitTopBar(story: CanonicalStory, connection: Option<ProviderView>) -> Element {
-    let (badge, badge_cls) = status_badge(story.status);
-
-    // Real connection status from /api/provider — the thing that matters when
-    // wiring GitHub. No fabricated cost meter / agent counts.
-    let (conn_cls, conn_label) = match &connection {
-        Some(p) if p.live => ("conn-ok", format!("● {}", p.provider)),
-        Some(p) => ("conn-warn", format!("● {} (no GitHub token)", p.provider)),
-        None => ("conn-warn", "● connecting…".to_string()),
-    };
-
-    // SOURCE (where it's tracked) vs BUILD TARGETS (where its code lands) — the
-    // two independent axes from the credential-delegated-scope decision.
-    let source = match story.external_ref.as_ref() {
-        Some(r) => format!("{:?} {}", r.provider, r.external_id),
-        None => "native".to_string(),
-    };
-    let targets = if story.targets.is_empty() {
-        "no targets yet".to_string()
-    } else {
-        story
-            .targets
-            .iter()
-            .map(|t| match &t.role {
-                Some(role) => format!("{} ({role})", t.repo),
-                None => t.repo.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    rsx! {
-        div { class: "cockpit-topbar",
-            div { class: "topbar-line1",
-                span { class: "topbar-brand", "Camerata · Conductor" }
-                span { class: "topbar-story", "{story.title}" }
-                span { class: "topbar-status {badge_cls}", "{badge}" }
-            }
-            div { class: "topbar-line3",
-                span { class: "topbar-axis-label", "source:" }
-                span { class: "topbar-axis-val", "{source}" }
-                span { class: "topbar-sep", "·" }
-                span { class: "topbar-axis-label", "targets:" }
-                span { class: "topbar-axis-val", "{targets}" }
-            }
-            div { class: "topbar-line2",
-                span { class: "topbar-axis-label", "tracker:" }
-                span { class: "{conn_cls}", "{conn_label}" }
-            }
-        }
-    }
-}
-
-/// The center-stage body for one lifecycle stage of the selected story. Driven by
-/// the (clickable) stage tab index, NOT by fabricated fixtures: it describes what
-/// happens at each stage for THIS story, marks stages the story hasn't reached
-/// yet, and never invents gate events, diffs, or provenance. Real run activity
-/// shows in `LiveRunPanel` once a run is started.
-#[component]
-fn StagePanel(story: CanonicalStory, stage: usize) -> Element {
-    let actual = active_stage_index(story.status);
-    let reached = stage <= actual;
-    let (name, body) = match stage {
-        0 => (
-            "Intake",
-            "The story is in the spine. From here the architect investigates it, asks the requirements owner any clarifying questions, decomposes it, and runs the governed fleet.",
-        ),
-        1 => (
-            "Investigation",
-            "The lead engineer reads the story against repo context and raises clarifying questions via the bridge below. Answers come back from the requirements owner before any code is written.",
-        ),
-        2 => (
-            "Plan",
-            "The story is decomposed into component child stories per the team's practice (use the panel below). Each child is independently governable and targets its own repo.",
-        ),
-        3 => (
-            "Execution & gating",
-            "The governed fleet runs the work in isolated worktrees; every write passes the gate (deny-before-execute), and each task is re-checked after. Press \u{201c}Run this story\u{201d} above to start it and watch the real verdicts stream in.",
-        ),
-        4 => (
-            "QA & sign-off",
-            "Review the produced diff and the gate results, then sign off to ship. Provenance (PR links, gate verdicts, sign-off) is written back to the tracker item.",
-        ),
-        _ => ("Stage", ""),
-    };
-    rsx! {
-        div { class: "panel-generic",
-            p { class: "panel-h", "{story.title}" }
-            p { class: "stage-name", "{name}" }
-            if !story.description.is_empty() {
-                p { class: "panel-sub", "{story.description}" }
-            }
-            p { class: "panel-sub", "{body}" }
-            if !reached {
-                p { class: "stage-not-reached",
-                    "This stage hasn't been reached yet — the story is currently at "
-                    span { class: "stage-not-reached-now", "{STAGE_TABS[actual]}" }
-                    "."
-                }
-            }
-        }
-    }
-}
-
 /// The live governed run: the real gate verdicts from the BFF run engine, streamed
 /// in as the run walks to completion.
 #[component]
@@ -9079,108 +9030,6 @@ fn ClarificationCard(clar: ClarificationView, refresh: Signal<u32>) -> Element {
                 div { class: "clar-answered",
                     span { class: "clar-answer-by", "{clar.answered_by.clone().unwrap_or_default()} answered" }
                     p { class: "clar-answer-text", "{clar.answer.clone().unwrap_or_default()}" }
-                }
-            }
-        }
-    }
-}
-
-/// Decompose a parent story into component children: propose, edit titles, create.
-/// Created children are real stories on the spine (visible in the left rail on the
-/// next mount); the tracker write-back is the provider phase.
-#[component]
-fn DecomposeSection(story_id: String) -> Element {
-    let mut proposed = use_signal(|| Option::<Vec<ProposedChildView>>::None);
-    let mut child_refresh = use_signal(|| 0u32);
-    let sid_children = story_id.clone();
-    let children_res = use_resource(move || {
-        let sid = sid_children.clone();
-        let _dep = child_refresh();
-        async move { fetch_children(&sid).await }
-    });
-
-    let sid_propose = story_id.clone();
-    let sid_commit = story_id.clone();
-
-    rsx! {
-        div { class: "decompose",
-            p { class: "clarify-h", "Decompose into component stories" }
-            p { class: "section-hint", "Split this feature into the component stories your practice calls for (here: a UI story and an API story). Review and edit, then create. Creating writes them to the tracker as child work items in the provider phase." }
-            button {
-                class: "btn-run",
-                onclick: move |_| {
-                    let sid = sid_propose.clone();
-                    spawn(async move {
-                        if let Some(p) = fetch_proposal(&sid).await {
-                            proposed.set(Some(p));
-                        }
-                    });
-                },
-                "Propose children"
-            }
-
-            {
-                match proposed() {
-                    Some(list) if !list.is_empty() => rsx! {
-                        div { class: "proposed-list",
-                            for (i , pc) in list.iter().enumerate() {
-                                {
-                                    let kind = pc.kind.clone();
-                                    let title = pc.title.clone();
-                                    rsx! {
-                                        div { class: "proposed-child",
-                                            span { class: "proposed-kind", "{kind}" }
-                                            input {
-                                                class: "addressee-input proposed-title",
-                                                value: "{title}",
-                                                oninput: move |e| {
-                                                    if let Some(v) = proposed.write().as_mut() {
-                                                        if let Some(item) = v.get_mut(i) {
-                                                            item.title = e.value();
-                                                        }
-                                                    }
-                                                },
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            button {
-                                class: "btn-run",
-                                onclick: move |_| {
-                                    let sid = sid_commit.clone();
-                                    let children = proposed().unwrap_or_default();
-                                    spawn(async move {
-                                        if commit_children(&sid, &children).await.is_some() {
-                                            proposed.set(None);
-                                            child_refresh += 1;
-                                        }
-                                    });
-                                },
-                                "Create these stories"
-                            }
-                        }
-                    },
-                    _ => rsx! {},
-                }
-            }
-
-            {
-                let kids = children_res.read().clone().flatten().unwrap_or_default();
-                if kids.is_empty() {
-                    rsx! {}
-                } else {
-                    rsx! {
-                        div { class: "children-list",
-                            p { class: "clarify-label", "Component stories" }
-                            for k in kids.iter() {
-                                div { class: "child-row",
-                                    span { class: "child-id", "{k.id}" }
-                                    span { class: "child-title", "{k.title}" }
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -10195,5 +10044,100 @@ mod tests {
         let m = FeatureFlagMap::default();
         assert!(!m.soc2, "default FeatureFlagMap should have all flags off");
         assert!(m.extra.is_empty(), "default extra should be empty");
+    }
+
+    // ── Governed Development: pure work-item / UoW helpers ─────────────────────
+    use super::{
+        create_or_open_label, existing_uow_for, labels_summary, work_item_state_badge, UowListEntry,
+        UowStage, WorkItem,
+    };
+
+    fn wi(id: &str) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            provider: "github".to_string(),
+            repo: "acme/web".to_string(),
+            number: 1,
+            title: "t".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: vec![],
+        }
+    }
+
+    #[test]
+    fn state_badge_maps_open_closed_and_unknown() {
+        assert_eq!(work_item_state_badge("open"), ("OPEN", "active"));
+        // Casing is normalized.
+        assert_eq!(work_item_state_badge("OPEN"), ("OPEN", "active"));
+        assert_eq!(work_item_state_badge("closed"), ("CLOSED", "done"));
+        assert_eq!(work_item_state_badge("weird"), ("UNKNOWN", "neutral"));
+    }
+
+    #[test]
+    fn labels_summary_joins_and_placeholders() {
+        assert_eq!(labels_summary(&[]), "—");
+        assert_eq!(labels_summary(&["bug".to_string()]), "bug");
+        assert_eq!(
+            labels_summary(&["bug".to_string(), "ui".to_string()]),
+            "bug, ui"
+        );
+    }
+
+    #[test]
+    fn create_or_open_label_dedup_logic() {
+        assert_eq!(create_or_open_label(false), "Create Unit of Work from this issue");
+        assert_eq!(create_or_open_label(true), "Open Unit of Work");
+    }
+
+    #[test]
+    fn existing_uow_for_matches_by_work_item_id() {
+        let uows = vec![
+            UowListEntry {
+                id: "uow-1".to_string(),
+                work_item: wi("github:acme/web#10"),
+                stage: UowStage::Development,
+            },
+            UowListEntry {
+                id: "uow-2".to_string(),
+                work_item: wi("github:acme/web#11"),
+                stage: UowStage::Intake,
+            },
+        ];
+        // A match returns the right UoW (drives "Open Unit of Work").
+        let found = existing_uow_for(&uows, "github:acme/web#11");
+        assert_eq!(found.map(|u| u.id.as_str()), Some("uow-2"));
+        // No match -> None (drives "Create Unit of Work").
+        assert!(existing_uow_for(&uows, "github:acme/web#99").is_none());
+        // The dedup display logic composes: no UoW -> Create label.
+        assert_eq!(
+            create_or_open_label(existing_uow_for(&uows, "github:acme/web#99").is_some()),
+            "Create Unit of Work from this issue"
+        );
+        assert_eq!(
+            create_or_open_label(existing_uow_for(&uows, "github:acme/web#10").is_some()),
+            "Open Unit of Work"
+        );
+    }
+
+    #[test]
+    fn work_item_deserializes_from_contract_shape() {
+        let json = r#"{
+            "id": "github:acme/web#42",
+            "provider": "github",
+            "repo": "acme/web",
+            "number": 42,
+            "title": "Add CSV export",
+            "body": "Members CSV",
+            "state": "open",
+            "url": "https://github.com/acme/web/issues/42",
+            "labels": ["enhancement", "ui"]
+        }"#;
+        let item: WorkItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.id, "github:acme/web#42");
+        assert_eq!(item.number, 42);
+        assert_eq!(item.labels, vec!["enhancement".to_string(), "ui".to_string()]);
+        assert_eq!(labels_summary(&item.labels), "enhancement, ui");
     }
 }
