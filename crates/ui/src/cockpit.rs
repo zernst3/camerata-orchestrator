@@ -202,7 +202,11 @@ struct TierMapView {
 }
 
 fn default_fast_model_str() -> String {
-    "claude-haiku-4-5".to_string()
+    // BUG-UI-1: align with the fleet canonical id in crates/fleet/src/tier.rs::default_fast_model().
+    // The previous value "claude-haiku-4-5" (without a date suffix) would cause the settings panel
+    // to show and save a different id than the fleet actually uses ("claude-haiku-4-5-20251001"),
+    // so a user hitting "Save" without changing anything would pin the wrong model.
+    "claude-haiku-4-5-20251001".to_string()
 }
 fn default_balanced_model_str() -> String {
     "claude-sonnet-4-6".to_string()
@@ -1558,7 +1562,7 @@ fn TierMapEditor(project: ProjectView) -> Element {
                     input {
                         class: "tier-map-input addressee-input",
                         r#type: "text",
-                        placeholder: "e.g. claude-haiku-4-5",
+                        placeholder: "e.g. claude-haiku-4-5-20251001",
                         value: "{fast}",
                         oninput: move |e| fast.set(e.value()),
                     }

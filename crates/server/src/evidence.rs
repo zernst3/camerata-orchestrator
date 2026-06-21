@@ -392,9 +392,26 @@ impl UowEvidenceRecord {
     /// (excluding the `content_hash` field itself) and store it in `self.content_hash`.
     ///
     /// Call this AFTER all fields are populated and before persisting or injecting into a PR.
+    ///
+    /// If serialization fails (unusual for a well-typed struct, but possible with certain
+    /// custom `Serialize` impls), `content_hash` is set to the sentinel `"HASH-ERROR"` so
+    /// the caller can detect the failure and `verify_hash` returns `false` (BUG-EV-1).
     pub fn compute_hash(&mut self) {
-        let canonical = canonical_json_for_hashing(self);
-        self.content_hash = fnv1a_hex(&canonical);
+        match canonical_json_for_hashing(self) {
+            Ok(canonical) => self.content_hash = fnv1a_hex(&canonical),
+            Err(e) => {
+                // BUG-EV-1: never hash an empty string — that produces a valid-looking
+                // sentinel that would pass verify_hash for other failed-serialize records.
+                // Use an explicit "HASH-ERROR" marker so verify_hash returns false and the
+                // caller sees a clear signal.
+                eprintln!(
+                    "[camerata-server] canonical_json_for_hashing failed for story {}: {e}; \
+                     content_hash set to HASH-ERROR",
+                    self.story_id
+                );
+                self.content_hash = "HASH-ERROR".to_string();
+            }
+        }
     }
 
     /// Verify that the record's `content_hash` matches a freshly-computed hash over the
@@ -402,12 +419,16 @@ impl UowEvidenceRecord {
     /// has been modified since the hash was computed.
     ///
     /// A record with an empty `content_hash` (not yet hashed) always returns `false`.
+    /// A record with `content_hash == "HASH-ERROR"` (serialization failed at hash time)
+    /// also returns `false` (BUG-EV-1).
     pub fn verify_hash(&self) -> bool {
-        if self.content_hash.is_empty() {
+        if self.content_hash.is_empty() || self.content_hash == "HASH-ERROR" {
             return false;
         }
-        let canonical = canonical_json_for_hashing(self);
-        fnv1a_hex(&canonical) == self.content_hash
+        match canonical_json_for_hashing(self) {
+            Ok(canonical) => fnv1a_hex(&canonical) == self.content_hash,
+            Err(_) => false,
+        }
     }
 }
 
@@ -415,12 +436,19 @@ impl UowEvidenceRecord {
 ///
 /// We zero `content_hash` before hashing so the hash is a commitment to all OTHER fields;
 /// re-computing it later produces the same hash as long as nothing else changed.
-fn canonical_json_for_hashing(r: &UowEvidenceRecord) -> String {
+///
+/// # Errors
+///
+/// Returns `Err` when `serde_json::to_string` fails. Callers MUST NOT fall back to a
+/// default/empty string on error — `fnv1a_hex("")` is a valid-looking deterministic hash,
+/// and hashing an empty string would make `verify_hash` return `true` for any other record
+/// that also fails to serialize, producing false-positive tamper-check results (BUG-EV-1).
+fn canonical_json_for_hashing(r: &UowEvidenceRecord) -> Result<String, serde_json::Error> {
     // Build a clone with content_hash cleared so the hash is stable across re-computes.
     let mut tmp = r.clone();
     tmp.content_hash = String::new();
     // serde_json produces deterministic output for structs (field order = declaration order).
-    serde_json::to_string(&tmp).unwrap_or_default()
+    serde_json::to_string(&tmp)
 }
 
 /// FNV-1a (32-bit) over the UTF-8 bytes of `s`. Returns the hash as a lowercase hex string.
@@ -597,9 +625,10 @@ pub fn render_pr_markdown(record: &UowEvidenceRecord) -> String {
         for link in &record.change_links {
             out.push_str(&format!("- {} — {}\n", link.kind, link.ref_));
             if !link.label.is_empty() {
-                // Replace the last plain `ref_` with a labeled markdown link when we have a label.
-                // The format above already emits the bare ref; for labeled links we'd need the URL,
-                // which may BE the ref. Just append the label inline.
+                // BUG-EV-2: append the human label on a sub-bullet so it is visible in the
+                // PR markdown. The label field was documented but never rendered, causing
+                // `ChangeLink` labels (e.g. commit/PR titles) to be silently dropped.
+                out.push_str(&format!("  _{}_\n", escape_md_table(&link.label)));
             }
         }
         out.push('\n');
@@ -1119,5 +1148,104 @@ mod tests {
         // 32-bit FNV produces 8 hex chars.
         let h = fnv1a_hex("test");
         assert_eq!(h.len(), 8, "FNV-1a (32-bit) hash should be 8 hex chars");
+    }
+
+    // ── BUG-EV-1 regression: canonical_json_for_hashing serialization failure ────────
+
+    /// BUG-EV-1: `compute_hash` must NOT fall back to hashing an empty string on
+    /// serialization failure. Before the fix, `unwrap_or_default()` would produce `fnv1a_hex("")`
+    /// (a valid-looking hash), causing `verify_hash` to return `true` for any OTHER record that
+    /// also failed to serialize — a false-positive tamper-check.
+    ///
+    /// We test the property: after `compute_hash`, `verify_hash` always returns `true` for a
+    /// normal (serializable) record, and that `content_hash` is never empty after the call.
+    #[test]
+    fn bug_ev1_compute_hash_produces_non_empty_hash_for_normal_record() {
+        let mut r = UowEvidenceRecord::new("S-1", "r-1", "2026-06-20T00:00:00Z");
+        r.compute_hash();
+        assert!(
+            !r.content_hash.is_empty(),
+            "BUG-EV-1: content_hash must not be empty after compute_hash"
+        );
+        assert_ne!(
+            r.content_hash, "HASH-ERROR",
+            "BUG-EV-1: a well-typed record must not produce a HASH-ERROR sentinel"
+        );
+    }
+
+    /// BUG-EV-1: `verify_hash` must return `true` after a round-trip (compute then verify
+    /// with the same record). This confirms the hash function is deterministic and the
+    /// canonical form is stable.
+    #[test]
+    fn bug_ev1_verify_hash_round_trip() {
+        let mut r = UowEvidenceRecord::new("S-EV1", "r-ev1", "2026-06-20T00:00:00Z");
+        r.add_event("2026-06-20T00:01:00Z", "fleet", "run", "Run completed");
+        r.compute_hash();
+        assert!(
+            r.verify_hash(),
+            "BUG-EV-1: verify_hash must return true immediately after compute_hash \
+             (deterministic hash round-trip)"
+        );
+    }
+
+    /// BUG-EV-1: `verify_hash` must return `false` when `content_hash` == `"HASH-ERROR"`.
+    /// The sentinel must never be treated as a valid hash.
+    #[test]
+    fn bug_ev1_verify_hash_returns_false_for_hash_error_sentinel() {
+        let mut r = UowEvidenceRecord::new("S-EV1-err", "r-ev1-err", "2026-06-20T00:00:00Z");
+        // Manually set the sentinel (as compute_hash would do on failure).
+        r.content_hash = "HASH-ERROR".to_string();
+        assert!(
+            !r.verify_hash(),
+            "BUG-EV-1: verify_hash must return false when content_hash is the HASH-ERROR sentinel"
+        );
+    }
+
+    /// BUG-EV-1: mutating a field after compute_hash must cause verify_hash to return false
+    /// (tamper-detection still works after the serialization-error fix).
+    #[test]
+    fn bug_ev1_tamper_detection_still_works() {
+        let mut r = UowEvidenceRecord::new("S-tamper", "r-tamper", "2026-06-20T00:00:00Z");
+        r.compute_hash();
+        // Mutate a field (simulating tampering).
+        r.story_id = "S-tamper-MODIFIED".to_string();
+        assert!(
+            !r.verify_hash(),
+            "BUG-EV-1: verify_hash must return false after a field is modified (tamper-detection)"
+        );
+    }
+
+    // ── BUG-EV-2 regression: render_pr_markdown change-link label rendering ──────────
+
+    /// BUG-EV-2: `render_pr_markdown` must render the `label` field of a `ChangeLink`
+    /// in the output. Before the fix, the `if !link.label.is_empty()` block was a no-op
+    /// comment with no code, silently dropping all labels.
+    #[test]
+    fn bug_ev2_render_pr_markdown_includes_change_link_label() {
+        let mut r = UowEvidenceRecord::new("S-EV2", "r-ev2", "2026-06-20T00:00:00Z");
+        r.add_change_link("pr", "https://github.com/org/repo/pull/42", "fix: add auth check");
+        let md = render_pr_markdown(&r);
+        assert!(
+            md.contains("fix: add auth check"),
+            "BUG-EV-2: render_pr_markdown must render the ChangeLink label; \
+             'fix: add auth check' was missing from output:\n{md}"
+        );
+    }
+
+    /// BUG-EV-2: a ChangeLink WITHOUT a label must still render the kind and ref_.
+    /// The label-append path must not break the no-label case.
+    #[test]
+    fn bug_ev2_render_pr_markdown_no_label_renders_kind_and_ref() {
+        let mut r = UowEvidenceRecord::new("S-EV2b", "r-ev2b", "2026-06-20T00:00:00Z");
+        r.add_change_link("commit", "abc123def456", "");
+        let md = render_pr_markdown(&r);
+        assert!(
+            md.contains("commit"),
+            "BUG-EV-2: kind must be present in change-link output"
+        );
+        assert!(
+            md.contains("abc123def456"),
+            "BUG-EV-2: ref_ must be present in change-link output"
+        );
     }
 }

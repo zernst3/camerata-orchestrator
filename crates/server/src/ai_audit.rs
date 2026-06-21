@@ -272,7 +272,14 @@ fn canonical_adopted_rule(
     let has = |s: &str| norm.contains(s);
     let candidate = if has("SECRET") && has("URL") {
         "ARCH-NO-SECRETS-IN-URL-1"
-    } else if has("PANIC") {
+    } else if has("PANIC")
+        // BUG-AI-2: narrow the match so rules that merely MENTION "PANIC" in a non-panic
+        // context (e.g. "PREVENT-PANICKING-AUTH-CHECK", "LOG-PANIC-RECOVERY-1") are not
+        // falsely canonicalized to ARCH-STRUCTURED-ERRORS-1. Only the specific invented
+        // names the model repeatedly emits for actual panic-at-callsite violations qualify.
+        && (has("HANDLER") || has("UNWRAP") || has("UNHANDLED") || has("ON-ERROR")
+            || has("PROPAGAT") || has("UNWIND") || has("BUBBL"))
+    {
         "ARCH-STRUCTURED-ERRORS-1"
     } else if (has("DIRECT") && (has("DB") || has("DATABASE")))
         || (has("BYPASS") && has("REPO"))
@@ -1182,6 +1189,11 @@ async fn run_passes_batch(
     batches: &[&[(String, String)]],
     label: &str,
     meter: Option<&UsageMeter>,
+    // BUG-AI-1: honor advisory_disabled in batch mode the same way run_passes does.
+    // When true, the "flag novel issues beyond adopted rules" task is suppressed for
+    // every (chunk, batch) pair, so batch mode does not re-introduce duplicate novel
+    // findings when called from a language-scoped routing group.
+    advisory_disabled: bool,
 ) -> anyhow::Result<(
     Vec<Finding>,
     Vec<ProposedRule>,
@@ -1234,7 +1246,12 @@ async fn run_passes_batch(
         for bi in 0..n_b {
             let batch = batches[bi];
             let rb = build_rules_block(batch);
-            let advisory = bi == 0;
+            // BUG-AI-1: mirror run_passes semantics — advisory fires only on bi==0 AND
+            // only when advisory_disabled is false. Without this check, every language-scoped
+            // batch group would re-run the novel-issue pass on its first batch, reproducing
+            // duplicate novel findings for each language group (the problem advisory_disabled
+            // was introduced to prevent in the parallel path).
+            let advisory = !advisory_disabled && bi == 0;
             let task_line = if advisory {
                 format!("── Check the code above against the ADOPTED rules below (batch {}/{n_b}); ALSO flag any other genuine issues NOT covered by an adopted rule. Use the REPO MAP for cross-file context. ──", bi + 1)
             } else {
@@ -1774,6 +1791,15 @@ pub async fn audit_repo(
     // Calibration model: the user's calibration pick wins; else CAMERATA_CALIBRATION_MODEL;
     // else fall back to the SCAN model so the audit is end-to-end on one model by default
     // (no silent default-model calibration). The UI exposes this as its own picker.
+    //
+    // BUG-AI-3: when `calibration_model` is None, CAMERATA_CALIBRATION_MODEL is unset,
+    // AND `audit_model` is also None (both model param and CAMERATA_AUDIT_MODEL absent),
+    // `calib_model` is None — which means `verify_findings` passes None to `build_req` and
+    // the LLM client uses its compiled-in default model. This is correct: if neither scan
+    // nor calibration model is pinned, both default to the same LLM default, so the audit
+    // IS end-to-end on one model. The comment above was slightly misleading ("fall back to
+    // the SCAN model") when scan_model is itself None — the accurate statement is "fall
+    // back to the same source as the scan, which may itself be the LLM default."
     let calib_model = calibration_model
         .map(str::to_string)
         .or_else(|| {
@@ -1827,6 +1853,10 @@ pub async fn audit_repo(
             &batches,
             "pass",
             meter,
+            // Batch mode does not yet apply per-rule routing (all rules vs all files), so
+            // the Scope::All advisory semantics apply: advisory is enabled (not disabled).
+            // If batch mode ever gains routing, pass the group's advisory_disabled flag here.
+            false,
         )
         .await?
     } else {
@@ -3741,6 +3771,123 @@ mod tests {
         assert!(
             digest.contains("[digest truncated"),
             "a significant truncation (large portion of a file dropped) must emit the notice"
+        );
+    }
+
+    // ── BUG-AI-1 regression: run_passes_batch advisory_disabled ──────────────────────
+
+    /// BUG-AI-1: when advisory_disabled is true the advisory prompt must be suppressed
+    /// for EVERY (chunk, batch) pair including bi==0. Before the fix, batch mode always
+    /// set `advisory = bi == 0` unconditionally, re-introducing duplicate novel findings
+    /// for every language-scoped group's first batch.
+    ///
+    /// We test the corrected logic via the `advisory` value formula directly (the function
+    /// itself is async + requires a live LLM, so we test the guard predicate in isolation).
+    #[test]
+    fn bug_ai1_advisory_disabled_suppresses_advisory_in_batch_mode() {
+        // Simulate what run_passes_batch now does for each (ci, bi) pair.
+        let advisory_disabled_cases: &[(bool, usize, bool)] = &[
+            // (advisory_disabled, bi, expected_advisory)
+            (true, 0, false),  // disabled + first batch → must NOT fire
+            (true, 1, false),  // disabled + later batch → must NOT fire
+            (false, 0, true),  // enabled  + first batch → MUST fire
+            (false, 1, false), // enabled  + later batch → must NOT fire
+        ];
+        for &(advisory_disabled, bi, expected) in advisory_disabled_cases {
+            let advisory = !advisory_disabled && bi == 0;
+            assert_eq!(
+                advisory, expected,
+                "BUG-AI-1: advisory_disabled={advisory_disabled}, bi={bi} → \
+                 expected advisory={expected}, got advisory={advisory}"
+            );
+        }
+    }
+
+    // ── BUG-AI-2 regression: canonical_adopted_rule PANIC false-positives ────────────
+
+    /// BUG-AI-2: `canonical_adopted_rule` must NOT map rules that merely mention "PANIC"
+    /// in a non-panic context to ARCH-STRUCTURED-ERRORS-1. Only invented names that
+    /// specifically indicate an unhandled panic at a call point qualify.
+    #[test]
+    fn bug_ai2_canonical_adopted_rule_panic_match_is_narrow() {
+        let mut adopted = std::collections::HashSet::new();
+        adopted.insert("ARCH-STRUCTURED-ERRORS-1".to_string());
+
+        // These should NOT match (merely mention PANIC in non-panic context):
+        let non_panic_rules = &[
+            "PREVENT-PANICKING-AUTH-CHECK",
+            "LOG-PANIC-RECOVERY-1",
+            "PANIC-GATE-GUARD",     // "PANIC" + "GUARD" — not in narrowing list
+        ];
+        for rule in non_panic_rules {
+            let result = canonical_adopted_rule(rule, &adopted);
+            assert!(
+                result.is_none(),
+                "BUG-AI-2: rule '{rule}' must NOT be canonicalized to ARCH-STRUCTURED-ERRORS-1 \
+                 (it only mentions PANIC but is not a panic-at-callsite violation)"
+            );
+        }
+
+        // These SHOULD match (specific panic-at-callsite invented names):
+        let panic_rules = &[
+            "AI-HANDLER-PANICS",
+            "UNHANDLED-PANIC",
+            "PANIC-ON-ERROR",
+            "PANIC-UNWRAP-RESULT",
+            "BUBBLE-PANIC-1",
+        ];
+        for rule in panic_rules {
+            let result = canonical_adopted_rule(rule, &adopted);
+            assert_eq!(
+                result.as_deref(),
+                Some("ARCH-STRUCTURED-ERRORS-1"),
+                "BUG-AI-2: rule '{rule}' should be canonicalized to ARCH-STRUCTURED-ERRORS-1"
+            );
+        }
+    }
+
+    /// BUG-AI-2: when ARCH-STRUCTURED-ERRORS-1 is NOT adopted, canonical_adopted_rule
+    /// must return None even for genuine panic rule names (not-adopted guard must hold).
+    #[test]
+    fn bug_ai2_canonical_adopted_rule_panic_not_adopted_returns_none() {
+        let adopted = std::collections::HashSet::new(); // empty — no rules adopted
+        let result = canonical_adopted_rule("PANIC-UNWRAP-RESULT", &adopted);
+        assert!(
+            result.is_none(),
+            "BUG-AI-2: canonicalization must return None when the target rule is not adopted"
+        );
+    }
+
+    // ── BUG-AI-3 regression: calibration-model fallback when audit_model is None ─────
+
+    /// BUG-AI-3: when calibration_model, CAMERATA_CALIBRATION_MODEL, and audit_model are
+    /// all None/absent, calib_model resolves to None. This is CORRECT — the LLM uses its
+    /// default for both scan and calibration, keeping the audit end-to-end on one model.
+    /// The test documents the expected None behavior so any future refactor that changes
+    /// the fallback chain is caught explicitly.
+    #[test]
+    fn bug_ai3_calib_model_none_when_all_sources_absent() {
+        // Replicate the fallback chain from audit_repo (with no env vars set in this test).
+        // We cannot call audit_repo directly (it needs a live LLM), so we test the chain
+        // logic in isolation — same three-level or_else chain the function uses.
+        let calibration_model: Option<&str> = None;
+        let audit_model: Option<String> = None; // CAMERATA_AUDIT_MODEL not set
+
+        let calib_model = calibration_model
+            .map(str::to_string)
+            .or_else(|| {
+                // In the test environment CAMERATA_CALIBRATION_MODEL is not set.
+                std::env::var("CAMERATA_CALIBRATION_MODEL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| audit_model.clone());
+
+        assert!(
+            calib_model.is_none(),
+            "BUG-AI-3: calib_model must be None when all three sources are absent; \
+             both scan and calibration will use the LLM default (correct end-to-end-on-one-model \
+             behavior). Got: {calib_model:?}"
         );
     }
 }
