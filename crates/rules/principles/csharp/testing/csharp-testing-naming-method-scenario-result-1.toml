@@ -1,0 +1,37 @@
+id = "CSHARP-TESTING-NAMING-METHOD-SCENARIO-RESULT-1"
+title = "Test methods follow MethodName_Scenario_ExpectedResult naming; test classes are named <ClassUnderTest>Tests"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "Test method names consist of three underscore-separated parts: (1) the name of the method or behavior under test, (2) the scenario or input condition, and (3) the expected result. Test classes are named after the production class they test with a 'Tests' suffix (e.g. OrderServiceTests for OrderService). This naming makes a failing test self-documenting without opening the test body."
+
+[decision]
+question = "How are test methods and test classes named?"
+default = "method-scenario-result"
+why = "A test name is the first diagnostic signal when a build fails. A name like 'Test1' or 'Add_ShouldWork' conveys nothing; a name like 'Add_SingleNumber_ReturnsSameNumber' tells a reader exactly what system under test, what input state, and what outcome is being verified. Microsoft's official unit-testing best-practices documentation mandates this three-part structure ('Name of the method being tested / Scenario under which it is being tested / Expected behavior when the scenario is invoked') and provides before/after examples. The test class named after the production class (OrderServiceTests) groups all tests for that class together and makes discovery intuitive. Deviating from this convention silently degrades the diagnostic value of the test suite."
+
+[[option]]
+id = "method-scenario-result"
+label = "MethodName_Scenario_ExpectedResult for methods; <ClassUnderTest>Tests for classes"
+directive = "Every [Fact] or [Theory] method follows the pattern MethodName_Scenario_ExpectedResult using PascalCase for each segment separated by underscores. Examples: Add_SingleNumber_ReturnsSameNumber; Checkout_WithNullCart_ThrowsArgumentNullException; GetUser_UserDoesNotExist_ReturnsNull. Test classes are named <ClassUnderTest>Tests (e.g., StringCalculatorTests, OrderServiceTests) and live in the same namespace as the class under test but in the test project. One test class per production class is the default structure."
+why = "The adopted default. Microsoft's official documentation demonstrates this pattern explicitly with before/after code examples."
+
+[[option]]
+id = "given-when-then"
+label = "Given_When_Then BDD-style naming"
+directive = "Test methods use GivenResidingInAustralia_WhenCheckout_ThenCharge10PercentTax style. Test classes may reflect a feature or scenario rather than a class name."
+why = "Works well with BDD tooling (SpecFlow) but adds noise for pure unit tests; the three-segment MethodName_Scenario_Result is more idiomatic in plain xUnit."
+
+[[option]]
+id = "no-convention"
+label = "freeform test names without a mandated pattern"
+directive = "Test methods are named with no enforced pattern; names like TestAdd or Verify_Stuff are allowed."
+why = "Freeform names degrade test-suite readability and make failure diagnosis harder; a failed test like 'TestAdd' reveals nothing about the failure mode."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Follow test naming standards"

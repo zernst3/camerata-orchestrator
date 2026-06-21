@@ -1,0 +1,41 @@
+id = "CSHARP-TESTING-XUNIT-CONSTRUCTOR-ISOLATION-1"
+title = "xUnit per-test isolation: use the constructor for per-test setup and IDisposable for teardown; use IClassFixture only for expensive shared resources"
+tag = "stack"
+domain = "csharp:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "xUnit creates a new instance of the test class for every [Fact] and [Theory] case. Per-test setup belongs in the constructor; per-test teardown belongs in Dispose() (implement IDisposable) or DisposeAsync() (implement IAsyncLifetime). Shared expensive resources (database connections, HTTP servers) are managed via IClassFixture<T> (one instance per test class) or ICollectionFixture<T> (one instance per named collection). [SetUp] and [TearDown] attributes do not exist in xUnit v2/v3; their equivalent is the constructor and Dispose."
+
+[decision]
+question = "How is per-test setup and teardown managed in xUnit, and when is shared context used?"
+default = "constructor-dispose-then-fixture"
+why = "xUnit's design deliberately replaces [SetUp]/[TearDown] from NUnit/MSTest with constructor/Dispose. The rationale is that a new test class instance per test automatically provides isolation: each test starts with a fresh object graph without any risk of state leaking from a prior test. The [SetUp] attribute was removed from xUnit v2 because it led to hidden shared state and reading-order dependencies. When test setup is expensive (spinning up a test server, seeding a database), IClassFixture<T> shares one fixture instance across all tests in the class without exposing mutable test-class state to adjacent tests. For cross-class sharing, ICollectionFixture<T> combined with [Collection] attributes extends the lifetime to the entire named collection. Microsoft's best-practices documentation reinforces this: 'Use helper methods instead of Setup and Teardown' — helper methods make setup visible within each test, avoiding hidden preconditions."
+
+[[option]]
+id = "constructor-dispose-then-fixture"
+label = "constructor for per-test setup; IDisposable/IAsyncLifetime for teardown; IClassFixture for expensive per-class shared state"
+directive = "Per-test dependencies are instantiated in the test class constructor and disposed in Dispose() or DisposeAsync(). The test class implements IDisposable or IAsyncLifetime (xUnit v2+) as needed. For expensive setup that should run once per test class (e.g., starting an in-process HTTP server), the setup logic is moved into a fixture class; the test class then implements IClassFixture<MyFixture> and receives the fixture via constructor injection. For state shared across multiple test classes, define a [CollectionDefinition] class implementing ICollectionFixture<T> and decorate consuming test classes with [Collection(\"name\")]. Never use static fields to hold test dependencies; always prefer the fixture mechanism."
+why = "The adopted default. Aligns with xUnit's design philosophy and prevents inter-test state contamination."
+
+[[option]]
+id = "shared-constructor-setup"
+label = "initialize shared dependencies once in a static constructor or [OneTimeSetUp] equivalent"
+directive = "Expensive objects are initialized in a static constructor or a beforeall hook so they are created once for all tests."
+why = "Static initialization runs once per AppDomain, not once per test class; shared mutable state can corrupt test isolation when tests run in parallel (xUnit's default). Use ICollectionFixture instead."
+
+[[option]]
+id = "nunit-msstyle-setup-teardown"
+label = "use [TestInitialize]/[SetUp] + [TestCleanup]/[TearDown] attributes (MSTest/NUnit style)"
+directive = "Annotate setup methods with [TestInitialize] (MSTest) or [SetUp] (NUnit) and teardown with [TestCleanup]/[TearDown]."
+why = "These attributes don't exist in xUnit; their NUnit/MSTest equivalents produce hidden shared state that breaks test isolation. xUnit's constructor+Dispose pattern is explicit and safer."
+
+verification = "grounded"
+
+[[sources]]
+url = "https://xunit.net/docs/shared-context"
+title = "xUnit.net — Sharing Context between Tests (constructor/Dispose, IClassFixture, ICollectionFixture, IAsyncLifetime)"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/testing/unit-testing-best-practices"
+title = "Best practices for writing unit tests — Use helper methods instead of Setup and Teardown"
