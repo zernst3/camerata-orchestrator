@@ -1,0 +1,46 @@
+id = "JAVASCRIPT-TESTING-DETERMINISTIC-1"
+title = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "mechanical"
+default = true
+qualifies = "Enforced by a combination of jest/no-done-callback (recommended config in eslint-plugin-jest, catches the callback-based async anti-pattern that silently swallows failures) and jest/expect-expect (recommended config, catches a test with zero assertions that always passes). The determinism contract for clock and timer control is enforced by jest.useFakeTimers() API discipline backed by jest/no-done-callback. No single linter rule bans real I/O in unit tests; the boundary is enforced at PR review via the mock-at-boundaries rule (JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). Flaky-test detection is a CI-level check: repeated runs or quarantine labels, not a lint gate."
+verification = "grounded"
+
+[[sources]]
+url = "https://jestjs.io/docs/timer-mocks"
+title = "Jest — Timer Mocks documentation"
+linter = "jest: jest.useFakeTimers() API"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-conditional-expect.md"
+title = "eslint-plugin-jest — no-conditional-expect (recommended)"
+linter = "jest: no-conditional-expect"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
+title = "eslint-plugin-jest — expect-expect rule (recommended)"
+linter = "jest: expect-expect"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
+title = "eslint-plugin-jest — no-done-callback rule (recommended)"
+linter = "jest: no-done-callback"
+
+[decision]
+question = "What position does the project take on: how should tests handle time, randomness, and external I/O to stay deterministic?"
+default = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
+why = "A test is only valuable if it produces the same result on every run. A test that depends on real wall-clock time will pass or fail depending on machine speed and scheduler scheduling, a test that calls a live network endpoint will fail whenever the endpoint is slow or unreachable, and a test that uses Math.random() without seeding will produce arbitrary outputs. These sources of non-determinism — collectively called flakiness — are the leading cause of test suite credibility collapse: once a suite has a known flaky test, developers start ignoring red CI runs, and the entire safety net degrades. Jest provides jest.useFakeTimers() to replace setTimeout, setInterval, Date.now, and performance.now with controllable implementations that do not advance unless the test explicitly advances them (jest.advanceTimersByTime(ms), jest.runAllTimers()), eliminating the scheduler lottery entirely. Real I/O is eliminated by mocking at boundaries (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The expect-expect rule ensures a test with zero assertions cannot silently pass, and no-conditional-expect ensures assertions cannot be unreachable via a conditional path."
+
+[[option]]
+id = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
+label = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
+directive = "Unit tests call jest.useFakeTimers() (optionally with a fixed { now } anchor to avoid epoch-0 side effects) whenever the module under test references Date, setTimeout, setInterval, or setImmediate. jest.useRealTimers() is called in afterEach to prevent timer-fake leakage across tests. Math.random() calls in the module under test are replaced by a jest.spyOn(Math, 'random').mockReturnValue(fixed) when the test needs deterministic random output. No unit test makes a real HTTP request, reads from a real database, or reads from the real filesystem; those calls are mocked (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The eslint-plugin-jest rules expect-expect and no-conditional-expect (both in the recommended config) are configured at error severity."
+why = "The adopted default. Deterministic tests produce reliable CI signal; flaky tests erode trust in the entire test suite and are more expensive to fix later than to prevent upfront."
+
+[[option]]
+id = "tests-use-real-timers-and-may-include-live-network-calls"
+label = "Tests use real timers; time-dependent code is tested with real waits or waitFor helpers"
+directive = "Tests do not use fake timers; time-dependent assertions use waitFor / sleep helpers that busy-wait for up to a timeout. Network calls may be live in integration tests."
+why = "A defensible alternative the project considered and did not adopt as the default for unit tests. Acceptable for integration-layer tests where the real timer behaviour is part of the contract."

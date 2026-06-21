@@ -1,0 +1,35 @@
+id = "JAVASCRIPT-TESTING-AAA-STRUCTURE-1"
+title = "Every test body follows Arrange-Act-Assert structure with one act per test"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+qualifies = "No ESLint or Jest linter rule enforces the Arrange-Act-Assert (AAA) structure or single-act constraint at the AST level. The jest/no-conditional-expect rule (eslint-plugin-jest, recommended config) catches one class of AAA violation — assertions inside conditionals — but does not enforce the full pattern. AAA structure is a code-review / team convention enforced at PR time."
+verification = "grounded"
+
+[[sources]]
+url = "https://jestjs.io/docs/api"
+title = "Jest globals API — describe, it/test, expect"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-conditional-expect.md"
+title = "eslint-plugin-jest — no-conditional-expect rule"
+linter = "jest: no-conditional-expect"
+
+[decision]
+question = "What position does the project take on: how should the body of an individual test be structured?"
+default = "every-test-follows-arrange-act-assert-one-act-per-test"
+why = "The Arrange-Act-Assert (AAA) pattern structures each test into three clearly delimited phases: Arrange sets up the preconditions and test data, Act executes the single operation under test, and Assert verifies the outcome. When a test mixes setup, exercise, and verification in an undivided block the reader must reconstruct these phases mentally before they can understand what the test is doing. The single-act constraint is equally important: a test with two Act phases verifies too many things at once, and when it fails the failure points to a sequence of operations rather than a single cause, forcing the reader to bisect the compound case themselves. An empirical study of open-source projects found 77% of test cases in practice follow the AAA structure, validating it as the community-dominant pattern."
+
+[[option]]
+id = "every-test-follows-arrange-act-assert-one-act-per-test"
+label = "Every test body follows Arrange-Act-Assert structure with one act per test"
+directive = "Each test (it/test block) is divided into three phases in order: (1) Arrange — set up state, inputs, and mock return values; (2) Act — call the function or trigger the event under test exactly once; (3) Assert — make all expect() calls for this test. A blank line separates the three phases. A test that requires two distinct Act invocations is split into two tests. Conditional logic inside a test body is forbidden (see jest/no-conditional-expect); if the tested outcome depends on a condition, that condition is a fixture variation handled by separate test cases or a parameterised describe.each / test.each block."
+why = "The adopted default. AAA makes the intent of each test readable at a glance, the single-act constraint keeps failure attribution unambiguous, and the blank-line visual delimiter communicates structure without comments."
+
+[[option]]
+id = "test-body-is-free-form-no-required-structure"
+label = "Test body structure is free-form; no required phase ordering"
+directive = "Test bodies have no required phase structure; each author organises setup, exercise, and assertion in whatever order is convenient for the scenario."
+why = "A defensible alternative the project considered and did not adopt as the default."

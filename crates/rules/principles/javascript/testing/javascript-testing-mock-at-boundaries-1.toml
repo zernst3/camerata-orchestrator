@@ -1,0 +1,39 @@
+id = "JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"
+title = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
+tag = "stack"
+domain = "javascript:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+qualifies = "No ESLint rule enforces where mocks may or may not be placed. The jest/prefer-spy-on rule (eslint-plugin-jest) nudges toward spyOn over manual assignment, but it does not distinguish boundary mocks from domain mocks. Testing Library's guiding principle — 'the more your tests resemble the way your software is used, the more confidence they can give you' — operationalises as: mock only what you cannot control (external systems), not what you can control (your own code). Convention is enforced at PR review."
+verification = "grounded"
+
+[[sources]]
+url = "https://jestjs.io/docs/mock-functions"
+title = "Jest — Mock Functions documentation"
+
+[[sources]]
+url = "https://testing-library.com/docs/guiding-principles/"
+title = "Testing Library — Guiding Principles"
+
+[[sources]]
+url = "https://github.com/jest-community/eslint-plugin-jest/blob/main/README.md"
+title = "eslint-plugin-jest — prefer-spy-on rule"
+linter = "jest: prefer-spy-on"
+
+[decision]
+question = "What position does the project take on: what should be mocked in tests?"
+default = "mocks-replace-external-boundaries-not-own-domain-logic"
+why = "Mocking is appropriate where real execution is either impossible (a third-party API in a unit test), too slow (a database query that requires infra), or non-deterministic (a payment SDK, an analytics event). When a developer mocks their own domain functions — e.g. replacing a real service method with jest.fn() in a unit test of a controller — they have written a test that asserts wiring ('the controller called the service') rather than correctness ('the system produces the right output'). Such tests are fragile: they break on safe internal refactors and pass even when the mocked dependency is wrong. Jest's own documentation demonstrates this principle with the axiosmock example: the external HTTP client is mocked so the test does not hit the real API; the in-process business logic is exercised through its real implementation. Testing Library codifies the same idea as its primary guiding principle: tests that resemble real software usage produce confidence; tests that enumerate internal calls produce noise."
+
+[[option]]
+id = "mocks-replace-external-boundaries-not-own-domain-logic"
+label = "Mocks replace external system boundaries (network, DB, clock); own domain logic is tested through real implementations"
+directive = "jest.mock() or jest.fn() is used to replace modules and functions that represent an external boundary the test cannot own: network clients (axios, fetch, node:http), database drivers (Prisma client, pg, knex), file system operations (node:fs when I/O is not the SUT), message queues, and time (jest.useFakeTimers for Date / setTimeout). Own domain code — services, repositories, utilities, validators — is exercised through real call chains so the test validates actual behaviour. A mock of a domain function is a code smell and requires an explicit justification in a comment."
+why = "The adopted default. Boundary mocks keep tests fast and infrastructure-free while leaving real behaviour intact; mocking domain logic replaces correctness with wiring assertions."
+
+[[option]]
+id = "mocks-used-liberally-for-any-dependency"
+label = "Mocks are used liberally to isolate the unit under test from any dependency"
+directive = "Every dependency of the unit under test is mocked regardless of whether it is an external boundary or own domain code, maximising isolation of the single function under test."
+why = "A defensible alternative the project considered and did not adopt as the default. Classic London-school TDD isolation; preferred by teams that want strict class-level unit tests."
