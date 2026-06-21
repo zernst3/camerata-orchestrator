@@ -21,6 +21,13 @@ Camerata scans **local clones** (it reads code on disk), so any repo must be clo
 - `budget-mini` / `agora-mini` (small, yours) — already local
 - `camerata-ai` (yours) — already local
 
+**Real-world EXTERNAL apps (shipped, not toy, not deliberately-vulnerable)** — the canonical external set
+(used for scan-cost measurement on 2026-06-20); clone shallow before scanning:
+- **Umami** — `github.com/umami-software/umami` — Next.js / React / TypeScript (~11 MB)
+- **linkding** — `github.com/sissbruecker/linkding` — Python / Django (~9 MB)
+- **RealWorld / Conduit** — `github.com/gothinkster/node-express-realworld-example-app` — Node / Express (~1 MB)
+- (`git clone --depth 1` each; spans TS/React, Python/Django, Node/Express — good language coverage, all small.)
+
 **Public repos with KNOWN issues** (for precision/recall against a real tool) — clone before scanning:
 - Security/SOC-2 lenses: OWASP **NodeGoat** (Node/Express), **RailsGoat** (Rails), **WebGoat** (Java),
   **django.nV** (Django) — intentionally vulnerable, documented flaws to detect.
