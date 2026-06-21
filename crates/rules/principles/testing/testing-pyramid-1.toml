@@ -1,0 +1,43 @@
+id = "TESTING-PYRAMID-1"
+title = "Test pyramid: many unit tests, fewer integration tests, few end-to-end tests"
+tag = "universal"
+domain = "testing"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/practical-test-pyramid.html"
+title = "Ham Vocke / Martin Fowler — The Practical Test Pyramid"
+
+[[sources]]
+url = "https://martinfowler.com/bliki/TestPyramid.html"
+title = "Martin Fowler — TestPyramid (bliki)"
+
+[[sources]]
+url = "http://xunitpatterns.com/Test%20Pyramid.html"
+title = "xUnit Test Patterns (Meszaros) — Test Pyramid"
+
+[decision]
+question = "How should test effort be distributed across the unit / integration / end-to-end spectrum?"
+default = "pyramid-many-unit-fewer-integration-few-e2e"
+why = "Unit tests are fast, cheap to write, precise in their failure signal, and require no external infrastructure. Integration tests catch wiring bugs that units miss but cost more to write and run. End-to-end tests validate real user journeys but are the slowest, most brittle, and most expensive to maintain. Inverting the pyramid (many E2E, few unit) produces suites that are slow, flaky, and costly to debug, because every failure implicates the entire stack rather than a single function. The shape is a practical guideline, not a hard count ratio: the point is that most confidence should come from the fast, isolated layer where failures are cheapest to diagnose."
+
+[[option]]
+id = "pyramid-many-unit-fewer-integration-few-e2e"
+label = "Many unit tests, fewer integration tests, few end-to-end tests (the pyramid)"
+directive = "Write tests at the lowest level that gives meaningful confidence: unit tests for pure logic, integration tests for component boundaries and I/O contracts, end-to-end tests only for critical user journeys. The bulk of the suite lives at the unit level; integration and E2E layers supplement, not replace, it. Avoid the 'ice cream cone' anti-pattern (many manual / E2E tests and few units)."
+why = "The adopted default. Fast, precise feedback at the unit layer drives short feedback loops; higher layers add proportionally less confidence per test-minute invested."
+
+[[option]]
+id = "inverted-pyramid-heavy-e2e"
+label = "Heavy E2E / integration bias (inverted pyramid)"
+directive = "Rely primarily on end-to-end and integration tests to give confidence that the system works as a whole; write unit tests sparingly."
+why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[option]]
+id = "no-explicit-distribution-policy"
+label = "No explicit distribution policy; write tests at whichever layer feels natural"
+directive = "Let developers choose test layer freely with no prescribed distribution."
+why = "A defensible alternative the project considered and did not adopt as the default."
