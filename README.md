@@ -12,6 +12,29 @@ The intended reader is the person who will clone the repo and check, so the line
 The fastest way to see the real, working part: `cargo run -p camerata-ui` (the Enterprise
 Cockpit, a Dioxus desktop app), then open the **Onboard repos** view.
 
+```text
+ CAMERATA — WHAT'S REAL vs STAGED                              (60-second read)
+ ════════════════════════════════════════════════════════════════════════════
+
+ ✅ REAL — runs today, you can reproduce it
+    ▸ GOVERNANCE GATE — deny-before-execute blocks a real `claude -p` agent's
+      forbidden write before it touches disk. Fail-closed, provider-neutral,
+      binary pass/fail (not an LLM grading an LLM).      ← the defensible wedge
+      reproduce →  cargo run -p camerata -- live-demo
+    ▸ BROWNFIELD ONBOARDING, end-to-end on fixtures — detect → two-tier audit
+      → calibrate/dedup → triage → baseline waivers + GitHub issues → apply.
+    ▸ 14-crate Rust workspace · 670+ tests · governs its OWN source in CI.
+
+ ⏳ STAGED — built & tested, NOT yet live (please don't grade these as proven)
+    ▸ App-builder "AI lead engineer" is a deterministic stub by default
+      (real governed fleet opt-in: CAMERATA_LIVE_BUILD=1); Azure deploy = plan.
+    ▸ Architect / board adapters tested against fake transports — 0 live calls.
+    ▸ The gate inside a full live DEVELOPMENT CYCLE — next milestone, not done.
+
+ → Grade the wedge: the GATE is the proven core. Everything staged is labeled
+   honestly in the sections below — nothing here is blurred.
+```
+
 ## What works today: brownfield onboarding, end to end
 
 Point Camerata at one or more existing GitHub repositories and it runs the full
