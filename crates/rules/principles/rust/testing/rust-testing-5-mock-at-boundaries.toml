@@ -1,0 +1,43 @@
+id = "RUST-TESTING-5"
+title = "Mocking is done at trait boundaries; concrete dependencies are injected as trait objects or generics"
+tag = "stack"
+domain = "rust:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch10-02-traits.html"
+title = "The Rust Book — Ch 10.2: Traits as Parameters (trait-based dependency injection)"
+
+[[sources]]
+url = "https://docs.rs/mockall/latest/mockall/"
+title = "mockall — Automock attribute for generating mock implementations of traits"
+
+[[sources]]
+url = "https://users.rust-lang.org/t/idiomatic-rust-way-of-testing-mocking/128024"
+title = "Rust Users Forum — Idiomatic Rust way of testing/mocking (trait injection discussion)"
+
+[decision]
+question = "What position does the project take on: how are external dependencies replaced in Rust unit tests?"
+default = "mock-at-trait-boundaries-inject-via-generic-or-dyn"
+why = "Rust's ownership and type system make monkey-patching and global-function replacement impossible at runtime; the only idiomatic substitution point is a trait. A function or struct that depends on a concrete type (e.g., a specific database client or HTTP client struct) cannot be tested in isolation without spinning up that concrete dependency. A function or struct that depends on a trait (e.g., a Repository trait, a Mailer trait) can be tested by injecting any type that implements the trait, including a test double. This pattern — depend on the abstraction, not the concretion — is the prerequisite for unit testing in Rust. The trait object (dyn Trait) approach avoids a generic type parameter on the struct, which is simpler for most cases; the generic (impl Trait / T: Trait) approach is zero-cost but propagates type parameters up the call chain. For generating mock implementations, mockall's #[automock] attribute is the ecosystem-standard tool; hand-written test doubles are preferred when the mock logic is trivial. Mock types must be confined to #[cfg(test)] so they are not compiled into production binaries."
+
+[[option]]
+id = "mock-at-trait-boundaries-inject-via-generic-or-dyn"
+label = "Trait boundary injection: mock via #[automock] or hand-written test double, confined to #[cfg(test)]"
+directive = "Production code depends on traits, not concrete types, for any dependency that must be replaced in tests (external services, file system, clocks, random sources). Unit tests inject mock implementations of those traits. For simple mocks, write a struct inside #[cfg(test)] that implements the trait manually. For complex expectations (call counts, argument matchers, return sequences), use mockall::automock to generate a MockFoo type. Mock types and their impl blocks must be inside #[cfg(test)] or in a test-only module gated by #[cfg(test)]; mock structs must not appear in the production binary."
+why = "The adopted default. The only idiomatic Rust substitution point at the type level is a trait. This is the pattern the ecosystem converges on (mockall, double, faux, and hand-written doubles all assume trait boundaries)."
+
+[[option]]
+id = "cfg-flag-seam-for-substitution"
+label = "Use a cfg feature flag to substitute a test implementation"
+directive = "The production struct is replaced at compile time by a test version selected via a #[cfg(feature = \"test-impl\")] flag rather than via a trait object or generic parameter."
+why = "A defensible alternative the project considered and did not adopt as the default. Works for simple cases (e.g., swapping a clock) but does not compose, requires feature-flag cargo plumbing, and the substitution is compile-time-only not per-test."
+
+[[option]]
+id = "integration-tests-over-real-deps"
+label = "Prefer integration tests against real dependencies over mocking"
+directive = "Avoid mocking entirely; test with real dependencies (a real database, real HTTP server, real file system) in integration tests."
+why = "A defensible alternative the project considered and did not adopt as the default. Highest fidelity, but slow, requires environment setup, and is not suitable for fast feedback unit tests of business logic."

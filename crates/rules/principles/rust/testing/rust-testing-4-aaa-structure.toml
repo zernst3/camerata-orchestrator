@@ -1,0 +1,39 @@
+id = "RUST-TESTING-4"
+title = "Test bodies follow Arrange-Act-Assert (AAA): setup, execute, then assert — in that order"
+tag = "stack"
+domain = "rust:testing"
+layer = "language"
+enforcement = "prose"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch11-01-writing-tests.html"
+title = "The Rust Book — Ch 11.1: Writing Tests (three-phase test body: set up, run, assert)"
+
+[[sources]]
+url = "https://doc.rust-lang.org/rust-by-example/testing/unit_testing.html"
+title = "Rust By Example — Unit Testing (setup / execute / assert pattern)"
+
+[decision]
+question = "What position does the project take on: how is the body of a Rust test function structured?"
+default = "arrange-act-assert-in-order"
+why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body — 'set up any needed data or state', 'run the code you want to test', and 'assert that the results are what you expect' — which corresponds directly to the Arrange-Act-Assert pattern. Structuring every test this way produces a consistent reading experience: a reviewer can immediately identify what is being set up, what is being exercised, and what is being verified. Mixing setup, execution, and assertions throughout a single test body makes it harder to identify the boundary between 'given' and 'when', blurs what the test is actually verifying, and makes the root cause of a failure less obvious. Inline comments (// Arrange, // Act, // Assert) are optional in short tests but helpful in tests where the phases are not visually obvious. A test should have exactly one Act (one call to the unit under test); a test with multiple Act-then-Assert sequences is actually multiple tests collapsed into one and should be split."
+
+[[option]]
+id = "arrange-act-assert-in-order"
+label = "Arrange then Act then Assert, three distinct phases in sequence"
+directive = "Each #[test] function body is organized into three sequential phases with no interleaving. Arrange: declare and initialize all inputs, expected values, and test doubles. Act: invoke the unit under test exactly once. Assert: verify the outcome with assert!, assert_eq!, assert_ne!, or by checking an Err/Ok result. A single blank line between phases makes the structure visible. A test that requires more than one Act phase should be split into separate #[test] functions. Inline // Arrange / // Act / // Assert comments are encouraged in longer tests."
+why = "The adopted default. Mirrors the three-phase structure the Rust Book describes for test function bodies. One Act per test keeps failures attributable to a single cause."
+
+[[option]]
+id = "free-form-test-body"
+label = "Free-form test body with no enforced phase structure"
+directive = "Test bodies may interleave setup, execution, and assertion in whatever order the test author finds clearest for the specific case."
+why = "A defensible alternative the project considered and did not adopt as the default. Lower friction for trivial tests but inconsistent structure makes test-reading at scale harder."
+
+[[option]]
+id = "given-when-then-bdd"
+label = "BDD-style Given-When-Then comments"
+directive = "Test bodies use // Given / // When / // Then comments instead of // Arrange / // Act / // Assert to match a BDD vocabulary."
+why = "A defensible alternative the project considered and did not adopt as the default. Semantically equivalent to AAA; acceptable if the team prefers BDD vocabulary but not the adopted term for this project."

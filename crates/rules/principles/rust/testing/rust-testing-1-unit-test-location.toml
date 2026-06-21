@@ -1,0 +1,43 @@
+id = "RUST-TESTING-1"
+title = "Unit tests live in a #[cfg(test)] mod tests block in the same file as the code under test"
+tag = "stack"
+domain = "rust:testing"
+layer = "language"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch11-03-test-organization.html"
+title = "The Rust Book — Ch 11.3: Test Organization (Unit Tests)"
+
+[[sources]]
+url = "https://doc.rust-lang.org/rust-by-example/testing/unit_testing.html"
+title = "Rust By Example — Unit Testing"
+
+[[sources]]
+url = "https://doc.rust-lang.org/reference/attributes/testing.html"
+title = "The Rust Reference — Testing Attributes (#[test], #[cfg(test)])"
+
+[decision]
+question = "What position does the project take on: where do unit tests live in a Rust crate?"
+default = "cfg-test-mod-tests-inline-in-source-file"
+why = "The Rust Book (Ch 11.3) and Rust By Example codify the inline #[cfg(test)] mod tests pattern as the canonical Rust convention for unit tests. Placing tests in the same file as the code allows the test module to import private items via 'use super::*;', which is the primary reason unit tests are colocated with production code in Rust rather than a separate file. The #[cfg(test)] attribute ensures the test module is excluded from normal compilation and from the final binary, so colocating tests does not bloat production artifacts. A separate unit-test file (e.g., src/foo_test.rs) is possible but loses access to private items without extra indirection and diverges from the language-wide convention the entire ecosystem expects. A tests/ top-level directory is reserved for integration tests that exercise only the public API."
+
+[[option]]
+id = "cfg-test-mod-tests-inline-in-source-file"
+label = "Inline #[cfg(test)] mod tests block in the same source file"
+directive = "Unit tests live in a #[cfg(test)] mod tests { ... } block at the bottom of the same .rs file as the code being tested. The module uses 'use super::*;' to bring production items (including private ones) into scope. No #[cfg(test)] annotation is required on individual #[test] functions — only the enclosing module needs it."
+why = "The adopted default. Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Colocating tests with code gives access to private items and matches ecosystem expectations."
+
+[[option]]
+id = "separate-unit-test-file-in-src"
+label = "Separate unit test file in src/ (e.g., src/foo_test.rs)"
+directive = "Unit tests live in a dedicated source file alongside the production code (e.g., src/foo_test.rs for src/foo.rs), included via a #[cfg(test)] mod foo_test; declaration."
+why = "A defensible alternative the project considered and did not adopt as the default. Loses direct access to private items; diverges from ecosystem convention."
+
+[[option]]
+id = "unit-tests-in-tests-dir"
+label = "Unit tests in the top-level tests/ directory"
+directive = "Unit tests live in the tests/ directory alongside integration tests, treating all tests as external crate consumers."
+why = "A defensible alternative the project considered and did not adopt as the default. The tests/ directory is reserved by convention for integration tests; mixing unit tests there loses private-item access and is contrary to Rust Book guidance."
