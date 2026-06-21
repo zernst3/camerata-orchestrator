@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are related model traversals in views and serializers prevented from firing N+1 queries?"
@@ -28,3 +29,7 @@ id = "only-and-values"
 label = "use .values() or .only() to fetch flat data and avoid relationship traversal"
 directive = "Related object data is fetched as flat values via `.values('relation__field')` or `.only('field')`, avoiding relationship traversal entirely."
 why = "Eliminates N+1 for read-only flat projections but cannot return model instances; composing with model methods or serializers that expect instances requires restructuring."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/topics/db/optimization/"
+title = "Django docs — Database access optimization (select_related, prefetch_related, N+1)"

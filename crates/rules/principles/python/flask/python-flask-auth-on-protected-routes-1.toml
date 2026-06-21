@@ -5,6 +5,7 @@ domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is authentication enforced on Flask routes that require a logged-in user or valid token?"
@@ -28,3 +29,7 @@ id = "no-auth-assumed-from-frontend"
 label = "assume only authenticated clients call protected routes"
 directive = "No authentication check is applied to protected routes; the application trusts that the frontend only calls protected routes after the user has logged in."
 why = "The server is the only enforcement point; the frontend's auth state is advisory, not authoritative; any caller with network access can invoke the route."
+
+[[sources]]
+url = "https://flask-login.readthedocs.io/en/latest/"
+title = "Flask-Login docs — login_required decorator"

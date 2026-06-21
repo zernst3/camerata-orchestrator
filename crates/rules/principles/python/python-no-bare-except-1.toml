@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a linter rule (Ruff E722 / flake8 bare-except, plus BLE001 for blind `except Exception`) at error severity. Conformance holds when the rule runs in CI and a `except:` or unjustified `except Exception:` fails the build; it fails when the rule is absent or only warns."
+verification = "grounded"
 
 [decision]
 question = "What may an exception handler catch?"
@@ -23,3 +24,17 @@ id = "allow-broad-catch"
 label = "allow bare except / blind except Exception anywhere"
 directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
 why = "Maximizes apparent robustness but swallows interrupts and masks real bugs, so failures vanish instead of surfacing."
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/bare-except/"
+title = "Ruff E722 — bare-except"
+linter = "Ruff: E722"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/blind-exception/"
+title = "Ruff BLE001 — blind-exception (flake8-blind-except)"
+linter = "Ruff: BLE001"
+
+[[sources]]
+url = "https://peps.python.org/pep-0008/#exception-handling"
+title = "PEP 8 — Exception Handling (bare except clause)"

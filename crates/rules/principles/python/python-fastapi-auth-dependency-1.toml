@@ -5,6 +5,7 @@ domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is authentication and authorization enforced on protected and write endpoints?"
@@ -22,3 +23,11 @@ id = "in-handler-auth-check"
 label = "perform auth checks inside each handler body"
 directive = "Each protected handler performs its own authentication and authorization check at the top of the function body."
 why = "Makes protection opt-in per handler, so a new write endpoint can ship with no check and no signal that one is missing."
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/dependencies/"
+title = "FastAPI Tutorial — Dependencies (Depends for security, authentication, role requirements)"
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/security/"
+title = "FastAPI Tutorial — Security (OAuth2, JWT, Depends for auth)"

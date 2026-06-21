@@ -5,6 +5,7 @@ domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What types define a FastAPI endpoint's request and response bodies?"
@@ -22,3 +23,11 @@ id = "raw-dict-bodies"
 label = "accept raw dicts and return ORM objects directly"
 directive = "Endpoints accept untyped `dict` request bodies and return ORM model instances directly, validating and shaping data by hand where needed."
 why = "Discards FastAPI's boundary validation, risks unchecked KeyErrors, and leaks internal ORM fields (e.g. password hashes) into responses."
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/request-body/"
+title = "FastAPI Tutorial — Request Body (Pydantic models for validation and type conversion)"
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/response-model/"
+title = "FastAPI Tutorial — Response Model (response_model filters output, prevents field leakage)"

@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are views protected from unauthenticated access and cross-site request forgery?"
@@ -28,3 +29,11 @@ id = "permission-classes-drf"
 label = "use DRF IsAuthenticated permission class on DRF viewsets"
 directive = "Django REST Framework viewsets declare `permission_classes = [IsAuthenticated]` (or set it globally in DEFAULT_PERMISSION_CLASSES) rather than using `@login_required` or `LoginRequiredMixin`."
 why = "The correct pattern for DRF API viewsets; equivalent protection for API endpoints that do not render HTML. Complementary to (not a replacement for) CSRF middleware when the API uses session-cookie auth."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/ref/csrf/"
+title = "Django docs — Cross Site Request Forgery protection (CsrfViewMiddleware, csrf_exempt)"
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/topics/auth/default/#limiting-access-to-logged-in-users"
+title = "Django docs — Limiting access to logged-in users (login_required, LoginRequiredMixin)"

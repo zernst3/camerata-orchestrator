@@ -6,6 +6,7 @@ layer = "language"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by a static-analysis gate (Bandit B608 / Ruff S608 / Semgrep) that flags f-strings, `%`-formatting, `.format()`, or `+` concatenation feeding a value into `cursor.execute(...)`, `session.execute(text(...))`, or `.raw(...)`. Conformance holds when the gate runs in CI and an interpolated query string fails the build; it fails when no SQL-injection lint runs."
+verification = "grounded"
 
 [decision]
 question = "How are dynamic values placed into SQL queries?"
@@ -23,3 +24,13 @@ id = "interpolate-with-escaping"
 label = "interpolate values into the query with manual escaping"
 directive = "Dynamic values are formatted into the SQL string with manual escaping or quoting rather than bound as parameters."
 why = "Reads naturally but is error-prone and incomplete; every site is a latent injection waiting for one unsanitized input."
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-sql-expression/"
+title = "Ruff S608 — hardcoded-sql-expression"
+linter = "Ruff: S608"
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b608_hardcoded_sql_expressions.html"
+title = "Bandit B608 — hardcoded_sql_expressions"
+linter = "Bandit: B608"

@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Gitleaks or Bandit (B105/B106/B107) scanning for secret-pattern string literals in config files and Python source. Conformance holds when the CI secret-scan gate runs and no committed file contains a pattern matching an API key, password, private key, or token; it fails when no secret-scan gate covers Flask config files."
+verification = "grounded"
 
 [decision]
 question = "How is Flask configuration (SECRET_KEY, database URI, API keys) provided to the application?"
@@ -29,3 +30,17 @@ id = "dotenv-committed"
 label = "use a committed .env file"
 directive = "Configuration is stored in a `.env` file that is version-controlled alongside the application and loaded with `python-dotenv`."
 why = "Equivalent to committing credentials; the `.env` pattern is safe only when the file is `.gitignore`d."
+
+[[sources]]
+url = "https://flask.palletsprojects.com/en/stable/config/"
+title = "Flask docs — Configuration Handling (SECRET_KEY, environment variables, config best practices)"
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
+title = "Bandit B105 — hardcoded_password_string"
+linter = "Bandit: B105"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-password-string/"
+title = "Ruff S105 — hardcoded-password-string"
+linter = "Ruff: S105"

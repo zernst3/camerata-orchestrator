@@ -5,6 +5,7 @@ domain = "python"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How is blocking I/O handled inside async functions?"
@@ -22,3 +23,22 @@ id = "blocking-in-async"
 label = "allow synchronous I/O directly in async handlers"
 directive = "Async handlers may call synchronous I/O directly when an async client is inconvenient, accepting that the call runs on the event-loop thread."
 why = "Simpler to write but stalls the entire event loop under load, collapsing throughput with no error to diagnose."
+
+[[sources]]
+url = "https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.run_in_executor"
+title = "Python docs — asyncio loop.run_in_executor (offload blocking IO)"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/blocking-sleep-in-async-function/"
+title = "Ruff ASYNC251 — blocking-sleep-in-async-function"
+linter = "Ruff: ASYNC251"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/blocking-open-call-in-async-function/"
+title = "Ruff ASYNC230 — blocking-open-call-in-async-function"
+linter = "Ruff: ASYNC230"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/blocking-http-call-in-async-function/"
+title = "Ruff ASYNC210 — blocking-http-call-in-async-function"
+linter = "Ruff: ASYNC210"

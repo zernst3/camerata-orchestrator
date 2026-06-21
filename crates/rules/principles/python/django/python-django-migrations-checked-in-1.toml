@@ -5,6 +5,7 @@ domain = "python:django"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "How are database schema changes tracked and applied across environments?"
@@ -28,3 +29,7 @@ id = "manual-ddl"
 label = "apply schema changes directly to the database without migrations"
 directive = "Schema changes are made by running SQL DDL (CREATE TABLE, ALTER TABLE) directly against the database, with no migration file generated."
 why = "Bypasses Django's migration state; `django_migrations` table drifts from the actual schema; `migrate` in future environments will either fail or skip the applied change."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/topics/migrations/"
+title = "Django docs — Migrations (makemigrations, migrate --check, commit migration files)"

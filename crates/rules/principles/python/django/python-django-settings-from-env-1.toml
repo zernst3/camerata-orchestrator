@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "mechanical"
 default = true
 qualifies = "Enforced by Gitleaks, Trufflehog, or Bandit (B105 / B106 / B107) scanning for hardcoded secret patterns in `settings.py` and related config files. Conformance holds when the CI gate runs and any string literal matching a common secret pattern in a committed settings file fails; it fails when no secret-scan gate covers `settings.py`."
+verification = "grounded"
 
 [decision]
 question = "How are credentials and environment-specific values provided to Django's settings module?"
@@ -29,3 +30,17 @@ id = "per-environment-settings-files"
 label = "maintain separate settings files per environment committed to git"
 directive = "Environment-specific settings live in committed files (`settings_dev.py`, `settings_prod.py`) that contain the actual credentials for each environment."
 why = "Keeps environments isolated but still commits production credentials to the repository; rotation still requires a commit."
+
+[[sources]]
+url = "https://docs.djangoproject.com/en/6.0/ref/settings/#secret-key"
+title = "Django docs — SECRET_KEY setting (keep this value secret)"
+
+[[sources]]
+url = "https://bandit.readthedocs.io/en/latest/plugins/b105_hardcoded_password_string.html"
+title = "Bandit B105 — hardcoded_password_string"
+linter = "Bandit: B105"
+
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/hardcoded-password-string/"
+title = "Ruff S105 — hardcoded-password-string"
+linter = "Ruff: S105"
