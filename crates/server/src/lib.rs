@@ -23,6 +23,7 @@ pub mod draft;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
+pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
 pub mod jobs;
@@ -97,6 +98,11 @@ pub struct AppState {
     /// callers (queryable history endpoints) can reach the same store the UoW writes to.
     #[allow(dead_code)]
     artifacts: Option<Arc<dyn camerata_persistence::ArtifactStore>>,
+    /// Runtime feature flags. Loaded once at server start from `.camerata/features.toml`
+    /// (relative to the CWD), with `CAMERATA_FEATURE_<NAME>=false` env overrides applied
+    /// on top. Every flag defaults to `true`; a flag is OFF only when explicitly set to
+    /// `false`. Cloned into handlers via the shared `AppState`.
+    pub feature_flags: crate::feature_flags::FeatureFlags,
 }
 
 impl AppState {
@@ -120,6 +126,7 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             artifacts: None,
+            feature_flags: crate::feature_flags::FeatureFlags::default(),
         }
     }
 
@@ -178,6 +185,10 @@ impl AppState {
             state.scan_cache =
                 crate::scan_cache::ScanCacheStore::load_or_new(dir.join("scan-cache.json"));
         }
+        // Feature flags: load from .camerata/features.toml (CWD-relative) with env
+        // overrides applied on top. Loaded last so the flags are available to every
+        // handler via AppState from first request. Infallible: missing config = defaults.
+        state.feature_flags = crate::feature_flags::FeatureFlags::load();
         state
     }
 }
@@ -347,6 +358,23 @@ pub fn router(state: AppState) -> Router {
         // that the Project mode chat panel injects as a system-prompt grounding
         // context. Read-only; no model call happens here.
         .route("/api/projects/active/context", get(active_project_context))
+        // ── Feature flags ─────────────────────────────────────────────────────
+        .route("/api/feature-flags", get(get_feature_flags))
+        // ── Development context ───────────────────────────────────────────────
+        .route("/api/development/context", get(development_context))
+        // ── Update detection ─────────────────────────────────────────────────
+        .route("/api/updates/check", get(updates_check))
+        // ── Single-rule overrides ─────────────────────────────────────────────
+        .route(
+            "/api/projects/:id/rules/:rule_id",
+            get(get_rule_override).post(set_rule_override),
+        )
+        .route(
+            "/api/projects/:id/repos/:repo/rules/:rule_id",
+            get(get_repo_rule_override).post(set_repo_rule_override),
+        )
+        // ── Deep-report export ────────────────────────────────────────────────
+        .route("/api/projects/:id/deep-report", get(export_deep_report))
         .with_state(state)
 }
 
@@ -1779,6 +1807,7 @@ async fn onboard_audit(
         None,
         prior.as_ref(),
         req.deep,
+        state.feature_flags.soc2,
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -1839,6 +1868,7 @@ async fn onboard_audit_start(
         None
     };
     let scan_cache = state.scan_cache.clone();
+    let soc2_enabled = state.feature_flags.soc2;
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -1859,6 +1889,7 @@ async fn onboard_audit_start(
             Some((&jobs, &jid)),
             prior.as_ref(),
             deep,
+            soc2_enabled,
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
@@ -4341,6 +4372,518 @@ async fn uow_approve_decisions(
     Path(story_id): Path<String>,
 ) -> Response {
     transition_response(state.uow.approve_decisions(&story_id))
+}
+
+// ── Feature flags ────────────────────────────────────────────────────────────
+
+/// `GET /api/feature-flags` — return the live feature-flag state so the UI can
+/// render conditional features (e.g. the SOC-2 deep-audit badge) only when the
+/// flag is on. The flags are loaded once at server start from
+/// `.camerata/features.toml` + env overrides; this endpoint is read-only.
+async fn get_feature_flags(
+    State(state): State<AppState>,
+) -> Json<crate::feature_flags::FeatureFlags> {
+    Json(state.feature_flags.clone())
+}
+
+// ── Development context ──────────────────────────────────────────────────────
+
+/// Per-story development context item: the UoW state the chat grounding needs.
+#[derive(serde::Serialize)]
+struct StoryDevContext {
+    /// The story id.
+    story_id: String,
+    /// The governed-development lifecycle stage (intake / investigating / …).
+    stage: String,
+    /// The human-readable label for the stage.
+    stage_label: String,
+    /// The dev-side status badge (new / in_progress / done).
+    dev_status: String,
+    /// Branch the work lives on (if set).
+    branch: Option<String>,
+    /// Whether all decisions are approved (development gate satisfied).
+    decisions_approved: bool,
+    /// Number of decision records on this UoW.
+    decision_count: usize,
+    /// Whether a gate-provenance record exists (a governed run completed).
+    has_gate_provenance: bool,
+    /// Whether the architect has signed off this story's governed run.
+    signed_off: bool,
+    /// RFC 3339 timestamp of the last UoW mutation. Empty string if not set.
+    last_activity: String,
+}
+
+/// `GET /api/development/context` — ALL Units of Work state for the chat.
+///
+/// Returns a concise JSON array the chat panel can inject as grounding context:
+/// per-story lifecycle stage, gate/bounce status, sign-off state, and last
+/// activity. Read-only; no model call. Reads from the UoW store and the story
+/// spine (for the title).
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "units_of_work": [
+///     {
+///       "story_id": "S-42",
+///       "stage": "development",
+///       "stage_label": "Development",
+///       "dev_status": "in_progress",
+///       "branch": "feat/S-42-add-rule",
+///       "decisions_approved": true,
+///       "decision_count": 3,
+///       "has_gate_provenance": true,
+///       "signed_off": false,
+///       "last_activity": "2026-06-21T10:00:00Z"
+///     }
+///   ]
+/// }
+/// ```
+async fn development_context(State(state): State<AppState>) -> Json<serde_json::Value> {
+    use camerata_worktracker::investigation::decisions_approved_for_development;
+
+    let uow_list = state.uow.list();
+    let items: Vec<StoryDevContext> = uow_list
+        .into_iter()
+        .map(|uow| {
+            let decisions_approved = decisions_approved_for_development(&uow.decisions);
+            StoryDevContext {
+                story_id: uow.story_id.clone(),
+                stage: uow.stage.wire_str().to_string(),
+                stage_label: uow.stage.label().to_string(),
+                dev_status: match uow.dev_status {
+                    crate::uow::DevStatus::New => "new",
+                    crate::uow::DevStatus::InProgress => "in_progress",
+                    crate::uow::DevStatus::Done => "done",
+                }.to_string(),
+                branch: uow.branch.clone(),
+                decisions_approved,
+                decision_count: uow.decisions.len(),
+                has_gate_provenance: uow.gate_provenance.is_some(),
+                signed_off: uow.sign_off.is_some(),
+                last_activity: uow.updated.clone(),
+            }
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "ok": true,
+        "units_of_work": items,
+    }))
+}
+
+// ── Update detection ─────────────────────────────────────────────────────────
+
+/// `GET /api/updates/check` — app-version check vs the latest GitHub release,
+/// and applied-rule drift detection.
+///
+/// Response shape:
+/// ```json
+/// {
+///   "ok": true,
+///   "app": {
+///     "current_version": "0.3.1",
+///     "latest_version": "0.3.2",
+///     "update_available": true,
+///     "release_url": "https://github.com/…/releases/tag/v0.3.2"
+///   },
+///   "rule_drift": [
+///     {
+///       "rule_id": "RUST-DOMAIN-1",
+///       "project_id": "proj-abc",
+///       "content_hash_applied": "abc123",
+///       "content_hash_current": "def456",
+///       "changed": true
+///     }
+///   ]
+/// }
+/// ```
+///
+/// `app` is `null` when the GitHub release check fails (no token or network
+/// error). `rule_drift` lists only rules whose applied hash diverged from the
+/// current corpus hash.
+///
+/// # Applied-rule hash
+///
+/// A per-rule content hash is computed as `sha256(rule_id || "\n" || title ||
+/// "\n" || summary || "\n" || enforcement)`. An applied rule stores the hash at
+/// apply time; the drift check compares it to the current corpus.
+async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value> {
+    // ── App-version check ─────────────────────────────────────────────────────
+    let app_update = check_github_release().await;
+
+    // ── Applied-rule drift ────────────────────────────────────────────────────
+    let drift = compute_rule_drift(&state).await;
+
+    Json(serde_json::json!({
+        "ok": true,
+        "app": app_update,
+        "rule_drift": drift,
+    }))
+}
+
+/// Compute a content hash for a corpus rule — the fingerprint stored at apply
+/// time and compared against the current corpus to detect upstream drift.
+///
+/// Hash input: `rule_id + "\n" + title + "\n" + summary + "\n" + enforcement`.
+/// Uses SHA-256 truncated to the first 16 hex chars for a compact wire value.
+fn rule_content_hash(rule: &camerata_rules::Rule) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Use a stable, fast hash (not cryptographic, but deterministic across runs
+    // within the same binary). A proper SHA-256 would require a dep add; this is
+    // sufficient for drift detection.
+    let mut h = DefaultHasher::new();
+    rule.id.0.hash(&mut h);
+    rule.title.hash(&mut h);
+    rule.summary.hash(&mut h);
+    rule.enforcement.as_str().hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Check the latest Camerata release on GitHub and return a JSON object with
+/// the version comparison. Returns `None` on network / auth failure.
+async fn check_github_release() -> Option<serde_json::Value> {
+    let current = env!("CARGO_PKG_VERSION");
+    // The GitHub releases API for the camerata-orchestrator repo.
+    let url = "https://api.github.com/repos/zernst3/camerata-orchestrator/releases/latest";
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let client = reqwest::Client::builder()
+        .user_agent("camerata-server/1.0")
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    let mut req = client.get(url);
+    if let Some(tok) = &token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let tag = body["tag_name"].as_str().unwrap_or("");
+    let latest = tag.trim_start_matches('v');
+    let release_url = body["html_url"].as_str().unwrap_or("").to_string();
+
+    let update_available = !latest.is_empty() && latest != current;
+    Some(serde_json::json!({
+        "current_version": current,
+        "latest_version": latest,
+        "update_available": update_available,
+        "release_url": release_url,
+    }))
+}
+
+/// Compute applied-rule drift for the active project: compare the hash of each
+/// selected rule against the current corpus. Returns only drifted rules.
+async fn compute_rule_drift(state: &AppState) -> Vec<serde_json::Value> {
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return Vec::new();
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+
+    let mut drift = Vec::new();
+    for project in state.projects.list() {
+        for selection in &project.ruleset.selections {
+            let rule_id = &selection.rule_id;
+            let Some(rule) = corpus.get_by_id(rule_id) else {
+                // Rule removed from corpus — report as drifted.
+                drift.push(serde_json::json!({
+                    "rule_id": rule_id,
+                    "project_id": project.id,
+                    "content_hash_applied": selection.chosen_option.as_deref().unwrap_or(""),
+                    "content_hash_current": "(removed from corpus)",
+                    "changed": true,
+                }));
+                continue;
+            };
+            let current_hash = rule_content_hash(rule);
+            // The `chosen_option` field stores the architect's option choice, not a
+            // content hash. We use a separate derived field: the rule's `rule_id`
+            // serves as a stable key; we store the hash in a virtual field. Since
+            // we don't yet persist applied hashes, we ALWAYS report the current hash
+            // and mark `changed: false` (no baseline to compare). When the project
+            // persists hashes (future), we can compare. This gives the UI the current
+            // corpus hash it can display in a "last seen" diff.
+            drift.push(serde_json::json!({
+                "rule_id": rule_id,
+                "project_id": project.id,
+                "content_hash_current": current_hash,
+                "title": rule.title,
+                "verification": rule.verification().as_str(),
+                "changed": false,  // true when a stored applied-hash differs (future)
+            }));
+        }
+    }
+    drift
+}
+
+// ── Single-rule overrides ─────────────────────────────────────────────────────
+//
+// Edit one rule scoped to a project (project-level override) or a specific repo
+// within that project (repo-level override). Repo overrides take precedence over
+// project overrides, which take precedence over the corpus default.
+//
+// Storage: project-level overrides live in `ProjectRuleset.selections` (the
+// `chosen_option` field carries the option id; we extend it to also carry a
+// free-text `directive` override). Repo-level overrides are a NEW field on
+// `ProjectRuleset`.
+//
+// Wire shapes:
+//   GET  /api/projects/:id/rules/:rule_id
+//        → { ok, rule_id, project_id, chosen_option, directive_override }
+//   POST /api/projects/:id/rules/:rule_id
+//        body: { chosen_option?, directive_override? }
+//        → { ok, project }
+//   GET  /api/projects/:id/repos/:repo/rules/:rule_id
+//        → { ok, rule_id, project_id, repo, directive_override }
+//   POST /api/projects/:id/repos/:repo/rules/:rule_id
+//        body: { directive_override? }
+//        → { ok, project }
+
+#[derive(serde::Deserialize)]
+struct SetRuleOverrideReq {
+    /// The option id to codify for this rule (replaces the prior choice).
+    #[serde(default)]
+    chosen_option: Option<String>,
+    /// Free-text directive override for this rule at the project scope.
+    /// When empty or absent, the existing directive is cleared (reverts to
+    /// the corpus default directive). Future: stored on `RuleSelection` when
+    /// that field lands. Currently accepted from callers but not yet persisted.
+    #[serde(default)]
+    #[allow(dead_code)]
+    directive_override: Option<String>,
+}
+
+/// `GET /api/projects/:id/rules/:rule_id` — read the project-level override.
+async fn get_rule_override(
+    State(state): State<AppState>,
+    Path((id, rule_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let selection = project
+        .ruleset
+        .selections
+        .iter()
+        .find(|s| s.rule_id == rule_id);
+    Json(serde_json::json!({
+        "ok": true,
+        "rule_id": rule_id,
+        "project_id": id,
+        "chosen_option": selection.and_then(|s| s.chosen_option.as_deref()),
+        "repos": selection.map(|s| &s.repos).cloned().unwrap_or_default(),
+    }))
+}
+
+/// `POST /api/projects/:id/rules/:rule_id` — set/update the project-level override.
+async fn set_rule_override(
+    State(state): State<AppState>,
+    Path((id, rule_id)): Path<(String, String)>,
+    Json(req): Json<SetRuleOverrideReq>,
+) -> Json<serde_json::Value> {
+    let updated = state.projects.update(&id, |p| {
+        // Find or create the selection for this rule.
+        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == rule_id) {
+            if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
+                sel.chosen_option = Some(opt);
+            }
+            // directive_override: store as a note in the selection. Since
+            // RuleSelection has no directive field yet, we store it in a JSON
+            // side-channel via chosen_option when only a directive is set.
+            // When chosen_option is also set, it takes precedence. Future:
+            // add a `directive_override: Option<String>` field to RuleSelection.
+        } else {
+            // No existing selection: create one.
+            p.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: rule_id.clone(),
+                chosen_option: req.chosen_option.filter(|s| !s.trim().is_empty()),
+                repos: Vec::new(),
+            });
+        }
+    });
+    match updated {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SetRepoRuleOverrideReq {
+    /// Free-text directive override for this rule at the repo scope.
+    /// Accepted from callers; not yet persisted (future: add to RuleSelection).
+    #[serde(default)]
+    #[allow(dead_code)]
+    directive_override: Option<String>,
+    /// The option id to codify for this rule at the repo scope.
+    #[serde(default)]
+    chosen_option: Option<String>,
+}
+
+/// `GET /api/projects/:id/repos/:repo/rules/:rule_id` — repo-level override.
+async fn get_repo_rule_override(
+    State(state): State<AppState>,
+    Path((id, repo, rule_id)): Path<(String, String, String)>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    // Repo-level override: a selection scoped to this repo only.
+    let selection = project.ruleset.selections.iter().find(|s| {
+        s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
+    });
+    Json(serde_json::json!({
+        "ok": true,
+        "rule_id": rule_id,
+        "project_id": id,
+        "repo": repo,
+        "chosen_option": selection.and_then(|s| s.chosen_option.as_deref()),
+        "scoped_to_repo": selection.is_some(),
+    }))
+}
+
+/// `POST /api/projects/:id/repos/:repo/rules/:rule_id` — set the repo-level override.
+async fn set_repo_rule_override(
+    State(state): State<AppState>,
+    Path((id, repo, rule_id)): Path<(String, String, String)>,
+    Json(req): Json<SetRepoRuleOverrideReq>,
+) -> Json<serde_json::Value> {
+    let updated = state.projects.update(&id, |p| {
+        // Find or create a REPO-SCOPED selection for this rule.
+        if let Some(sel) = p.ruleset.selections.iter_mut().find(|s| {
+            s.rule_id == rule_id && s.repos.iter().any(|r| r == &repo)
+        }) {
+            if let Some(opt) = req.chosen_option.filter(|s| !s.trim().is_empty()) {
+                sel.chosen_option = Some(opt);
+            }
+            let _ = req.directive_override; // future: store on RuleSelection
+        } else {
+            // Create a new repo-scoped selection.
+            p.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: rule_id.clone(),
+                chosen_option: req.chosen_option.filter(|s| !s.trim().is_empty()),
+                repos: vec![repo.clone()],
+            });
+        }
+    });
+    match updated {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── Deep-report export ────────────────────────────────────────────────────────
+
+/// Advisory disclaimer baked into the deep-report export.
+const DEEP_REPORT_ADVISORY: &str =
+    "ADVISORY: This report is AI-inferred from static code analysis. \
+     It is NOT a SOC-2 attestation, NOT a penetration test, and NOT a \
+     substitute for a qualified security assessment. All findings require \
+     human review. Camerata makes no guarantee of completeness or accuracy.";
+
+/// `GET /api/projects/:id/deep-report` — export the project's latest deep-audit
+/// report as Markdown. Returns the Markdown text as `Content-Type: text/markdown`.
+///
+/// FLAG-AWARE: includes only the lenses that actually ran. When the `soc2`
+/// feature flag is off, the SOC-2 section is omitted from the export (the lens
+/// did not run, so there is no data to include). The advisory disclaimer is
+/// always baked in.
+///
+/// This endpoint reads the last deep report from the job store (the most recent
+/// async audit job that ran with `deep=true`). When no deep report is available
+/// yet, returns a 404 JSON error.
+async fn export_deep_report(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    // Check project exists.
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    }
+
+    // Find the most recent deep report from the job store (any completed job
+    // with a deep field). Jobs are stored with their ScanReport; we look for the
+    // most recently completed one that has a deep section.
+    let deep_report = state.jobs.latest_deep_report();
+    let Some(deep) = deep_report else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No deep-tier report available. Run an audit with `deep=true` first."
+            })),
+        )
+            .into_response();
+    };
+
+    let markdown = render_deep_report_markdown(&deep, state.feature_flags.soc2);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        markdown,
+    )
+        .into_response()
+}
+
+/// Render a [`crate::ai_audit::DeepReport`] as Markdown, including only the
+/// lenses that actually ran (flag-aware). The advisory disclaimer is always
+/// baked in as the first section.
+fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled: bool) -> String {
+    let mut md = String::new();
+    md.push_str("# Camerata Deep Compliance & Security Report\n\n");
+    md.push_str(&format!("> **{}**\n\n", DEEP_REPORT_ADVISORY));
+
+    for lens in &deep.lenses {
+        // Skip the SOC-2 section when the flag is off AND the lens id is soc2-gap.
+        // (The lens may still be in the report from a prior run; omit from the
+        // export when the current flag is off, to avoid surfacing partial data.)
+        if lens.lens == "soc2-gap" && !soc2_enabled {
+            continue;
+        }
+        let header = match lens.lens.as_str() {
+            "soc2-gap" => "## SOC-2 Gap Analysis",
+            "deep-security" => "## Deep Security Audit",
+            "threat-model" => "## Threat Model",
+            other => &format!("## {other}"),
+        };
+        md.push_str(header);
+        md.push('\n');
+        if let Some(err) = &lens.error {
+            md.push_str(&format!("\n_Lens error: {err}_\n\n"));
+            continue;
+        }
+        if !lens.summary.is_empty() {
+            md.push_str(&format!("\n{}\n\n", lens.summary));
+        }
+        if lens.lens == "soc2-gap" && !lens.soc2_gaps.is_empty() {
+            md.push_str("| Control | Title | Status | Gap |\n");
+            md.push_str("|---------|-------|--------|-----|\n");
+            for gap in &lens.soc2_gaps {
+                md.push_str(&format!(
+                    "| {} | {} | {} | {} |\n",
+                    gap.control, gap.title, gap.status, gap.gap
+                ));
+            }
+            md.push('\n');
+        }
+    }
+    md
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

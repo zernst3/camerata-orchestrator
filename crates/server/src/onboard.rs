@@ -146,6 +146,14 @@ pub struct ProposedRule {
     pub finding_count: usize,
     /// Whether it is recommended for the starter set.
     pub recommended: bool,
+    /// Whether this rule should be PRE-CHECKED (auto-selected) in the onboarding
+    /// scan proposal. True iff the rule is `grounded` or `verified` — i.e. it is
+    /// backed by a cited authoritative source that was verified at some level.
+    /// `draft` and `needs_recheck` rules are listed but NOT pre-checked: the
+    /// architect must explicitly opt in. Absent on rules built inline (the
+    /// deterministic-floor rules), where it defaults to `false`.
+    #[serde(default)]
+    pub is_auto_recommended: bool,
 }
 
 /// The detected tech stack for one repo (languages from extensions, frameworks
@@ -313,6 +321,8 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             placement: "CI gate + gate config installed in every repo".to_string(),
             finding_count,
             recommended: true,
+            // Inline deterministic-floor rules are not corpus-grounded yet.
+            is_auto_recommended: false,
         });
     }
 
@@ -340,6 +350,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
             placement: "Integration gate, pre-PR, run across the assembled repo set".to_string(),
             finding_count: 0,
             recommended: true,
+            is_auto_recommended: false,
         });
     }
 
@@ -362,6 +373,7 @@ pub fn propose_rules(findings: &[Finding], repos: &[String]) -> Vec<ProposedRule
         placement: "VCS-action gate at commit/PR (per account, all repos)".to_string(),
         finding_count: 0,
         recommended: false,
+        is_auto_recommended: false,
     });
 
     out
@@ -836,6 +848,10 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 // are ALWAYS suggested by design (they govern how the AI fleet builds,
                 // regardless of stack). The rest are available but not recommended here.
                 recommended: is_suggested || r.domain == "agentic",
+                // AUTO-RECOMMENDED = grounded or verified (backed by a cited source).
+                // Draft and needs_recheck rules are listed but not pre-checked: the
+                // architect must explicitly opt in. Mirrors Rule::is_auto_recommended().
+                is_auto_recommended: r.is_auto_recommended(),
             }
         })
         .collect::<Vec<_>>();
@@ -1625,6 +1641,10 @@ pub async fn audit_repos(
     // + model-inferred (#62). When false the behavior is unchanged — the most expensive tier
     // never runs by default.
     deep: bool,
+    // Feature flag: whether the SOC-2 gap-analysis lens in the deep tier is enabled. When
+    // false, ONLY the soc2 lens is skipped inside `run_deep_tier`; the other two lenses still
+    // run. Pass `true` to restore full three-lens behaviour (the old default).
+    soc2_enabled: bool,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
@@ -1806,6 +1826,7 @@ pub async fn audit_repos(
                 mode,
                 feedback,
                 Some(&meter),
+                soc2_enabled,
             )
             .await;
             per_repo.push(dr);
