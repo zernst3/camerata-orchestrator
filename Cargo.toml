@@ -14,7 +14,8 @@ members = [
     "crates/ui",          # Dioxus cockpit (separate process)
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
-    "crates/deploy",      # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
+    "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
+    "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
 ]
 
 [workspace.lints.rust]

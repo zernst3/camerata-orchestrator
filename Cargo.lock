@@ -679,6 +679,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-linter-registry"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "camerata-maintenance"
 version = "0.0.0"
 dependencies = [
