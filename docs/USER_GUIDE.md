@@ -237,12 +237,176 @@ Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo**
 
 ---
 
-## 8. The in-app assistant (chat bubble)
+## 8. The in-app assistant (four context modes)
 
-The floating chat bubble has two modes:
-- **Research** — open AI chat (any question), a live smoke test that the model backend works.
-- **Guide** — answers "how do I do X in Camerata?" grounded in THIS user guide. It answers only from
-  the guide and says when something isn't covered, so it won't invent features.
+The floating chat bubble has **four modes**, each grounded in different context:
+
+| Mode | Grounding | Best for |
+|---|---|---|
+| **Research** | None (open AI chat) | Any question; smoke test that the model backend works |
+| **Guide** | `docs/USER_GUIDE.md` (this document) + corpus rules listing | "How do I do X in Camerata?" — operational how-tos |
+| **Technical** | `docs/TECHNICAL.md` — architecture, internals, extensibility | Deep dives into how Camerata works under the hood |
+| **Project** | Live project state — onboarding phase, findings, selected ruleset, findings summary | "What findings did my audit surface?" "What rules are in scope?" — data-driven questions about the active project |
+
+### The unified chat assistant
+
+The assistant draws on **four context sources**, prioritized by the mode you select:
+
+1. **Canonical docs** (USER_GUIDE.md, TECHNICAL.md) — the source of truth for features and operations.
+2. **Project rules** (the corpus + the active project's selections) — what's actually in scope.
+3. **Live development state** (current scan findings, onboarded repos, in-flight stories) — the actual data.
+4. **Active finding** (when you click "Ask" on a specific audit finding) — zoomed view of one violation.
+
+The assistant **only answers from its grounding source** and says "That isn't covered by [mode name]" for out-of-scope questions, so it won't invent features that don't exist.
+
+### Project mode in detail
+
+When you open the **Project** tab:
+- The panel fetches the active project's scan state, findings, and ruleset.
+- The system prompt includes:
+  - **Onboarding phase** (blank, in-progress, onboarded) and a status label.
+  - **Selected ruleset** — all repo-local + project-level rules currently in scope, with their enforcement kind.
+  - **Up to 50 findings** from the last audit, rendered as `[severity] rule_id in repo/path:line — detail`.
+- Ask "what findings did the last audit find?" or "why was this flagged?" and get answers grounded in real data.
+- **Click "Ask" on a finding row** (when the cockpit wiring is complete) to zoom into a specific violation — the panel opens in Project mode with that finding in focus.
+
+### Honesty guardrail
+
+All modes include a **critical guardrail phrase** that the assistant must say verbatim when you ask something outside its scope — e.g., "That isn't covered by the current project context." This ensures the assistant never bluffs.
+
+---
+
+## 9. Update detection and rule drift
+
+Camerata surfaces two update signals:
+
+### App updates
+
+When a new version of Camerata is available, a **banner appears at the top of the UI** with the release notes and an "Update" button. This is a one-click reminder, not an auto-update.
+
+### Applied-rule drift
+
+The **Rules** view runs a continuous **health check** on applied rules. Any rule that was applied to a repo but is no longer in the project's ruleset is flagged as **"Needs re-check"** with an amber badge. This happens when:
+- A rule was deleted from the corpus (rare; the corpus is stable).
+- The project's ruleset was edited and the rule was deselected.
+- A repo was exported/imported and the ruleset drifted between machines.
+
+The Rules view also shows **verification badges** on every rule:
+
+| Badge | Meaning |
+|---|---|
+| ✓ **Verified** (green) | A human explicitly approved this rule; gold standard |
+| **Grounded** (blue) | Rule is cited in a corpus source (linter, doc, framework best practice); hover for the source |
+| **Draft** (gray, italic) | AI-generated rule not yet grounded; advisory only |
+| **Needs re-check** (amber) | Was verified but its source drifted; review before relying on it |
+
+To **update a rule** when drift is detected: click the amber "Needs re-check" badge, review the rule's rationale and source, and either **re-verify** it (mark it trusted) or **delete** it from the ruleset. The Rules view will regenerate the affected repos' `.camerata/AGENTS.md` and `CONVENTIONS.md` on the next emit.
+
+---
+
+## 10. Single-rule editing (project and repo scope)
+
+The **Rules view** (§4) allows fine-grained rule editing at three scopes:
+
+### Editing a single rule
+
+Click any rule in the **Project rules** table to open its **detail modal**. You can:
+- **Switch its chosen option** — if the rule has multiple alternatives (e.g., "no hardcoded secrets" vs. "secrets vaulted"), select a different one. The choice is per-repo.
+- **Add custom sub-options** — for rules that support local overrides, you can tack on a custom directive (e.g., "allow X in this repo only").
+- **View the rule's full definition** — the decision question, all available options + rationale, the sources it's grounded in, and the enforcement kind.
+
+### Repo-scoped overrides
+
+A rule applies to **all repos in the project by default**. To override for a single repo:
+- **Remove the rule from just that repo** — a checkbox per repo in the applied-rules table.
+- **Add a custom rule that applies only to that repo** — a rule you author locally (e.g., "house style for tests in this codebase").
+
+### Project-level rules (always apply everywhere)
+
+Some rules are marked as **project-level** and apply to **every repo** in the project:
+- Examples: process rules like commit format (`AB#{id}`), cross-repo API contracts, per-project security floor (baseline tech debt).
+- These rules are immutable at the repo level — you can only edit them in the **Project rules** table, and the change flows to all repos on the next emit.
+
+### Custom rules
+
+Beyond the corpus you can author **two kinds of custom rules**:
+- **Repo-scoped** — applies to a single repo; lives in its `.camerata/AGENTS.md`.
+- **Project-scoped** — applies to every repo; lives in the project store (cross-repo rules read it).
+
+Both custom types flow through the Rules view editor and the emission system exactly like corpus rules. Deleting a custom rule removes it from any repo it was on. Editing one changes only that rule.
+
+---
+
+## 11. Deep-report Markdown export
+
+When you run an **onboarding audit** with the **"Deep report"** checkbox enabled, Camerata runs three advanced analysis lenses over each repo:
+
+1. **SOC-2 gap analysis** — maps detectable practices onto SOC-2 Common-Criteria controls and reports **gaps** (what controls appear to lack implementation). This is a **gap analysis, never a compliance report or certification** — it is advisory and model-inferred.
+2. **Deep security audit** — a layer deeper than the deterministic floor: authorization on write paths, sensitive-data handling, secret flows, trust boundaries. Findings flow into the same triage + tech-debt workflow as the standard audit.
+3. **Threat model** — a structured STRIDE-flavored view: entry points, trust boundaries, data stores, sensitive-data paths, and threats + mitigations.
+
+### Cost and timing
+
+The deep tier is the **most expensive audit option** (~3× the standard audit cost, run on the strong model). It is **strictly opt-in** because of the cost; baseline audits (deterministic floor + AI architectural scan) run by default and are much cheaper.
+
+### The deep-report export
+
+After the audit, the **deep report is rendered as structured Markdown**. You can **export it** (download as `.md`) from the findings screen. The markdown includes:
+
+- **Advisory notices** — prominent labels stating the output is model-inferred, a static-code analysis (not a pen test), and not externally validated.
+- **Scoped-scan table** — deterministic security findings from the changed files (hardcoded secrets, raw SQL, etc.) — the same floor that gates are enforced on.
+- **SOC-2 gap summary** — controls it appears the codebase leaves gaps in, with severity rankings.
+- **Deep security findings** — architectural + authorization issues, trust-boundary violations, sensitive-data handling gaps.
+- **Threat model** — entry points, data stores, trust boundaries, and the threats that apply to each.
+- **SOC-2 control index** — a deduped cross-reference of all Trust Services Criteria controls touched by the scan.
+
+The export is markdown, so you can **paste it into a GitHub issue, a team wiki, or a compliance readiness doc** for review and discussion.
+
+### Important: the SOC-2 output is advisory
+
+The SOC-2 lens produces a **gap analysis** — a conversation-starter about what controls may be underimplemented, not an audit-grade report. For true SOC-2 compliance work, pair Camerata's gap analysis with a real readiness review and, if aiming for certification, an accredited assessor. Camerata is a **governance tool**, not a compliance tool.
+
+---
+
+## 12. Feature flags (opt-in/opt-out)
+
+Camerata uses **feature flags** to ship features that are optional or under evaluation without requiring code branching. Flags default **ON** (features enabled) unless otherwise noted.
+
+### Enabling/disabling flags
+
+Flags are controlled via **environment variables**, set before launching the app:
+
+```bash
+export CAMERATA_FEATURE_<NAME>=false   # Disable the feature
+export CAMERATA_FEATURE_<NAME>=true    # Enable it (or omit if default is on)
+cargo run -p camerata-ui
+```
+
+Alternatively, add them to your `.env` file (in the repo root, gitignored):
+
+```env
+# .env (auto-loaded at startup)
+CAMERATA_FEATURE_SOC2_ANALYSIS=false
+CAMERATA_FEATURE_DEEP_SECURITY=true
+```
+
+### Current flags
+
+| Flag | Default | What it controls | Note |
+|---|---|---|---|
+| `CAMERATA_FEATURE_SOC2_ANALYSIS` | **OFF** | SOC-2 gap-analysis lens in the deep audit. | Off by default until gap analysis is externally validated (Phase 2). Safe to turn ON; advisory label is mandatory. |
+| `CAMERATA_FEATURE_DEEP_SECURITY` | ON | Deep-security lens (trust boundaries, auth, secrets) in the deep audit. | Always safe. |
+| `CAMERATA_FEATURE_THREAT_MODEL` | ON | Threat-model lens (STRIDE-flavored) in the deep audit. | Always safe. |
+
+When a flag is OFF, the corresponding **scan option is hidden from the UI** and the feature **is not run**, so no cost is incurred and no noise is added to the findings.
+
+### Why flags?
+
+Flags let us:
+- **Ship features on day one** without inflating defaults (e.g., SOC-2 analysis is optional until validated).
+- **A/B test** features with real users before committing to permanent defaults.
+- **Kill or pivot** features fast if they don't land (no messy deprecation dance).
+- **Support air-gapped or offline deployments** that opt out of certain AI passes.
 
 ---
 
@@ -253,4 +417,5 @@ per-repo rules → Add rules to repo(s): local branch+push → optionally audit 
 manage the ruleset in the Rules view → adopt stories and run governed work in Governed Development →
 review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
 push/PR and the AI audit + governed dev. Export/import a project to move it between machines; resolve
-local repo paths on the receiving side.
+local repo paths on the receiving side. Use the chat bubble's Project mode to ask data-driven questions
+about your active project.
