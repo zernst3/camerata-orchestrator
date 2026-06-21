@@ -5,6 +5,15 @@ domain = "rust"
 layer = "language"
 enforcement = "prose"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch17-00-async-await.html"
+title = "The Rust Book — Ch 17: Async and Await"
+
+[[sources]]
+url = "https://tokio.rs/tokio/tutorial"
+title = "Tokio Tutorial — async I/O and the requirement to avoid blocking calls in async contexts"
 
 [decision]
 question = "What position does the project take on: Async all the way down?"

@@ -5,6 +5,19 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://rust-lang.github.io/api-guidelines/interoperability.html"
+title = "Rust API Guidelines — C-GOOD-ERR: Error types are meaningful and well-behaved"
+
+[[sources]]
+url = "https://docs.rs/thiserror/latest/thiserror/"
+title = "thiserror crate documentation — derive macro for std::error::Error"
+
+[[sources]]
+url = "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html"
+title = "The Rust Book — Ch 9.2: Recoverable Errors with Result"
 
 [decision]
 question = "What position does the project take on: Errors via thiserror enums per crate?"
