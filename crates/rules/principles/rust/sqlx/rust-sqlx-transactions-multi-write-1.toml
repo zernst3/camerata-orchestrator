@@ -16,13 +16,13 @@ why = "A transaction groups multiple SQL statements and ensures all succeed or a
 id = "use-explicit-transactions"
 label = "Wrap multiple writes in explicit transactions"
 directive = "Any operation that performs multiple database writes (inserts, updates, or deletes across one or more tables) is wrapped in a transaction via sqlx::Transaction or connection.begin(). If any write fails, the transaction is rolled back. A single write that does not require atomicity with other writes does not require an explicit transaction."
-why = "The adopted default. Explicit transactions ensure consistency and prevent partial state corruption."
+why = "Explicit transactions ensure consistency and prevent partial state corruption."
 
 [[option]]
 id = "no-explicit-transactions"
 label = "Rely on implicit transactions for each statement"
 directive = "Each SQL statement runs in an implicit transaction. Multiple writes are executed as separate statements without an explicit transaction group."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/struct.Transaction.html"

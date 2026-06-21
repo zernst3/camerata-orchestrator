@@ -15,7 +15,7 @@ why = "ASP.NET Core does not add CORS headers by default; without UseCors and a 
 id = "explicit-named-origins"
 label = "Named CORS policy with explicit allowed origins read from configuration"
 directive = "CORS is configured via builder.Services.AddCors(options => options.AddPolicy('PolicyName', policy => policy.WithOrigins(...).AllowAnyMethod().AllowAnyHeader())); the allowed origins list is read from configuration, not hardcoded. UseCors('PolicyName') is called in the middleware pipeline in the canonical position (after UseRouting, before UseAuthentication). AllowAnyOrigin() is forbidden on any endpoint that uses authentication cookies or credential headers; if it is used on a public anonymous endpoint, a comment justifying it is required. AllowAnyOrigin().AllowCredentials() is forbidden unconditionally."
-why = "The adopted default. Explicit named origins are environment-configurable, auditable, and correct for authenticated APIs; they prevent the silent AllowAnyOrigin + AllowCredentials security hole."
+why = "Explicit named origins are environment-configurable, auditable, and correct for authenticated APIs; they prevent the silent AllowAnyOrigin + AllowCredentials security hole."
 
 [[option]]
 id = "allow-any-origin"

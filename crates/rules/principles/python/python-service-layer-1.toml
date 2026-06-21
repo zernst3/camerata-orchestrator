@@ -16,7 +16,7 @@ why = "A Django view or a Flask/FastAPI route handler exists to translate HTTP i
 id = "service-layer"
 label = "keep handlers thin; business logic in a service layer"
 directive = "Views and route handlers only parse and validate input, call a service-layer function, and shape the response. All business rules, multi-step workflows, and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks, and other endpoints and unit-testable without the web stack."
-why = "The adopted default. A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
+why = "A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
 
 [[option]]
 id = "logic-in-views"

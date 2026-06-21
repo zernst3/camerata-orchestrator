@@ -28,16 +28,16 @@ why = "Typed errors give callers compile-time knowledge of failure modes and kee
 id = "errors-via-thiserror-enums-per-crate"
 label = "Errors via thiserror enums per crate"
 directive = "Each layer's crate defines its own thiserror enum (DomainError, RepositoryError, ServiceError, …) with explicit From impls at boundaries. anyhow is reserved for application edges (binaries)."
-why = "The adopted default. Typed errors give callers compile-time knowledge of failure modes and keep each layer's failure vocabulary self-contained."
+why = "Typed errors give callers compile-time knowledge of failure modes and keep each layer's failure vocabulary self-contained."
 
 [[option]]
 id = "the-workspace-defines-a-single-global-error-enum"
 label = "the workspace defines a single global error enum that …"
 directive = "the workspace defines a single global error enum that every layer shares, rather than a layer-specific thiserror enum at each crate boundary"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "every-layer-uses-anyhow-for-its-error-type-rathe"
 label = "every layer uses anyhow for its error type, rather …"
 directive = "every layer uses anyhow for its error type, rather than reserving anyhow for the application-edge binaries and using typed thiserror enums in libraries"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

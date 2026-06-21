@@ -20,16 +20,16 @@ why = "False positives are recoverable. The routine pauses, a human takes a minu
 id = "default-to-recall-opt-specific-signals-into-prec"
 label = "default to recall, opt specific signals into precision-tuning"
 directive = "Detection signals in autonomous routines (tech-debt sniffers, anomaly flags, drift detectors, anything that gates the routine on a judgment call) are tuned broadly. Anything that could plausibly be a real issue triggers a pause, including borderline cases that turn out to be false positives. The cost of stopping to investigate a false positive is small and recoverable. The cost of letting a real issue slip through silently is unbounded. Default posture: catch too much, not too little."
-why = "The adopted default. False positives are recoverable."
+why = "False positives are recoverable."
 
 [[option]]
 id = "default-to-precision-opt-specific-signals-into-b"
 label = "default to precision, opt specific signals into broader recall"
 directive = "detection signals in autonomous routines default to precision tuning: only strong-tier signals trigger a pause, weaker borderline cases pass without halting, and missed real issues are accepted as the cost of fewer interruptions"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "no-tuning-accept-default-signal-sensitivity"
 label = "no tuning, accept default signal sensitivity"
 directive = "detection signals in autonomous routines are not tuned at all; the routine accepts whatever recall and precision the detection step naturally produces with no per-signal calibration"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

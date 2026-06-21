@@ -24,7 +24,7 @@ title = "Spring Framework Reference — Using @Transactional (service-layer plac
 id = "strict-layer-hierarchy"
 label = "Controllers depend on services; services depend on repositories; no upward dependencies"
 directive = "@RestController classes inject only @Service (or @Component) beans, not @Repository beans. @Service classes inject @Repository beans and other @Service beans; they do not inject @RestController beans. @Repository interfaces (Spring Data) or classes inject only JPA infrastructure (EntityManager, JdbcTemplate); they do not inject @Service or @RestController beans. This hierarchy is the single direction of dependency: Controller → Service → Repository. Any injection that points upward in this hierarchy (Service → Controller, Repository → Service) is forbidden and indicates that the logic should be refactored to a lower-layer component."
-why = "The adopted default. Strict layer hierarchy ensures @Transactional semantics apply at the right scope, HTTP concerns stay in controllers, persistence concerns stay in repositories, and each layer is independently testable."
+why = "Strict layer hierarchy ensures @Transactional semantics apply at the right scope, HTTP concerns stay in controllers, persistence concerns stay in repositories, and each layer is independently testable."
 
 [[option]]
 id = "controller-accesses-repository-directly"

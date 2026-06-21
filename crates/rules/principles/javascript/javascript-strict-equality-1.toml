@@ -22,10 +22,10 @@ why = "Abstract equality (==) runs the Abstract Equality Comparison algorithm, w
 id = "comparisons-use-strict-equality-never-the-coerci"
 label = "Comparisons use strict equality (=== / !==), never the coercing == / !="
 directive = "All equality comparisons use === and !==. The abstract-equality operators == and != are forbidden. The one sanctioned exception, if the project opts into it, is the == null / != null idiom to test for null-or-undefined in a single check; if that exception is not adopted, an explicit value === null || value === undefined is required instead."
-why = "The adopted default. Abstract equality (==) coerces operands across types before comparing, producing results that are non-obvious and non-transitive, and reviewers cannot tell whether a given == was deliberate or a typo for ===."
+why = "Abstract equality (==) coerces operands across types before comparing, producing results that are non-obvious and non-transitive, and reviewers cannot tell whether a given == was deliberate or a typo for ===."
 
 [[option]]
 id = "loose-equality-is-used-relying-on-javascripts-ty"
 label = "loose equality (== / !=) is used, relying on …"
 directive = "loose equality (== / !=) is used throughout, relying on JavaScript's type coercion rules to compare values across types, rather than requiring strict === / !== comparisons"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

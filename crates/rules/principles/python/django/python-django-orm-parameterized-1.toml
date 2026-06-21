@@ -17,7 +17,7 @@ why = "Django's ORM (`.filter(name=value)`, `.annotate(...)`, `Q(...)`) construc
 id = "orm-or-parameterized-raw"
 label = "ORM query API for all queries; parameterized args for unavoidable raw SQL"
 directive = "All database queries use the Django ORM query API (`.filter()`, `.exclude()`, `.annotate()`, `.aggregate()`, `Q(...)`, `F(...)`). When a query cannot be expressed through the ORM, `QuerySet.raw(sql, params=[...])` or `cursor.execute(sql, params=[...])` is used with values passed as the `params` list, never interpolated into the SQL string. `.extra()` is forbidden (deprecated and injection-prone). f-strings, `%`-formatting, `.format()`, and string concatenation inside any raw SQL string are forbidden. Column or table names that must be dynamic come from a fixed allow-list, never from request data."
-why = "The adopted default. The ORM parameterizes automatically; raw queries with explicit `params=` bind values separately from the SQL grammar, eliminating injection."
+why = "The ORM parameterizes automatically; raw queries with explicit `params=` bind values separately from the SQL grammar, eliminating injection."
 
 [[option]]
 id = "raw-with-string-formatting"

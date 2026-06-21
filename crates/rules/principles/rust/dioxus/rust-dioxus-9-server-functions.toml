@@ -16,25 +16,25 @@ why = "A hand-rolled client crate doubles the surface that has to stay in sync (
 id = "server-to-client-calls-use-server-functions-not"
 label = "Server-to-client calls use server functions, not a separately maintained HTTP client"
 directive = "When the UI needs data or actions from the server, the framework's server-function macro is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition. The function body runs server-side and may call the application's service layer directly. A separately maintained REST or RPC client crate that the UI imports is forbidden, because the same route surface would then have to be kept in sync across two boundaries. When the function legitimately needs to talk to a third party (payment provider, email gateway, external API), the call to that third party lives in the server-side body of a server function, never in client-side code."
-why = "The adopted default. A hand-rolled client crate doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change."
+why = "A hand-rolled client crate doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change."
 
 [[option]]
 id = "server-to-client-calls-go-through-a-hand-rolled"
 label = "server-to-client calls go through a hand-rolled REST client crate …"
 directive = "server-to-client calls go through a hand-rolled REST client crate that the UI imports, with route definitions on the server and matching call sites in the client crate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "server-to-client-calls-go-through-a-typed-rpc-la"
 label = "server-to-client calls go through a typed RPC layer added …"
 directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc, or similar), rather than through the framework's server-function macro"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-server-exposes-a-graph-query-endpoint-with-c"
 label = "the server exposes a graph-query endpoint with client-side code …"
 directive = "the server exposes a graph-query endpoint with client-side code generation, and the UI fetches everything through generated query types rather than through per-operation server functions"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/server_functions"

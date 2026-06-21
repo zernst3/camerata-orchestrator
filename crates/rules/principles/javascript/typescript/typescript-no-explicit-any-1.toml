@@ -22,10 +22,10 @@ why = "any is not a type, it is an instruction to the compiler to stop checking:
 id = "any-is-forbidden-unknown-is-the-typed-escape-hat"
 label = "any is forbidden; unknown is the typed escape hatch at boundaries"
 directive = "Explicit any annotations are forbidden. At boundaries where a value's type is genuinely not known at compile time (parsed JSON, third-party payloads, dynamic input), the value is typed unknown and narrowed via a type guard or validated via a schema parser before use. Where any is truly unavoidable, it is isolated behind a single commented lint-disable rather than spread through the surrounding types."
-why = "The adopted default. any disables type checking transitively along every assignment, call, and property access it touches, so one any near a boundary can silently void the guarantees of a large region of typed code; unknown serves the same purpose without the contagion."
+why = "any disables type checking transitively along every assignment, call, and property access it touches, so one any near a boundary can silently void the guarantees of a large region of typed code; unknown serves the same purpose without the contagion."
 
 [[option]]
 id = "any-is-permitted-as-an-escape-hatch-wherever-a-t"
 label = "any is permitted as an escape hatch wherever a …"
 directive = "any is permitted as an escape hatch wherever a type is inconvenient to express, accepting that values so typed disable checking transitively, rather than requiring unknown plus explicit narrowing at boundaries"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

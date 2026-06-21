@@ -20,7 +20,7 @@ why = "A query that fetches N parent records, then in a loop calls a database qu
 id = "preload-join-one-query"
 label = "Related data is loaded in a single query using Preload or Join"
 directive = "When a handler or service needs to fetch records and their related associations, the repository method loads them in a single query using GORM's Preload() for separate queries per association (optimized into a second query for all children), or Join() for a single JOIN query. The repository method signature includes the associations it loads; callers do not load related data in a loop."
-why = "The adopted default. GORM's Preload and Join are optimized to load related data efficiently; one query or two instead of N+1."
+why = "GORM's Preload and Join are optimized to load related data efficiently; one query or two instead of N+1."
 
 [[option]]
 id = "lazy-loading-in-loop"

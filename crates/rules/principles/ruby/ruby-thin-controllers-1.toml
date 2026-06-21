@@ -16,7 +16,7 @@ why = "A controller's responsibility is HTTP-shaped: parse the request, invoke a
 id = "fat-models-or-service-layer"
 label = "Keep controllers thin; business logic lives in models, services, or repositories"
 directive = "Controllers are limited to HTTP concerns: validate and parse the request (Rails strong_parameters), call a model method or service class, and render the result. Business rules, validations, and data access (queries, updates, deletions, external API calls) live in an ActiveRecord model or a dedicated service/use-case class. A database query or business computation written inline in a controller action is forbidden; it moves behind a model method or service class the controller delegates to. Example: controller calls @order = CreateOrderService.new(user, params).call; service owns the query and workflow logic."
-why = "The adopted default. Logic in models or services is independently testable, reusable across entry points, and separately changeable from routing."
+why = "Logic in models or services is independently testable, reusable across entry points, and separately changeable from routing."
 
 [[option]]
 id = "fat-controllers"

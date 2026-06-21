@@ -20,7 +20,7 @@ why = "gRPC provides unary and streaming interceptors as middleware that wraps a
 id = "interceptors-cross-cutting"
 label = "Cross-cutting concerns are implemented as unary/streaming interceptors"
 directive = "Authentication, logging, error recovery, rate limiting, tracing, and other concerns that apply across all or many RPCs are implemented as interceptors registered on the gRPC server. Handlers receive already-authenticated contexts (with credentials in ctx.Value), already-logged by the interceptor chain, and do not re-implement these concerns. Each interceptor is registered once; all RPCs flow through the chain."
-why = "The adopted default. gRPC interceptors are the idiomatic extension point; one implementation per concern, consistent behavior across all RPCs."
+why = "gRPC interceptors are the idiomatic extension point; one implementation per concern, consistent behavior across all RPCs."
 
 [[option]]
 id = "per-handler-inline"

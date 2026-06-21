@@ -15,22 +15,22 @@ why = "Per-aggregate abstractions let services depend on the shape of the data t
 id = "one-repository-abstraction-per-aggregate-declare"
 label = "One repository abstraction per aggregate, declared in the domain layer"
 directive = "Each domain aggregate has its own repository abstraction (an interface, trait, or protocol depending on the language) declared in the domain layer. The methods take and return domain types only. Concrete implementations live in the infrastructure layer and are wired in at the edges. Services depend on the abstraction, not the implementation."
-why = "The adopted default. Per-aggregate abstractions let services depend on the shape of the data they actually need (a UserRepository exposes find_by_email, find_by_org; a ProjectRepository exposes find_by_owner) without inheriting persistence-specific methods they do not use."
+why = "Per-aggregate abstractions let services depend on the shape of the data they actually need (a UserRepository exposes find_by_email, find_by_org; a ProjectRepository exposes find_by_owner) without inheriting persistence-specific methods they do not use."
 
 [[option]]
 id = "the-domain-layer-declares-a-single-generic-repos"
 label = "the domain layer declares a single generic Repository-of-T abstraction …"
 directive = "the domain layer declares a single generic Repository-of-T abstraction that every aggregate consumes through type parameters, rather than declaring a separate abstraction per aggregate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-domain-layer-declares-one-repository-abstrac"
 label = "the domain layer declares one repository abstraction per use …"
 directive = "the domain layer declares one repository abstraction per use case (find-user-by-email, find-active-projects-in-org) rather than per aggregate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-domain-layer-declares-no-repository-abstract"
 label = "the domain layer declares no repository abstraction at all; …"
 directive = "the domain layer declares no repository abstraction at all; services call the persistence library directly, with no boundary between domain logic and persistence implementation"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

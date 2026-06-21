@@ -22,10 +22,10 @@ why = "The non-null assertion ! tells the compiler 'trust me, this is not null h
 id = "the-non-null-assertion-operator-is-forbidden-nar"
 label = "The non-null assertion operator (!) is forbidden; narrow instead"
 directive = "The postfix non-null assertion operator (!) is forbidden. A value typed as possibly null or undefined is narrowed before use via a control-flow guard, optional chaining with a sane fallback, or an early return that proves the non-null case to the compiler. Where an assertion is genuinely unavoidable, it is isolated behind a single commented lint-disable that records why the value cannot be null at that point."
-why = "The adopted default. The non-null assertion erases the check strictNullChecks exists to enforce and is a runtime no-op, so a wrong assertion lets a null flow through to a TypeError detached from the bad assumption."
+why = "The non-null assertion erases the check strictNullChecks exists to enforce and is a runtime no-op, so a wrong assertion lets a null flow through to a TypeError detached from the bad assumption."
 
 [[option]]
 id = "the-non-null-assertion-operator-is-permitted-to"
 label = "the non-null assertion operator (!) is permitted to …"
 directive = "the non-null assertion operator (!) is permitted to suppress possibly-null and possibly-undefined errors at the author's discretion, rather than requiring the value to be narrowed so the compiler verifies the non-null claim"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

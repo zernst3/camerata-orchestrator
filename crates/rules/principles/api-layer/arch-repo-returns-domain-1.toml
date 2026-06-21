@@ -15,22 +15,22 @@ why = "Keeping the persistence representation an infrastructure detail is what m
 id = "repositories-return-domain-types-never-persisten"
 label = "Repositories return domain types, never persistence representations"
 directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity, or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
-why = "The adopted default. Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes."
+why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes."
 
 [[option]]
 id = "repository-methods-return-the-persistence-librar"
 label = "repository methods return the persistence library's row or entity …"
 directive = "repository methods return the persistence library's row or entity type directly, with no translation into a separate domain type at the boundary"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "repository-methods-return-a-thin-wrapper-over-th"
 label = "repository methods return a thin wrapper over the persistence …"
 directive = "repository methods return a thin wrapper over the persistence type that exposes additional helper methods on top of the underlying library's row representation, lifecycle, and fetch semantics"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "repository-methods-return-persistence-types-from"
 label = "repository methods return persistence types from some repositories and …"
 directive = "repository methods return persistence types from some repositories and domain types from others, with the choice made per repository based on what is convenient at the time"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

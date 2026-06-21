@@ -25,7 +25,7 @@ why = "Go programs are concurrent by default: any http.Handler or background tas
 id = "no-goroutine-unsafe-globals"
 label = "never store mutable state in globals; use structs with locks or channels"
 directive = "Mutable state is never stored in package-level variables. If multiple goroutines need to coordinate (e.g., a service instance that holds a database connection pool), that state is stored in a struct that is instantiated once and passed to goroutines, or it is protected by a sync.Mutex / sync.RWMutex. If state must be shared globally (rare), it is read-only after initialization or guarded by atomic operations or channels."
-why = "The adopted default. Avoiding globals eliminates race conditions and makes concurrency explicit and testable."
+why = "Avoiding globals eliminates race conditions and makes concurrency explicit and testable."
 
 [[option]]
 id = "sync-globals-minimally"

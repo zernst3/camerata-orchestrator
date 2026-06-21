@@ -20,22 +20,22 @@ why = "Precedent is a reality-check; an 'obvious' call with no prior example is 
 id = "novelty-downgrades-authority"
 label = "Novelty downgrades authority"
 directive = "A choice with no clear analog in existing conventions is treated as contested; lack of precedent lowers confidence even when the winner feels obvious. Pause and escalate the decision to a human reviewer rather than auto-applying the obvious-feeling answer."
-why = "The adopted default. Precedent is a reality-check; an 'obvious' call with no prior example is higher-risk than one anchored in existing patterns."
+why = "Precedent is a reality-check; an 'obvious' call with no prior example is higher-risk than one anchored in existing patterns."
 
 [[option]]
 id = "the-agent-treats-obvious-feeling-calls-as-settle"
 label = "the agent treats obvious-feeling calls as settled regardless of …"
 directive = "the agent treats obvious-feeling calls as settled regardless of whether precedent exists for the choice, and proceeds to apply the answer"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-applies-the-obvious-feeling-answer-imm"
 label = "the agent applies the obvious-feeling answer immediately and surfaces …"
 directive = "the agent applies the obvious-feeling answer immediately and surfaces a flag for asynchronous human review after the artifact has shipped"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-searches-for-analogies-in-adjacent-cod"
 label = "the agent searches for analogies in adjacent codebases or …"
 directive = "the agent searches for analogies in adjacent codebases or upstream libraries and proceeds autonomously if any analogy is found, only pausing when no analogy at all exists"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,7 +16,7 @@ why = "An `async def` shares one event-loop thread with every other coroutine in
 id = "async-or-offload"
 label = "use async-native I/O or offload blocking calls off the loop"
 directive = "Inside any `async def` that runs on the event loop, all I/O uses async-native clients (an async DB driver, an async HTTP client, `asyncio.sleep`). When only a synchronous API is available, the blocking call is offloaded with `asyncio.to_thread` or a run-in-executor so it never runs on the loop thread. Blocking DB drivers, `requests`, `time.sleep`, and synchronous file I/O are forbidden directly inside async handlers."
-why = "The adopted default. Keeping the loop thread free preserves the concurrency the async stack is built to provide."
+why = "Keeping the loop thread free preserves the concurrency the async stack is built to provide."
 
 [[option]]
 id = "blocking-in-async"

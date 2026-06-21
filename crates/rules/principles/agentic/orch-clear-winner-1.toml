@@ -20,16 +20,16 @@ why = "Most language/framework choices have a canonical answer; stopping on thos
 id = "the-clear-winner-test-decide-vs-stop"
 label = "The clear-winner test — decide vs. stop"
 directive = "Before stopping for a human, run the test. (a) Is there a documented convention? Apply it, cite it, continue. (b) Does a guiding principle (e.g. robustness) break the tie? Apply the winner, document it, continue. Stop only if neither resolves it."
-why = "The adopted default. Most language/framework choices have a canonical answer; stopping on those wastes the human's attention."
+why = "Most language/framework choices have a canonical answer; stopping on those wastes the human's attention."
 
 [[option]]
 id = "the-agent-stops-and-escalates-to-a-human-reviewe"
 label = "the agent stops and escalates to a human reviewer …"
 directive = "the agent stops and escalates to a human reviewer on every multi-option choice, regardless of whether a documented convention or a guiding principle would resolve it"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-auto-decides-on-every-multi-option-cho"
 label = "the agent auto-decides on every multi-option choice, regardless of …"
 directive = "the agent auto-decides on every multi-option choice, regardless of whether the call is reversible or how far it travels in the architecture"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

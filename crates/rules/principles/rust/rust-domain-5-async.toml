@@ -24,16 +24,16 @@ why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync 
 id = "async-all-the-way-down"
 label = "Async all the way down"
 directive = "I/O functions, repo traits, service methods, and handlers are async; no block_on in layered code."
-why = "The adopted default. The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss."
+why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss."
 
 [[option]]
 id = "the-project-s-i-o-functions-repo-traits-service"
 label = "the project's I/O functions, repo traits, service methods, and …"
 directive = "the project's I/O functions, repo traits, service methods, and handlers are sync, and async runtime use is wrapped in block_on at the layer boundaries"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-project-exposes-both-sync-and-async-variants"
 label = "the project exposes both sync and async variants of …"
 directive = "the project exposes both sync and async variants of its I/O functions, repo traits, service methods, and handlers as parallel public APIs"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

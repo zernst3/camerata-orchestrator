@@ -15,7 +15,7 @@ why = "Go web frameworks (Gin, Echo, net/http) provide middleware chains as the 
 id = "middleware-all-concerns"
 label = "Cross-cutting concerns implemented as middleware; handlers are concern-agnostic"
 directive = "Logging, authentication, timeout enforcement, panic recovery, CORS, rate limiting, and other concerns that apply across multiple handlers are implemented as middleware in the application's middleware chain. Handlers receive already-authenticated requests, already-bounded by timeout, already-logged, and do not re-implement these concerns. Each middleware applies to all routes it is registered in front of; selective application uses middleware groups or conditional branching inside the middleware, not per-handler duplication."
-why = "The adopted default. Go framework middleware is the idiomatic mechanism for cross-cutting concerns; one implementation per concern, one place to audit and maintain, consistent behavior across routes."
+why = "Go framework middleware is the idiomatic mechanism for cross-cutting concerns; one implementation per concern, one place to audit and maintain, consistent behavior across routes."
 
 [[option]]
 id = "per-handler-inline"

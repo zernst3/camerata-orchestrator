@@ -16,13 +16,13 @@ why = "Axum allows configuration of request timeouts (how long a handler can run
 id = "configure-timeouts-and-body-limits"
 label = "Configure request timeouts and body size limits"
 directive = "The Axum application configures a request timeout (via middleware or by wrapping handlers in tokio::time::timeout) and a body size limit (via DefaultBodyLimit or custom extractors that reject bodies above a threshold). The timeouts and limits are documented and chosen based on the application's expected use patterns."
-why = "The adopted default. Timeouts and limits protect against resource exhaustion and cascading failures."
+why = "Timeouts and limits protect against resource exhaustion and cascading failures."
 
 [[option]]
 id = "no-timeout-or-limit-configuration"
 label = "No timeout or limit configuration"
 directive = "The application does not configure request timeouts or body size limits, relying on the OS and network layer to eventually close connections."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html"

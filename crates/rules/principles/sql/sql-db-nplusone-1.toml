@@ -25,10 +25,10 @@ why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at
 id = "no-n-1-query-patterns"
 label = "No N+1 query patterns"
 directive = "Iterating a collection with a per-item database call is banned. Use a single batched query (or 1-2 queries with a join / eager-load), never N+1."
-why = "The adopted default. N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes."
+why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes."
 
 [[option]]
 id = "code-fetches-a-list-of-rows-and-then-loops-over"
 label = "code fetches a list of rows and then loops …"
 directive = "code fetches a list of rows and then loops over the list, issuing a database call per item to fetch related data, rather than using a single batched query or an eager-load with a join"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -17,7 +17,7 @@ why = "In Ruby, string literals are mutable by default: str = 'hello'; str << ' 
 id = "frozen-string-literal"
 label = "Enable frozen_string_literal: true in all Ruby files"
 directive = "Every .rb file begins with the line # frozen_string_literal: true (on the first or second line, after a shebang if present). All string literals in the file are frozen and immutable. Methods that need to mutate a string call .dup or .clone first. This is the standard in Rails 6+ and modern Ruby projects."
-why = "The adopted default. Immutable strings by default eliminate accidental mutation bugs."
+why = "Immutable strings by default eliminate accidental mutation bugs."
 
 [[option]]
 id = "mutable-strings"

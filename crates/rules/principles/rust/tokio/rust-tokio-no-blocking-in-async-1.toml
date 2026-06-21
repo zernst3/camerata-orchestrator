@@ -16,13 +16,13 @@ why = "Tokio is a cooperative multitasking runtime; it schedules many async task
 id = "use-spawn-blocking-for-blocking-calls"
 label = "Use tokio::task::spawn_blocking for blocking operations"
 directive = "Any blocking operation (synchronous I/O, CPU work, blocking lock acquisition) is wrapped in tokio::task::spawn_blocking so it runs on a separate thread pool. The async function awaits the spawn_blocking result. Blocking calls are not made directly inside async functions."
-why = "The adopted default. spawn_blocking prevents blocking the async runtime and keeps concurrent tasks responsive."
+why = "spawn_blocking prevents blocking the async runtime and keeps concurrent tasks responsive."
 
 [[option]]
 id = "blocking-calls-inline-in-async"
 label = "Call blocking operations directly inside async functions"
 directive = "Blocking operations are called directly inside async functions without spawn_blocking. The async executor manages the blocking."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html"

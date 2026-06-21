@@ -15,7 +15,7 @@ why = "Separating concerns makes code testable, maintainable, and reusable. Cont
 id = "layered-architecture"
 label = "separate controllers, services, and repositories by concern"
 directive = "Controllers (endpoints, routes) handle HTTP only: parse requests, invoke services, format responses, return appropriate status codes. Controllers never query the database directly. Services contain business logic: validation, authorization, orchestration, domain rules, calculations. Services depend on repositories and other services via constructor injection. Services are stateless and reentrant. Repositories own all data-access patterns: queries (fetching), inserts, updates, deletes, transactions. Repositories implement a repository interface that services depend on. Repositories are mechanical and domain-unaware. Testing: controllers are tested by mocking services; services are tested by mocking repositories; repositories are tested with a real or in-memory database."
-why = "The adopted default. Clear separation makes code testable, reusable, and maintainable."
+why = "Clear separation makes code testable, reusable, and maintainable."
 
 [[option]]
 id = "mixed-concerns"

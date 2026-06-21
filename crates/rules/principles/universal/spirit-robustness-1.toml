@@ -23,16 +23,16 @@ why = "Two-part calculus. (1) Explicitness is near-free under AI because the AI 
 id = "robustness-over-terseness-but-buy-complexity-onl"
 label = "Robustness over terseness, but buy complexity only against a named threat"
 directive = "When two correct implementations differ, robustness (not verbosity) is the deciding axis. Choose the more explicit version. AI bears the boilerplate cost, and explicitness gives future AI more context to debug and extend. When the more robust option is also more complex (not just more explicit), name the specific failure mode the complexity is buying you protection against. Do not harden throwaway, internal, or fully-encapsulated code where nothing is at stake."
-why = "The adopted default. Two-part calculus."
+why = "Two-part calculus."
 
 [[option]]
 id = "the-more-terse-of-two-correct-implementations-is"
 label = "the more terse of two correct implementations is preferred …"
 directive = "the more terse of two correct implementations is preferred by default, on the pre-AI principle that less code is less to maintain"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-more-defensive-of-two-correct-implementation"
 label = "the more defensive of two correct implementations is always …"
 directive = "the more defensive of two correct implementations is always preferred, regardless of whether a specific failure mode justifies the added complexity"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

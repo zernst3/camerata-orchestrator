@@ -24,22 +24,22 @@ why = "Removes 'is this validated?' as a question at every call site; moves it f
 id = "newtype-validated-strings-email-url-slug"
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
-why = "The adopted default. Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time."
+why = "Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time."
 
 [[option]]
 id = "every-call-site-that-needs-a-validated-string-ru"
 label = "every call site that needs a validated string runs …"
 directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "validation-status-is-recorded-as-a-metadata-tag"
 label = "validation status is recorded as a metadata tag attached …"
 directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
 label = "the codebase makes no distinction between validated and raw …"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

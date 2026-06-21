@@ -9,11 +9,11 @@
 | Status | Count |
 |--------|-------|
 | Grounded | 38 |
-| Ungrounded (left as draft) | 5 |
+| Ungrounded (left as draft) | 4 |
 | Demoted (mechanical → prose) | 0 |
-| **Total in family** | **43** |
+| **Total in family** | **42** |
 
-All 43 rules use `enforcement = "structured"` — no mechanical rules exist in this family, so no demotions were required.
+All 42 rules use `enforcement = "structured"` — no mechanical rules exist in this family, so no demotions were required.
 
 ---
 
@@ -22,7 +22,6 @@ All 43 rules use `enforcement = "structured"` — no mechanical rules exist in t
 These rules assert project-level conventions with no single authoritative external source to cite. They remain `draft`.
 
 - **RUST-DIOXUS-1** — UI crate file-role layout (views/, components/, hooks/, contexts/, services/). This is a project-level structural convention. Dioxus docs discuss component types but do not mandate this specific directory naming scheme.
-- **RUST-DIOXUS-10** — Auth `_can` flags on responses; raw permission codes never reach the client. This is a cross-cutting product architecture decision documented internally; no Dioxus official doc covers this pattern.
 - **RUST-DIOXUS-12** — Icons render as inline SVG from static string constants. This is a performance/bundle-size convention; no authoritative Dioxus doc mandates inline SVG specifically.
 - **RUST-DIOXUS-13** — Forms display errors from domain newtype constructors; UI never re-implements validation rules. This is a domain-driven design convention; no Dioxus official doc covers this integration pattern.
 - **RUST-DIOXUS-14** — Primitives-first UI layer; views compose shared primitives. This is a component-architecture convention; no Dioxus official doc mandates a primitives layer.
@@ -44,7 +43,6 @@ None. All rules in the family use `enforcement = "structured"`, which does not r
 | RUST-AXUM-TIMEOUT-LIMITS-1 | grounded | https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html | grounded |
 | RUST-AXUM-TYPED-ERROR-RESPONSE-1 | grounded | https://docs.rs/axum/latest/axum/response/index.html | grounded |
 | RUST-DIOXUS-1 | draft | — | ungrounded |
-| RUST-DIOXUS-10 | draft | — | ungrounded |
 | RUST-DIOXUS-11 | grounded | https://dioxuslabs.com/learn/0.6/guides/fullstack/ | grounded |
 | RUST-DIOXUS-12 | draft | — | ungrounded |
 | RUST-DIOXUS-13 | draft | — | ungrounded |

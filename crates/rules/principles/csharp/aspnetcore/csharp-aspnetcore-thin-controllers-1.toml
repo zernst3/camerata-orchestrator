@@ -15,13 +15,13 @@ why = "A controller action's job is protocol translation: read the validated req
 id = "thin-controllers-service-layer"
 label = "Controllers translate HTTP to service calls; all business logic lives in a service layer"
 directive = "Controller actions and Minimal API endpoint handlers are limited to: reading validated input from the request, calling one service method, and returning an IActionResult (or typed result) that maps the service's success or error. Business rules, conditional logic, validation beyond schema constraints, and data-access calls do not appear inside controllers or endpoint lambdas. Service classes own domain rules; repository classes own data access. A controller method body longer than ~10 lines is a signal that logic has leaked into the controller."
-why = "The adopted default. Controllers that translate protocol to service calls are independently testable, reusable across entry points, and insulated from domain changes."
+why = "Controllers that translate protocol to service calls are independently testable, reusable across entry points, and insulated from domain changes."
 
 [[option]]
 id = "fat-controllers-inline-logic"
 label = "Business logic and data access inline in controller actions"
 directive = "Controller actions contain the full implementation: validate input, apply business rules, query the database directly (via DbContext or repositories), and compose the response, all inline in the action body."
-why = "A defensible alternative the project considered and did not adopt as the default. Inline logic is reachable only through HTTP, is not reusable across entry points, and conflates protocol concerns with domain concerns in a single method."
+why = "A defensible alternative the project considered. Inline logic is reachable only through HTTP, is not reusable across entry points, and conflates protocol concerns with domain concerns in a single method."
 
 verification = "grounded"
 

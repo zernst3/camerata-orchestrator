@@ -15,22 +15,22 @@ why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is ses
 id = "domain-timestamps-are-anchored-to-utc-mappers-no"
 label = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
 directive = "Timestamps in the domain layer use the language's UTC-anchored type, never an offset-bearing or naive type. The persistence boundary (the mapper between the storage representation and the domain type) is responsible for normalizing whatever the storage layer returns into UTC before the value reaches the domain. Locale and timezone presentation happen at the rendering boundary, never inside the domain."
-why = "The adopted default. TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise."
+why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise."
 
 [[option]]
 id = "the-domain-holds-timestamps-as-offset-bearing-va"
 label = "the domain holds timestamps as offset-bearing values that carry …"
 directive = "the domain holds timestamps as offset-bearing values that carry whatever offset the storage layer returned, and downstream code normalizes case by case"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-domain-holds-timestamps-as-naive-timezone-le"
 label = "the domain holds timestamps as naive (timezone-less) values with …"
 directive = "the domain holds timestamps as naive (timezone-less) values with no timezone information attached, and consumers assume UTC by convention rather than by type"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-domain-holds-timestamps-as-raw-integers-epoc"
 label = "the domain holds timestamps as raw integers (epoch seconds …"
 directive = "the domain holds timestamps as raw integers (epoch seconds or milliseconds) or as strings, bypassing the language's date-time type entirely"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

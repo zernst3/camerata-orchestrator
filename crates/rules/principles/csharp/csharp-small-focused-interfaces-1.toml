@@ -15,7 +15,7 @@ why = "A large interface with many unrelated methods (a \"fat\" interface) force
 id = "small-focused-interfaces"
 label = "design interfaces with 1-5 related methods; split unrelated concerns"
 directive = "Each interface represents a single capability or role. Methods are cohesive and all related to that capability. Example: IRepository<T> has Get, Add, Update, Delete; ILogger has Log; IEmailService has Send. If a class needs multiple roles, it implements multiple interfaces. Default methods are not used to stub out unrelated functionality. When a fat interface is discovered, it is split into multiple focused interfaces and existing implementations are updated to implement only the interfaces they need."
-why = "The adopted default. Small interfaces are easier to understand, mock, and reuse."
+why = "Small interfaces are easier to understand, mock, and reuse."
 
 [[option]]
 id = "fat-interfaces"

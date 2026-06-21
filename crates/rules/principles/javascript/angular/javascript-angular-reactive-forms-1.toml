@@ -20,10 +20,10 @@ why = "Template-driven forms bind form state to template directives (ngModel, ng
 id = "complex-forms-use-reactive-forms-formbuilder-forma"
 label = "Complex forms use reactive (FormBuilder, FormGroup) over template-driven forms"
 directive = "All forms are created using FormBuilder to build a FormGroup, with validators and dynamic field logic in the component class. The template binds to the FormGroup's controls using formGroup and formControl directives. Form state, validation, and changes are managed in the component, not in two-way bindings in the template. Template-driven forms (ngModel, ngForm) are used only for trivial single-field forms; all other forms are reactive."
-why = "The adopted default. Reactive forms make form state and logic explicit, auditable, and testable. Complex form logic in templates is difficult to read and maintain."
+why = "Reactive forms make form state and logic explicit, auditable, and testable. Complex form logic in templates is difficult to read and maintain."
 
 [[option]]
 id = "all-forms-use-template-driven-two-way-bindings-wi"
 label = "all forms use template-driven two-way bindings with …"
 directive = "all forms are created using ngModel and two-way bindings, with form state managed implicitly in the template via ngForm and validation directives"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

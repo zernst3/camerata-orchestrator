@@ -20,10 +20,10 @@ why = "NestJS interceptors are functions that run before and after a controller 
 id = "interceptors-for-cross-cutting"
 label = "Use interceptors for cross-cutting concerns"
 directive = "Logging, tracing, response transformation, exception handling, and other concerns that span multiple routes are implemented as NestJS interceptors. Interceptors are applied via @UseInterceptors() decorators or registered globally. Controllers and services do not contain duplicate logging or transformation logic."
-why = "The adopted default. Interceptors centralize cross-cutting logic and ensure consistent application."
+why = "Interceptors centralize cross-cutting logic and ensure consistent application."
 
 [[option]]
 id = "cross-cutting-logic-in-controllers"
 label = "Implement cross-cutting logic in controllers"
 directive = "Each controller method handles logging, tracing, error handling, and response transformation explicitly."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

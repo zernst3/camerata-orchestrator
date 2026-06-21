@@ -25,7 +25,7 @@ why = "Go's defer statement schedules a cleanup function to run when the enclosi
 id = "defer-cleanup-and-context-cancellation"
 label = "pair every resource acquire with defer; manage goroutines via context"
 directive = "Every resource acquired (file open, database connection begin, listener start, etc.) is immediately followed by a deferred cleanup function (defer f.Close(), defer tx.Rollback(), etc.). Goroutines spawned to handle a request are governed by a context that flows down from the handler; when the handler exits, it cancels that context, signalling all spawned goroutines to exit."
-why = "The adopted default. Defer cleanup ensures every code path cleans up; context cancellation ensures goroutines do not leak and stale work does not accumulate."
+why = "Defer cleanup ensures every code path cleans up; context cancellation ensures goroutines do not leak and stale work does not accumulate."
 
 [[option]]
 id = "explicit-cleanup-at-end"

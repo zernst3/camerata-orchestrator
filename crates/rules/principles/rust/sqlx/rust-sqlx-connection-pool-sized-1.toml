@@ -16,13 +16,13 @@ why = "A database connection is expensive to create (involves a network round tr
 id = "configure-sized-connection-pool"
 label = "Configure an explicit connection pool with size"
 directive = "A connection pool is created via sqlx::PgPoolOptions (or the respective DB engine's equivalent) with explicit min_connections, max_connections, acquire timeout, and idle timeout settings. All queries use this pool. Pool size is set based on expected concurrency and database connection limits."
-why = "The adopted default. A configured pool reuses connections and prevents resource exhaustion."
+why = "A configured pool reuses connections and prevents resource exhaustion."
 
 [[option]]
 id = "create-connection-per-query"
 label = "Create a new connection for each query"
 directive = "Each query creates a new database connection, uses it, and closes it, without connection pooling."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/sqlx/latest/sqlx/pool/struct.Pool.html"

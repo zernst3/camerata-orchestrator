@@ -15,7 +15,7 @@ why = "ASP.NET Core's [ApiController] attribute connects the model-binding pipel
 id = "apicontroller-auto-400"
 label = "[ApiController] on every controller; automatic 400 on invalid ModelState"
 directive = "Every controller class carries the [ApiController] attribute (or inherits from a base class that does). Request DTOs declare Data Annotation or FluentValidation constraints that express the valid input shape. Manual ModelState.IsValid guards inside action methods are forbidden — the attribute makes them redundant and their presence signals that [ApiController] is missing. Validation errors return a RFC 7807 problem-details 400 response automatically without controller code."
-why = "The adopted default. [ApiController] enforces model validity structurally at the framework layer; no action body runs against an invalid model, and no per-action guard is needed."
+why = "[ApiController] enforces model validity structurally at the framework layer; no action body runs against an invalid model, and no per-action guard is needed."
 
 [[option]]
 id = "manual-modelstate-guards"

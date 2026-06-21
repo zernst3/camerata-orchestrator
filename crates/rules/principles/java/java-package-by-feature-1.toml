@@ -22,7 +22,7 @@ linter = "PMD: LoosePackageCoupling"
 id = "package-by-feature"
 label = "organize packages by feature (domain); each feature contains its own layers"
 directive = "Packages are named by domain or feature (com.example.users, com.example.organizations, com.example.reports). Each feature package contains its own controller, service, repository, and domain model classes. Dependencies flow between features explicitly (com.example.users depends on com.example.organizations, not the reverse). Common/shared code lives in a separate package (com.example.common or com.example.shared)."
-why = "The adopted default. Feature-based packages group related code, make dependencies explicit, and are easier to refactor or extract."
+why = "Feature-based packages group related code, make dependencies explicit, and are easier to refactor or extract."
 
 [[option]]
 id = "package-by-layer"

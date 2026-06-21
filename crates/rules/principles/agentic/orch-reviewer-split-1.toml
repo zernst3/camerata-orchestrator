@@ -24,22 +24,22 @@ why = "An agent that reviews its own output inherits its own blindspots: the arc
 id = "the-reviewer-agent-for-any-change-is-distinct-fr"
 label = "The reviewer agent for any change is distinct from the author agent"
 directive = "The agent that reviews a change is a separate agent from the one that authored it. Author and reviewer differ in some load-bearing configuration: a different prompt, a different principles set, a different model, or a combination of those. The reviewer reads the diff, the change's stated intent, and the codified architectural commitments. The reviewer does not read the author agent's reasoning trace. This separation holds across all orchestrated work regardless of whether author and reviewer share a model family."
-why = "The adopted default. An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time."
+why = "An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time."
 
 [[option]]
 id = "the-same-agent-that-authored-a-change-also-revie"
 label = "the same agent that authored a change also reviews …"
 directive = "the same agent that authored a change also reviews it, with no separation between author and reviewer agent"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "a-different-instance-of-the-same-model-with-the"
 label = "a different instance of the same model with the …"
 directive = "a different instance of the same model with the same prompt and the same principles set reviews the change"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-reviewer-agent-reads-the-author-agent-s-reas"
 label = "the reviewer agent reads the author agent's reasoning trace …"
 directive = "the reviewer agent reads the author agent's reasoning trace alongside the diff when evaluating the change"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -15,22 +15,22 @@ why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-esse
 id = "no-client-side-storage-or-third-party-trackers-i"
 label = "No client-side storage or third-party trackers initialize without explicit consent"
 directive = "No client-side cookies, localStorage, sessionStorage, IndexedDB writes, or third-party analytics or tracking scripts initialize without a runtime consent check gated by the category the user agreed to. Necessary-category storage (auth session, preference for the consent banner itself) is the only exception, and is documented as such. New trackers require a Privacy Policy update and a consent-category update in the same change."
-why = "The adopted default. GDPR and the ICO's equal-weight consent rules require opt-in for non-essential storage and tracking."
+why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-essential storage and tracking."
 
 [[option]]
 id = "third-party-analytics-and-tracking-scripts-initi"
 label = "third-party analytics and tracking scripts initialize on every page …"
 directive = "third-party analytics and tracking scripts initialize on every page by default, and the user is offered an opt-out control rather than an opt-in consent gate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "consent-is-checked-once-at-the-page-or-route-lev"
 label = "consent is checked once at the page or route …"
 directive = "consent is checked once at the page or route level, and any tracker mounted inside a component or shared layout under that page initializes without further check"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "consent-checks-run-inside-a-load-event-handler-t"
 label = "consent checks run inside a load-event handler that fires …"
 directive = "consent checks run inside a load-event handler that fires after the tracker's script has already been fetched and made its first beacon"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

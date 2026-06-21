@@ -15,7 +15,7 @@ why = "An HTTP handler has three narrow jobs: bind and validate the request, cal
 id = "thin-handlers-service-delegation"
 label = "Handlers are thin; business logic and queries live in services and repositories"
 directive = "An HTTP handler is a wrapper around a service call: it binds request input to a DTO, calls a service method with the DTO, and formats the response. The handler does not contain if-statements for business logic, does not call the database directly, and does not orchestrate multiple steps. All multi-step workflows, permission checks, and data transformations are in the service or repository layer. A handler error-path simply formats the service's returned error as an HTTP response."
-why = "The adopted default. Handlers are narrow adapters that translate HTTP to the service layer; business logic lives where it can be tested and reused across interfaces."
+why = "Handlers are narrow adapters that translate HTTP to the service layer; business logic lives where it can be tested and reused across interfaces."
 
 [[option]]
 id = "fat-handlers"

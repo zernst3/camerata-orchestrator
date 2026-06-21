@@ -34,16 +34,16 @@ label = "unwrap_used is denied workspace-wide via clippy; non-test code handles 
 directive = """
 The clippy lint unwrap_used is set to deny under [workspace.lints.clippy], so any .unwrap() in non-test code fails the build. Test code is exempt via allow-unwrap-in-tests = true in clippy.toml, and integration tests under crates/*/tests/ carry a file-level #![allow(clippy::unwrap_used)]. Non-test code must handle the fallible value explicitly: propagate with ?, map to a structured error, or destructure with a fallback. A cargo clippy -D warnings gate enforces it in CI so a feature branch cannot reintroduce an unwrap without failing the merge.
 """
-why = "The adopted default. Converts a convention into a per-build mechanical guarantee, so a reintroduced unwrap fails the merge before a human reads the diff."
+why = "Converts a convention into a per-build mechanical guarantee, so a reintroduced unwrap fails the merge before a human reads the diff."
 
 [[option]]
 id = "set-unwrap-used-to-warn-surfacing-without-blocki"
 label = "unwrap_used is set to warn, surfacing occurrences without …"
 directive = "The unwrap_used lint is set to warn rather than deny, so occurrences appear in clippy output but do not fail the build; the team is trusted to clean them up."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "discourage-unwrap-by-convention-and-code-review"
 label = "unwrap() is discouraged by convention and caught in code …"
 directive = "unwrap() is discouraged by convention and caught in code review rather than by a lint; no mechanical gate is configured."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

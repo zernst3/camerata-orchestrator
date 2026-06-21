@@ -16,13 +16,13 @@ why = "std::sync::Mutex is designed for synchronous code. When a task holds a st
 id = "use-tokio-mutex-for-async-code"
 label = "Use tokio::sync::Mutex in async code"
 directive = "Any lock held across an await point uses tokio::sync::Mutex (or tokio::sync::RwLock), not std::sync::Mutex. std::sync::Mutex is only used in synchronous code that does not await. If a critical section must use std::sync::Mutex, all await points are moved outside the locked region."
-why = "The adopted default. tokio::sync::Mutex prevents lock starvation and deadlocks in async code."
+why = "tokio::sync::Mutex prevents lock starvation and deadlocks in async code."
 
 [[option]]
 id = "use-std-mutex-in-async-code"
 label = "Use std::sync::Mutex in async code"
 directive = "std::sync::Mutex is used even if locks may be held across await points, relying on task scheduling and careful programming to avoid deadlocks."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html"

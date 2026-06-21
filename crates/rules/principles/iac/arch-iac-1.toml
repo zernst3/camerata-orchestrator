@@ -20,10 +20,10 @@ why = "Reproducible environments, centralized rotation, no credential sprawl. Pr
 id = "infrastructure-as-code-per-environment-isolation"
 label = "Infrastructure as code, per-environment isolation"
 directive = "All infra scaffolding lives in IaC (e.g. Terraform); secrets live in a per-environment vault with isolation, never in the repo or CI logs; local dev stays credential-free via injection tooling."
-why = "The adopted default. Reproducible environments, centralized rotation, no credential sprawl."
+why = "Reproducible environments, centralized rotation, no credential sprawl."
 
 [[option]]
 id = "infrastructure-is-provisioned-manually-through-a"
 label = "infrastructure is provisioned manually through a cloud console (click-ops) …"
 directive = "infrastructure is provisioned manually through a cloud console (click-ops) and secrets are stored in the repository or CI configuration rather than in a per-environment vault"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

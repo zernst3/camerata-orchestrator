@@ -17,7 +17,7 @@ why = "Building a SQL string by interpolating a value with string interpolation 
 id = "activerecord-binding-parameters"
 label = "Use ActiveRecord parameterized queries with placeholders or hash binding"
 directive = "Every dynamic value in a SQL statement is passed as a binding parameter using ? placeholders, :named parameters, or ActiveRecord's where/find_by methods. Raw SQL queries use User.where('email = ?', email) or User.where('id = :id', id: id), never string interpolation like User.where(\"email = '#{email}'\"). Method chaining (User.where(email: email)) is preferred over raw SQL. The raw_sql column names and table names that must be dynamic come from a fixed allow-list, never from request input."
-why = "The adopted default. ActiveRecord parameterization sends SQL and values separately, preventing SQL injection entirely."
+why = "ActiveRecord parameterization sends SQL and values separately, preventing SQL injection entirely."
 
 [[option]]
 id = "string-interpolation-with-escaping"

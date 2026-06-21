@@ -16,7 +16,7 @@ why = "Raw SQL is genuinely necessary for query shapes the typed builder cannot 
 id = "typed-domain-projection-at-boundary"
 label = "Raw SQL allowed, but only parsed into a typed domain projection"
 directive = "When a repository method's query cannot be expressed through the SeaORM typed query builder (for example JSON-path extraction, conditional aggregates, window functions, or correlated subqueries the typed API cannot chain), the implementation may use the raw-statement escape hatch only when the result is parsed into a typed domain projection struct that derives the SeaORM result-mapping trait. The raw result-set types and untyped row types of the ORM do not appear in the repository trait surface; only typed domain types cross the trait boundary. Each raw-SQL block carries a one-line comment naming the upstream source it mirrors so schema-drift review can connect repository code to migrations that touch its tables and columns."
-why = "The adopted default. Raw SQL is sometimes unavoidable, but routing its result through a struct that derives the result-mapping trait converts silent schema drift into a loud runtime error, and the upstream-source comment ties repository code back to the migrations it depends on."
+why = "Raw SQL is sometimes unavoidable, but routing its result through a struct that derives the result-mapping trait converts silent schema drift into a loud runtime error, and the upstream-source comment ties repository code back to the migrations it depends on."
 
 [[option]]
 id = "return-raw-result-types"

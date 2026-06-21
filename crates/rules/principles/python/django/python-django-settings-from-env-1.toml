@@ -17,7 +17,7 @@ why = "A Django `settings.py` file is Python source code committed to version co
 id = "env-vars-in-settings"
 label = "read all credentials and env-specific values from environment variables"
 directive = "All values that vary by environment or that are credentials (SECRET_KEY, database URL, email credentials, API keys, ALLOWED_HOSTS, CORS origins) are read from environment variables via `os.environ.get('VAR')`, `os.environ['VAR']`, `django-environ`'s `env(...)`, or `python-decouple`'s `config(...)`. `settings.py` contains only the logic to read these values and their defaults for local development (where the risk is low); no production credential or secret appears as a string literal. A `.env` file for local development is listed in `.gitignore` and is never committed."
-why = "The adopted default. Environment variables keep secrets outside the repository and git history; per-environment values are injected at deploy time without modifying source."
+why = "Environment variables keep secrets outside the repository and git history; per-environment values are injected at deploy time without modifying source."
 
 [[option]]
 id = "hardcoded-in-settings"

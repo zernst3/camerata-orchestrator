@@ -20,10 +20,10 @@ why = "Everything on the request object that comes from the client (req.body, re
 id = "request-input-is-validated-at-the-boundary-befor"
 label = "Request input is validated at the boundary before use"
 directive = "Every route that reads req.body, req.params, or req.query validates and parses that input against an explicit schema (zod, joi, express-validator, or equivalent) at the boundary, before any business logic runs, and rejects a malformed request with a 400. Handler and downstream code consume the validated, typed result, never the raw request fields. Reaching directly into unvalidated request input and passing it downstream is forbidden."
-why = "The adopted default. Request fields are untrusted client-controlled input; validating against a schema at the edge converts them into a known typed shape once and rejects malformed requests with a 400 before they reach business logic, a database, or a template."
+why = "Request fields are untrusted client-controlled input; validating against a schema at the edge converts them into a known typed shape once and rejects malformed requests with a 400 before they reach business logic, a database, or a template."
 
 [[option]]
 id = "request-fields-are-read-directly-and-passed-down"
 label = "request fields are read directly and passed downstream …"
 directive = "request fields are read directly from req.body, req.params, and req.query and passed downstream on the assumption the client sent the expected shape, rather than validating and parsing input against a schema at the boundary"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

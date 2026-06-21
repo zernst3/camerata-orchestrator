@@ -22,10 +22,10 @@ why = "A Promise whose result is discarded is a floating promise: the asynchrono
 id = "every-promise-is-awaited-returned-or-explicitly"
 label = "Every Promise is awaited, returned, or explicitly handled"
 directive = "Every expression that returns a Promise is awaited, returned to the caller, or chained with a .catch handler. A genuinely fire-and-forget call is marked with the void operator AND attaches its own rejection handler, so the discard is deliberate and the error path is still covered. A bare Promise-returning call whose result is dropped is forbidden."
-why = "The adopted default. A floating promise still runs but nothing waits for it and nothing observes its rejection, producing unhandled rejections and silently violated ordering guarantees that surface as flaky, timing-dependent production failures."
+why = "A floating promise still runs but nothing waits for it and nothing observes its rejection, producing unhandled rejections and silently violated ordering guarantees that surface as flaky, timing-dependent production failures."
 
 [[option]]
 id = "promise-returning-calls-may-be-left-floating-whe"
 label = "Promise-returning calls may be left floating when the …"
 directive = "Promise-returning calls may be left floating when the result is not needed, relying on the author to await only where a value is consumed, rather than requiring every promise to be awaited, returned, or explicitly voided-and-handled"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

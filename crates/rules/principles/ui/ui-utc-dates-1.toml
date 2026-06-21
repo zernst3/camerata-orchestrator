@@ -16,22 +16,22 @@ why = "When the timezone is left implicit, the server renders the date in the ho
 id = "render-dates-through-a-project-level-helper-that"
 label = "Render dates through a project-level helper that pins UTC; never format inline"
 directive = "All date and time rendering in the UI goes through a single project-level helper that pins the timezone explicitly (commonly UTC, sometimes a known display-tz). Direct calls to the platform's locale-aware formatting (toLocaleString, strftime with no tz, Intl.DateTimeFormat with no timeZone option) in feature code are forbidden and lint-enforced. The helper is the one place timezone decisions live."
-why = "The adopted default. When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's."
+why = "When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's."
 
 [[option]]
 id = "feature-code-formats-dates-inline-at-each-call-s"
 label = "feature code formats dates inline at each call site …"
 directive = "feature code formats dates inline at each call site using the platform's locale-aware formatting (toLocaleString, strftime, Intl.DateTimeFormat) without going through a project-level helper that pins the timezone"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "feature-code-renders-dates-only-on-the-client-vi"
 label = "feature code renders dates only on the client via …"
 directive = "feature code renders dates only on the client via a post-mount effect, with the server rendering a placeholder until the client picks up the value"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "feature-code-calls-the-platform-s-date-formattin"
 label = "feature code calls the platform's date-formatting APIs without specifying …"
 directive = "feature code calls the platform's date-formatting APIs without specifying a timezone, letting the platform's default locale and timezone control the result at each site"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

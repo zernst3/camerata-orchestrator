@@ -24,10 +24,10 @@ why = "With live users, a single deploy can't be paired with a breaking schema c
 id = "expand-then-contract-for-breaking-schema-changes"
 label = "Expand-then-contract for breaking schema changes"
 directive = "Split breaking changes (drop/rename/NOT-NULL) across releases: expand (add new, write both), migrate reads, then contract (drop old). Migrations are schema-only; never seed user data in a migration."
-why = "The adopted default. With live users, a single deploy can't be paired with a breaking schema change without an incompatibility window."
+why = "With live users, a single deploy can't be paired with a breaking schema change without an incompatibility window."
 
 [[option]]
 id = "breaking-schema-changes-drop-rename-not-null-add"
 label = "breaking schema changes (drop, rename, NOT-NULL additions) ship in …"
 directive = "breaking schema changes (drop, rename, NOT-NULL additions) ship in a single deploy without an expand-then-contract split, applying the destructive change in the same release as the application code that depends on the new shape"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

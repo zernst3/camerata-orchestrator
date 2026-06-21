@@ -25,22 +25,22 @@ why = "Preventive gatekeeping catches issues before they compound downstream, wh
 id = "environment-gated-quality-nothing-ships-unverifi"
 label = "Environment-gated quality — nothing ships unverified"
 directive = "Autonomously-generated code passes a local quality bar (compile clean, lint clean, tests green; schema changes also pass a migration-safety check) before merge. After merge, the code progresses through one or more pre-production environments before reaching users, and advancement through each one is gated by automated checks rather than reviewer judgment. The number, naming, and topology of pre-production environments is the organization's call (single staging, dev-then-staging, ephemeral preview-per-PR, canary slices of the production environment, or any combination); the rule commits to the existence of the gradient and to automated gating between its steps, not to a specific environment layout."
-why = "The adopted default. Preventive gatekeeping catches issues before they compound downstream, where they are far more expensive to triage and roll back."
+why = "Preventive gatekeeping catches issues before they compound downstream, where they are far more expensive to triage and roll back."
 
 [[option]]
 id = "autonomously-generated-code-ships-directly-from"
 label = "autonomously-generated code ships directly from the author's machine to …"
 directive = "autonomously-generated code ships directly from the author's machine to the user-facing environment without passing a local quality bar or progressing through any pre-production environment; issues are caught by post-hoc monitoring in production"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "autonomously-generated-code-passes-a-local-quali"
 label = "autonomously-generated code passes a local quality bar before merge …"
 directive = "autonomously-generated code passes a local quality bar before merge but goes directly from merge to the user-facing environment, with no pre-production environment between them"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "autonomously-generated-code-progresses-through-o"
 label = "autonomously-generated code progresses through one or more pre-production environments, …"
 directive = "autonomously-generated code progresses through one or more pre-production environments, but advancement through each one is gated by manual reviewer approval rather than by automated checks"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

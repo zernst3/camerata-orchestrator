@@ -22,22 +22,22 @@ Admin-curated reference tables (categories, roles, system config, lookup tables)
 User-generated content tables (posts, comments, applications, submissions): created_at timestamp + updated_at timestamp + an author foreign key. The author FK already attributes the row; separate created_by and modified_by would duplicate it.
 
 System-managed event or log tables (audit_log, ingest_events, webhook_deliveries): domain-specific timestamps (received_at, processed_at, occurred_at) and no created_by or modified_by. The row's origin is the system, not a user."""
-why = "The adopted default. A blanket created_by/modified_by/created_at/modified_at quartet on every table is wasteful (most user-generated rows never have a modified_by consumer) and misleading (event-log rows have no meaningful creator)."
+why = "A blanket created_by/modified_by/created_at/modified_at quartet on every table is wasteful (most user-generated rows never have a modified_by consumer) and misleading (event-log rows have no meaningful creator)."
 
 [[option]]
 id = "every-table-carries-the-same-four-column-audit-q"
 label = "every table carries the same four-column audit quartet (created_by, …"
 directive = "every table carries the same four-column audit quartet (created_by, created_on, modified_by, modified_on) regardless of whether the table is admin-curated, user-generated, or system-managed"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "no-table-in-the-schema-carries-any-audit-columns"
 label = "no table in the schema carries any audit columns; …"
 directive = "no table in the schema carries any audit columns; provenance is reconstructed after the fact from logs or external systems"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-audit-columns-are-written-by-orm-level-lifec"
 label = "the audit columns are written by ORM-level lifecycle hooks …"
 directive = "the audit columns are written by ORM-level lifecycle hooks rather than declared as explicit columns in the schema, so any write that bypasses the ORM leaves the audit data unset"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

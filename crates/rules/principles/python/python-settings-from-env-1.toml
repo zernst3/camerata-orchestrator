@@ -16,7 +16,7 @@ why = "A secret or environment-specific value written into a source file ships t
 id = "typed-settings-from-env"
 label = "load a typed settings object from the environment at startup"
 directive = "All configuration and secrets are read from environment variables (optionally via a local .env file that is gitignored) into a single typed settings object validated once at application startup. The settings object coerces and validates every value up front so a missing or malformed setting fails fast at boot. No secret, connection string, API key, or environment-specific value is written into source. Application code reads settings from this object, not from `os.environ` directly."
-why = "The adopted default. A validated settings boundary keeps secrets out of the repo, lets one artifact run everywhere, and fails fast on bad config."
+why = "A validated settings boundary keeps secrets out of the repo, lets one artifact run everywhere, and fails fast on bad config."
 
 [[option]]
 id = "scattered-os-environ"

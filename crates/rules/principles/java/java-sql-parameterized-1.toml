@@ -22,7 +22,7 @@ linter = "SpotBugs/FindSecBugs: SQL_INJECTION_JDBC"
 id = "parameterized-queries"
 label = "use PreparedStatement bind parameters or JPA parameter syntax"
 directive = "Every dynamic value in a SQL statement is passed as a bound parameter (? placeholders in PreparedStatement, :name/:? in JPA, or parameterized ORM queries), never concatenated into the query string. String concatenation, StringBuilder, or String.format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
-why = "The adopted default. Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
+why = "Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
 
 [[option]]
 id = "string-concatenation-with-escaping"

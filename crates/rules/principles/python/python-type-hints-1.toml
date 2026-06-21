@@ -17,7 +17,7 @@ why = "Python is gradually typed: annotations are optional at runtime, so an unc
 id = "annotate-and-check"
 label = "annotate public signatures and run a type checker in CI"
 directive = "Every public function and method declares parameter and return type hints, and a static type checker (mypy or pyright) runs in CI at error severity. New code must type-check clean; the checker's strictness floor only ratchets up. Internal helpers may omit annotations only where the checker can infer them, never to dodge a real type error."
-why = "The adopted default. A checked, annotated codebase turns type mismatches into build failures at their origin and keeps the annotations honest."
+why = "A checked, annotated codebase turns type mismatches into build failures at their origin and keeps the annotations honest."
 
 [[option]]
 id = "annotate-without-checker"

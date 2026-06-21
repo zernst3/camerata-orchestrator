@@ -15,7 +15,7 @@ why = "Entity Framework's LINQ syntax automatically parameterizes queries and se
 id = "parameterized-linq"
 label = "use parameterized LINQ queries exclusively"
 directive = "All queries use LINQ syntax (Where, Select, Join, GroupBy, etc.), which automatically parameterizes values. No raw SQL. If a query is too complex for LINQ (e.g., complex aggregations, vendor-specific syntax), use a stored procedure called via FromSqlInterpolated with parameterized invocation, or refactor the query to simpler LINQ. String concatenation or string interpolation in SQL queries is forbidden."
-why = "The adopted default. LINQ parameterization is automatic and prevents SQL injection entirely."
+why = "LINQ parameterization is automatic and prevents SQL injection entirely."
 
 [[option]]
 id = "raw-sql-interpolated"

@@ -16,16 +16,16 @@ why = "Coupling the wire format to the domain model means every internal refacto
 id = "api-request-and-response-types-are-dtos-never-do"
 label = "API request and response types are DTOs, never domain types"
 directive = "Endpoints accept request DTOs and return response DTOs; the controller layer maps DTOs to and from domain types. The wire format and the internal model evolve independently. Enforce with a lint rule that blocks imports of domain types from controller files. Adding a field to a domain type does not silently change the API; renaming or restructuring a domain field does not break clients."
-why = "The adopted default. Coupling the wire format to the domain model means every internal refactor risks breaking external consumers, and every external API requirement leaks into the domain core."
+why = "Coupling the wire format to the domain model means every internal refactor risks breaking external consumers, and every external API requirement leaks into the domain core."
 
 [[option]]
 id = "endpoints-return-domain-types-directly-in-the-re"
 label = "endpoints return domain types directly in the response body …"
 directive = "endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-project-uses-a-single-shared-model-type-acro"
 label = "the project uses a single shared model type across …"
 directive = "the project uses a single shared model type across both the wire format and the domain core, rather than maintaining separate DTOs and domain types"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

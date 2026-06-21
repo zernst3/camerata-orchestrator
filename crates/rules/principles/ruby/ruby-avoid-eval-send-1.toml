@@ -17,7 +17,7 @@ why = "eval() and eval-like functions (instance_eval, class_eval) execute arbitr
 id = "dispatch-table-or-case-statement"
 label = "Use a fixed dispatch table (hash or case statement) to route to whitelisted methods"
 directive = "Dynamic dispatch is implemented as a case statement or hash that maps a fixed set of values (derived from user input) to hardcoded method names or lambdas. Example: ACTIONS = { 'create' => :create_action, 'delete' => :delete_action }; send(ACTIONS[params[:action]]) if ACTIONS.key?(params[:action]). Or use a case statement. The allowed actions are hardcoded; new actions require code review. eval(), instance_eval(), class_eval(), and send() with user-derived strings are forbidden."
-why = "The adopted default. A fixed whitelist eliminates the ability to invoke unintended methods."
+why = "A fixed whitelist eliminates the ability to invoke unintended methods."
 
 [[option]]
 id = "permitted-symbols"

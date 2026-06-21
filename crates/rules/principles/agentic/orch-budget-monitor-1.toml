@@ -20,7 +20,7 @@ why = "An unattended routine needs a real ceiling; per-run caps prevent runaway,
 id = "rolling-window-plus-per-session-caps"
 label = "rolling-window + per-session caps, enforced by a wrapper"
 directive = "Track spend in a rolling window against a safety threshold, with per-session caps, and self-check periodically during a run. A wrapper enforces hard limits before invoking the model."
-why = "The adopted default. A rolling-window cap plus per-session caps covers both the single-run runaway and the cross-run accumulation cases, and the wrapper makes the limit non-bypassable."
+why = "A rolling-window cap plus per-session caps covers both the single-run runaway and the cross-run accumulation cases, and the wrapper makes the limit non-bypassable."
 
 [[option]]
 id = "per-session-cap-only"

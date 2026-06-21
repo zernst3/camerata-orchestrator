@@ -29,10 +29,10 @@ why = "Vue components are organized in a tree. A parent component should pass da
 id = "props-down-events-up"
 label = "Props down; events up; no direct method calls or shared mutable state"
 directive = "Parent components pass data to children via props. Children emit events to notify parents of changes. Shared state is managed in a store (Pinia) or passed via provide/inject. Direct parent-to-child method calls (via template refs, .value.$refs, etc.) and co-mutation of state between parent and child are forbidden."
-why = "The adopted default. Unidirectional data flow makes component interactions predictable and debuggable."
+why = "Unidirectional data flow makes component interactions predictable and debuggable."
 
 [[option]]
 id = "direct-method-calls-and-shared-state"
 label = "Direct method calls and shared mutable state"
 directive = "Parent components call child methods directly via template refs. Parent and child components share and mutate the same state object. Data flow is bidirectional."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

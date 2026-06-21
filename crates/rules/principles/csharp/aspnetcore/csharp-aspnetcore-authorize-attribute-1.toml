@@ -15,7 +15,7 @@ why = "ASP.NET Core's default for any endpoint is anonymous access. Adding [Auth
 id = "authorize-at-controller-or-group-level"
 label = "[Authorize] at the controller class or route group; [AllowAnonymous] on public endpoints"
 directive = "Every ControllerBase subclass that exposes protected endpoints carries [Authorize] at the class level (or its base class does). In Minimal API projects, MapGroup is used to collect protected endpoints, and RequireAuthorization() is called on the group. Public endpoints carry [AllowAnonymous] (MVC) or AllowAnonymous() (Minimal API). The combination of [Authorize] at class level and [AllowAnonymous] per action is the canonical pattern; the inverse (no class-level [Authorize], per-action [Authorize]) is forbidden for controllers where more than one action requires authentication. Role and policy requirements are expressed as [Authorize(Roles = '...')] or [Authorize(Policy = '...')] on the specific actions that need them, on top of the base class-level [Authorize]."
-why = "The adopted default. Class-level [Authorize] is an opt-out model: new actions start protected and must be explicitly opened, so a forgotten annotation produces a visible 401 rather than silent unauthorized access."
+why = "Class-level [Authorize] is an opt-out model: new actions start protected and must be explicitly opened, so a forgotten annotation produces a visible 401 rather than silent unauthorized access."
 
 [[option]]
 id = "authorize-per-action"

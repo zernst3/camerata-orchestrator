@@ -20,7 +20,7 @@ why = "The protoc compiler generates Go code from .proto definitions. Handwritin
 id = "proto-generated-immutable"
 label = "Generated code is immutable; changes flow through .proto → code generation"
 directive = "All proto-generated files (.pb.go, _grpc.pb.go) are treated as read-only build artifacts. Changes to the gRPC interface, message fields, or service methods are made in the .proto definition, then code is regenerated via `protoc`. CI or pre-commit checks ensure generated code is up-to-date; out-of-sync generated code is a build failure."
-why = "The adopted default. Generated code is a build artifact, not a maintained source file; the .proto definition is the source of truth."
+why = "Generated code is a build artifact, not a maintained source file; the .proto definition is the source of truth."
 
 [[option]]
 id = "hand-edited-generated"

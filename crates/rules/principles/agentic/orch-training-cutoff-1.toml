@@ -20,22 +20,22 @@ why = "An agent that decides on training-cutoff-sensitive surfaces with high con
 id = "training-data-limited-decisions-route-to-human-r"
 label = "Training-data-limited decisions route to human review by category, not by confidence"
 directive = "When a decision depends on the current state of something the agent cannot directly observe from inside the project (third-party dependency versions, framework or vendor API shapes, latest model identifiers, current security-advisory state, anything whose ground truth ships outside the project's own source tree and moves faster than the agent's training cutoff), the agent does not decide unilaterally. It surfaces the question to a human reviewer along with the candidate answer and the citation it would use. The trigger is the CATEGORY of question, not the agent's subjective confidence: confidence calibrated against a stale training snapshot is the failure mode the rule exists to prevent. The category is visible, shipped version surfaces with an external ground truth. The rule does NOT cover stable, self-correcting surfaces like the host language's edition or backwards-compatible compiler features, where the project's own declared version anchors the answer."
-why = "The adopted default. An agent that decides on training-cutoff-sensitive surfaces with high confidence is calibrating against a stale snapshot, not the current world."
+why = "An agent that decides on training-cutoff-sensitive surfaces with high confidence is calibrating against a stale snapshot, not the current world."
 
 [[option]]
 id = "the-agent-auto-decides-on-dependency-api-or-late"
 label = "the agent auto-decides on dependency, API, or 'latest X' …"
 directive = "the agent auto-decides on dependency, API, or 'latest X' questions when its own confidence in the answer feels high, without routing to human review"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-routes-every-version-sensitive-questio"
 label = "the agent routes every version-sensitive question to a human …"
 directive = "the agent routes every version-sensitive question to a human reviewer, including questions about the project's own declared compiler edition and other surfaces the project itself anchors"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-agent-fetches-the-current-state-through-what"
 label = "the agent fetches the current state through whatever web …"
 directive = "the agent fetches the current state through whatever web or registry tool it has available and then auto-decides from the fetched answer, treating human review as unnecessary once a fetch is possible"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

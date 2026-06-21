@@ -15,16 +15,16 @@ why = "Enforces strict hexagonal layering: each side absorbs churn independently
 id = "mappers-live-in-their-own-crate"
 label = "Mappers live in their own crate"
 directive = "A dedicated mappers crate depends on both the domain crate and the persistence-entities crate; neither of those depends on the other."
-why = "The adopted default. Enforces strict hexagonal layering: each side absorbs churn independently, and translation has one clear home."
+why = "Enforces strict hexagonal layering: each side absorbs churn independently, and translation has one clear home."
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-persistence-en"
 label = "the project's mappers live in the persistence-entities crate alongside …"
 directive = "the project's mappers live in the persistence-entities crate alongside the entity types, rather than in a dedicated mappers crate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-domain-crate-a"
 label = "the project's mappers live in the domain crate alongside …"
 directive = "the project's mappers live in the domain crate alongside the domain types, rather than in a dedicated mappers crate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

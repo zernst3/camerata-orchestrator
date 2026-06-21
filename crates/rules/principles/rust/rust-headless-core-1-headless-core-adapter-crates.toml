@@ -15,7 +15,7 @@ why = "The logic of a component (its state, its computations, its interaction ru
 id = "headless-core-plus-adapters"
 label = "framework-agnostic core crate plus per-framework adapter crates"
 directive = "A reusable component or UI library is split into a framework-agnostic core crate that owns all logic, state, and computation and carries no dependency on any rendering framework, plus one thin adapter crate per supported framework. Each adapter crate depends on the core and wires the core's state and behavior to that framework's rendering primitives. Framework-specific code lives only in adapter crates; the core stays renderer-free so it can be tested in isolation and reused across every adapter."
-why = "The adopted default. Keeping the logic in a renderer-free core lets it be written and tested once and reused by every framework adapter."
+why = "Keeping the logic in a renderer-free core lets it be written and tested once and reused by every framework adapter."
 
 [[option]]
 id = "single-framework-build"

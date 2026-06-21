@@ -16,7 +16,7 @@ why = "A Rails request-response cycle has a finite timeout (commonly 30 seconds 
 id = "background-jobs"
 label = "enqueue a job from the controller; worker runs the slow work"
 directive = "Any work estimated to take more than roughly 100ms, any external HTTP call, any email send, any file processing, and any operation that may fail transiently (rate limits, timeouts) is performed inside an ActiveJob subclass queued from the controller action. The controller enqueues the job and returns a 200/202 immediately. The job class is the single place that holds the slow logic. Inline email delivery (`deliver_now`) in a controller is acceptable only for synchronous one-off cases that have been explicitly approved; the default is `deliver_later`. Direct external API calls inside a controller action without a job wrapper are the pattern to eliminate."
-why = "The adopted default. Offloading slow work to a background job keeps request threads available, decouples user response time from external-system latency, and enables automatic retries on transient failure."
+why = "Offloading slow work to a background job keeps request threads available, decouples user response time from external-system latency, and enables automatic retries on transient failure."
 
 [[option]]
 id = "inline-in-request"

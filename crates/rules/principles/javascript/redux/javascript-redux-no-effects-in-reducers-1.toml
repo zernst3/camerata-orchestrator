@@ -20,10 +20,10 @@ why = "A reducer is required to be a pure function of (state, action): same inpu
 id = "reducers-are-pure-side-effects-live-in-thunks-or"
 label = "Reducers are pure; side effects live in thunks or middleware"
 directive = "Reducers are pure functions of (state, action) with no side effects: no API calls, no dispatching, no I/O, no reading the clock, no random or unique-id generation, no logging. All side effects and async work live in thunks (createAsyncThunk or RTK Query) or custom middleware, which perform the effect and dispatch plain result actions that the reducer folds into state. Non-deterministic inputs an action needs (timestamps, generated ids) are computed in the action creator or thunk and passed in via the payload, not produced inside the reducer."
-why = "The adopted default. Reducers are re-run during replay and time-travel, so a side effect inside one fires again on every replay producing duplicate requests and non-reproducible state; effects belong in thunks or middleware that run exactly once."
+why = "Reducers are re-run during replay and time-travel, so a side effect inside one fires again on every replay producing duplicate requests and non-reproducible state; effects belong in thunks or middleware that run exactly once."
 
 [[option]]
 id = "reducers-perform-side-effects-such-as-api-calls"
 label = "reducers perform side effects such as API calls …"
 directive = "reducers perform side effects such as API calls, dispatching, or id generation directly when the triggering action arrives there, rather than confining all effects to thunks and middleware and keeping reducers pure"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,7 +16,7 @@ why = "Rails Concerns are a powerful tool for sharing code across multiple model
 id = "concerns-for-true-cross-cutting"
 label = "Use Concerns for code shared by 3+ models; avoid large or single-use concerns"
 directive = "A Concern is created only when the code is reused across multiple (3+) models and represents a single, orthogonal behavior. Examples: Sluggable, Paranoid (soft deletes), Timestamps, Publishable. A Concern is not a dumping ground for odds and ends; if a method is used by only one model or if the concern is >50 lines, the logic belongs in the model itself or in a separate service/repository class. Large concerns are extracted into service classes; single-use Concerns are inlined into the model."
-why = "The adopted default. Small, focused Concerns reduce duplication across models without becoming a source of hidden dependencies."
+why = "Small, focused Concerns reduce duplication across models without becoming a source of hidden dependencies."
 
 [[option]]
 id = "concerns-liberally"

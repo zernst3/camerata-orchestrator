@@ -20,10 +20,10 @@ why = "NestJS guards are functions that run before a controller method and deter
 id = "guards-for-auth-and-authz"
 label = "Use guards for auth checks"
 directive = "Authentication (verifying the request is from a logged-in user) and authorization (checking user permissions) are implemented as NestJS guards. Guards are applied via @UseGuards() decorators on controllers or methods. Controllers and services do not duplicate auth checks."
-why = "The adopted default. Guards centralize auth checks and ensure consistent application."
+why = "Guards centralize auth checks and ensure consistent application."
 
 [[option]]
 id = "auth-logic-in-controllers"
 label = "Implement auth logic in controllers"
 directive = "Authentication and authorization checks are implemented directly in controller methods or called from service code."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

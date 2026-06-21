@@ -20,28 +20,28 @@ why = "Without a regression test, the bug is gone today and free to recur tomorr
 id = "every-bug-fix-ships-with-a-regression-test-that"
 label = "Every bug fix ships with a regression test that fails before the fix and passes after"
 directive = "A change that fixes a bug includes, in the same change, a test that fails on the pre-fix code and passes on the post-fix code. The test lives at whichever layer of the test pyramid naturally exercises the bug (unit if the bug is in pure logic, integration if it is in component wiring, end-to-end if it is in a user-visible flow). The author confirms the failing-then-passing behavior before submitting the change. A bug-fix change with no accompanying test, or with a test that passes on the pre-fix code as well, is incomplete regardless of whether the surrounding suite goes green."
-why = "The adopted default. Without a regression test, the bug is gone today and free to recur tomorrow because nothing in CI is watching for it."
+why = "Without a regression test, the bug is gone today and free to recur tomorrow because nothing in CI is watching for it."
 
 [[option]]
 id = "the-bug-fix-lands-without-any-accompanying-test"
 label = "the bug fix lands without any accompanying test; the …"
 directive = "the bug fix lands without any accompanying test; the project relies on the surrounding test suite staying green to catch any related regression in the future"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-bug-fix-lands-with-a-regression-test-only-wh"
 label = "the bug fix lands with a regression test only …"
 directive = "the bug fix lands with a regression test only when the bug occurred in a load-bearing or hot code path; bugs in less critical areas are fixed without a test"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-bug-fix-lands-without-a-regression-test-but"
 label = "the bug fix lands without a regression test, but …"
 directive = "the bug fix lands without a regression test, but the PR description documents the reproduction steps so a future investigator can re-run them manually if the bug appears to recur"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-bug-fix-lands-without-a-regression-test-the"
 label = "the bug fix lands without a regression test; the …"
 directive = "the bug fix lands without a regression test; the project relies on canary or staging environments to surface any recurrence after the fix has shipped"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

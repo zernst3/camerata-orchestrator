@@ -24,10 +24,10 @@ why = "NestJS is built on dependency injection (DI). A service is a class decora
 id = "modules-providers-di"
 label = "Use NestJS modules and dependency injection"
 directive = "Services are decorated with @Injectable() and declared as providers in a module. Controllers and services receive dependencies via constructor injection. The NestJS DI container manages instantiation and injection. Testing uses NestJS's Test.createTestingModule() to configure a DI container for the test."
-why = "The adopted default. DI makes services composable, testable, and easy to wire together."
+why = "DI makes services composable, testable, and easy to wire together."
 
 [[option]]
 id = "manual-service-instantiation"
 label = "Instantiate services manually"
 directive = "Services are created manually (new ServiceClass()) or stored in static properties, and dependencies are wired explicitly in the code."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

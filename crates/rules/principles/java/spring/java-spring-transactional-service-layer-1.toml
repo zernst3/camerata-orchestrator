@@ -20,7 +20,7 @@ title = "Spring Framework Reference — Using @Transactional (service-layer exam
 id = "transactional-on-service"
 label = "@Transactional on service methods; controllers and repositories are transaction-free"
 directive = "@Transactional is applied on public service-layer methods (or on the service class, with per-method overrides where needed). @RestController and @Repository classes do not carry @Transactional. readOnly = true is used on service methods that only read data (SELECTS, no writes) to allow the JPA provider to optimize for read-only mode. @Transactional(rollbackFor = Exception.class) is specified when checked exceptions must also trigger rollback (Spring's default rollback policy is unchecked exceptions only)."
-why = "The adopted default. Service methods represent logical units of work that must be atomic; @Transactional on the service layer gives Spring the transaction boundary at the level of business operations, not individual SQL statements or HTTP request handlers."
+why = "Service methods represent logical units of work that must be atomic; @Transactional on the service layer gives Spring the transaction boundary at the level of business operations, not individual SQL statements or HTTP request handlers."
 
 [[option]]
 id = "transactional-on-repository"

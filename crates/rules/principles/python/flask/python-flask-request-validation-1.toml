@@ -16,7 +16,7 @@ why = "Flask does not provide built-in input validation. `request.json`, `reques
 id = "schema-validation-marshmallow-or-pydantic"
 label = "marshmallow Schema or pydantic model validates and deserializes all inbound data"
 directive = "Every route that accepts state-changing input (POST, PUT, PATCH) validates `request.json` (or `request.form`) against a marshmallow Schema or a pydantic model before any business logic runs. Deserialized, validated data is passed to the service or model layer; the raw `request.json` dict is never passed downstream directly. Routes return a structured 400 response (with field-level error details) when validation fails. `request.args` query parameters are similarly validated for routes where they are business-significant. Accessing `request.json.get('field')` or `request.json['field']` and passing the raw string to a service without schema validation is forbidden."
-why = "The adopted default. Marshmallow/pydantic schemas run a declared contract, produce typed Python objects, and generate structured error responses; manual dict access duplicates this incompletely."
+why = "Marshmallow/pydantic schemas run a declared contract, produce typed Python objects, and generate structured error responses; manual dict access duplicates this incompletely."
 
 [[option]]
 id = "manual-dict-access"

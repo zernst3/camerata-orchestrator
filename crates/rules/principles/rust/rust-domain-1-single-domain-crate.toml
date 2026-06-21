@@ -24,16 +24,16 @@ why = "At small/medium scale (tens of entities), no real bounded-context seams h
 id = "single-domain-crate-modules-by-bounded-context"
 label = "Single domain crate, modules by bounded context"
 directive = "One domain crate. Bounded contexts are internal modules, not separate crates."
-why = "The adopted default. At small/medium scale (tens of entities), no real bounded-context seams have emerged; splitting prematurely adds cyclic-dependency friction, and un-splitting later is harder than splitting later."
+why = "At small/medium scale (tens of entities), no real bounded-context seams have emerged; splitting prematurely adds cyclic-dependency friction, and un-splitting later is harder than splitting later."
 
 [[option]]
 id = "the-project-starts-with-a-separate-crate-per-bou"
 label = "the project starts with a separate crate per bounded …"
 directive = "the project starts with a separate crate per bounded context from day one, and bounded contexts live as sibling crates rather than as modules in a shared domain crate"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-project-keeps-a-single-domain-crate-but-does"
 label = "the project keeps a single domain crate but does …"
 directive = "the project keeps a single domain crate but does not subdivide it into modules by bounded context; all domain code lives in one flat module structure regardless of context"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

@@ -16,13 +16,13 @@ why = "Axum extractors run before the handler and convert raw HTTP data into typ
 id = "use-extractors-for-validation"
 label = "Use extractors for request validation; reject invalid requests at the boundary"
 directive = "Request validation (checking path parameters, query parameters, JSON body shape, required fields, type conversions) happens in custom extractors or built-in Axum extractors (Path, Query, Json, RawBody) that run before the handler. Invalid requests are rejected with an HTTP error response by the extractor before the handler is invoked. The handler receives only validated, typed data."
-why = "The adopted default. Extractors enforce validation at the HTTP boundary, so the handler assumes valid input and avoids duplicate validation logic."
+why = "Extractors enforce validation at the HTTP boundary, so the handler assumes valid input and avoids duplicate validation logic."
 
 [[option]]
 id = "validation-happens-inside-handlers-or-services"
 label = "validation happens inside handlers or services"
 directive = "Request data is extracted into a generic type in the handler, and validation (checking field presence, type correctness, constraints) happens inside the handler or is delegated to the service layer."
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/index.html"

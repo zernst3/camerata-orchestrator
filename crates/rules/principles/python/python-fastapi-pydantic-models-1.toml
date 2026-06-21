@@ -16,7 +16,7 @@ why = "Typing a request body as a Pydantic model gives FastAPI a validated bound
 id = "explicit-pydantic-schemas"
 label = "use explicit Pydantic request and response models"
 directive = "Every endpoint that accepts a body types it as a Pydantic model so FastAPI validates and coerces input at the boundary, and every endpoint that returns data declares a `response_model` Pydantic schema that filters the output to exactly the intended fields. ORM objects and raw dicts are never accepted as request bodies or returned directly; they are mapped to and from dedicated request/response schemas distinct from the persistence model."
-why = "The adopted default. Pydantic schemas validate input at the boundary and filter output, preventing both malformed input and accidental field leakage."
+why = "Pydantic schemas validate input at the boundary and filter output, preventing both malformed input and accidental field leakage."
 
 [[option]]
 id = "raw-dict-bodies"

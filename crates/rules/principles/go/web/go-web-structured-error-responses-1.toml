@@ -15,7 +15,7 @@ why = "An error response is metadata for the client: it needs to know whether to
 id = "structured-error-format"
 label = "All errors return a consistent structured format: {code, message, statusCode, ...}"
 directive = "The API defines an error response envelope (e.g., {code: string, message: string, status: int, details?: object}). All handlers, regardless of which error they encounter, format it into this envelope before sending the HTTP response. Status codes (4xx, 5xx) are paired with the structured body; a 400 Bad Request also includes the structured error code and message."
-why = "The adopted default. Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
+why = "Structured errors are parseable, loggable, and enable client-side error handling; one schema used across all handlers."
 
 [[option]]
 id = "status-code-only"

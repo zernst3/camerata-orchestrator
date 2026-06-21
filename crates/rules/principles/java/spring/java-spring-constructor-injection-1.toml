@@ -26,7 +26,7 @@ linter = "Checkstyle: VisibilityModifier"
 id = "constructor-injection-final-fields"
 label = "All dependencies as constructor parameters; fields are private final; no @Autowired on fields"
 directive = "Every Spring bean class declares its dependencies as constructor parameters. Each parameter is assigned to a private final field in the constructor body. No @Autowired annotation appears on an instance field. For classes with a single constructor, the @Autowired annotation on the constructor itself is omitted (Spring auto-wires it). @Autowired on a constructor with multiple constructors is permitted when the intent is to disambiguate. @RequiredArgsConstructor from Lombok is an acceptable shorthand when the project uses Lombok."
-why = "The adopted default. Constructor injection exposes dependencies explicitly, enables final fields, makes testing trivial without a container, and surfaces circular dependency cycles at startup."
+why = "Constructor injection exposes dependencies explicitly, enables final fields, makes testing trivial without a container, and surfaces circular dependency cycles at startup."
 
 [[option]]
 id = "field-injection-autowired"

@@ -16,7 +16,7 @@ why = "Everything that arrives in `request.POST`, `request.data`, `request.GET`,
 id = "forms-or-serializers"
 label = "Form or Serializer validates and cleans all inbound data; view reads validated_data only"
 directive = "Every view that accepts state-changing input (POST, PUT, PATCH, DELETE with body) passes `request.data` (or `request.POST`) to a Form or DRF Serializer before any business logic. The view calls `form.is_valid()` or `serializer.is_valid(raise_exception=True)` and reads from `form.cleaned_data` or `serializer.validated_data`. Accessing `request.data['field']` or `request.POST.get('field')` directly and passing the raw string to a model or service without Form/Serializer validation is forbidden. Model-level validators and `full_clean()` are a complementary layer, not a substitute for the Form/Serializer boundary."
-why = "The adopted default. Forms and Serializers run a declared schema, produce typed cleaned values, and return structured error responses automatically; manual request-dict access duplicates this work incompletely."
+why = "Forms and Serializers run a declared schema, produce typed cleaned values, and return structured error responses automatically; manual request-dict access duplicates this work incompletely."
 
 [[option]]
 id = "direct-request-data-access"

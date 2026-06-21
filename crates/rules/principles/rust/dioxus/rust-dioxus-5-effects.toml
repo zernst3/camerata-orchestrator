@@ -16,25 +16,25 @@ why = "Auto-tracking from signal reads is more correct than the manual dependenc
 id = "side-effects-run-inside-use-effect-dependencies"
 label = "Side effects run inside use_effect; dependencies auto-track from signal reads in the closure"
 directive = "Side effects (telemetry emission, scroll-to-top on route change, manual DOM measurement, third-party widget initialization) run inside the framework's effect hook. Dependencies are tracked automatically from the signals the closure reads; there is no manual dependency array. Data fetching does NOT belong in an effect; use the resource hook for that. Cleanup runs through the drop implementation of state captured by the closure, the same way the framework cleans up any other state when a tracked signal changes."
-why = "The adopted default. Auto-tracking from signal reads is more correct than the manual dependency arrays seen in other frameworks because a contributor cannot forget to list a dependency: the effect simply does not re-run if the value was not read."
+why = "Auto-tracking from signal reads is more correct than the manual dependency arrays seen in other frameworks because a contributor cannot forget to list a dependency: the effect simply does not re-run if the value was not read."
 
 [[option]]
 id = "side-effects-use-the-framework-s-effect-hook-wit"
 label = "side effects use the framework's effect hook with a …"
 directive = "side effects use the framework's effect hook with a manually maintained dependency array, rather than relying on auto-tracking from signal reads inside the closure"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "data-fetching-for-the-ui-runs-inside-an-effect-h"
 label = "data fetching for the UI runs inside an effect …"
 directive = "data fetching for the UI runs inside an effect hook with manual loading/error/refresh state, rather than going through the resource hook"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "side-effects-run-directly-in-the-component-body"
 label = "side effects run directly in the component body outside …"
 directive = "side effects run directly in the component body outside any effect hook, executing on every render"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://docs.rs/dioxus/latest/dioxus/prelude/fn.use_effect.html"

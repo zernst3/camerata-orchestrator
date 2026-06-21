@@ -25,22 +25,22 @@ why = "Green existing tests prove the new code did not break old paths; they do 
 id = "ai-authored-code-paths-carry-tests-not-just-a-pa"
 label = "AI-authored code paths carry tests, not just a passing existing suite"
 directive = "A change that adds a new code path carries new tests for that path, not only a green run of the existing test suite. The new test exercises the new branch directly, and a change-time check verifies that the new path is actually reached by the new test (a coverage diff on the introduced lines, a mutation check on the new branch, or equivalent). The rule applies to every change but is load-bearing for AI-authored ones, because agents can write code that compiles and that the existing suite passes while leaving the new branch entirely uncovered."
-why = "The adopted default. Green existing tests prove the new code did not break old paths; they do not prove the new path works."
+why = "Green existing tests prove the new code did not break old paths; they do not prove the new path works."
 
 [[option]]
 id = "the-change-pipeline-requires-only-that-the-exist"
 label = "the change pipeline requires only that the existing test …"
 directive = "the change pipeline requires only that the existing test suite passes on a diff; no check verifies that the new code path introduced by the diff is actually exercised by any test"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-change-pipeline-requires-the-project-to-stay"
 label = "the change pipeline requires the project to stay above …"
 directive = "the change pipeline requires the project to stay above a fixed coverage percentage on the full project, with no per-diff check that the introduced lines specifically are covered"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-change-pipeline-ships-ai-authored-changes-on"
 label = "the change pipeline ships AI-authored changes on the strength …"
 directive = "the change pipeline ships AI-authored changes on the strength of a passing existing suite, and post-merge canary or staging environments are relied on to surface coverage gaps after the fact"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

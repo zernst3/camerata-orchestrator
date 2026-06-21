@@ -16,7 +16,7 @@ why = "When a where() clause is written in multiple places — e.g., User.where(
 id = "activerecord-scopes"
 label = "Encapsulate query patterns in ActiveRecord scopes"
 directive = "Common or complex query conditions are defined as scopes in the model. Example: scope :active, -> { where(is_active: true) }; scope :recent, -> { where('created_at > ?', 1.week.ago) }; scope :with_orders, -> { joins(:orders).distinct }. Queries are then chained as User.active.recent.with_orders. Scopes are public, documented, and testable in isolation. A where() clause used in more than one place is a candidate for a scope."
-why = "The adopted default. Scopes centralize query definitions, making them reusable, consistent, and changeable in one place."
+why = "Scopes centralize query definitions, making them reusable, consistent, and changeable in one place."
 
 [[option]]
 id = "inline-where-clauses"

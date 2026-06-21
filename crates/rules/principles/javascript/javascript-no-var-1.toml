@@ -22,10 +22,10 @@ why = "var is function-scoped and hoisted, which means a var declared anywhere i
 id = "bindings-are-declared-with-const-or-let-var-is-f"
 label = "Bindings are declared with const or let; var is forbidden"
 directive = "Every binding is declared with const (the default) or let (only when the binding is reassigned). The var keyword is forbidden everywhere, including in loops and conditional blocks where its function-scoping and hoisting are most error-prone."
-why = "The adopted default. var is function-scoped and hoisted, producing closure-capture and temporal bugs that the block-scoped const and let structurally cannot have."
+why = "var is function-scoped and hoisted, producing closure-capture and temporal bugs that the block-scoped const and let structurally cannot have."
 
 [[option]]
 id = "var-remains-permitted-alongside-const-and-let-le"
 label = "var remains permitted alongside const and let, leaving …"
 directive = "var remains permitted alongside const and let, leaving the choice of declaration keyword to the author rather than forbidding the function-scoped, hoisted var form outright"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

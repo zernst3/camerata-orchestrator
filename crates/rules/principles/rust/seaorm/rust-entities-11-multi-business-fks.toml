@@ -16,25 +16,25 @@ why = "Both directions get compile-time validation and self-document the roles. 
 id = "two-or-more-business-fks-to-the-same-parent-both"
 label = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 directive = "When an entity has multiple business FKs to the same parent (e.g. requester_id, reviewer_id), declare both belongs_to plus disambiguated reverse has_many variants (…AsRequester, …AsReviewer). Add impl Related on the principal semantic direction (the creator or initiator); secondary directions use filtered queries. The pattern generalizes to N business FKs."
-why = "The adopted default. Both directions get compile-time validation and self-document the roles."
+why = "Both directions get compile-time validation and self-document the roles."
 
 [[option]]
 id = "the-entity-declares-one-of-the-business-fks-as-b"
 label = "the entity declares one of the business FKs as …"
 directive = "the entity declares one of the business FKs as belongs_to and stores the other role as a plain Uuid column rather than as a foreign key with its own belongs_to and reverse has_many"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-entity-declares-both-business-fk-belongs-to"
 label = "the entity declares both business FK belongs_to variants but …"
 directive = "the entity declares both business FK belongs_to variants but drops the reverse has_many for one of the roles, so reverse traversal from the parent works for one role and not the other"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "the-entity-declares-both-directions-but-routes-i"
 label = "the entity declares both directions but routes impl Related …"
 directive = "the entity declares both directions but routes impl Related to the secondary role rather than to the principal semantic direction, so find_related traverses the non-primary role by default"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"

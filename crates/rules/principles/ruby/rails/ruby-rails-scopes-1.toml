@@ -16,7 +16,7 @@ why = "An ad-hoc `.where(status: 'active', deleted_at: nil)` repeated in three c
 id = "named-scopes-on-model"
 label = "named scopes on the model; call sites compose scope names"
 directive = "Query conditions that appear more than once, or that represent a business concept (e.g. `active`, `pending`, `visible_to(user)`), are defined as named scopes on the model using the `scope :name, -> { ... }` macro or a class method returning an ActiveRecord::Relation. Call sites compose scope names rather than repeating where-clause conditions. Ad-hoc `.where` chains at a call site are acceptable for one-off queries unique to that site, but any condition used in two or more places moves to a named scope."
-why = "The adopted default. Named scopes give query conditions a single authoritative definition on the model that all call sites compose, making changes to the condition a one-file edit."
+why = "Named scopes give query conditions a single authoritative definition on the model that all call sites compose, making changes to the condition a one-file edit."
 
 [[option]]
 id = "where-chains-at-call-site"

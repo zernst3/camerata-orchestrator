@@ -20,7 +20,7 @@ why = "A transaction groups multiple writes into an atomic unit: either all succ
 id = "transactions-multi-write"
 label = "Multi-step writes use transactions; all-or-nothing consistency"
 directive = "Any operation that performs multiple writes (insert user, insert profile; transfer from account A to account B) wraps the writes in a transaction using db.WithTxn(ctx, func(tx *gorm.DB) error { ... }) or db.BeginTx(ctx, nil).Create(...).Save(...).Commit(). If any write fails, the transaction rolls back and the database is not left in a partial state. Single writes do not require a transaction (the database ensures single-write atomicity)."
-why = "The adopted default. Transactions enforce all-or-nothing semantics; the database is always consistent."
+why = "Transactions enforce all-or-nothing semantics; the database is always consistent."
 
 [[option]]
 id = "no-transactions"

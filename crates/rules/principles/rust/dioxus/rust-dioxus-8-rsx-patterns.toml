@@ -16,25 +16,25 @@ why = "Native Rust control flow inside the template means contributors do not ha
 id = "templates-use-native-control-flow-iterated-child"
 label = "Templates use native control flow; iterated children must carry a stable key"
 directive = "Inside the framework's template macro, conditional rendering uses native if expressions, optional rendering uses native if-let expressions, iteration uses native for expressions, and multi-branch rendering uses native match expressions. Signal and string interpolation happens through curly-brace placeholders in attribute and text positions. Every child produced by a for expression carries a stable key derived from a property of the underlying data, never the loop index. Without a stable key, the framework cannot diff list reorders and every row remounts, destroying child state."
-why = "The adopted default. Native Rust control flow inside the template means contributors do not have to learn a separate expression-mode dialect: the language they already know IS the template language."
+why = "Native Rust control flow inside the template means contributors do not have to learn a separate expression-mode dialect: the language they already know IS the template language."
 
 [[option]]
 id = "iteration-in-templates-is-expressed-by-building"
 label = "iteration in templates is expressed by building a vector …"
 directive = "iteration in templates is expressed by building a vector of elements through an iterator chain and interpolating the vector, rather than using a native for expression inside the rsx macro"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "templates-are-rendered-as-concatenated-strings-t"
 label = "templates are rendered as concatenated strings that bypass the …"
 directive = "templates are rendered as concatenated strings that bypass the framework's diffing entirely, rather than going through the rsx macro and the virtual DOM"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "lists-rendered-in-templates-omit-the-key-attribu"
 label = "lists rendered in templates omit the key attribute on …"
 directive = "lists rendered in templates omit the key attribute on iterated children when the list looks stable in practice, rather than always supplying a stable key derived from the underlying data"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/reference/rsx"

@@ -25,10 +25,10 @@ why = "A template's job is to render the view; it should be a declarative map of
 id = "templates-are-simple-and-logic-free-complex-cond"
 label = "Templates are simple and logic-free; complex conditions and computations live in the component"
 directive = "Templates contain only simple property bindings, *ngIf on single boolean conditions, and *ngFor on arrays. Complex conditions (AND/OR chains, ternary operators, comparisons), computations, method calls with side effects, and derived values are moved to the component class and exposed as properties or getter methods. A template that contains logic beyond simple bindings and single conditions is refactored to move the logic to the component."
-why = "The adopted default. Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
+why = "Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
 
 [[option]]
 id = "templates-contain-complex-logic-ternary-operators"
 label = "templates contain complex logic, ternary operators, …"
 directive = "templates contain conditionals, method calls, computations, and complex logic expressions inline, without moving them to component properties or methods"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

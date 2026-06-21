@@ -20,7 +20,7 @@ title = "Spring Data JPA Reference — Configuring Fetch- and LoadGraphs (@Entit
 id = "fetch-join-or-entity-graph"
 label = "LAZY default on all associations; fetch joins or @EntityGraph on repository methods that need them"
 directive = "All @OneToMany, @ManyToMany, and @ManyToOne associations default to FetchType.LAZY (the default for @OneToMany and @ManyToMany; must be explicit for @ManyToOne which defaults to EAGER). Repository methods that need an association loaded declare a JPQL fetch join (JOIN FETCH) or carry @EntityGraph(attributePaths = {'...'}). Service or domain code does not traverse a LAZY association in a loop without having loaded it via a fetch join or EntityGraph in the originating query. EAGER as a default FetchType on any association is forbidden."
-why = "The adopted default. LAZY default prevents over-fetching; explicit fetch joins and EntityGraphs load associations in one query for the callers that need them, eliminating N+1 round-trips."
+why = "LAZY default prevents over-fetching; explicit fetch joins and EntityGraphs load associations in one query for the callers that need them, eliminating N+1 round-trips."
 
 [[option]]
 id = "eager-globally"

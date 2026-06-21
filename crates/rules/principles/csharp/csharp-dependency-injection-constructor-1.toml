@@ -15,7 +15,7 @@ why = "Constructor injection makes dependencies explicit in the type's public co
 id = "constructor-injection"
 label = "inject dependencies via constructor parameters, marked private readonly"
 directive = "All dependencies are declared as constructor parameters and assigned to private readonly instance fields. The constructor is explicitly defined (not implicitly generated). For ASP.NET Core, the container automatically wires all registered service dependencies to the constructor. Dependencies are private readonly so they cannot be reassigned or accidentally modified. No [Inject] or [Service] attributes on properties or fields."
-why = "The adopted default. Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
+why = "Constructor injection is explicit, immutable, testable, and makes circular dependencies obvious."
 
 [[option]]
 id = "property-injection"

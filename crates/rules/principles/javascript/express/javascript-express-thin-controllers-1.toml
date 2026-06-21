@@ -20,10 +20,10 @@ why = "A route handler's job is HTTP-shaped: read the validated request, call in
 id = "route-handlers-stay-thin-business-logic-and-data"
 label = "Route handlers stay thin; business logic and data access live in a service layer"
 directive = "Route handlers are limited to HTTP concerns: invoke input validation, call a service/use-case function, and map its result or error onto a response. Business rules and data access (database queries, ORM calls, external API calls) live in a service or repository layer the handler delegates to, not inline in the route. A direct database query or business-rule computation written inside a route handler is forbidden; it moves behind the service layer the handler calls."
-why = "The adopted default. Logic and data access inline in a handler can only be reached through an HTTP request, so it cannot be unit-tested or reused by a job or another route, and it mixes transport concerns with domain concerns in one place."
+why = "Logic and data access inline in a handler can only be reached through an HTTP request, so it cannot be unit-tested or reused by a job or another route, and it mixes transport concerns with domain concerns in one place."
 
 [[option]]
 id = "route-handlers-contain-business-logic-and-direct"
 label = "route handlers contain business logic and direct database …"
 directive = "route handlers contain business logic and direct database access inline, handling validation, rules, and data access together in the route, rather than delegating to a separate service or repository layer"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

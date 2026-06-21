@@ -21,10 +21,10 @@ why = "Prevents business logic hiding inside the query layer; keeps each layer t
 id = "strict-layering-services-orchestrate-repositorie"
 label = "Strict layering — services orchestrate, repositories own data access"
 directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer). Exception: transaction flow control belongs in services."
-why = "The adopted default. Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
+why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
 
 [[option]]
 id = "controllers-services-and-repositories-are-not-se"
 label = "controllers, services, and repositories are not separated by lint …"
 directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

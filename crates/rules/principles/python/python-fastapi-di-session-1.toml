@@ -16,7 +16,7 @@ why = "A path operation that opens its own session, or pulls one from a module-l
 id = "inject-per-request-session"
 label = "inject a per-request session via Depends"
 directive = "Path operations receive their database session through a `Depends`-injected dependency that yields a session scoped to the single request and guarantees close (and rollback-on-error) afterward. Handlers never construct a session, open a connection, or read a module-level session global. The session dependency is overridable in tests through `app.dependency_overrides` so handlers run against a transactional test session."
-why = "The adopted default. A dependency-injected per-request session guarantees cleanup automatically and makes handlers testable in isolation."
+why = "A dependency-injected per-request session guarantees cleanup automatically and makes handlers testable in isolation."
 
 [[option]]
 id = "session-in-handler"

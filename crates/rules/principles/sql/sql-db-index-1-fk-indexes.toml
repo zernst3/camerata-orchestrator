@@ -25,22 +25,22 @@ why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not auto
 id = "every-foreign-key-column-gets-an-index-in-the-sa"
 label = "Every foreign-key column gets an index in the same migration"
 directive = "When a migration adds a foreign-key column, the same migration adds an index on it. Declare the index adjacent to the FK in the file so a reviewer can see them together. The pair is enforceable by a migration linter that scans for FK declarations and verifies a matching index in the same change."
-why = "The adopted default. Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join."
+why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join."
 
 [[option]]
 id = "the-project-relies-on-the-database-engine-to-aut"
 label = "the project relies on the database engine to auto-index …"
 directive = "the project relies on the database engine to auto-index foreign-key columns and does not declare explicit indexes on FK columns in migrations"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "fk-indexes-are-added-reactively-in-later-migrati"
 label = "FK indexes are added reactively in later migrations after …"
 directive = "FK indexes are added reactively in later migrations after production performance degrades, rather than being added in the same migration that introduces the FK column"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."
 
 [[option]]
 id = "fk-indexes-are-declared-in-a-follow-up-migration"
 label = "FK indexes are declared in a follow-up migration that …"
 directive = "FK indexes are declared in a follow-up migration that ships after the migration introducing the FK column, rather than in the same atomic change"
-why = "A defensible alternative the project considered and did not adopt as the default."
+why = "A defensible alternative the project considered."

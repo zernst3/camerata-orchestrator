@@ -17,7 +17,7 @@ why = "Rails ActiveRecord models can be instantiated or updated with Model.new(p
 id = "strong-parameters"
 label = "Use Rails strong_parameters with permit() to whitelist inputs"
 directive = "Every controller action that receives user input calls params.require(:resource).permit(:field1, :field2, ...) to explicitly whitelist the parameters allowed for that action. The result is passed to model methods like create() or update(). Bare params hashes are never passed directly to model mutations. Array and nested-parameter types use permit(arrays: []) and permit(nested_attr: [:id, :name]) syntax. Model mass-assignment protection (attr_accessible) is still enabled as a defense-in-depth backstop."
-why = "The adopted default. Strong parameters are a built-in Rails convention that require explicit opt-in, preventing mass-assignment vulnerabilities."
+why = "Strong parameters are a built-in Rails convention that require explicit opt-in, preventing mass-assignment vulnerabilities."
 
 [[option]]
 id = "permissive-params"

@@ -25,7 +25,7 @@ why = "Go's context.Context is the standard mechanism for propagating request-sc
 id = "context-all-calls"
 label = "Context is threaded through all function calls; operations respect deadlines and cancellation"
 directive = "Every handler receives the request context from the framework. Service methods, repository methods, external API calls, and any blocking operations accept context as their first argument. Handlers pass the context to all downstream calls. Operations that can be cancelled or timed out (db.QueryContext, http.DoWithContext, etc.) respect the context deadline; a context timeout is not caught and suppressed but is allowed to propagate and terminate the operation."
-why = "The adopted default. Context propagation is Go's built-in request-scoping mechanism; respecting it ensures timeouts work, resources are cleaned up on cancellation, and the system is responsive to client disconnects."
+why = "Context propagation is Go's built-in request-scoping mechanism; respecting it ensures timeouts work, resources are cleaned up on cancellation, and the system is responsive to client disconnects."
 
 [[option]]
 id = "context-background-in-services"
