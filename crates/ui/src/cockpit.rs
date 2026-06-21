@@ -8003,6 +8003,17 @@ fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                 }
+                // If the architect SKIPS the audit, the post-scan section below (which hosts the
+                // CI-wiring story) never renders because `code_chars == 0`. But wiring mechanical
+                // rules into CI only needs the SELECTED rules, not a code scan — so offer the
+                // CI-story affordance here too, so it's reachable straight after rule selection.
+                if report.code_chars == 0 {
+                    div { class: "onboard-final-step",
+                        span { class: "onboard-step-eyebrow", "Optional: wire mechanical rules into CI" }
+                        CiRulesPanel { repos: report.repos.clone() }
+                        p { class: "section-hint", "You can file the CI-wiring story (a GitHub issue) from your selected rules without running the audit. Optional, and not required to finish onboarding." }
+                    }
+                }
                 // Cost: the pre-audit ESTIMATE for this configuration (model + calibration
                 // model + mode + ticked rules), and — once the audit has run — the ACTUAL
                 // billed usage beside it, so the estimate is verifiable, not a black box.
