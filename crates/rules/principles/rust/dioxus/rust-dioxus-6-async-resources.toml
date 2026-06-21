@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Async UI data goes through the resource hook; fire-and-forget work goes through spawn?"
@@ -34,3 +35,11 @@ id = "the-project-adopts-a-global-request-cache-librar"
 label = "the project adopts a global request-cache library on top …"
 directive = "the project adopts a global request-cache library on top of resource hooks from day one, regardless of whether a specific caching need has surfaced"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/essentials/async/"
+title = "Dioxus essentials: Async — use_resource for UI data, spawn for fire-and-forget"
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/reference/use_resource"
+title = "Dioxus reference: use_resource — async hook with reactive dependencies"

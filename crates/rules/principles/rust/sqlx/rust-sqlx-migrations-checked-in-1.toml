@@ -5,6 +5,7 @@ domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Database migrations?"
@@ -22,3 +23,7 @@ id = "apply-migrations-manually"
 label = "Apply migrations manually"
 directive = "Database migrations are applied manually by a DBA or operations team before or after deployment, outside of the application startup process."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sqlx/latest/sqlx/macro.migrate.html"
+title = "sqlx::migrate! — Embeds SQL migration files into the binary as a static Migrator"

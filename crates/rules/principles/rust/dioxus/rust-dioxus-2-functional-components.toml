@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq?"
@@ -34,3 +35,7 @@ id = "every-component-declares-its-props-inline-as-fun"
 label = "every component declares its props inline as function arguments …"
 directive = "every component declares its props inline as function arguments regardless of count, with no dedicated Props struct even when the component has three or more props"
 why = "Functionally equivalent — the component-attribute macro generates the same Props struct and derives behind the scenes. The only cost is a longer function signature past a few props, so this differs from the default on readability alone, not correctness."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/reference/components"
+title = "Dioxus reference: Components — functions returning Element in UpperCamelCase"

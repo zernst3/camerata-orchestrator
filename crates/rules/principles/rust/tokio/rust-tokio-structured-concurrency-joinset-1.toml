@@ -5,6 +5,7 @@ domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Structured concurrency with JoinSet?"
@@ -22,3 +23,7 @@ id = "use-unstructured-spawn"
 label = "Use unstructured tokio::spawn"
 directive = "Tasks are spawned via tokio::spawn without a JoinSet. Tasks may run past the scope where they are spawned, and the application relies on explicit cancellation or task-local cleanup."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html"
+title = "tokio::task::JoinSet — Structured task collection; aborts on drop"

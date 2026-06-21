@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Server-to-client calls use server functions, not a separately maintained HTTP client?"
@@ -34,3 +35,7 @@ id = "the-server-exposes-a-graph-query-endpoint-with-c"
 label = "the server exposes a graph-query endpoint with client-side code …"
 directive = "the server exposes a graph-query endpoint with client-side code generation, and the UI fetches everything through generated query types rather than through per-operation server functions"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/server_functions"
+title = "Dioxus fullstack: Server Functions — #[server] macro generates client/server from one definition"

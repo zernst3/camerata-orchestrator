@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Templates use native control flow; iterated children must carry a stable key?"
@@ -34,3 +35,7 @@ id = "lists-rendered-in-templates-omit-the-key-attribu"
 label = "lists rendered in templates omit the key attribute on …"
 directive = "lists rendered in templates omit the key attribute on iterated children when the list looks stable in practice, rather than always supplying a stable key derived from the underlying data"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/reference/rsx"
+title = "Dioxus reference: RSX — declarative UI with native Rust control flow in rsx!"

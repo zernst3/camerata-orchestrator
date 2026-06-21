@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Cross-cutting concerns in middleware?"
@@ -22,3 +23,7 @@ id = "cross-cutting-concerns-inline-in-handlers"
 label = "Implement cross-cutting concerns inline in handlers"
 directive = "Each handler is responsible for implementing logging, authentication, rate limiting, and other cross-cutting concerns directly in the handler body or by calling helper functions from the handler."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/middleware/index.html"
+title = "axum::middleware — Tower middleware integration"

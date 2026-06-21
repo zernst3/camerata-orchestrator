@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Side effects run inside use_effect; dependencies auto-track from signal reads in the closure?"
@@ -34,3 +35,7 @@ id = "side-effects-run-directly-in-the-component-body"
 label = "side effects run directly in the component body outside …"
 directive = "side effects run directly in the component body outside any effect hook, executing on every render"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/dioxus/latest/dioxus/prelude/fn.use_effect.html"
+title = "dioxus::use_effect — auto-tracking signal dependencies, runs after mount and on signal change"

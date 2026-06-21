@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Unique constraints the macro cannot express live at the DB level and are noted in the module doc?"
@@ -34,3 +35,7 @@ id = "the-composite-or-partial-uniqueness-constraint-i"
 label = "the composite or partial uniqueness constraint is dropped at …"
 directive = "the composite or partial uniqueness constraint is dropped at the database level and enforced exclusively in application code instead"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
+title = "SeaORM docs: Entity Format — #[sea_orm(unique)] single-column constraint only"

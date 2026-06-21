@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Self-referential FKs: single belongs_to + impl Related<Entity> for Entity?"
@@ -28,3 +29,7 @@ id = "the-self-referential-entity-declares-the-belongs"
 label = "the self-referential entity declares the belongs_to but omits impl …"
 directive = "the self-referential entity declares the belongs_to but omits impl Related, and every caller spells out the join inline at the call site"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"
+title = "SeaORM docs: Complex Relations — self-referential FKs with self_ref"

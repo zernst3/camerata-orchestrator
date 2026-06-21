@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs?"
@@ -28,3 +29,7 @@ id = "the-entity-stores-its-audit-relationships-create"
 label = "the entity stores its audit relationships (created_by, modified_by) as …"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"
+title = "SeaORM docs: One to Many — belongs_to and has_many relation patterns"

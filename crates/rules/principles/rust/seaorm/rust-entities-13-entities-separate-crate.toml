@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Entities live in their own crate, separate from infrastructure?"
@@ -28,3 +29,7 @@ id = "repository-implementations-live-in-the-mapper-cr"
 label = "repository implementations live in the mapper crate alongside the …"
 directive = "repository implementations live in the mapper crate alongside the translation logic, rather than in the infrastructure crate"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
+title = "sea_orm::DeriveEntityModel — entities are pure data; no DB pool or driver"

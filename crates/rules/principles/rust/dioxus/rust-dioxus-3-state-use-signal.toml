@@ -5,6 +5,7 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Local component state is a Signal, read via call or read, written via set or with_mut?"
@@ -34,3 +35,7 @@ id = "a-dummy-signal-is-incremented-manually-to-force"
 label = "a dummy signal is incremented manually to force a …"
 directive = "a dummy signal is incremented manually to force a re-render whenever component state changes, rather than letting the signal primitive's automatic subscription tracking drive re-renders"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://dioxuslabs.com/learn/0.6/essentials/state/"
+title = "Dioxus essentials: State — use_signal, Signal, read, set, write"

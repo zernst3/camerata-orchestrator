@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: No serde derives on the SeaORM Model (load-bearing)?"
@@ -28,3 +29,7 @@ id = "individual-entity-models-opt-in-to-deriving-seri"
 label = "individual entity Models opt in to deriving Serialize and …"
 directive = "individual entity Models opt in to deriving Serialize and Deserialize on a per-entity basis, while other entities remain non-serde"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
+title = "sea_orm::DeriveEntityModel — Entity Model definition; no Serialize/Deserialize by default"

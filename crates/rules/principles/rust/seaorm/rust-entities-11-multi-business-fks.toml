@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction?"
@@ -34,3 +35,7 @@ id = "the-entity-declares-both-directions-but-routes-i"
 label = "the entity declares both directions but routes impl Related …"
 directive = "the entity declares both directions but routes impl Related to the secondary role rather than to the principal semantic direction, so find_related traverses the non-primary role by default"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/relation/complex-relations/"
+title = "SeaORM docs: Complex Relations — multiple FKs to same entity, via_rel disambiguation"

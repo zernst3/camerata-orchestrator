@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Typed error responses?"
@@ -22,3 +23,7 @@ id = "handlers-build-http-responses-directly"
 label = "Handlers build HTTP responses directly for errors"
 directive = "Each handler constructs StatusCode and response bodies directly when errors occur, mapping domain errors to HTTP responses inline in the handler code."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/response/index.html"
+title = "axum::response — IntoResponse trait and ErrorResponse type"

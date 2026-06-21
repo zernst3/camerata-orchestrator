@@ -5,6 +5,7 @@ domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: FK relations declared on BOTH sides?"
@@ -34,3 +35,11 @@ id = "foreign-key-relations-are-added-on-each-side-onl"
 label = "foreign-key relations are added on each side only when …"
 directive = "foreign-key relations are added on each side only when the current code path needs them, so the FK graph in the entities crate grows only as features exercise specific traversal directions"
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"
+title = "SeaORM docs: One to Many — belongs_to on child, has_many on parent"
+
+[[sources]]
+url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-one/"
+title = "SeaORM docs: One to One — always define belongs_to on the entity with the FK"

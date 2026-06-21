@@ -5,6 +5,7 @@ domain = "rust:axum"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
 
 [decision]
 question = "What position does the project take on: Handlers stay thin and delegate to services?"
@@ -22,3 +23,7 @@ id = "handlers-contain-business-logic-and-data-access"
 label = "Handlers contain business logic and data access inline"
 directive = "Handlers contain business logic, data access (database queries, ORM calls), and external API calls inline, handling validation, rules, and data retrieval together in the handler, rather than delegating to a separate service or repository layer."
 why = "A defensible alternative the project considered and did not adopt as the default."
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/"
+title = "axum — Overview: handlers, extractors, and routing architecture"
