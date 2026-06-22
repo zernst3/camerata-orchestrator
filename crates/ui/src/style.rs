@@ -2464,6 +2464,25 @@ html, body {
 .uow-stage-btn:hover:not(:disabled) { border-color: var(--accent); }
 .uow-stage-btn:disabled { opacity: .45; cursor: not-allowed; }
 
+/* ── Per-phase run control, inline with the lifecycle steps (Increment 1) ──── */
+/* The run control for the ACTIVE phase renders here; it replaces the prior
+   phase's control rather than stacking. */
+.uow-step-control {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--surface);
+}
+.uow-step-h {
+  font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--ink-faint); margin: 0;
+}
+/* The three per-tier model selects for a development run. */
+.uow-tier-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px;
+}
+.uow-tier-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.uow-tier-field .run-model-select { width: 100%; }
+
 /* Frozen gate provenance read-out on the UoW panel. */
 .uow-provenance {
   display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px;
