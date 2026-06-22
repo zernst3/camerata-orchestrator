@@ -5609,9 +5609,13 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
 }
 
 fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
+    // The enforcement LANE (coarse automated-vs-human axis): mechanical/architectural
+    // rules are CI-enforced ("Automated (CI)"), prose/structured are human-reviewed.
+    // Labels deliberately avoid reusing "Mechanical" so this column doesn't collide
+    // with the four-modality "Type" column.
     let kind = BadgeVariantMap::new()
-        .with("mechanical", BadgeVariant::new("Mechanical", "green"))
-        .with("review", BadgeVariant::new("Review", "yellow"));
+        .with("mechanical", BadgeVariant::new("Automated (CI)", "green"))
+        .with("review", BadgeVariant::new("Human review", "yellow"));
     let scope = BadgeVariantMap::new()
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
@@ -5668,6 +5672,15 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(280.0),
+        // Type (enforcement modality): prose / structured / mechanical / architectural —
+        // WHAT kind of conformance check the rule needs. The RowCellRenderer below adds a
+        // `title` tooltip with the modality definition; see `enforcement_tooltip()`.
+        ColumnDef::new(ColumnId("enf_type"), "Type", |r: &ProposedRuleView| {
+            CellValue::Text(r.enforcement.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(enforcement_badges()))
+        .initial_width(130.0),
         // Provenance / verification state — displayed next to the rule name so the
         // architect immediately sees whether a rule is human-verified, grounded in a
         // cited source, a draft (AI-generated, not yet grounded), or flagged for
@@ -5688,11 +5701,11 @@ fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleView>> {
         // chosen in the "Repo ruleset" selector above the table, so per-row repo was redundant.)
         ColumnDef::new(
             ColumnId("placement"),
-            "Gate placement",
+            "Where enforced",
             |r: &ProposedRuleView| CellValue::Text(r.placement.clone()),
         )
         .initial_width(300.0),
-        ColumnDef::new(ColumnId("kind"), "Kind", |r: &ProposedRuleView| {
+        ColumnDef::new(ColumnId("kind"), "Enforced by", |r: &ProposedRuleView| {
             CellValue::Text(r.kind.clone())
         })
         .sortable()
@@ -6419,6 +6432,23 @@ fn ProposedRulesTable(
         String::new()
     };
 
+    // Row-cell renderer for the Type (enforcement modality) column: a native `title`
+    // tooltip with the modality definition. Mirrors ProjectRulesTable / AllRulesTable.
+    let rule_type_renderers = {
+        let mut m: std::collections::HashMap<ColumnId, RowCellRenderer<ProposedRuleView>> =
+            std::collections::HashMap::new();
+        m.insert(
+            ColumnId("enf_type"),
+            std::sync::Arc::new(move |r: &ProposedRuleView, _val: &CellValue| {
+                let enf = r.enforcement.as_str();
+                let tip = enforcement_tooltip(enf);
+                let label = if enf.is_empty() { "\u{2014}" } else { enf };
+                rsx! { span { title: "{tip}", "{label}" } }
+            }) as RowCellRenderer<ProposedRuleView>,
+        );
+        RowCellRenderers::new(m)
+    };
+
     rsx! {
         // Per-domain "select all" is now native: the table is grouped by domain and
         // chorale 0.2.3 renders a tri-state select-all checkbox in each group header
@@ -6429,6 +6459,7 @@ fn ProposedRulesTable(
             sort_enabled: true,
             selection_enabled: true,
             filter_enabled: true,
+            row_cell_renderers: rule_type_renderers,
             // 0.2.3: expand-all / collapse-all control in the grouped header. The table is
             // grouped by domain and mounts collapsed, so this lets the architect open every
             // domain's rules (and re-collapse them) in one click.
