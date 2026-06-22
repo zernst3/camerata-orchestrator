@@ -4,15 +4,20 @@ This is the "I have a repo new to Camerata — where do I start, and how do I ta
 the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status (updated 2026-06-19): the brownfield **onboarding flow is built and live** — per-repo
+> Status (updated 2026-06-22): the brownfield **onboarding flow is built and live** — per-repo
 > stack detection + rule selection, **custom rules** (per-repo + project-global), an optional code
-> audit with three scan modes and an opt-in **thorough-calibration** consensus pass, a three-table
-> finding triage, and an **Apply** step that writes governance onto a local branch and pushes it
-> (no PR until you ask). Re-onboarding an already-onboarded repo is **blocked**. Projects are
-> **exportable/importable**, repos resolve to **local folders** with a health check, and onboarding
-> state **auto-saves**. Governed Development carries a one-click **Gate self-check** (go/no-go) that
-> proves the deny-before-execute floor + bounce-and-revise loop are wired. The two things you connect
-> are a **GitHub token** and **Claude** (the `claude` CLI).
+> audit you can scope with a **scan-type selector** (AI review and/or deterministic scans), four scan
+> modes, an opt-in **thorough-calibration** consensus pass, a **scan-time deterministic preview** that
+> runs your selected mechanical linters during the scan, a three-table finding triage, and an **Apply**
+> step that writes governance onto a local branch and pushes it (no PR until you ask). Two opt-in
+> **CI/CD security rules** (Semgrep, CodeQL) are available but never auto-recommended. Re-onboarding an
+> already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos resolve to
+> **local folders** with a health check, and onboarding state **auto-saves**. Governed Development adds
+> a project-settings **gear popup**, **blank UoWs you author with AI**, an **AI-assisted Update-branch**
+> control, a work-item modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap
+> bypass** for installing tooling, and a one-click **Gate self-check** (go/no-go) that proves the
+> deny-before-execute floor + bounce-and-revise loop are wired. The two things you connect are a
+> **GitHub token** and **Claude** (the `claude` CLI).
 
 ---
 
@@ -64,9 +69,10 @@ import a project on a new machine you start with no UoWs; they accumulate as you
 Inside a project the nav shows: **Onboard repos · Governed Development · Rules · Routines ·
 Repository Workspace · Docs**.
 - **Onboard repos** — bring a repo under governance (§3).
-- **Governed Development** — the work control surface: pull work items from a tracker, create a Unit
-  of Work (UoW) from one, then run governed development on it with the human↔AI clarify loop, comment
-  back, and sign off (§6).
+- **Governed Development** — the work control surface: pull work items from a tracker (or author a new
+  story from a blank UoW with AI), create a Unit of Work (UoW) from one, then run governed development
+  on it with the human↔AI clarify loop, comment back, and sign off (§6). A project-settings **gear
+  popup** at the top holds the loop guard + default tier-map.
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
 - **Routines** — schedule governed runs.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
@@ -108,16 +114,38 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
    instant).
 
-   **Two kinds of finding, and the difference matters:**
+   **Scan-type selector — what to run.** At audit-start two checkboxes decide which passes run, both
+   **on by default** (today's behavior):
+   - **AI architectural review** — the LLM scan of architectural/structured/prose rules (and the deep
+     tier). Unticking it skips **every** model call: **no tokens** are spent.
+   - **Deterministic scans (floor + linters)** — the always-on security floor **plus** the scan-time
+     mechanical preview (below). Local, **no LLM, no tokens**.
+
+   You need at least one ticked; if you untick both, Camerata runs both rather than nothing. **Pick
+   deterministic-only** for a fast, free pass (it's also the cleanest way to sanity-check the linter
+   findings); **pick AI-only** for just the judgment review. The deep-report toggle is hidden when AI
+   review is off (the deep tier is itself an LLM pass). The scan-mode picker below (Parallel /
+   Sequential / Background / Batch) is unchanged.
+
+   **Three kinds of finding, and the difference matters:**
    - **Deterministic floor** (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
      `ARCH-NO-SECRETS-IN-URL-1`) — pure regex/logic, no LLM. **Repeatable** (same code → same result,
      same rule-id, same line), and these are the exact checks the layer-1 gate enforces on new writes.
-     Treat their rule-ids as **stable/canonical**.
+     Treat their rule-ids as **stable/canonical**. In the triage table they carry a green
+     **"Rule · enforced"** badge.
+   - **Deterministic preview** — findings from the **scan-time preview** (below): your selected
+     mechanical rules' own linters, run by Camerata during the scan. **Deterministic** (stable
+     tool rule-ids) but **advisory** — they are **not enforced until the CI story wires them**. They
+     carry a purple **"Preview · not enforced until wired"** badge.
    - **AI-suggested (architectural)** — model-inferred issues regex can't catch (layering violations,
      N+1, missing auth on writes, god objects, GET-with-side-effects). These are **advisory**, and the
      model **invents the rule-id** per finding, so the id, severity, and exact set can **vary run to
-     run**. Read them as "the model flagged this pattern," not as a fixed rule. The calibration pass
-     recalibrates severity and flags low-confidence ones but never drops any — you make the final call.
+     run**. Read them as "the model flagged this pattern," not as a fixed rule. They carry a blue
+     **"AI · advisory"** badge. The calibration pass recalibrates severity and flags low-confidence ones
+     but never drops any — you make the final call.
+
+   The triage table's **Authority** column shows these three tiers and is **filterable** (enforced /
+   preview / advisory); the CSV export carries the `preview` / `preview_tool` columns.
 
    Pick the **model** and the **scan mode** (four options; Camerata auto-selects a recommended one by
    the codebase's size):
@@ -151,9 +179,25 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    findings" button — fixing a finding is just its resolve-now story flowing into the dev layer.
    Triage/Process is **not required** to finish onboarding.
 
-   **Note:** **mechanical** rules (CI/runtime/DB-context checks like a query-plan/index audit) are NOT
-   run by this code scan — they can't be judged from a static digest, so they're enforced in CI instead
-   (step 6). The scan header shows how many were excluded for that reason.
+   **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
+   Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
+   with a Camerata-supplied config and folds the results into triage as **preview findings** — even if
+   the rule isn't wired into the repo yet. You select it, you see findings. A preview is **indicative,
+   not enforcement**: it uses Camerata's tool version (which may differ from what the repo eventually
+   pins), and the CI story still has to wire the rule for the gate to block on it. Honest stance: a
+   missing tool, an unparseable result, or a linter Camerata doesn't drive end-to-end
+   (golangci-lint, rubocop, Checkstyle, Roslyn, …) yields a benign note ("could not preview X —
+   enforces once wired"), never a false clean. Mechanical rules **stay out of the AI/LLM review** — a
+   deterministic tool runs them instead, which saves tokens.
+
+   **Excluded from the preview by design:** **CodeQL** and the **paid cloud tiers** (`layer3_only` — too
+   heavy a whole-program build to run locally) never preview; they are CI-story-only (step 6). The scan
+   header still shows how many rules were excluded from the AI scan for being mechanical.
+
+   **Deterministic-scan progress.** A **"Deterministic scan" progress indicator** renders **above the AI
+   agent-activity drawer**, with an overall done/total bar plus a per-tool row (the floor and each
+   preview linter: starting → running → done, with a findings count). It's the primary progress view in
+   deterministic-only mode, where the AI drawer is empty.
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
@@ -175,6 +219,28 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    shelf linter; architectural = bespoke custom checker), and the two are filed as separate issues so
    they can be scheduled independently. Like resolve-now, onboarding *writes the story*; the dev layer
    (Pillar 2) does the work. Separate from the tech-debt issues above.
+
+   **CI-wiring covers both gate layers, not just CI.** Each story instructs wiring the check into the
+   repo's **canonical check command** (the lint/test command **layer 2** runs in the dev loop) **and**
+   the CI workflow (**layer 3**, on every PR) — one wiring serves both. They run the *same* checks and
+   differ only in where/when, so wiring CI-only on a repo with no pre-existing lint script would have
+   left a step layer 2 never invokes.
+
+   **Optional CI security rules (opt-in, never auto-recommended).** Two CI/CD-domain rules can generate
+   their own security-scan CI stories. They are **never pre-checked** during onboarding (you opt in
+   deliberately) and have **no default option** — selecting one forces a conscious tier choice (the
+   amber "must choose" state):
+   - **`CICD-SEMGREP-SECURITY-SCAN-1`** — **Community Edition** (free, LGPL-2.1 OSS CLI; runs on any
+     repo public or private; single-file, light enough for the scan preview, layer-2, and CI) **vs.**
+     **AppSec Platform / Pro** (paid, cross-file taint analysis + the Pro rule set; CI / platform tier).
+   - **`CICD-CODEQL-SECURITY-SCAN-1`** — **public-repo (free)** **vs.** **GitHub Advanced Security
+     (paid, per active committer, for private repos)**. CodeQL's free entitlement is **public/open-source
+     repos only**; private code requires the paid GHAS license. Either way its whole-program database
+     build is heavy, so CodeQL is **CI / layer-3 ONLY** — it never runs at the scan preview or in the
+     dev loop (which is also why CodeQL never appears in the scan-time preview, §3 step 4).
+
+   These rules wrap mature engines rather than re-implementing them: Camerata composes CodeQL/Semgrep
+   as deterministic check sources and enforces their findings at the points they don't cover.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.
@@ -233,6 +299,18 @@ The **Governed Development** view is built around two objects:
   GitHub Projects are **planned per-provider adapters, not yet shipped**.
 - A **Unit of Work (UoW)** is the dev lifecycle that references a WorkItem.
 
+### Project settings (the gear popup)
+
+A small **⚙ Settings** button sits at the top of the Governed Development left nav and is always
+visible regardless of which UoW is selected. It opens a popup holding the two **project-wide** settings
+that used to live elsewhere:
+- **Loop guard** — the maximum number of revise iterations a governed run may take before it stops.
+- **Default tier-map** — the project's default Fast / Balanced / Strongest model ids.
+
+These are project defaults, not per-UoW knobs. (The tier-map is also still editable in the Rules view
+for discoverability; both surfaces save to the same project row.) Per-run model overrides stay on the
+UoW card — they default *from* this tier-map but override only that one run.
+
 ### Issue Management — pull work items
 
 At the top of the view, an **Issue Management** panel shows the GitHub connection status (`● GitHub
@@ -246,6 +324,23 @@ labels, and an **Open issue ↗** link to the source).
 From a work item's detail, click **Create Unit of Work from this issue**. This is **deduped by
 external reference**: if a UoW already exists for that item the button reads **Open Unit of Work**
 and selects the existing one instead of making a duplicate.
+
+### Author a story from a blank UoW with AI
+
+You don't have to start from an existing issue. The left nav's **New authored story** button creates a
+**blank draft UoW** and opens an **authoring panel**:
+- A **clarification chat** — describe what you want; the AI drafts an issue title + body and, when the
+  requirements are ambiguous, **asks one clarifying question** back. Keep chatting to refine it.
+- A **live draft preview** of the title and body as they take shape.
+- A **target-repo picker** (the active project's repos) and a **Push to board & link** button.
+
+Clicking **Push to board & link** opens the story as a **GitHub issue** in the chosen repo and **links**
+the draft UoW to it; the draft then becomes a normal linked UoW and the standard dev controls take
+over. This path is **LLM text generation only** — it drafts an issue, it does **not** write code — so
+the governance gate isn't involved here (same class as the chat assistant); the gate stays on the
+governed dev run after the UoW is linked. Pushing to the board needs a GitHub token; without a token
+(or with Claude unavailable) the chat still saves your turns and tells you AI drafting is unavailable
+rather than failing.
 
 ### The UoW dev controls
 
@@ -296,6 +391,15 @@ parent-driven (a child returns an `INCOMPLETE:` signal and the orchestrator re-h
 Without `CAMERATA_LIVE_BUILD=1` the run is token-free/scripted and the gate enforcement is still
 real. With it set and `claude` connected, a real multi-tier `claude -p` fleet runs.
 
+**Bootstrap run — skip layer-2 checks (the chicken-and-egg escape hatch).** The development-run control
+carries a **default-OFF** "bootstrap run — skip layer-2 checks" toggle. Layer 2 is fail-closed: a repo
+with a manifest but no lint/test wired fails as "could-not-run," which is correct governance but creates
+a deadlock — the very run that would *install* the linters fails layer 2 because the tools aren't there
+yet. Enabling this toggle skips **only** the post-task layer-2 lint/test bounce for that one
+tool-installing run, so you can land the tooling, then turn it back off. **Layer 1 (deny-before-write)
+and the decisions gate still apply** — you never bypass the security gate. It's deliberate and visible,
+never silent or sticky.
+
 #### Later stages (Development → Awaiting QA → Signed Off)
 
 Once a development run starts, the remaining stage transitions are engine-driven:
@@ -305,9 +409,23 @@ Once a development run starts, the remaining stage transitions are engine-driven
 
 **Other controls on every UoW card:**
 
+- **Open work item** — opens the full work-item modal right from inside the UoW (next to the
+  retained **Open issue ↗** link). The modal shows the title, body, and a **Comments** section that
+  fetches and renders every comment on the source issue (author + timestamp + body). The
+  create/open-UoW affordance is hidden here (you're already in the UoW).
 - **Add comment to issue** — write a comment posted back onto the source issue via the tracker
-  adapter. Use @-mentions to loop a teammate in; GitHub resolves the handle. This replaces the old
-  "Ask the team" clarify panel, which has been removed.
+  adapter. The comment box has **GitHub-style @-mention autocomplete**: type `@` and a dropdown of the
+  repo's assignable users appears; click one to insert `@login`. This replaces the old "Ask the team"
+  clarify panel, which has been removed. (The mention set is GitHub's repo **assignees** — the
+  practical mention set, provider-specific; a per-provider user search is the future generalization.)
+- **Update branch (AI-assisted)** — Camerata's equivalent of GitHub's PR "Update branch": pick a source
+  branch (grouped **Local** / **Origin**) and merge it **into** this UoW's branch. A clean merge commits
+  automatically; on a conflict a **single gated agent** resolves the conflict markers and stages the
+  files, and the server completes the merge commit. The agent runs behind the same gate as every
+  Camerata agent (gated tools only, no `git`, can't spawn sub-agents) — it never commits or pushes
+  itself. It's **fail-closed**: with live build off, conflicts abort the merge with an honest "needs the
+  AI resolver" message (a clean merge still succeeds); and any path left conflicted aborts the whole
+  merge (`git merge --abort`), so a model claiming success without resolving is caught.
 - **Pull latest work item** — re-pull just this one item from the tracker (a full refresh, no cache).
 - **Sign off this run** — review the run's diff + gate results (rules in force, deny/allow tallies,
   total bounces) and **✓ Sign off this run**; provenance is written back.
@@ -547,6 +665,16 @@ The remaining four are the corpus enforcement modalities, from most human-judgme
 | **Structured** | A concrete design contract with a clear conform/violate answer — but not lint-able. Examples: "repositories return domain types," "API version lives in the URL prefix," "cursor not offset pagination." A human can verify it objectively; a linter cannot. | PR review (human, binary yes/no). |
 | **Prose** | A principle or idiom where a human must judge conformance: "interfaces are small and cohesive," "optimization by default," "errors are wrapped with context." Reasonable engineers may weigh these differently on the margin. | PR review (human judgment). |
 
+### Opt-in CI security rules (never auto-recommended)
+
+A few `mechanical` rules carry an **`opt_in_only`** flag: they are grounded against a real tool but are
+**never pre-checked** during onboarding — you opt in deliberately. The two security-scan rules
+(`CICD-SEMGREP-SECURITY-SCAN-1`, `CICD-CODEQL-SECURITY-SCAN-1`, §3 step 6) are the current examples;
+they exist to generate a security-scan **CI story** for a DevOps engineer, not to constrain the agent's
+code, and they have **no default option** so selecting one forces a conscious tier choice. CodeQL also
+carries **`layer3_only`** — its whole-program database build is too heavy to run at the scan preview or
+in the dev loop, so it is enforced at CI / layer-3 only and never appears in the scan-time preview.
+
 ### The objectivity spectrum
 
 One way to read the four modalities is as a single spectrum: how far can the conformance check shift from human to machine?
@@ -597,11 +725,12 @@ The mechanical rules in the current corpus are grounded (each maps to a real, na
 
 ## The whole loop, in one line
 
-**Create/open a project → onboard each repo (browse to its local folder → scan the local code → pick
-per-repo rules → Add rules to repo(s): local branch+push → optionally audit + triage + wire CI) →
-manage the ruleset in the Rules view → in Governed Development, pull work items, create a Unit of Work
-from one → Begin investigation (Intake, single-model run) → Approve decisions (Investigating) → Run
-development governed (Decisions Approved, three-tier orchestrator-led run) → review → sign off.**
+**Create/open a project → onboard each repo (browse to its local folder → scan the local code, choosing
+AI review and/or deterministic scans → pick per-repo rules → Add rules to repo(s): local branch+push →
+optionally audit + triage + wire CI) → manage the ruleset in the Rules view → in Governed Development,
+pull work items (or author a new story from a blank UoW with AI), create a Unit of Work from one →
+Begin investigation (Intake, single-model run) → Approve decisions (Investigating) → Run development
+governed (Decisions Approved, three-tier orchestrator-led run) → review → sign off.**
 Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the push/PR and the AI
 audit + governed dev. Export/import a project (config only; UoWs stay local) to move it between
 machines; resolve local repo paths on the receiving side. Use the chat bubble to ask data-driven
