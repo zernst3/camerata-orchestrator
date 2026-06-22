@@ -2572,6 +2572,34 @@ struct FromWorkItemResult {
     created: bool,
 }
 
+/// One comment on a work item (`POST /api/workitems/comments`), flattened for the
+/// modal. Mirrors the server's `IssueComment` shape.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct WorkItemComment {
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    body: String,
+    /// ISO-8601 created-at as the tracker returns it; the UI shows it as-is.
+    #[serde(default)]
+    created_at: String,
+}
+
+/// The `POST /api/workitems/comments` envelope.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct WorkItemCommentsResult {
+    #[serde(default)]
+    comments: Vec<WorkItemComment>,
+}
+
+/// The `POST /api/workitems/assignees` envelope: the repo's assignable user logins
+/// (the practical @-mention set).
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+struct WorkItemAssigneesResult {
+    #[serde(default)]
+    users: Vec<String>,
+}
+
 // ── Pure helpers (unit-tested) ──────────────────────────────────────────────────
 
 /// The label a work item's State badge shows. Pure mapping over the wire string so
@@ -2691,6 +2719,103 @@ async fn comment_on_work_item(work_item_id: &str, body: &str) -> Option<String> 
     } else {
         None
     }
+}
+
+/// Read the COMMENTS on a work item (`POST /api/workitems/comments`). Degrades to an
+/// empty list (server returns `{ comments: [] }` token-less / on error).
+async fn fetch_work_item_comments(work_item_id: &str) -> Vec<WorkItemComment> {
+    let res = reqwest::Client::new()
+        .post(format!("{}/api/workitems/comments", crate::BFF_URL))
+        .json(&serde_json::json!({ "work_item_id": work_item_id }))
+        .send()
+        .await
+        .ok();
+    match res {
+        Some(r) => r
+            .json::<WorkItemCommentsResult>()
+            .await
+            .ok()
+            .map(|r| r.comments)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Read the assignable users for a work item's repo (`POST /api/workitems/assignees`).
+/// Degrades to an empty list (server returns `{ users: [] }` token-less / on error).
+async fn fetch_work_item_assignees(work_item_id: &str) -> Vec<String> {
+    let res = reqwest::Client::new()
+        .post(format!("{}/api/workitems/assignees", crate::BFF_URL))
+        .json(&serde_json::json!({ "work_item_id": work_item_id }))
+        .send()
+        .await
+        .ok();
+    match res {
+        Some(r) => r
+            .json::<WorkItemAssigneesResult>()
+            .await
+            .ok()
+            .map(|r| r.users)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// Detect an ACTIVE `@<partial>` mention token at the END of the comment text, for the
+/// autocomplete dropdown. Pragmatic approach: we look only at the LAST whitespace-
+/// separated token of the whole value. If it starts with `@` and contains no further
+/// `@`, the part after the `@` is the active partial (possibly empty, right after
+/// typing `@`). Returns `None` when there is no active token (the dropdown stays hidden).
+///
+/// KNOWN LIMITATION: this tracks the tail of the value, not the caret. Editing a mention
+/// in the MIDDLE of already-typed text does not re-open the dropdown. Full mid-text caret
+/// tracking is a follow-up; the tail case covers the overwhelming common path (type then
+/// mention).
+fn active_mention_partial(value: &str) -> Option<&str> {
+    let last = value.split_whitespace().next_back()?;
+    let partial = last.strip_prefix('@')?;
+    // A second `@` inside the token (e.g. an email-ish `a@b`) is not a mention token.
+    if partial.contains('@') {
+        return None;
+    }
+    Some(partial)
+}
+
+/// Replace the trailing active `@<partial>` token in `value` with `@<login> ` (trailing
+/// space so the user keeps typing after the completed mention). Pure; used when the user
+/// clicks a dropdown suggestion. If there is no active token, appends `@<login> `.
+fn apply_mention_selection(value: &str, login: &str) -> String {
+    match active_mention_partial(value) {
+        Some(partial) => {
+            // Trim exactly the trailing `@partial` (its byte length) off the value.
+            let token_len = 1 + partial.len(); // the `@` plus the partial
+            let keep = &value[..value.len() - token_len];
+            format!("{keep}@{login} ")
+        }
+        None => {
+            let mut out = value.to_string();
+            if !out.is_empty() && !out.ends_with(' ') && !out.ends_with('\n') {
+                out.push(' ');
+            }
+            out.push('@');
+            out.push_str(login);
+            out.push(' ');
+            out
+        }
+    }
+}
+
+/// Filter the assignable logins by the active partial (case-insensitive prefix-ish
+/// `contains` match), capped to a short dropdown. An empty partial returns the first
+/// few (so typing a bare `@` shows the set). Pure; unit-tested.
+fn filter_mention_candidates(users: &[String], partial: &str) -> Vec<String> {
+    let needle = partial.to_lowercase();
+    users
+        .iter()
+        .filter(|u| needle.is_empty() || u.to_lowercase().contains(&needle))
+        .take(8)
+        .cloned()
+        .collect()
 }
 
 /// Which sub-view of the Governed Development page is selected in the left nav:
@@ -3762,7 +3887,12 @@ fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element
 }
 
 /// The detail view for one work item: full title + body + state + a link to the issue,
-/// plus the create/open-UoW affordance (dedup-aware). Provider-agnostic.
+/// the comments thread, plus (optionally) the create/open-UoW affordance (dedup-aware).
+/// Provider-agnostic.
+///
+/// `show_uow_action` defaults to true (the work-item TABLE opens it to create/open a
+/// UoW). When opened from INSIDE an existing UoW's dev controls, pass `false` to hide the
+/// redundant create/open-UoW button — the UoW already exists.
 #[component]
 fn WorkItemDetail(
     item: WorkItem,
@@ -3770,9 +3900,19 @@ fn WorkItemDetail(
     on_close: EventHandler<()>,
     uows_refresh: Signal<u32>,
     sel: Signal<GovDevSel>,
+    #[props(default = true)] show_uow_action: bool,
 ) -> Element {
     let (state_label, state_cls) = work_item_state_badge(&item.state);
     let existing = existing_uow_for(&uows, &item.id).cloned();
+    // Fetch this work item's comments once per item id (re-fetches if the id changes).
+    let comments_res = {
+        let wid = item.id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            async move { fetch_work_item_comments(&wid).await }
+        })
+    };
+    let comments = comments_res.read().clone();
     rsx! {
         // Modal overlay (click backdrop to close); the inner box stops propagation so
         // clicks inside don't dismiss. Same overlay/box pattern as the rule detail modal.
@@ -3802,8 +3942,43 @@ fn WorkItemDetail(
                 if !item.url.is_empty() {
                     a { class: "wi-detail-link", href: "{item.url}", target: "_blank", "Open issue \u{2197}" }
                 }
-                div { class: "wi-detail-actions",
-                    CreateOrOpenUow { item: item.clone(), existing, uows_refresh, sel, compact: false }
+
+                // ── Comments thread (read-only, fetched for this item) ────────────
+                div { class: "wi-comments",
+                    p { class: "wi-comments-h", "Comments" }
+                    match comments {
+                        // Still loading the comments fetch.
+                        None => rsx! { p { class: "section-hint", "Loading comments…" } },
+                        Some(list) if list.is_empty() => rsx! {
+                            p { class: "wi-comments-empty section-hint", "No comments." }
+                        },
+                        Some(list) => rsx! {
+                            for (i , c) in list.into_iter().enumerate() {
+                                div { key: "{i}", class: "wi-comment",
+                                    div { class: "wi-comment-meta",
+                                        span { class: "wi-comment-author", "{c.author}" }
+                                        if !c.created_at.is_empty() {
+                                            span { class: "wi-comment-date", "{c.created_at}" }
+                                        }
+                                    }
+                                    if c.body.is_empty() {
+                                        p { class: "wi-comment-body empty", "(empty comment)" }
+                                    } else {
+                                        div {
+                                            class: "wi-comment-body md chat-turn-text",
+                                            dangerous_inner_html: crate::md::md_to_html(&c.body),
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+
+                if show_uow_action {
+                    div { class: "wi-detail-actions",
+                        CreateOrOpenUow { item: item.clone(), existing, uows_refresh, sel, compact: false }
+                    }
                 }
             }
         }
@@ -3957,12 +4132,33 @@ fn UowDevControls(uow: UowListEntry) -> Element {
         }));
     }
 
-    // Comment-to-issue composer (+ a lightweight @-mention insert).
+    // Comment-to-issue composer (+ GitHub-style @-mention autocomplete).
     let mut comment_body = use_signal(String::new);
-    let mut mention_handle = use_signal(String::new);
     let mut commenting = use_signal(|| false);
     // Pull-latest state.
     let mut refreshing = use_signal(|| false);
+
+    // ── Work-item modal (opened from inside the UoW) ───────────────────────────
+    // A local flag toggles the WorkItemDetail modal for THIS UoW's work item. The
+    // modal's create/open-UoW action is hidden (the UoW already exists), so the
+    // uows / sel / uows_refresh it requires are local throwaways here.
+    let mut wi_modal_open = use_signal(|| false);
+    let modal_uows_refresh = use_signal(|| 0u32);
+    let modal_sel = use_signal(|| GovDevSel::IssueManagement);
+
+    // ── @-mention autocomplete state ───────────────────────────────────────────
+    // The repo's assignable users, fetched once per work item (the practical mention
+    // set). Degrades to empty (no token / error) → the dropdown simply never shows.
+    let assignees_res = {
+        let wid = uow.work_item.id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            async move { fetch_work_item_assignees(&wid).await }
+        })
+    };
+    let assignees = assignees_res.read().clone().unwrap_or_default();
+    // Whether the dropdown is showing (an active `@token` exists and matches).
+    let mut mention_open = use_signal(|| false);
 
     let it = item.read().clone();
     let (state_label, state_cls) = work_item_state_badge(&it.state);
@@ -3974,11 +4170,31 @@ fn UowDevControls(uow: UowListEntry) -> Element {
                 span { class: "uow-dev-repo", "{it.repo}" }
                 span { class: "uow-dev-num", "#{it.number}" }
                 span { class: "wi-state {state_cls}", "{state_label}" }
+                // Open the full work-item modal (title + body + ALL comments) in-app.
+                button {
+                    class: "btn-edit-sm",
+                    onclick: move |_| wi_modal_open.set(true),
+                    "Open work item"
+                }
+                // RETAINED: the direct link to the issue on the tracker.
                 if !it.url.is_empty() {
                     a { class: "wi-detail-link", href: "{it.url}", target: "_blank", "Open issue ↗" }
                 }
             }
             p { class: "uow-dev-title", "{it.title}" }
+
+            // The work-item modal (with comments), opened from the head button above.
+            // Its create/open-UoW action is hidden — this UoW already exists.
+            if wi_modal_open() {
+                WorkItemDetail {
+                    item: it.clone(),
+                    uows: Vec::new(),
+                    on_close: EventHandler::new(move |_| wi_modal_open.set(false)),
+                    uows_refresh: modal_uows_refresh,
+                    sel: modal_sel,
+                    show_uow_action: false,
+                }
+            }
 
             // ── Pull latest work item ─────────────────────────────────────────
             div { class: "uow-dev-pull-row",
@@ -4043,46 +4259,59 @@ fn UowDevControls(uow: UowListEntry) -> Element {
                 LiveRunPanel { run: r, uow_refresh }
             }
 
-            // ── Add comment to the source issue (with @-mention) ──────────────
-            // This replaces the old "Ask the team" clarify panel: a comment with an
-            // @-mention IS how you loop a teammate in. The mention insert is GitHub-shaped
-            // (a literal @handle the tracker resolves); a per-provider user picker that
-            // fetches assignable members is the future wrapper for Jira/ADO.
+            // ── Add comment to the source issue (with @-mention autocomplete) ──
+            // A comment with an @-mention IS how you loop a teammate in. As you type an
+            // `@<partial>` token, a dropdown of the repo's ASSIGNABLE users (the practical
+            // mention set GitHub resolves) appears; clicking one completes the @handle.
+            // SCOPE: the candidate set is GitHub's assignees for the repo. A per-provider
+            // mention wrapper (Jira/ADO user search) is the future generalization.
             div { class: "uow-comment",
                 p { class: "clarify-h", "Add comment to issue" }
-                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter. Mention a teammate to loop them in (GitHub resolves @handle)." }
-                div { class: "uow-mention-row",
-                    input {
-                        class: "uow-mention-input",
-                        value: "{mention_handle}",
-                        placeholder: "mention @handle…",
-                        oninput: move |e| mention_handle.set(e.value()),
-                    }
-                    button {
-                        class: "btn-edit-sm",
-                        onclick: move |_| {
-                            let raw = mention_handle();
-                            let h = raw.trim().trim_start_matches('@').trim();
-                            if h.is_empty() { return; }
-                            let mut body = comment_body();
-                            if !body.is_empty() && !body.ends_with(' ') && !body.ends_with('\n') {
-                                body.push(' ');
-                            }
-                            body.push('@');
-                            body.push_str(h);
-                            body.push(' ');
-                            comment_body.set(body);
-                            mention_handle.set(String::new());
+                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter. Type @ to mention an assignable teammate (GitHub resolves @handle)." }
+                // The textarea wrapper is position-relative so the dropdown anchors to it.
+                div { class: "uow-comment-box",
+                    textarea {
+                        class: "clarify-q",
+                        value: "{comment_body}",
+                        rows: "3",
+                        placeholder: "Write a comment to post on the issue… (type @ to mention)",
+                        oninput: move |e| {
+                            let v = e.value();
+                            // Recompute whether an active @token exists with matches.
+                            let show = match active_mention_partial(&v) {
+                                Some(p) => !filter_mention_candidates(&assignees, p).is_empty(),
+                                None => false,
+                            };
+                            comment_body.set(v);
+                            mention_open.set(show);
                         },
-                        "Mention"
                     }
-                }
-                textarea {
-                    class: "clarify-q",
-                    value: "{comment_body}",
-                    rows: "3",
-                    placeholder: "Write a comment to post on the issue…",
-                    oninput: move |e| comment_body.set(e.value()),
+                    // The autocomplete dropdown: shown only when an active @token matches.
+                    if mention_open() {
+                        {
+                            let partial = active_mention_partial(&comment_body()).unwrap_or("").to_string();
+                            let candidates = filter_mention_candidates(&assignees, &partial);
+                            rsx! {
+                                div { class: "uow-mention-dropdown",
+                                    for login in candidates {
+                                        button {
+                                            key: "{login}",
+                                            class: "uow-mention-option",
+                                            onclick: {
+                                                let login = login.clone();
+                                                move |_| {
+                                                    let next = apply_mention_selection(&comment_body(), &login);
+                                                    comment_body.set(next);
+                                                    mention_open.set(false);
+                                                }
+                                            },
+                                            "@{login}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 button {
                     class: "btn-run",
@@ -10350,8 +10579,9 @@ mod tests {
 
     // ── Governed Development: pure work-item / UoW helpers ─────────────────────
     use super::{
-        create_or_open_label, existing_uow_for, labels_summary, work_item_state_badge, UowListEntry,
-        UowStage, WorkItem,
+        active_mention_partial, apply_mention_selection, create_or_open_label, existing_uow_for,
+        filter_mention_candidates, labels_summary, work_item_state_badge, UowListEntry, UowStage,
+        WorkItem,
     };
 
     fn wi(id: &str) -> WorkItem {
@@ -10421,6 +10651,49 @@ mod tests {
             create_or_open_label(existing_uow_for(&uows, "github:acme/web#10").is_some()),
             "Open Unit of Work"
         );
+    }
+
+    #[test]
+    fn active_mention_partial_detects_trailing_at_token() {
+        // A bare `@` at the tail is an active token with an empty partial.
+        assert_eq!(active_mention_partial("hey @"), Some(""));
+        // `@oct` -> partial `oct`.
+        assert_eq!(active_mention_partial("hey @oct"), Some("oct"));
+        // No trailing token -> None.
+        assert_eq!(active_mention_partial("hey there"), None);
+        // A completed mention followed by a space is no longer the trailing token.
+        assert_eq!(active_mention_partial("hey @octocat "), None);
+        // An email-ish token (second `@`) is not a mention.
+        assert_eq!(active_mention_partial("ping a@b"), None);
+        // Empty input -> None.
+        assert_eq!(active_mention_partial(""), None);
+    }
+
+    #[test]
+    fn apply_mention_selection_replaces_trailing_token() {
+        // Completes the active partial with the chosen login + trailing space.
+        assert_eq!(apply_mention_selection("hey @oct", "octocat"), "hey @octocat ");
+        // A bare `@` completes to the full handle.
+        assert_eq!(apply_mention_selection("hey @", "hubot"), "hey @hubot ");
+        // No active token -> appends a mention (with a separating space).
+        assert_eq!(apply_mention_selection("hello", "octocat"), "hello @octocat ");
+        // Appending onto empty input needs no leading space.
+        assert_eq!(apply_mention_selection("", "octocat"), "@octocat ");
+    }
+
+    #[test]
+    fn filter_mention_candidates_is_case_insensitive_and_capped() {
+        let users: Vec<String> = vec!["Octocat", "octo-bot", "hubot", "alice"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // Case-insensitive `contains` match on the partial.
+        let m = filter_mention_candidates(&users, "OCT");
+        assert_eq!(m, vec!["Octocat", "octo-bot"]);
+        // Empty partial returns the leading set (so a bare `@` shows suggestions).
+        assert_eq!(filter_mention_candidates(&users, "").len(), 4);
+        // A non-match yields an empty list (dropdown hidden).
+        assert!(filter_mention_candidates(&users, "zzz").is_empty());
     }
 
     #[test]

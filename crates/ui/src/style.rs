@@ -2455,7 +2455,7 @@ html, body {
   color: #fff; background: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
 }
-.uow-lifecycle-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.uow-lifecycle-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .uow-stage-btn {
   font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 7px;
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
@@ -2482,6 +2482,9 @@ html, body {
 }
 .uow-tier-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .uow-tier-field .run-model-select { width: 100%; }
+/* The run-button + model-select row inside a step control: give the side-by-side
+   controls comfortable breathing room (TASK 2). */
+.run-control-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
 /* Frozen gate provenance read-out on the UoW panel. */
 .uow-provenance {
@@ -3276,10 +3279,41 @@ html, body {
 
 /* UoW dev controls */
 .uow-dev { max-width: 920px; }
-.uow-dev-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.uow-dev-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 .uow-dev-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
 .uow-dev-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
 .uow-dev-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
 .uow-dev-pull-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .uow-comment { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px; }
+/* The Post-comment button sits below the composer with breathing room (TASK 2). */
+.uow-comment .btn-run { margin-top: 12px; }
+
+/* @-mention autocomplete: the composer wrapper is the positioning context so the
+   dropdown anchors to the textarea. */
+.uow-comment-box { position: relative; }
+.uow-mention-dropdown {
+  position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 20;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--paper);
+  box-shadow: 0 6px 18px rgba(0,0,0,.12); overflow: hidden; max-height: 220px; overflow-y: auto;
+}
+.uow-mention-option {
+  text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; color: var(--ink); background: transparent; border: 0;
+  padding: 7px 11px; cursor: pointer; border-bottom: 1px solid var(--line-soft);
+}
+.uow-mention-option:last-child { border-bottom: 0; }
+.uow-mention-option:hover { background: var(--accent-wash); }
+
+/* Work-item comments thread inside the detail modal. */
+.wi-comments { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.wi-comments-h { font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 10px; }
+.wi-comments-empty { font-style: italic; }
+.wi-comment { border: 1px solid var(--line-soft); border-radius: 8px; background: var(--paper); padding: 9px 11px; margin-bottom: 8px; }
+.wi-comment:last-child { margin-bottom: 0; }
+.wi-comment-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+.wi-comment-author { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.wi-comment-date { font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.wi-comment-body { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
+.wi-comment-body.empty { font-style: italic; color: var(--ink-faint); }
 "#;
