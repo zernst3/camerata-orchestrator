@@ -26,6 +26,7 @@ pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
 pub mod github_issues;
+pub mod investigation_run;
 pub mod jobs;
 pub mod lifecycle;
 pub mod live_fleet;
@@ -476,6 +477,13 @@ struct StartRunReq {
     /// the caller sends no body.
     #[serde(default)]
     model: Option<String>,
+    /// The per-UoW THREE-TIER model map (ORCH-MODEL-TIERING-1). When present, the
+    /// development fleet runs TIERED: each task runs on its capability band's model
+    /// (`strongest`/`balanced`/`fast`), with the strongest tier acting as the
+    /// orchestrator/lead. When absent, the single-`model` path is used (back-compat).
+    /// The two fields are independent; `tier_map` takes precedence when both are sent.
+    #[serde(default)]
+    tier_map: Option<crate::model_tier::TierMap>,
 }
 
 /// Start a governed run for a story. Returns the run id immediately; the run walks
@@ -489,14 +497,16 @@ async fn start_run(
     Path(story_id): Path<String>,
     req: Option<Json<StartRunReq>>,
 ) -> Response {
-    let model = req
-        .and_then(|Json(r)| r.model)
-        .filter(|m| !m.trim().is_empty());
+    let (model, tier_map) = match req {
+        Some(Json(r)) => (r.model.filter(|m| !m.trim().is_empty()), r.tier_map),
+        None => (None, None),
+    };
 
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
     // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
     // We block + surface exactly why, rather than silently starting a run that the
-    // architect did not gate. The check reads the persisted decisions on the UoW.
+    // architect did not gate. The check reads the persisted decisions on the UoW. The
+    // gate is identical for the single-model and tiered paths.
     if let Err(reason) = ensure_development_gate(&state, &story_id) {
         let body = Json(serde_json::json!({
             "error": "development gate not satisfied",
@@ -506,7 +516,7 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
-    let (run_id, mode) = start_governed_run(&state, &story_id, model).await;
+    let (run_id, mode) = start_governed_run(&state, &story_id, model, tier_map).await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
         .into_response()
 }
@@ -581,6 +591,7 @@ async fn start_governed_run(
     state: &AppState,
     story_id: &str,
     model: Option<String>,
+    tier_map: Option<crate::model_tier::TierMap>,
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
@@ -602,9 +613,30 @@ async fn start_governed_run(
             .active()
             .map(|p| p.max_iterations)
             .unwrap_or(1);
-        tokio::spawn(async move {
-            live_fleet::execute_live_run(store, rid, title, desc, model, max_iterations).await
-        });
+        match tier_map {
+            // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
+            // strongest tier leading. The single `model` is ignored when a map is given.
+            Some(map) => {
+                tokio::spawn(async move {
+                    live_fleet::execute_live_run_tiered(
+                        store,
+                        rid,
+                        title,
+                        desc,
+                        map,
+                        max_iterations,
+                    )
+                    .await
+                });
+            }
+            // Single-model path (back-compat): one operator-wide model for every agent.
+            None => {
+                tokio::spawn(async move {
+                    live_fleet::execute_live_run(store, rid, title, desc, model, max_iterations)
+                        .await
+                });
+            }
+        }
     } else {
         // Token-free scripted path: real gate verdicts over planted calls, with the
         // per-agent transcripts (generated prompt + actions + verdicts) populated.
@@ -4680,12 +4712,74 @@ fn transition_response(
     }
 }
 
-/// Drive the UoW Intake → Investigating (Pillar 2). 409 if the UoW is not at Intake.
+/// Body for `POST /api/uow/:story_id/begin-investigation`. Optional `model` pins the
+/// single investigation agent's model; `None`/blank defaults to the active project's
+/// `tier_map.strongest`. Absent body (no JSON) is accepted (defaults applied).
+#[derive(serde::Deserialize, Default)]
+struct BeginInvestigationReq {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Drive the UoW Intake → Investigating (Pillar 2) AND kick a single, model-aware,
+/// gated investigation agent that analyzes the story and records an investigation note
+/// onto the UoW. Returns `{ "run_id", "story_id" }` so the UI can watch AgentActivity.
+///
+/// The investigation is a SINGLE agent (not the development fleet): it analyzes and
+/// surfaces decisions; it does not scaffold or write code. The agent is gated identically
+/// to every fleet agent (allowedTools = gated tools only; `Task` disallowed).
+///
+/// 409 (with the precise reason) if the stage transition is illegal (e.g. the UoW is
+/// not at Intake) — surfaced before any run is started so the UI shows why.
 async fn uow_begin_investigation(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
+    req: Option<Json<BeginInvestigationReq>>,
 ) -> Response {
-    transition_response(state.uow.begin_investigation(&story_id))
+    // Transition the stage first; if it is illegal, surface the reason and start nothing.
+    if let Err(err) = state.uow.begin_investigation(&story_id) {
+        let body = Json(serde_json::json!({
+            "error": "lifecycle transition blocked",
+            "reason": err.message(),
+            "detail": err,
+        }));
+        return (StatusCode::CONFLICT, body).into_response();
+    }
+
+    // Resolve the model: the caller's choice, else the active project's strongest tier.
+    let requested = req
+        .and_then(|Json(r)| r.model)
+        .filter(|m| !m.trim().is_empty());
+    let model = requested.unwrap_or_else(|| {
+        state
+            .projects
+            .active()
+            .map(|p| p.tier_map.strongest)
+            .unwrap_or_else(crate::model_tier::default_strongest_model)
+    });
+
+    // Pull the story context for the agent prompt (best-effort; fall back to the id).
+    let (title, desc) = match state.stories.get(&story_id).await {
+        Ok(Some(s)) => (s.title, s.description),
+        _ => (story_id.clone(), String::new()),
+    };
+
+    // Create a run the UI can poll, then kick the single gated investigation agent.
+    let run_id = state.runs.create(&story_id, "investigation");
+    {
+        let runs = state.runs.clone();
+        let uow = state.uow.clone();
+        let rid = run_id.clone();
+        let sid = story_id.clone();
+        tokio::spawn(async move {
+            crate::investigation_run::execute_investigation_run(
+                runs, uow, rid, sid, title, desc, model,
+            )
+            .await;
+        });
+    }
+
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
 
 /// Drive the UoW Investigating → DecisionsApproved (Pillar 2), gated by the story's
@@ -5579,6 +5673,195 @@ mod tests {
             state.uow.get_or_create(story).stage,
             lifecycle::UowStage::Investigating
         );
+    }
+
+    // ── UoW Increment 1: tiered dev run + model-aware investigation ───────────────
+
+    #[test]
+    fn start_run_req_parses_tier_map_when_present() {
+        // The frozen contract: { "model": <string|null>, "tier_map": {...} | null }.
+        let body = serde_json::json!({
+            "model": null,
+            "tier_map": { "strongest": "opus-x", "balanced": "sonnet-x", "fast": "haiku-x" }
+        });
+        let req: StartRunReq = serde_json::from_value(body).unwrap();
+        assert!(req.model.is_none());
+        let map = req.tier_map.expect("tier_map parsed");
+        assert_eq!(map.strongest, "opus-x");
+        assert_eq!(map.balanced, "sonnet-x");
+        assert_eq!(map.fast, "haiku-x");
+    }
+
+    #[test]
+    fn start_run_req_tier_map_absent_is_back_compat_single_model() {
+        // No tier_map, just a model → single-model path (back-compat).
+        let req: StartRunReq =
+            serde_json::from_value(serde_json::json!({ "model": "claude-opus-4-8" })).unwrap();
+        assert_eq!(req.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(req.tier_map.is_none());
+
+        // Entirely empty body also parses (no-body callers stay compatible).
+        let empty: StartRunReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.model.is_none());
+        assert!(empty.tier_map.is_none());
+    }
+
+    /// The dev run selects the TIERED path when a map is present and the single-model
+    /// path otherwise. Asserted on the scripted (token-free) path: both start a run and
+    /// return the frozen `{run_id, story_id, mode}` shape, with the gate enforced
+    /// identically. (The live tiered vs. single-model branch is exercised by the
+    /// live_fleet functions; here we prove the request contract + gate are honored.)
+    #[tokio::test]
+    async fn dev_run_accepts_tier_map_and_still_enforces_the_gate() {
+        let state = AppState::seeded();
+        let story = "TIER-GATE-1";
+
+        // With a tier_map but NO approved decisions, the gate still blocks (409).
+        let app = router(state.clone());
+        let body = serde_json::json!({
+            "tier_map": { "strongest": "s", "balanced": "b", "fast": "f" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "the gate is universal: a tier_map does not bypass it"
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_run_tiered_path_starts_once_decisions_are_approved() {
+        let state = AppState::seeded();
+        let story = "TIER-GATE-2";
+
+        // Approve a decision so the gate is satisfied.
+        let app = router(state.clone());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/uow/{story}/decisions"))
+                .header("content-type", "application/json")
+                .body(Body::from(approved_decision_json(story).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // A tier_map run now starts and returns the frozen response shape.
+        let app = router(state.clone());
+        let body = serde_json::json!({
+            "tier_map": { "strongest": "s", "balanced": "b", "fast": "f" }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["run_id"].is_string());
+        assert_eq!(json["story_id"], story);
+        assert!(json["mode"].is_string());
+    }
+
+    /// begin-investigation is model-aware, returns a run id, and transitions the stage
+    /// Intake → Investigating.
+    #[tokio::test]
+    async fn begin_investigation_is_model_aware_returns_run_id_and_transitions_stage() {
+        let state = AppState::seeded();
+        let story = "INV-1";
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Intake
+        );
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/begin-investigation"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "model": "claude-opus-4-8" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["run_id"].is_string(), "returns a pollable run id");
+        assert_eq!(json["story_id"], story);
+
+        // The stage advanced Intake → Investigating.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Investigating
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_investigation_accepts_absent_model_body() {
+        // No body → defaults to the project's strongest tier; still returns a run id
+        // and transitions the stage.
+        let state = AppState::seeded();
+        let story = "INV-2";
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/begin-investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["run_id"].is_string());
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Investigating
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_investigation_409s_when_not_at_intake() {
+        // Already past Intake → the transition is illegal, so no run is started.
+        let state = AppState::seeded();
+        let story = "INV-3";
+        state.uow.begin_investigation(story).unwrap(); // now Investigating
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/begin-investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 
     // ── Evidence assembly (issue #53) ─────────────────────────────────────────
