@@ -2830,7 +2830,11 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
     // front so the reader doesn't have to infer it from the title alone.
     let preamble = "Mechanical and architectural rules are both deterministic CI-tier checks. \
         Mechanical rules map to an existing off-the-shelf linter (simple to wire). \
-        Architectural rules require a custom checker and team refinement before implementing.";
+        Architectural rules require a custom checker and team refinement before implementing. \
+        Wire each check into the repo's CANONICAL check command (the lint/test command that \
+        Camerata's in-loop layer-2 check also runs) AND the CI workflow — one wiring covers BOTH \
+        the in-loop layer-2 check (fast, during a governed run) and the authoritative layer-3 CI \
+        gate (every PR, including non-Camerata changes).";
 
     let (title, body) = match req.tier.as_str() {
         "mechanical" => {
@@ -2858,8 +2862,11 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
                  1. Check whether it is already enforced in CI (inspect `.github/workflows/`, the \
                  linter config, package scripts).\n\
                  2. If it is, leave it.\n\
-                 3. If not, enable the cited linter rule and wire it into the CI workflow so it \
-                 runs on every PR — a failing PR means the rule is violated.\n\n\
+                 3. If not, enable the cited linter rule in the repo's lint config so the repo's \
+                 canonical lint command runs it (this makes Camerata's in-loop layer-2 check pick \
+                 it up automatically), AND wire that same command into the CI workflow so it runs \
+                 on every PR (layer 3). One wiring covers both layers; a failing PR means the rule \
+                 is violated.\n\n\
                  Do not weaken or delete existing checks.\n\n\
                  _Filed by Camerata onboarding._"
             );
@@ -2889,7 +2896,9 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
                  For each rule:\n\
                  1. Agree on a checker strategy (AST transform, grep pattern, Semgrep rule, etc.).\n\
                  2. Implement and test the checker in isolation.\n\
-                 3. Wire it into the CI workflow so it runs on every PR.\n\n\
+                 3. Wire the checker into the repo's canonical check command (e.g. its lint/test \
+                 script, so Camerata's in-loop layer-2 check runs it) AND the CI workflow so it \
+                 runs on every PR (layer 3). One wiring covers both layers.\n\n\
                  Do not weaken or delete existing checks. Scope each checker as a sub-task if the \
                  list is long — do not block the mechanical CI story on this work.\n\n\
                  _Filed by Camerata onboarding._"
