@@ -285,6 +285,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
         // Model-tiering: read/write the project's fast/balanced/strongest model bindings (#63).
         .route("/api/projects/:id/tier-map", post(set_tier_map))
+        // Per-step model config: set the model for one NON-FLEET AI step on this project.
+        .route("/api/projects/:id/step-models", post(set_step_model))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
@@ -1617,6 +1619,88 @@ async fn set_tier_map(
     }
 }
 
+/// Resolve the model id for a NON-FLEET AI step from the ACTIVE project's per-step config.
+///
+/// This is the single resolution point for the FALLBACK steps (story authoring,
+/// decomposition, escalation, clarification): once a project exists, its
+/// [`crate::project::Project::model_for_step`] value is authoritative — there is NO
+/// env/const fallback. The ONLY remaining [`crate::llm::DEFAULT_MODEL`] floor is the
+/// project-less edge (no active project at all, e.g. a smoke test before any project is
+/// created). UI-picked steps (audit / calibration / research chat) do not use this helper
+/// directly — they let an explicit request model override this default at their call site
+/// via [`step_model_or`].
+fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
+    state
+        .projects
+        .active()
+        .map(|p| p.model_for_step(step).to_string())
+        .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
+/// UI-picked step resolution: the caller's explicit `requested` model wins when non-empty;
+/// otherwise fall back to the active project's per-step default (see [`step_model`]). Used
+/// by the audit / calibration / research-chat steps, where the UI still owns the
+/// speed-vs-thoroughness override but the project supplies the default.
+fn step_model_or(
+    state: &AppState,
+    step: crate::project::StepKind,
+    requested: Option<&str>,
+) -> String {
+    match requested.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => m.to_string(),
+        None => step_model(state, step),
+    }
+}
+
+/// Body for `POST /api/projects/:id/step-models`: which NON-FLEET AI step and the model id
+/// to bind to it. Patch semantics — one step per call, the others left untouched.
+#[derive(serde::Deserialize)]
+struct SetStepModelReq {
+    /// The step key: `audit` | `calibration` | `research_chat` | `story_authoring` |
+    /// `decomposition` | `escalation` | `clarification`.
+    step: String,
+    /// The model id to bind (e.g. `claude-opus-4-8`).
+    model: String,
+}
+
+/// Parse a step key from the request body into a [`StepKind`]. Tolerant of dash/space
+/// separators (e.g. `research-chat`). Returns `None` for an unknown key.
+fn parse_step_kind(s: &str) -> Option<crate::project::StepKind> {
+    use crate::project::StepKind;
+    match s.trim().to_ascii_lowercase().replace([' ', '-'], "_").as_str() {
+        "audit" => Some(StepKind::Audit),
+        "calibration" => Some(StepKind::Calibration),
+        "research_chat" => Some(StepKind::ResearchChat),
+        "story_authoring" => Some(StepKind::StoryAuthoring),
+        "decomposition" => Some(StepKind::Decomposition),
+        "escalation" => Some(StepKind::Escalation),
+        "clarification" => Some(StepKind::Clarification),
+        _ => None,
+    }
+}
+
+/// `POST /api/projects/:id/step-models` — set the model for ONE non-fleet AI step on this
+/// project. Patch semantics (one step per call); mirrors the tier-map write path —
+/// mutates only the named project and persists. A blank `model` or unknown `step` is a
+/// no-op error response (never silently mutates).
+async fn set_step_model(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetStepModelReq>,
+) -> Json<serde_json::Value> {
+    let Some(step) = parse_step_kind(&req.step) else {
+        return Json(serde_json::json!({ "ok": false, "message": "unknown step" }));
+    };
+    let model = req.model.trim().to_string();
+    if model.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
+    }
+    match state.projects.set_step_model(&id, step, model) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 // ── VCS-gate process-rule configuration + auditable bypass (issue #65) ────────
 
 /// `GET /api/projects/:id/process-rule-config` — read the project's current VCS-gate
@@ -2055,8 +2139,20 @@ async fn onboard_audit(
     // pass below, which runs the rule's deterministic tool itself and folds in preview findings.
     let (selected, excluded_mechanical, preview_rules, corpus) =
         split_scannable_rules(selected).await;
-    let model = req.model.filter(|m| !m.trim().is_empty());
-    let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
+    // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
+    // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
+    // no active project). Each is resolved to a concrete id (never `None`) so there is no
+    // downstream env/const fallback once a project exists.
+    let model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Audit,
+        req.model.as_deref(),
+    ));
+    let calibration_model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Calibration,
+        req.calibration_model.as_deref(),
+    ));
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     // Scan-type selector: resolve the two flags (both-false coerces to both-true).
     let (run_ai_review, run_deterministic, _coerced) =
@@ -2169,8 +2265,20 @@ async fn onboard_audit_start(
     // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW.
     let (selected, excluded_mechanical, preview_rules, corpus) =
         split_scannable_rules(selected).await;
-    let model = req.model.filter(|m| !m.trim().is_empty());
-    let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
+    // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
+    // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
+    // no active project). Each is resolved to a concrete id (never `None`) so there is no
+    // downstream env/const fallback once a project exists.
+    let model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Audit,
+        req.model.as_deref(),
+    ));
+    let calibration_model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Calibration,
+        req.calibration_model.as_deref(),
+    ));
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     let thorough = req.thorough;
     let deep = req.deep;
@@ -3692,7 +3800,10 @@ async fn decompose_propose(
         .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
     let llm = state.llm();
-    let children = crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm).await;
+    // Decomposition is a NON-FLEET step: model from the active project's per-step config.
+    let model = step_model(&state, crate::project::StepKind::Decomposition);
+    let children =
+        crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm, &model).await;
     Ok(Json(children))
 }
 
@@ -3718,8 +3829,15 @@ async fn suggest_clarifications(
         story.title, story.description
     );
     let llm = state.llm();
+    // Clarification authoring is a NON-FLEET step: model from the active project's per-step
+    // config (DEFAULT_MODEL floor only when there is no active project).
+    let model = step_model(&state, crate::project::StepKind::Clarification);
     let questions = match llm
-        .complete(crate::llm::LlmRequest::new(user).with_system(system))
+        .complete(
+            crate::llm::LlmRequest::new(user)
+                .with_model(model)
+                .with_system(system),
+        )
         .await
     {
         Ok(resp) => parse_string_array(&resp.text),
@@ -3999,13 +4117,10 @@ async fn answer_escalation(
     let driver = crate::escalation::LlmTranslator {
         llm: state.llm(),
     };
-    let model = state
-        .routines
-        .list()
-        .into_iter()
-        .find(|r| r.id == esc.routine_id)
-        .map(|r| r.model)
-        .unwrap_or_default();
+    // Escalation translation is a NON-FLEET step: the model comes from the active project's
+    // per-step config (no env/const fallback once a project exists), replacing the prior
+    // per-routine model. DEFAULT_MODEL floor only applies with no active project.
+    let model = step_model(&state, crate::project::StepKind::Escalation);
     let payload = crate::escalation::translate_answer_ai(&driver, &esc, &req.answer, &model).await;
     let resolved = state
         .escalations
@@ -4084,7 +4199,10 @@ async fn chat(
     Json(req): Json<ChatReq>,
 ) -> Result<Json<crate::llm::LlmResponse>, AppError> {
     let llm = state.llm();
-    let mut r = crate::llm::LlmRequest::new(req.prompt).with_model(req.model);
+    // Research chat is a UI-PICKED non-fleet step: an explicit request model wins; otherwise
+    // the active project's per-step default applies (DEFAULT_MODEL floor only with no project).
+    let model = step_model_or(&state, crate::project::StepKind::ResearchChat, Some(&req.model));
+    let mut r = crate::llm::LlmRequest::new(req.prompt).with_model(model);
     if let Some(system) = req.system {
         r = r.with_system(system);
     }
@@ -4920,7 +5038,13 @@ async fn uow_author(
     let prompt = build_author_prompt(&prior.chat, &message);
 
     let llm = state.llm();
-    let request = crate::llm::LlmRequest::new(prompt).with_system(STORY_AUTHOR_SYSTEM);
+    // Story authoring is a NON-FLEET step: its model comes from the active project's
+    // per-step config (no env/const fallback once a project exists). The project-less edge
+    // (no active project) is the only place the DEFAULT_MODEL floor applies.
+    let model = step_model(&state, crate::project::StepKind::StoryAuthoring);
+    let request = crate::llm::LlmRequest::new(prompt)
+        .with_model(model)
+        .with_system(STORY_AUTHOR_SYSTEM);
     let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
@@ -6473,6 +6597,79 @@ mod tests {
             conformance: None,
             repos: repos.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn step_model_routes_to_active_projects_configured_model() {
+        // (e) CALL-SITE ROUTING: the resolution helper every non-fleet call site uses must
+        // return the ACTIVE project's per-step model — that is what gets put on the LlmRequest.
+        use crate::project::StepKind;
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // No active project yet: the only floor is DEFAULT_MODEL (project-less edge).
+        assert_eq!(
+            step_model(&state, StepKind::StoryAuthoring),
+            crate::llm::DEFAULT_MODEL,
+            "project-less edge falls back to DEFAULT_MODEL"
+        );
+
+        // Create a project (becomes active) and pin its story-authoring model.
+        let p = state.projects.create("Routing", vec![]).unwrap();
+        state
+            .projects
+            .set_step_model(&p.id, StepKind::StoryAuthoring, "claude-opus-4-8".to_string())
+            .unwrap();
+
+        // The fallback-step resolver now returns the project's configured model (no env floor).
+        let model = step_model(&state, StepKind::StoryAuthoring);
+        assert_eq!(model, "claude-opus-4-8");
+        // And it is exactly what a fallback-step call site puts on the LlmRequest.
+        let req = crate::llm::LlmRequest::new("draft").with_model(model);
+        assert_eq!(req.model, "claude-opus-4-8");
+
+        // A different step on the same project is still the default (per-step isolation).
+        assert_eq!(
+            step_model(&state, StepKind::Decomposition),
+            crate::llm::DEFAULT_MODEL
+        );
+    }
+
+    #[test]
+    fn ui_picked_step_lets_request_model_override_project_default() {
+        // UI-picked steps (audit / calibration / research chat): an explicit request model
+        // wins; a blank/None request falls back to the project's per-step default.
+        use crate::project::StepKind;
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("UiPick", vec![]).unwrap();
+        state
+            .projects
+            .set_step_model(&p.id, StepKind::Audit, "claude-sonnet-4-6".to_string())
+            .unwrap();
+
+        // Explicit pick overrides the project default.
+        assert_eq!(
+            step_model_or(&state, StepKind::Audit, Some("claude-opus-4-8")),
+            "claude-opus-4-8"
+        );
+        // Blank / None falls back to the project's per-step model.
+        assert_eq!(
+            step_model_or(&state, StepKind::Audit, Some("   ")),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            step_model_or(&state, StepKind::Audit, None),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn parse_step_kind_accepts_known_keys_and_separators() {
+        use crate::project::StepKind;
+        assert_eq!(parse_step_kind("audit"), Some(StepKind::Audit));
+        assert_eq!(parse_step_kind("research_chat"), Some(StepKind::ResearchChat));
+        // Tolerant of dashes/spaces/case.
+        assert_eq!(parse_step_kind("Research-Chat"), Some(StepKind::ResearchChat));
+        assert_eq!(parse_step_kind("story authoring"), Some(StepKind::StoryAuthoring));
+        assert_eq!(parse_step_kind("nope"), None);
     }
 
     #[test]

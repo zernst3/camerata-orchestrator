@@ -91,6 +91,7 @@ mod tests {
                 strongest: "opus-custom".into(),
             },
             process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),
+            step_models: crate::project::StepModels::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

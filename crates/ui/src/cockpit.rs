@@ -78,6 +78,51 @@ struct ProjectView {
     /// Serde default fills in the fleet defaults when the field is absent (back-compat).
     #[serde(default)]
     tier_map: TierMapView,
+    /// Per-step model config for the NON-FLEET AI steps (audit, calibration, research chat,
+    /// story authoring, decomposition, escalation, clarification). Serde default fills in
+    /// the shipped default model per slot when the field is absent (back-compat).
+    #[serde(default)]
+    step_models: StepModelsView,
+}
+
+/// UI mirror of `camerata_server::project::StepModels`. One model-id slot per NON-FLEET AI
+/// step. Serde defaults match the server's `DEFAULT_MODEL`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct StepModelsView {
+    #[serde(default = "default_step_model_str")]
+    audit: String,
+    #[serde(default = "default_step_model_str")]
+    calibration: String,
+    #[serde(default = "default_step_model_str")]
+    research_chat: String,
+    #[serde(default = "default_step_model_str")]
+    story_authoring: String,
+    #[serde(default = "default_step_model_str")]
+    decomposition: String,
+    #[serde(default = "default_step_model_str")]
+    escalation: String,
+    #[serde(default = "default_step_model_str")]
+    clarification: String,
+}
+
+/// The shipped server `DEFAULT_MODEL` (`crate::llm::DEFAULT_MODEL`). Kept in sync here so a
+/// project JSON missing a step field renders the same default the server seeds at creation.
+fn default_step_model_str() -> String {
+    "claude-sonnet-4-6".to_string()
+}
+
+impl Default for StepModelsView {
+    fn default() -> Self {
+        Self {
+            audit: default_step_model_str(),
+            calibration: default_step_model_str(),
+            research_chat: default_step_model_str(),
+            story_authoring: default_step_model_str(),
+            decomposition: default_step_model_str(),
+            escalation: default_step_model_str(),
+            clarification: default_step_model_str(),
+        }
+    }
 }
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
@@ -256,6 +301,20 @@ async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
             "balanced": map.balanced,
             "strongest": map.strongest,
         }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Set the model for ONE non-fleet AI step on a project. Uses the
+/// `POST /api/projects/:id/step-models` endpoint (patch semantics: one step per call). The
+/// `id` is the SCOPED project id passed into the editor — never a global — so the mutation
+/// targets exactly that project (per-project isolation is preserved end to end).
+async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/step-models", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "step": step, "model": model }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1734,6 +1793,106 @@ fn TierMapEditor(project: ProjectView) -> Element {
     }
 }
 
+/// Per-step model editor: one labeled `<select>` per NON-FLEET AI step (audit,
+/// calibration, research chat, story authoring, decomposition, escalation, clarification).
+///
+/// Reads each current value from `project.step_models` and saves on change via
+/// `POST /api/projects/:id/step-models` (one step per round-trip — patch semantics, mirrors
+/// the per-step server endpoint). The dropdown options come from `GET /api/models` (the
+/// same source the tier-map / audit selectors use). The project id is the scoped id from
+/// the passed-in `ProjectView`, so each save targets exactly this project.
+#[component]
+fn StepModelsEditor(project: ProjectView) -> Element {
+    let models = use_resource(|| async move { fetch_audit_models().await });
+    let models = models.read().clone().flatten();
+
+    // The (step-key, human label, current model id) tuples, in display order.
+    let sm = &project.step_models;
+    let rows: Vec<(&'static str, &'static str, String)> = vec![
+        ("audit", "Audit", sm.audit.clone()),
+        ("calibration", "Calibration", sm.calibration.clone()),
+        ("research_chat", "Research chat", sm.research_chat.clone()),
+        ("story_authoring", "Story authoring", sm.story_authoring.clone()),
+        ("decomposition", "Decomposition", sm.decomposition.clone()),
+        ("escalation", "Escalation", sm.escalation.clone()),
+        ("clarification", "Clarification", sm.clarification.clone()),
+    ];
+
+    rsx! {
+        div { class: "tier-map-editor step-models-editor",
+            p { class: "tier-map-heading", "Step models" }
+            p { class: "section-hint tier-map-hint",
+                "The model each NON-FLEET AI step uses for THIS project. Once set, the project's \
+                 value is authoritative (no environment fallback). Audit, calibration, and research \
+                 chat still let an explicit per-run pick override this default; the other steps use \
+                 it directly. Each change saves immediately."
+            }
+            div { class: "tier-map-rows",
+                for (step_key , label , current) in rows.into_iter() {
+                    StepModelRow {
+                        key: "{project.id}-{step_key}",
+                        project_id: project.id.clone(),
+                        step_key,
+                        label,
+                        current,
+                        models: models.clone(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row of [`StepModelsEditor`]: a label + a model `<select>` that POSTs the chosen model
+/// for its single step on change. Self-contained (owns its local selection + saving signals)
+/// so a save on one step never touches another.
+#[component]
+fn StepModelRow(
+    project_id: String,
+    step_key: &'static str,
+    label: &'static str,
+    current: String,
+    models: Option<AuditModelsResp>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut selected = use_signal(|| current.clone());
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "tier-map-row step-model-row",
+            label { class: "tier-map-band-label", "{label}" }
+            if let Some(m) = models {
+                select {
+                    class: "tier-map-input run-model-select",
+                    value: "{selected}",
+                    disabled: saving(),
+                    onchange: move |e| {
+                        let model = e.value();
+                        selected.set(model.clone());
+                        let pid = project_id.clone();
+                        saving.set(true);
+                        spawn(async move {
+                            if set_project_step_model(&pid, step_key, &model).await {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, &format!("{label} model saved."));
+                            } else {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, &format!("Could not save {label} model."));
+                            }
+                            saving.set(false);
+                        });
+                    },
+                    for opt in m.models.iter() {
+                        option {
+                            value: "{opt.id}",
+                            selected: selected() == opt.id,
+                            "{opt.label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -2121,6 +2280,13 @@ fn RulesView() -> Element {
                         // the rule tables above.
                         p { class: "section-label settings-label", "SETTINGS: Model tier map" }
                         TierMapEditor { project: p_owned.clone() }
+
+                        // ── SETTINGS: Per-step models ─────────────────────────────────
+                        // The model each non-fleet AI step uses for this project. Distinct
+                        // from the fleet tier map above (that is per-task-tier for governed
+                        // runs); this covers audit / calibration / chat / authoring / etc.
+                        p { class: "section-label settings-label", "SETTINGS: Step models" }
+                        StepModelsEditor { project: p_owned.clone() }
 
                         // ── SETTINGS: Commit / PR gate settings (#65) ──────────────
                         // The `VcsGateSettings` component owns the `process-rule-config`
@@ -4535,7 +4701,12 @@ fn ProjectSettingsGear() -> Element {
 
                         // ── Default tier-map ──────────────────────────────────────
                         div { class: "proj-settings-section",
-                            TierMapEditor { project: p }
+                            TierMapEditor { project: p.clone() }
+                        }
+
+                        // ── Per-step models ───────────────────────────────────────
+                        div { class: "proj-settings-section",
+                            StepModelsEditor { project: p }
                         }
                     }
                 }

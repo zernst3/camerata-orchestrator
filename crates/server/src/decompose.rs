@@ -87,6 +87,7 @@ pub async fn propose_ai(
     parent: &CanonicalStory,
     practice: &Practice,
     llm: &crate::llm::Llm,
+    model: &str,
 ) -> Vec<ProposedChild> {
     let kinds: Vec<String> = practice
         .children
@@ -105,7 +106,11 @@ pub async fn propose_ai(
         parent.description,
         kinds.join(", ")
     );
-    let req = crate::llm::LlmRequest::new(user).with_system(system);
+    // Decomposition is a NON-FLEET step: the model is resolved by the caller from the
+    // active project's per-step config (no env/const fallback once a project exists).
+    let req = crate::llm::LlmRequest::new(user)
+        .with_model(model)
+        .with_system(system);
     let Ok(resp) = llm.complete(req).await else {
         return propose(parent, practice);
     };

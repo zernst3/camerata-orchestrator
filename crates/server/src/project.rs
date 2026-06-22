@@ -15,7 +15,86 @@ use serde::{Deserialize, Serialize};
 
 use camerata_checks::vcs_action::ProcessRuleConfig;
 
+use crate::llm::DEFAULT_MODEL;
 use crate::model_tier::TierMap;
+
+/// The NON-FLEET AI steps whose model is configured per-project on [`StepModels`].
+///
+/// Each variant maps 1:1 to a field on [`StepModels`] (see [`Project::model_for_step`])
+/// and to exactly one (or one family of) `LlmRequest` call site(s). These are the steps
+/// the governed development FLEET does NOT own — the fleet's per-stage models come from
+/// the project's [`TierMap`] (`ORCH-MODEL-TIERING-1`), a separate axis. `StepKind` covers
+/// everything else: the brownfield audit, the calibration pass, the research chat, story
+/// authoring, decomposition, escalation translation, and clarification authoring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepKind {
+    /// The brownfield AI audit pass (the LLM scan of architectural / structured / prose
+    /// rules, plus the deep-lens tier). UI-picked: an explicit request model overrides.
+    Audit,
+    /// The calibration pass (severity recalibration + confidence tagging) that runs after
+    /// the audit. UI-picked: an explicit request model overrides.
+    Calibration,
+    /// The research / side-by-side chat completion. UI-picked: an explicit request model
+    /// overrides.
+    ResearchChat,
+    /// Story authoring (the draft-UoW clarification chat → story redraft).
+    StoryAuthoring,
+    /// AI decomposition of a parent story into grounded child stories.
+    Decomposition,
+    /// Escalation answer translation (restating a human decision as a resume directive).
+    Escalation,
+    /// AI-suggested clarifying questions for a story.
+    Clarification,
+}
+
+/// serde default for each [`StepModels`] field — the shipped [`DEFAULT_MODEL`]. Used so a
+/// project JSON written before a given step field existed deserializes to the default
+/// rather than failing (mirrors [`default_max_iterations`]).
+pub fn default_model() -> String {
+    DEFAULT_MODEL.to_string()
+}
+
+/// Per-project, per-step model configuration for every NON-FLEET AI step.
+///
+/// One model-id slot per [`StepKind`]. This mirrors [`TierMap`] exactly: `serde(default)`
+/// on every field (legacy-JSON back-compat), a [`Default`] impl seeding every slot with
+/// [`DEFAULT_MODEL`], and per-project storage on [`Project`] mutated only through
+/// [`ProjectStore::set_step_model`]. Once a project exists, its step model is the SOLE
+/// source for that step — there is no runtime env/const fallback (the only remaining
+/// `DEFAULT_MODEL` floor is the project-less edge, e.g. the smoke-test chat with no active
+/// project). UI-picked steps (audit / calibration / research_chat) still let an explicit
+/// request model override this default; fallback steps read it directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StepModels {
+    #[serde(default = "default_model")]
+    pub audit: String,
+    #[serde(default = "default_model")]
+    pub calibration: String,
+    #[serde(default = "default_model")]
+    pub research_chat: String,
+    #[serde(default = "default_model")]
+    pub story_authoring: String,
+    #[serde(default = "default_model")]
+    pub decomposition: String,
+    #[serde(default = "default_model")]
+    pub escalation: String,
+    #[serde(default = "default_model")]
+    pub clarification: String,
+}
+
+impl Default for StepModels {
+    fn default() -> Self {
+        Self {
+            audit: DEFAULT_MODEL.to_string(),
+            calibration: DEFAULT_MODEL.to_string(),
+            research_chat: DEFAULT_MODEL.to_string(),
+            story_authoring: DEFAULT_MODEL.to_string(),
+            decomposition: DEFAULT_MODEL.to_string(),
+            escalation: DEFAULT_MODEL.to_string(),
+            clarification: DEFAULT_MODEL.to_string(),
+        }
+    }
+}
 
 /// An architect-authored rule (not from the corpus). Preserved across base-rule
 /// upserts — camerata-ai's `CustomRule`.
@@ -110,6 +189,17 @@ pub struct Project {
     /// See `camerata_checks::vcs_action::{ProcessRuleConfig, build_rules}`.
     #[serde(default)]
     pub process_rule_config: ProcessRuleConfig,
+    /// Per-step model configuration for every NON-FLEET AI step (audit, calibration,
+    /// research chat, story authoring, decomposition, escalation, clarification).
+    ///
+    /// Serde default fills in [`StepModels::default()`] (every slot = [`DEFAULT_MODEL`])
+    /// for projects persisted before this field existed — no migration required, and each
+    /// individual field also `serde(default)`s so a partial blob still loads. Once a
+    /// project exists this is the SOLE source for a step's model (no env/const fallback);
+    /// the only remaining floor is the project-less edge. Mutated only via
+    /// [`ProjectStore::set_step_model`].
+    #[serde(default)]
+    pub step_models: StepModels,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -176,6 +266,41 @@ impl Project {
     /// `camerata_checks::vcs_action::build_rules` on each gate call).
     pub fn set_process_rule_config(&mut self, config: ProcessRuleConfig) {
         self.process_rule_config = config;
+    }
+
+    /// The configured model id for a given NON-FLEET AI [`StepKind`] on THIS project.
+    ///
+    /// This is the project's per-step source of truth: once a project exists there is no
+    /// env/const fallback for these steps — the value here is authoritative (it is seeded
+    /// to [`DEFAULT_MODEL`] at creation and changed only via
+    /// [`ProjectStore::set_step_model`]). UI-picked steps still let an explicit request
+    /// model override this default at the call site; fallback steps use it directly.
+    pub fn model_for_step(&self, step: StepKind) -> &str {
+        match step {
+            StepKind::Audit => &self.step_models.audit,
+            StepKind::Calibration => &self.step_models.calibration,
+            StepKind::ResearchChat => &self.step_models.research_chat,
+            StepKind::StoryAuthoring => &self.step_models.story_authoring,
+            StepKind::Decomposition => &self.step_models.decomposition,
+            StepKind::Escalation => &self.step_models.escalation,
+            StepKind::Clarification => &self.step_models.clarification,
+        }
+    }
+
+    /// Set the model id for a single [`StepKind`] on this project IN PLACE, leaving every
+    /// other step untouched. The per-project mutation primitive behind
+    /// [`ProjectStore::set_step_model`]; isolation (a change to one project never leaks to
+    /// another) is guaranteed because this only ever borrows `&mut self`.
+    pub fn set_model_for_step(&mut self, step: StepKind, model: String) {
+        match step {
+            StepKind::Audit => self.step_models.audit = model,
+            StepKind::Calibration => self.step_models.calibration = model,
+            StepKind::ResearchChat => self.step_models.research_chat = model,
+            StepKind::StoryAuthoring => self.step_models.story_authoring = model,
+            StepKind::Decomposition => self.step_models.decomposition = model,
+            StepKind::Escalation => self.step_models.escalation = model,
+            StepKind::Clarification => self.step_models.clarification = model,
+        }
     }
 
     /// Explicitly remove a custom rule by name (the ONLY way a custom rule leaves
@@ -308,6 +433,7 @@ impl ProjectStore {
                 max_iterations: default_max_iterations(),
                 tier_map: TierMap::default(),
                 process_rule_config: ProcessRuleConfig::default(),
+                step_models: StepModels::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -371,6 +497,7 @@ impl ProjectStore {
                     max_iterations: default_max_iterations(),
                     tier_map: TierMap::default(),
                     process_rule_config: ProcessRuleConfig::default(),
+                    step_models: StepModels::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -423,6 +550,20 @@ impl ProjectStore {
         ok
     }
 
+    /// Set the model for a single [`StepKind`] on ONE project (by id), persisting the
+    /// change. Mirrors the tier-map write path: it mutates ONLY the named project and
+    /// saves. Per-project isolation is structural — the closure borrows just that one
+    /// project's `&mut`, so a change to project A can never touch project B. Returns the
+    /// updated project, or `None` when no project has that id.
+    pub fn set_step_model(
+        &self,
+        id: &str,
+        step: StepKind,
+        model: String,
+    ) -> Option<Project> {
+        self.update(id, |p| p.set_model_for_step(step, model))
+    }
+
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
         let updated = {
@@ -470,6 +611,7 @@ mod tests {
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -508,6 +650,7 @@ mod tests {
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -540,6 +683,7 @@ mod tests {
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -575,6 +719,7 @@ mod tests {
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -622,6 +767,7 @@ mod tests {
             max_iterations: default_max_iterations(),
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -752,5 +898,165 @@ mod tests {
         );
         // Verify it persists in the store too.
         assert_eq!(store.get(&p.id).unwrap().onboarded, onboarded);
+    }
+
+    // ── StepModels (per-project, per-step model config) ────────────────────────
+
+    #[test]
+    fn new_project_seeds_every_step_to_default_model() {
+        // (a) A freshly created project carries DEFAULT_MODEL in every step slot.
+        let store = ProjectStore::new();
+        let p = store.create("SM", vec![]).unwrap();
+        assert_eq!(p.step_models.audit, DEFAULT_MODEL);
+        assert_eq!(p.step_models.calibration, DEFAULT_MODEL);
+        assert_eq!(p.step_models.research_chat, DEFAULT_MODEL);
+        assert_eq!(p.step_models.story_authoring, DEFAULT_MODEL);
+        assert_eq!(p.step_models.decomposition, DEFAULT_MODEL);
+        assert_eq!(p.step_models.escalation, DEFAULT_MODEL);
+        assert_eq!(p.step_models.clarification, DEFAULT_MODEL);
+        // model_for_step agrees with the field for every kind.
+        for step in [
+            StepKind::Audit,
+            StepKind::Calibration,
+            StepKind::ResearchChat,
+            StepKind::StoryAuthoring,
+            StepKind::Decomposition,
+            StepKind::Escalation,
+            StepKind::Clarification,
+        ] {
+            assert_eq!(
+                p.model_for_step(step),
+                DEFAULT_MODEL,
+                "new project defaults step {step:?} to DEFAULT_MODEL"
+            );
+        }
+    }
+
+    #[test]
+    fn step_models_default_when_absent_from_legacy_project_json() {
+        // (b) A project JSON written before step_models existed must deserialize with the
+        // default StepModels (serde fills it in), not fail. Mirrors the tier_map/max_iter tests.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p.step_models,
+            StepModels::default(),
+            "legacy project must deserialise with default step_models"
+        );
+        // And a PARTIAL step_models blob (only one field present) fills the rest from default —
+        // the per-field #[serde(default)] is what guarantees this.
+        let partial = r#"{
+            "id": "proj-2",
+            "name": "Partial",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "step_models": { "audit": "claude-opus-4-8" }
+        }"#;
+        let p2: Project = serde_json::from_str(partial).unwrap();
+        assert_eq!(p2.step_models.audit, "claude-opus-4-8");
+        assert_eq!(
+            p2.step_models.calibration, DEFAULT_MODEL,
+            "absent step fields fall back to DEFAULT_MODEL even in a partial blob"
+        );
+    }
+
+    #[test]
+    fn set_step_model_is_per_project_isolated() {
+        // (c) THE CRITICAL ISOLATION TEST: setting a step model on project A must NOT leak
+        // to project B. Each project owns its own StepModels.
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+
+        // Set A's audit model to a non-default id.
+        let updated_a = store
+            .set_step_model(&a.id, StepKind::Audit, "claude-opus-4-8".to_string())
+            .unwrap();
+        assert_eq!(updated_a.model_for_step(StepKind::Audit), "claude-opus-4-8");
+
+        // A's audit model changed...
+        assert_eq!(
+            store.get(&a.id).unwrap().model_for_step(StepKind::Audit),
+            "claude-opus-4-8",
+            "project A's audit model was set"
+        );
+        // ...but B's audit model is STILL the default — the change did not leak.
+        assert_eq!(
+            store.get(&b.id).unwrap().model_for_step(StepKind::Audit),
+            DEFAULT_MODEL,
+            "project B's audit model must be untouched by A's change"
+        );
+        // And A's OTHER steps are untouched too (patch semantics, one step per call).
+        assert_eq!(
+            store.get(&a.id).unwrap().model_for_step(StepKind::Calibration),
+            DEFAULT_MODEL,
+            "setting A's audit model must not touch A's calibration model"
+        );
+    }
+
+    #[test]
+    fn set_step_model_persists_to_disk_and_survives_reload() {
+        // (d) PERSISTENCE: set a step model, then reload the store from disk — the value
+        // survives the serde round-trip through the on-disk JSON file.
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-stepmodels-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+
+        let id = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let p = store.create("Persisted", vec![]).unwrap();
+            store
+                .set_step_model(&p.id, StepKind::Escalation, "claude-haiku-4-5-20251001".to_string())
+                .unwrap();
+            p.id
+        };
+
+        // Fresh store from the SAME file: the change must have been written through.
+        let reloaded = ProjectStore::load_or_new(path.clone());
+        let p = reloaded.get(&id).expect("project survived reload");
+        assert_eq!(
+            p.model_for_step(StepKind::Escalation),
+            "claude-haiku-4-5-20251001",
+            "the step model survived persistence + reload"
+        );
+        // Untouched steps reloaded at the default.
+        assert_eq!(p.model_for_step(StepKind::Audit), DEFAULT_MODEL);
+
+        // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn step_models_custom_values_survive_project_json_roundtrip() {
+        let mut original = Project {
+            id: "p".into(),
+            name: "P".into(),
+            repos: vec![],
+            onboarded: vec![],
+            max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
+            ruleset: ProjectRuleset::default(),
+        };
+        original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());
+        original.set_model_for_step(StepKind::ResearchChat, "claude-haiku-4-5-20251001".into());
+        let json = serde_json::to_string(&original).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.step_models, original.step_models);
+        assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-4-8");
     }
 }
