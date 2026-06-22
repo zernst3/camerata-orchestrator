@@ -71,5 +71,14 @@ just the judgment review. The audit entry points (`onboard_audit`/`_start`/`_job
 the selection; the cockpit audit UI gets the toggle. Sequenced after Part B because it edits the
 same audit pipeline + audit UI.
 
+## Deterministic-scan progress indicator (queued — build with/after Part B)
+
+Today only the AI agents show progress during a scan; the deterministic scan (floor + the new
+tool pass) has no visible state. Add a **"Deterministic scan" progress component above the AI
+agent-activity drawer**: the deterministic pass emits progress (per tool: starting → running →
+done, with a findings count; plus overall done/total), and the component renders it. Matters most
+in deterministic-only mode (no AI progress to watch). Sequenced with Part B/C — same scan UI +
+audit pipeline; the deterministic pass must emit the progress events.
+
 Relates to [[camerata_layer2_uses_repo_pinned_toolchain]], the universal gate, and the CI-wiring
 both-layers decision.

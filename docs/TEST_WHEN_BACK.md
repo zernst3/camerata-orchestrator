@@ -75,6 +75,11 @@ No GitHub issue filed for this yet — banked here as a QA item.
       Deterministic-only should run fast with **no LLM/token usage** (floor + tool preview only);
       AI-only should skip the linters; both = today's behavior. (Great for QA'ing the tool pass.)
 
+- [ ] **★ Deterministic-scan progress indicator.** During a scan, a "Deterministic scan" progress
+      component sits **above** the AI agent-activity drawer, showing the floor + tool pass state
+      (per-tool starting/running/done + findings count, overall done/total). In deterministic-only
+      mode it's the primary progress view.
+
 ## Known v1 limits (by design — not bugs)
 
 - Jobs are in-memory (don't survive an app restart — correct, since the work can't either).
