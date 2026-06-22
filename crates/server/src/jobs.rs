@@ -154,6 +154,8 @@ mod tests {
             detail: "d".into(),
             status: "active".into(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         }
     }
 

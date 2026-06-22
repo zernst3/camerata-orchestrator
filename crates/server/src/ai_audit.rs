@@ -355,6 +355,9 @@ pub fn parse_ai_findings(
                 detail,
                 status: "active".to_string(),
                 also_matches: Vec::new(),
+                // AI-audit findings are advisory, never scan-time tool previews.
+                preview: false,
+                preview_tool: None,
             });
         }
     }
@@ -2791,6 +2794,8 @@ mod tests {
             detail: format!("detail for {rule_id}"),
             status: "active".to_string(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         }
     }
 
@@ -3171,6 +3176,8 @@ mod tests {
             detail: "d".into(),
             status: "active".into(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         }
     }
 
@@ -3712,6 +3719,8 @@ mod tests {
             detail: "d".to_string(),
             status: "active".to_string(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![
