@@ -193,11 +193,18 @@ The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path
 - **Custom Global** — a project-level rule that applies to every repo, alongside the built-in
   project-level rules.
 
-Each custom rule carries the same shape as a corpus rule (id, the decision question, options +
-default + rationale, enforcement kind) so it flows through selection, the amber needs-choice
-highlight, and Apply exactly like a built-in. You can **create, edit, and delete** custom rules from
-the Rules view; deleting one removes it from any repo it was on. Custom rules are advisory unless you
-give them a mechanical/CI enforcement kind.
+A custom rule is a **free-text directive**, not a corpus-shaped rule: it carries only a short
+**name**, a **directive body**, and its **scope** (the domain it routes to). It has none of the
+corpus decision/options/enforcement-kind shape, so there is no alternative to choose and no amber
+needs-choice gate — it simply emits as a `### CUSTOM-{name}` block alongside the selected rules. You
+can **create, edit, and delete** custom rules from the Rules view; deleting one removes it from any
+repo it was on.
+
+**In practice a custom rule is always a prose or structured rule** — an advisory directive the agent
+follows and a human reviews. It can never be `mechanical` or `architectural`, because Camerata has no
+off-the-shelf linter mapping or bespoke checker for a rule you just invented. To make a custom rule
+deterministically enforced, you would open a story / development task to build that enforcement (a
+linter mapping or a custom AST checker); until then it is guidance, not a gate. (See §13.)
 
 ---
 
@@ -385,7 +392,7 @@ Beyond the corpus you can author **two kinds of custom rules**:
 - **Repo-scoped** — applies to a single repo; lives in its `.camerata/AGENTS.md`.
 - **Project-scoped** — applies to every repo; lives in the project store (cross-repo rules read it).
 
-Both custom types flow through the Rules view editor and the emission system exactly like corpus rules. Deleting a custom rule removes it from any repo it was on. Editing one changes only that rule.
+Both custom types flow through the Rules view editor and the emission system. A custom rule is a free-text directive (name + body + scope) and carries **no enforcement kind**, so it is **prose or structured in practice** — never mechanical or architectural unless you open a development task to build a linter mapping or custom checker for it (see §13). Deleting a custom rule removes it from any repo it was on. Editing one changes only that rule.
 
 ---
 
@@ -506,6 +513,16 @@ Both prose and structured rules carry the same TOML shape and both live outside 
 ### Where rules are written
 
 `arm.rs` routes rules to files at emit time: `prose` → `AGENTS.md`, everything else (`structured`, `mechanical`, `architectural`) → `CONVENTIONS.md`. That routing is the live source of truth (see `crates/server/src/arm.rs`). The format string at the top of each generated file explains this for anyone reading the repo without Camerata open.
+
+### Custom rules are always prose or structured
+
+The four modalities above describe **corpus** rules. A rule *you* author (a custom rule, §10) is a
+free-text directive with no `enforcement` field, so in practice it is only ever **prose** or
+**structured** — an advisory directive the agent follows and a human reviews. A custom rule cannot be
+`mechanical` or `architectural` on its own: those require an existing linter mapping or a bespoke
+checker, which Camerata can't conjure for a rule it has never seen. To enforce a custom rule
+deterministically, open a development task to build that linter mapping or custom check — then it
+graduates out of the advisory tier.
 
 ### Rule provenance badges
 
