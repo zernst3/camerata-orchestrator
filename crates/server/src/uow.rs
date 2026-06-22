@@ -163,11 +163,62 @@ impl GateProvenance {
     }
 }
 
+/// One message in a story-authoring clarification chat. `role` is `"user"` or
+/// `"ai"`; `text` is the message body. Persisted on the UoW so the back-and-forth
+/// survives sessions until the story is published.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct AuthorChatMessage {
+    /// `"user"` (the requirements author) or `"ai"` (the drafting assistant).
+    pub role: String,
+    /// The message body.
+    pub text: String,
+}
+
+/// The transient AI story-authoring state carried by a DRAFT UoW (one created via
+/// `POST /api/uow/blank` with `work_item = None`). It records the requirements
+/// prompt, the clarification chat transcript, and the current AI-drafted issue
+/// (title + body). It is preserved on the struct after publish for the record.
+///
+/// All fields default, so a legacy `uow.json` written before this field existed
+/// deserializes with an empty/absent authoring state (back-compat).
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct AuthoringState {
+    /// The first user message: the free-text requirements that seed the draft.
+    #[serde(default)]
+    pub requirements_prompt: String,
+    /// The full clarification chat transcript (user + ai turns), in order.
+    #[serde(default)]
+    pub chat: Vec<AuthorChatMessage>,
+    /// The current AI-drafted issue title.
+    #[serde(default)]
+    pub draft_title: String,
+    /// The current AI-drafted issue body (GitHub-flavoured markdown).
+    #[serde(default)]
+    pub draft_body: String,
+}
+
 /// The Unit of Work for one story. Keyed by `story_id`.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct UnitOfWork {
     /// The story this UoW belongs to.
     pub story_id: String,
+    /// The work-item link for a UoW whose KEY is not itself the work-item story id.
+    ///
+    /// For a normal UoW created from an existing issue the key IS the work-item story
+    /// id (`owner/repo#num`) and this stays `None` — `/api/uows` resolves the work item
+    /// from the spine by the key. For a DRAFT UoW authored with AI (keyed `draft-<uuid>`)
+    /// this carries the real work-item story id after publish so the link survives without
+    /// re-keying the UoW (see the build decision doc: draft-id-no-rekey). Defaults to
+    /// `None` so a legacy `uow.json` loads unchanged.
+    #[serde(default)]
+    pub work_item: Option<String>,
+    /// The AI story-authoring state for a DRAFT UoW (created blank, no work item yet).
+    /// `None` for a normal UoW that references an existing work item. `Some` while the
+    /// architect is authoring a story with AI; it carries the requirements prompt, the
+    /// clarification chat, and the drafted issue title/body. Defaults to `None` so a
+    /// legacy `uow.json` loads unchanged.
+    #[serde(default)]
+    pub authoring: Option<AuthoringState>,
     /// The git branch this work lives on (if set). Auto-populated by the fleet;
     /// also settable via the `/api/uow/:id/branch` endpoint.
     #[serde(default)]
@@ -376,6 +427,20 @@ impl UowStore {
         chrono::Utc::now().to_rfc3339()
     }
 
+    /// A process-unique token for a draft UoW id (`draft-<token>`). Combines the
+    /// nanosecond wall clock with a monotonic process-local counter so two blanks
+    /// created in the same nanosecond still get distinct ids (no `uuid` dependency).
+    fn next_draft_token() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{nanos:x}-{n:x}")
+    }
+
     /// Run an async artifact-store operation to completion from the sync UoW API.
     ///
     /// Uses the captured runtime handle. When called from within a tokio worker
@@ -562,6 +627,105 @@ impl UowStore {
             self.flush();
         }
         uow
+    }
+
+    /// Create a blank DRAFT UoW with an empty authoring state and no work item.
+    ///
+    /// The key is a draft id (`draft-<uuid>`); the UoW carries `authoring =
+    /// Some(default)` and `work_item` stays unset (resolved as `None` by `/api/uows`).
+    /// The draft id is the UoW key for its whole lifecycle: after publish the work-item
+    /// reference is carried on the spine story, so the key is never re-mapped (see the
+    /// build decision doc). Persists immediately. Returns the created UoW.
+    pub fn create_blank(&self) -> UnitOfWork {
+        let id = format!("draft-{}", Self::next_draft_token());
+        let now = Self::now_rfc3339();
+        let uow = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = UnitOfWork {
+                story_id: id.clone(),
+                authoring: Some(AuthoringState::default()),
+                updated: now,
+                ..Default::default()
+            };
+            map.insert(id.clone(), uow.clone());
+            uow
+        };
+        self.flush();
+        uow
+    }
+
+    /// Append a chat turn to a draft UoW's authoring state and overwrite the current
+    /// draft title/body. The first user message is also recorded as the
+    /// `requirements_prompt` (when it is still empty). Materializes an authoring state
+    /// if the UoW does not have one yet. Returns the updated UoW.
+    ///
+    /// `user_message` / `ai_reply` are appended in that order (user first, then ai).
+    /// `draft_title` / `draft_body` replace the current draft. Persists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_authoring_turn(
+        &self,
+        story_id: &str,
+        user_message: &str,
+        ai_reply: &str,
+        draft_title: &str,
+        draft_body: &str,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    authoring: Some(AuthoringState::default()),
+                    ..Default::default()
+                });
+            let st = uow.authoring.get_or_insert_with(AuthoringState::default);
+            if st.requirements_prompt.trim().is_empty() {
+                st.requirements_prompt = user_message.to_string();
+            }
+            st.chat.push(AuthorChatMessage {
+                role: "user".to_string(),
+                text: user_message.to_string(),
+            });
+            st.chat.push(AuthorChatMessage {
+                role: "ai".to_string(),
+                text: ai_reply.to_string(),
+            });
+            st.draft_title = draft_title.to_string();
+            st.draft_body = draft_body.to_string();
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Link a (draft) UoW to a newly-created work item: set its `work_item` reference
+    /// to the canonical story id. The UoW KEY is NOT changed (the draft id stays the
+    /// key; the work-item ref carries the real `owner/repo#num`). Appends a history
+    /// entry so the publish act is visible in the timeline. Returns the updated UoW.
+    pub fn link_work_item(&self, story_id: &str, work_item_story_id: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.work_item = Some(work_item_story_id.to_string());
+            uow.history.push(HistoryEntry {
+                ts: now.clone(),
+                kind: "authored".to_string(),
+                text: format!("Story authored with AI and published to the board: {work_item_story_id}"),
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
     }
 
     /// All known UoWs, in arbitrary order.
@@ -2247,5 +2411,107 @@ mod concurrency_regression_tests {
             1,
             "BUG-UOW-4: second decisions_for must not create extra revisions"
         );
+    }
+
+    // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────────────
+
+    #[test]
+    fn create_blank_makes_a_draft_uow_with_authoring_state() {
+        let store = UowStore::new();
+        let uow = store.create_blank();
+        assert!(uow.story_id.starts_with("draft-"), "draft id");
+        assert!(uow.work_item.is_none(), "no work item yet");
+        let st = uow.authoring.expect("authoring state present");
+        assert!(st.requirements_prompt.is_empty());
+        assert!(st.chat.is_empty());
+        assert!(st.draft_title.is_empty());
+
+        // It lists.
+        assert!(store.list().iter().any(|u| u.story_id == uow.story_id));
+
+        // Two blanks get distinct ids.
+        let other = store.create_blank();
+        assert_ne!(uow.story_id, other.story_id);
+    }
+
+    #[test]
+    fn append_authoring_turn_records_chat_and_draft() {
+        let store = UowStore::new();
+        let draft = store.create_blank();
+        let id = draft.story_id.clone();
+
+        let updated = store.append_authoring_turn(
+            &id,
+            "Build a CSV export",
+            "What columns do you need?",
+            "Add CSV export to report",
+            "## Summary\nExport the report as CSV.",
+        );
+        let st = updated.authoring.expect("authoring");
+        // First user message becomes the requirements prompt.
+        assert_eq!(st.requirements_prompt, "Build a CSV export");
+        // user then ai, in order.
+        assert_eq!(st.chat.len(), 2);
+        assert_eq!(st.chat[0].role, "user");
+        assert_eq!(st.chat[0].text, "Build a CSV export");
+        assert_eq!(st.chat[1].role, "ai");
+        assert_eq!(st.chat[1].text, "What columns do you need?");
+        assert_eq!(st.draft_title, "Add CSV export to report");
+        assert!(st.draft_body.contains("Export the report"));
+
+        // A second turn appends without clobbering the requirements prompt.
+        let updated = store.append_authoring_turn(&id, "Columns: a, b", "Updated.", "T2", "B2");
+        let st = updated.authoring.unwrap();
+        assert_eq!(st.requirements_prompt, "Build a CSV export", "prompt unchanged");
+        assert_eq!(st.chat.len(), 4);
+        assert_eq!(st.draft_title, "T2");
+    }
+
+    #[test]
+    fn link_work_item_links_without_rekey() {
+        let store = UowStore::new();
+        let draft = store.create_blank();
+        let id = draft.story_id.clone();
+
+        let linked = store.link_work_item(&id, "me/api#7");
+        // Key unchanged; ref carries the real id.
+        assert_eq!(linked.story_id, id, "no re-key");
+        assert_eq!(linked.work_item.as_deref(), Some("me/api#7"));
+        // A history entry records the publish.
+        assert!(linked.history.iter().any(|h| h.kind == "authored"));
+
+        // Persisted under the same key.
+        assert_eq!(
+            store.get_or_create(&id).work_item.as_deref(),
+            Some("me/api#7")
+        );
+    }
+
+    #[test]
+    fn authoring_fields_deserialize_back_compat() {
+        // A legacy uow.json (written before the authoring + work_item fields existed)
+        // must deserialize with those fields defaulted to None.
+        let legacy = r#"{"story_id":"me/api#1","dev_status":"new"}"#;
+        let uow: UnitOfWork = serde_json::from_str(legacy).expect("legacy uow deserializes");
+        assert_eq!(uow.story_id, "me/api#1");
+        assert!(uow.authoring.is_none(), "authoring defaults to None");
+        assert!(uow.work_item.is_none(), "work_item defaults to None");
+
+        // Round-trips: serialize then deserialize keeps the new fields.
+        let uow = UnitOfWork {
+            story_id: "draft-x".to_string(),
+            authoring: Some(AuthoringState {
+                requirements_prompt: "r".into(),
+                chat: vec![AuthorChatMessage { role: "user".into(), text: "t".into() }],
+                draft_title: "dt".into(),
+                draft_body: "db".into(),
+            }),
+            work_item: Some("me/api#9".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&uow).unwrap();
+        let back: UnitOfWork = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.authoring, uow.authoring);
+        assert_eq!(back.work_item, uow.work_item);
     }
 }

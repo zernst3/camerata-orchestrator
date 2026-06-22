@@ -353,6 +353,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/assignees", post(workitems_assignees))
         .route("/api/uows", get(uows_list))
         .route("/api/uow/from-workitem", post(uow_from_workitem))
+        // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
+        .route("/api/uow/blank", post(uow_blank))
+        .route("/api/uow/:story_id/author", post(uow_author))
+        .route("/api/uow/:story_id/publish", post(uow_publish))
         .route("/api/uow", get(uow_list))
         .route("/api/uow/:story_id", get(uow_get))
         .route("/api/uow/:story_id/status", post(uow_set_status))
@@ -4532,31 +4536,44 @@ fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppErr
 /// A UoW with the WorkItem it references and its lifecycle stage, for `GET /api/uows`.
 #[derive(serde::Serialize)]
 struct UowView {
-    /// The UoW id (its story id, e.g. `OWNER/REPO#123`).
+    /// The UoW id (its story id, e.g. `OWNER/REPO#123`, or `draft-<token>` for an
+    /// AI-authoring draft).
     id: String,
     /// The work item this UoW references, when it maps to one (a GitHub-sourced
-    /// spine story). `None` for native/legacy stories with no external ref.
+    /// spine story). `None` for native/legacy stories with no external ref AND for a
+    /// blank/authoring DRAFT UoW that has not been published to the board yet.
     work_item: Option<crate::workitems::WorkItem>,
     /// The lifecycle stage as a snake_case wire string (`intake`, `development`, …).
     stage: String,
+    /// `true` when this is a blank/authoring DRAFT UoW (it has an authoring state and no
+    /// work item yet). The UI renders the authoring panel instead of the dev controls.
+    authoring: bool,
 }
 
 /// `GET /api/uows` — list all Units of Work, each with the WorkItem it references
-/// (resolved from the story spine) and its lifecycle stage.
+/// (resolved from the story spine) and its lifecycle stage. A draft UoW's work item is
+/// resolved by its explicit `work_item` link (set at publish), falling back to the key.
 async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
     let stories = state.stories.list().await.map_err(AppError)?;
     let uows = state.uow.list();
     let views: Vec<UowView> = uows
         .into_iter()
         .map(|u| {
+            // A linked draft carries the real work-item story id in `work_item`; a
+            // normal UoW's key IS the work-item story id. Resolve against the spine by
+            // whichever applies.
+            let lookup_id = u.work_item.clone().unwrap_or_else(|| u.story_id.clone());
             let work_item = stories
                 .iter()
-                .find(|s| s.id == u.story_id)
+                .find(|s| s.id == lookup_id)
                 .and_then(crate::workitems::WorkItem::from_canonical_story);
+            // A draft is one with an authoring state and no published work item yet.
+            let authoring = u.authoring.is_some() && work_item.is_none();
             UowView {
                 id: u.story_id,
                 work_item,
                 stage: u.stage.wire_str().to_string(),
+                authoring,
             }
         })
         .collect();
@@ -4621,6 +4638,226 @@ async fn uow_from_workitem(
     Ok(Json(
         serde_json::json!({ "uow_id": uow.story_id, "created": true }),
     ))
+}
+
+// ── AI story authoring from a blank UoW (2026-06-22) ─────────────────────────────
+
+/// `POST /api/uow/blank` — create a blank DRAFT UoW (no story yet, `work_item = None`,
+/// an empty authoring state). It appears in `/api/uows` as a draft (authoring=true) and
+/// is the start of the "author a story with AI" flow. Returns `{ uow_id }`.
+async fn uow_blank(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let uow = state.uow.create_blank();
+    Json(serde_json::json!({ "uow_id": uow.story_id }))
+}
+
+#[derive(serde::Deserialize)]
+struct UowAuthorReq {
+    /// The next message in the clarification chat. The first message is the free-text
+    /// requirements; subsequent ones answer the AI's clarifying questions.
+    message: String,
+}
+
+/// The system prompt that turns the LLM into a story-authoring assistant. It produces a
+/// JSON object `{ "title", "body", "reply" }` so the server can update the draft AND show
+/// a conversational reply (which may be a clarifying question).
+const STORY_AUTHOR_SYSTEM: &str = "You are a product-owner assistant that drafts a single \
+GitHub-issue-style user story (a title and a markdown body) from a set of requirements and \
+an ongoing clarification chat. Keep one cohesive story: a concise imperative title and a \
+body with sections like Summary, Acceptance Criteria (a checklist), and Notes as warranted. \
+When the requirements are ambiguous or missing key detail, ASK ONE concise clarifying \
+question in your reply and draft the best story you can so far. Respond ONLY with a minified \
+JSON object with exactly these keys: \"title\" (string), \"body\" (string, markdown), and \
+\"reply\" (string: a short conversational message to the author, e.g. your clarifying \
+question or a note on what you changed). Do not wrap the JSON in code fences.";
+
+/// Parse the LLM's story-authoring response into `(title, body, reply)`. The model is asked
+/// for a JSON object; if it deviates (e.g. wraps in fences or returns prose), we degrade
+/// gracefully: strip a fenced block if present, else treat the whole text as the reply and
+/// leave the draft unchanged signals (empty strings).
+fn parse_author_response(raw: &str) -> (String, String, String) {
+    let trimmed = raw.trim();
+    // Strip a leading/trailing ```json … ``` fence if the model added one.
+    let inner = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_start())
+        .and_then(|s| s.strip_suffix("```"))
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
+        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let reply = v
+            .get("reply")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        return (title, body, reply);
+    }
+    // Not JSON: keep the raw text as the conversational reply; leave the draft untouched.
+    (String::new(), String::new(), trimmed.to_string())
+}
+
+/// Build the user prompt for the authoring LLM from the prior chat plus the new message.
+fn build_author_prompt(chat: &[crate::uow::AuthorChatMessage], new_message: &str) -> String {
+    let mut p = String::new();
+    if chat.is_empty() {
+        p.push_str("Requirements:\n");
+        p.push_str(new_message);
+    } else {
+        p.push_str("Conversation so far:\n");
+        for m in chat {
+            let who = if m.role == "ai" { "Assistant" } else { "Author" };
+            p.push_str(&format!("{who}: {}\n", m.text));
+        }
+        p.push_str("\nNew message from the author:\n");
+        p.push_str(new_message);
+    }
+    p.push_str(
+        "\n\nUpdate the story draft and reply. Respond ONLY with the JSON object described \
+         in the system prompt.",
+    );
+    p
+}
+
+/// `POST /api/uow/:story_id/author` body `{ message }` — append a turn to a draft UoW's
+/// clarification chat, ask the LLM to (re)draft the story, persist, and return the updated
+/// `UnitOfWork`. Degrades gracefully with no LLM token (returns a clear note as the AI reply
+/// and leaves the draft unchanged) — story authoring is an LLM text-generation assist (no
+/// gate, same class as the chat assistant).
+async fn uow_author(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowAuthorReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    let message = req.message.trim().to_string();
+    if message.is_empty() {
+        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+    }
+    // Snapshot the prior chat + draft so we can preserve the draft if the LLM is off/fails.
+    let before = state.uow.get_or_create(&story_id);
+    let prior = before.authoring.unwrap_or_default();
+    let prompt = build_author_prompt(&prior.chat, &message);
+
+    let llm = crate::llm::Llm::from_env();
+    let request = crate::llm::LlmRequest::new(prompt).with_system(STORY_AUTHOR_SYSTEM);
+    let (title, body, reply) = match llm.complete(request).await {
+        Ok(resp) => {
+            let (t, b, r) = parse_author_response(&resp.text);
+            // Keep the existing draft when the model returned no usable title/body.
+            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
+            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
+            let reply = if r.is_empty() {
+                "Updated the draft.".to_string()
+            } else {
+                r
+            };
+            (title, body, reply)
+        }
+        Err(e) => {
+            // Token-less / LLM-off: don't crash; record a clear note and keep the draft.
+            let note = format!(
+                "AI drafting is unavailable right now ({}). Your message was saved; configure \
+                 a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                e
+            );
+            (prior.draft_title.clone(), prior.draft_body.clone(), note)
+        }
+    };
+    let updated = state
+        .uow
+        .append_authoring_turn(&story_id, &message, &reply, &title, &body);
+    Ok(Json(updated))
+}
+
+#[derive(serde::Deserialize)]
+struct UowPublishReq {
+    /// The target repo (`owner/repo`), one of the active project's repos.
+    repo: String,
+}
+
+/// `POST /api/uow/:story_id/publish` body `{ repo }` — create a GitHub issue from the
+/// drafted title/body (reuse `onboard::create_issue`), upsert the resulting work item onto
+/// the canonical spine, and LINK the draft UoW to it (without re-keying the UoW). Returns
+/// the linked `{ work_item, uow_id }`. Requires a GitHub token; 4xx with a clear reason
+/// when the token is absent, the repo is malformed, or the draft has no title.
+async fn uow_publish(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowPublishReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let coord = camerata_worktracker::RepoCoord::parse(&req.repo).ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "repo must be `owner/repo`, got `{}`",
+            req.repo
+        ))
+    })?;
+    let token = github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the story to the board."
+        ))
+    })?;
+    let uow = state.uow.get_or_create(&story_id);
+    let authoring = uow.authoring.clone().unwrap_or_default();
+    if authoring.draft_title.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!(
+            "The story has no drafted title yet. Author the story before publishing."
+        )));
+    }
+
+    // Create the issue (the generic emit-a-story primitive).
+    let html_url = crate::onboard::create_issue(
+        &coord.owner,
+        &coord.repo,
+        &token,
+        &authoring.draft_title,
+        &authoring.draft_body,
+    )
+    .await
+    .map_err(AppError)?;
+
+    // The new issue number is the trailing path segment of the html_url
+    // (`https://github.com/owner/repo/issues/<num>`).
+    let number: u64 = html_url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.trim().parse().ok())
+        .ok_or_else(|| {
+            AppError(anyhow::anyhow!(
+                "could not parse the new issue number from `{html_url}`"
+            ))
+        })?;
+
+    // Build the canonical story for the new issue and upsert it onto the spine so
+    // /api/uows resolves the work item and dev runs have a story to run against.
+    let story = crate::github_issues::issue_to_story(
+        &req.repo,
+        number,
+        &authoring.draft_title,
+        &authoring.draft_body,
+    );
+    let work_item_story_id = story.id.clone();
+    state.stories.upsert(story).await.map_err(AppError)?;
+
+    // Link the draft UoW to the work item WITHOUT re-keying it (the work-item ref carries
+    // the real owner/repo#num).
+    state
+        .uow
+        .link_work_item(&story_id, &work_item_story_id);
+
+    // Resolve the linked work item for the response.
+    let work_item = state
+        .stories
+        .get(&work_item_story_id)
+        .await
+        .map_err(AppError)?
+        .as_ref()
+        .and_then(crate::workitems::WorkItem::from_canonical_story);
+
+    Ok(Json(serde_json::json!({
+        "uow_id": story_id,
+        "work_item": work_item,
+    })))
 }
 
 #[derive(serde::Deserialize)]
@@ -6775,5 +7012,194 @@ mod tests {
         assert!(parse_github_work_item_id("github:o/r").is_err());
         assert!(parse_github_work_item_id("github:notarepo#1").is_err());
         assert!(parse_github_work_item_id("github:o/r#notanumber").is_err());
+    }
+
+    // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────────────
+
+    /// `parse_author_response` handles a clean JSON object, a fenced JSON block, and
+    /// non-JSON prose (kept as the conversational reply, draft left untouched).
+    #[test]
+    fn parse_author_response_handles_json_fenced_and_prose() {
+        let (t, b, r) = parse_author_response(
+            "{\"title\":\"Add export\",\"body\":\"## Summary\\nDo it\",\"reply\":\"What format?\"}",
+        );
+        assert_eq!(t, "Add export");
+        assert!(b.contains("Summary"));
+        assert_eq!(r, "What format?");
+
+        // Fenced block is unwrapped.
+        let fenced = "```json\n{\"title\":\"T\",\"body\":\"B\",\"reply\":\"R\"}\n```";
+        let (t, b, r) = parse_author_response(fenced);
+        assert_eq!((t.as_str(), b.as_str(), r.as_str()), ("T", "B", "R"));
+
+        // Non-JSON: whole text becomes the reply; title/body empty (caller keeps draft).
+        let (t, b, r) = parse_author_response("Just some prose, no JSON here.");
+        assert!(t.is_empty() && b.is_empty());
+        assert_eq!(r, "Just some prose, no JSON here.");
+    }
+
+    /// `POST /api/uow/blank` creates a draft UoW that then lists in `/api/uows` with
+    /// `work_item = null` and `authoring = true`.
+    #[tokio::test]
+    async fn blank_uow_creates_and_lists_as_authoring() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let uow_id = json["uow_id"].as_str().unwrap().to_string();
+        assert!(uow_id.starts_with("draft-"), "draft id, got {uow_id}");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/uows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let uows = json["uows"].as_array().unwrap();
+        let entry = uows
+            .iter()
+            .find(|u| u["id"] == uow_id)
+            .expect("draft in /api/uows");
+        assert!(entry["work_item"].is_null(), "draft has no work item yet");
+        assert_eq!(entry["authoring"], true, "draft flagged as authoring");
+    }
+
+    /// `POST /api/uow/:id/author` appends the chat turn and persists the requirements
+    /// even when the LLM is unavailable (token-free): the endpoint degrades gracefully
+    /// with a clear note rather than crashing, and the user message is recorded.
+    #[tokio::test]
+    async fn author_endpoint_appends_chat_without_token() {
+        // Ensure no API key is set so the LLM path returns the graceful note (the CLI may
+        // or may not exist on CI; either way the user turn is appended and we get a 200).
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let app = router(state);
+
+        let draft = uow_store.create_blank();
+        let id = draft.story_id.clone();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{}/author", id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"Add a CSV export to the report"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The store reflects the appended user turn + the requirements prompt.
+        let after = uow_store.get_or_create(&id);
+        let st = after.authoring.expect("authoring state");
+        assert_eq!(st.requirements_prompt, "Add a CSV export to the report");
+        assert_eq!(st.chat.first().map(|m| m.role.as_str()), Some("user"));
+        assert_eq!(
+            st.chat.first().map(|m| m.text.as_str()),
+            Some("Add a CSV export to the report")
+        );
+        // An AI turn (real reply or graceful note) is always appended after the user turn.
+        assert_eq!(st.chat.get(1).map(|m| m.role.as_str()), Some("ai"));
+    }
+
+    /// `POST /api/uow/:id/publish` rejects (non-2xx) with a clear reason when no GitHub
+    /// token is configured.
+    #[tokio::test]
+    async fn publish_without_token_is_rejected_with_reason() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let app = router(state);
+
+        let draft = uow_store.create_blank();
+        // Give it a draft title so we reach the token check (not the empty-title check).
+        uow_store.append_authoring_turn(&draft.story_id, "req", "ok", "A title", "A body");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{}/publish", draft.story_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"repo":"me/api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!resp.status().is_success(), "no token -> non-2xx");
+        let json = body_json(resp).await;
+        let err = json["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("GitHub") || err.contains("token"),
+            "reason names the missing token, got: {err}"
+        );
+    }
+
+    /// The publish LINK step (what `uow_publish` does after `create_issue`) wires the work
+    /// item onto the spine and links the draft UoW WITHOUT re-keying it; `/api/uows` then
+    /// resolves the work item and the entry is no longer flagged as authoring. This
+    /// exercises the link logic without a network call to `create_issue`.
+    #[tokio::test]
+    async fn publish_link_step_links_draft_without_rekey() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let stories = state.stories.clone();
+        let app = router(state);
+
+        let draft = uow_store.create_blank();
+        let draft_id = draft.story_id.clone();
+        uow_store.append_authoring_turn(&draft_id, "req", "ok", "Authored title", "Body");
+
+        // Simulate create_issue having returned issue #7 in me/api: upsert the spine story
+        // and link the draft (the two writes uow_publish performs after the HTTP call).
+        let story =
+            crate::github_issues::issue_to_story("me/api", 7, "Authored title", "Body");
+        let wi_story_id = story.id.clone();
+        stories.upsert(story).await.unwrap();
+        let linked = uow_store.link_work_item(&draft_id, &wi_story_id);
+
+        // The KEY is unchanged (no re-key); the work_item ref carries the real id.
+        assert_eq!(linked.story_id, draft_id, "draft id kept as the key");
+        assert_eq!(linked.work_item.as_deref(), Some(wi_story_id.as_str()));
+
+        // /api/uows now resolves the work item and the entry is no longer authoring.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/uows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let entry = json["uows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["id"] == draft_id)
+            .expect("linked draft still listed under its draft id");
+        assert_eq!(entry["authoring"], false, "linked draft is no longer authoring");
+        assert_eq!(entry["work_item"]["number"], 7);
+        assert_eq!(entry["work_item"]["repo"], "me/api");
     }
 }

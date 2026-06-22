@@ -2609,7 +2609,7 @@ async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome 
 /// `POST /api/workitems/refresh`). The server maps a provider's native issue (today:
 /// the worktracker GitHub adapter's `CanonicalStory`) into this shape so the UI never
 /// touches a provider-specific payload.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
 struct WorkItem {
     /// Stable cross-provider id, e.g. `"github:OWNER/REPO#123"`. The dedup key for UoWs.
     id: String,
@@ -2656,9 +2656,15 @@ struct PullWorkItemsResult {
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
 struct UowListEntry {
     id: String,
-    work_item: WorkItem,
+    /// The work item this UoW references, or `None` for a blank/authoring DRAFT UoW that
+    /// has not been published to the board yet.
+    #[serde(default)]
+    work_item: Option<WorkItem>,
     #[serde(default)]
     stage: UowStage,
+    /// `true` when this is a blank/authoring DRAFT UoW (render the authoring panel).
+    #[serde(default)]
+    authoring: bool,
 }
 
 /// The `GET /api/uows` envelope.
@@ -2732,7 +2738,8 @@ fn labels_summary(labels: &[String]) -> String {
 /// view shows "Open Unit of Work" (and the existing UoW id) instead of a Create button.
 /// Matching is by the work item's stable id against each UoW's referenced work item id.
 fn existing_uow_for<'a>(uows: &'a [UowListEntry], work_item_id: &str) -> Option<&'a UowListEntry> {
-    uows.iter().find(|u| u.work_item.id == work_item_id)
+    uows.iter()
+        .find(|u| u.work_item.as_ref().is_some_and(|wi| wi.id == work_item_id))
 }
 
 /// The button label for the create/open affordance, given whether a UoW already exists.
@@ -2786,6 +2793,124 @@ async fn create_uow_from_work_item(work_item_id: &str) -> Option<FromWorkItemRes
         .json::<FromWorkItemResult>()
         .await
         .ok()
+}
+
+// ── AI story authoring from a blank UoW (2026-06-22) ─────────────────────────────
+
+/// One message in the story-authoring clarification chat (mirrors the server's
+/// `AuthorChatMessage`). `role` is `"user"` or `"ai"`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct AuthorChatMessageView {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    text: String,
+}
+
+/// The story-authoring state of a draft UoW (mirrors the server's `AuthoringState`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct AuthoringStateView {
+    #[serde(default)]
+    requirements_prompt: String,
+    #[serde(default)]
+    chat: Vec<AuthorChatMessageView>,
+    #[serde(default)]
+    draft_title: String,
+    #[serde(default)]
+    draft_body: String,
+}
+
+/// The subset of the server's `UnitOfWork` the authoring panel reads back from the
+/// `POST /api/uow/:id/author` and `GET /api/uow/:id` endpoints.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct AuthoringUowView {
+    #[serde(default)]
+    story_id: String,
+    #[serde(default)]
+    authoring: Option<AuthoringStateView>,
+    #[serde(default)]
+    work_item: Option<String>,
+}
+
+/// Create a blank draft UoW to author a story (`POST /api/uow/blank`). Returns the new
+/// draft id on success.
+async fn create_blank_uow() -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/uow/blank", crate::BFF_URL))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    v.get("uow_id")
+        .and_then(|x| x.as_str())
+        .map(String::from)
+}
+
+/// Fetch a draft UoW's current authoring state (`GET /api/uow/:id`).
+async fn fetch_authoring_uow(story_id: &str) -> Option<AuthoringUowView> {
+    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
+        .await
+        .ok()?
+        .json::<AuthoringUowView>()
+        .await
+        .ok()
+}
+
+/// Send a message to the story-authoring assistant (`POST /api/uow/:id/author`). Returns
+/// the updated authoring UoW (with the refreshed draft + chat).
+async fn post_author_message(story_id: &str, message: &str) -> Option<AuthoringUowView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/author", crate::BFF_URL, enc_seg(story_id)))
+        .json(&serde_json::json!({ "message": message }))
+        .send()
+        .await
+        .ok()?
+        .json::<AuthoringUowView>()
+        .await
+        .ok()
+}
+
+/// The outcome of publishing a drafted story to the board (`POST /api/uow/:id/publish`).
+enum PublishOutcome {
+    /// Published + linked; the UoW is now a normal linked UoW.
+    Ok,
+    /// The server rejected the publish (4xx) with a human-readable reason.
+    Rejected(String),
+    /// A transport failure.
+    Failed,
+}
+
+/// Publish a drafted story to the board and link the UoW (`POST /api/uow/:id/publish`).
+async fn post_publish(story_id: &str, repo: &str) -> PublishOutcome {
+    let url = format!("{}/api/uow/{}/publish", crate::BFF_URL, enc_seg(story_id));
+    let resp = match reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return PublishOutcome::Failed,
+    };
+    if resp.status().is_success() {
+        PublishOutcome::Ok
+    } else {
+        // The server returns { "error": "<why>" } for an AppError 4xx/5xx.
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .or_else(|| v.get("message"))
+                    .and_then(|r| r.as_str().map(String::from))
+            })
+            .unwrap_or_else(|| "Could not publish the story.".to_string());
+        PublishOutcome::Rejected(reason)
+    }
 }
 
 /// Re-pull a single work item (`POST /api/workitems/refresh`).
@@ -3833,26 +3958,37 @@ fn GovernedDevPage() -> Element {
                     span { class: "govdev-nav-top-title", "Issue Management" }
                     span { class: "govdev-nav-top-sub", "Pull issues · create Units of Work" }
                 }
+                // ── New Unit of Work: author a story with AI ──────────────────────
+                NewAuthoredUowButton { uows_refresh, sel }
                 p { class: "govdev-nav-label", "UNITS OF WORK ({uows.len()})" }
                 div { class: "govdev-uow-list",
                     if uows.is_empty() {
-                        p { class: "govdev-uow-empty", "No Units of Work yet. Pull work items and create one from an issue." }
+                        p { class: "govdev-uow-empty", "No Units of Work yet. Pull work items and create one from an issue, or author a new story with AI." }
                     }
                     for u in uows.iter() {
                         {
                             let uid = u.id.clone();
                             let selected = sel() == GovDevSel::Uow(uid.clone());
                             let cls = if selected { "govdev-uow-card sel" } else { "govdev-uow-card" };
-                            let title = u.work_item.title.clone();
-                            let repo = u.work_item.repo.clone();
-                            let stage = u.stage.label();
+                            // A draft (authoring) UoW has no work item yet; show a draft label.
+                            let title = match &u.work_item {
+                                Some(wi) => wi.title.clone(),
+                                None => "Untitled draft story".to_string(),
+                            };
+                            let repo = match &u.work_item {
+                                Some(wi) => wi.repo.clone(),
+                                None => String::new(),
+                            };
+                            let stage = if u.authoring { "Authoring" } else { u.stage.label() };
                             rsx! {
                                 button {
                                     class: "{cls}",
                                     onclick: move |_| sel.set(GovDevSel::Uow(uid.clone())),
                                     span { class: "govdev-uow-title", "{title}" }
                                     div { class: "govdev-uow-meta",
-                                        span { class: "govdev-uow-repo", "{repo}" }
+                                        if !repo.is_empty() {
+                                            span { class: "govdev-uow-repo", "{repo}" }
+                                        }
                                         span { class: "govdev-uow-stage", "{stage}" }
                                     }
                                 }
@@ -3874,6 +4010,12 @@ fn GovernedDevPage() -> Element {
                             // fresh per-UoW state. Without the key, Dioxus reused one instance and
                             // just swapped the prop, so the first UoW's use_signal/use_resource
                             // state (dev status, stage, run model, etc.) bled into every other UoW.
+                            //
+                            // A DRAFT (authoring) UoW renders the story-authoring panel instead of
+                            // the dev controls; once published it becomes a normal linked UoW.
+                            Some(u) if u.authoring => rsx! {
+                                StoryAuthoringPanel { key: "{u.id}", uow_id: u.id.clone(), uows_refresh, sel }
+                            },
                             Some(u) => rsx! { UowDevControls { key: "{u.id}", uow: u } },
                             // The UoW vanished from the list (e.g. between refreshes): fall back.
                             None => rsx! {
@@ -4238,6 +4380,257 @@ fn CreateOrOpenUow(
     }
 }
 
+/// The "New Unit of Work — author a story" action in the left nav. Creates a blank draft
+/// UoW (`POST /api/uow/blank`) and selects it so the authoring panel opens. The inverse of
+/// "create from issue": author the story first, then publish it to the board.
+#[component]
+fn NewAuthoredUowButton(uows_refresh: Signal<u32>, sel: Signal<GovDevSel>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut working = use_signal(|| false);
+    rsx! {
+        button {
+            class: "govdev-nav-top",
+            disabled: working(),
+            onclick: move |_| {
+                let mut sel = sel;
+                let mut uows_refresh = uows_refresh;
+                let toasts = toasts;
+                working.set(true);
+                spawn(async move {
+                    match create_blank_uow().await {
+                        Some(id) => {
+                            uows_refresh += 1;
+                            sel.set(GovDevSel::Uow(id));
+                        }
+                        None => {
+                            crate::toast::push_toast(
+                                toasts,
+                                crate::toast::ToastKind::Warning,
+                                "Could not create a new draft Unit of Work.".to_string(),
+                            );
+                        }
+                    }
+                    working.set(false);
+                });
+            },
+            span { class: "govdev-nav-top-title",
+                if working() { "Creating…" } else { "\u{2728} New Unit of Work — author a story" }
+            }
+            span { class: "govdev-nav-top-sub", "Draft a story with AI · push to the board" }
+        }
+    }
+}
+
+/// The story-authoring panel for a DRAFT (blank/authoring) UoW. A requirements + clarify
+/// chat (`POST /api/uow/:id/author`), a live draft preview, a target-repo picker (the
+/// project's repos), and a "Push to board & link" button (`POST /api/uow/:id/publish`).
+///
+/// Story authoring is an LLM text-generation assist — NOT a code-writing agent — so the
+/// governed-dev gate is NOT in this path (same class as the chat assistant). On a successful
+/// publish the UoW becomes a normal linked UoW and its dev controls take over.
+#[component]
+fn StoryAuthoringPanel(
+    uow_id: String,
+    uows_refresh: Signal<u32>,
+    sel: Signal<GovDevSel>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // The active project's repos for the target picker.
+    let active_proj = use_resource(fetch_active_project);
+    let repos = active_proj
+        .read()
+        .clone()
+        .flatten()
+        .map(|p| p.repos.clone())
+        .unwrap_or_default();
+
+    // The authoring state, re-fetched whenever this tick bumps (after each chat turn).
+    let refresh = use_signal(|| 0u32);
+    let state_res = {
+        let id = uow_id.clone();
+        use_resource(move || {
+            let id = id.clone();
+            let _dep = refresh();
+            async move { fetch_authoring_uow(&id).await }
+        })
+    };
+    let st = state_res
+        .read()
+        .clone()
+        .flatten()
+        .and_then(|u| u.authoring)
+        .unwrap_or_default();
+
+    let mut message = use_signal(String::new);
+    let mut sending = use_signal(|| false);
+    let mut publishing = use_signal(|| false);
+    // The selected target repo (defaults to the first project repo when present).
+    let mut target_repo = use_signal(String::new);
+    if target_repo().is_empty() {
+        if let Some(first) = repos.first() {
+            target_repo.set(first.clone());
+        }
+    }
+
+    let draft_title = st.draft_title.clone();
+    let draft_body = st.draft_body.clone();
+    let body_html = crate::md::md_to_html(&draft_body);
+    let chat = st.chat.clone();
+    let has_draft = !draft_title.trim().is_empty();
+
+    rsx! {
+        div { class: "uow-dev story-authoring",
+            div { class: "uow-dev-head",
+                span { class: "uow-dev-repo", "\u{2728} Author a story with AI" }
+            }
+            p { class: "section-hint",
+                "Describe the requirements; the assistant drafts a GitHub-issue-style story and \
+                 asks clarifying questions. When the draft looks right, push it to the board."
+            }
+
+            // ── Clarification chat ────────────────────────────────────────────
+            div { class: "authoring-chat",
+                if chat.is_empty() {
+                    p { class: "section-hint", "Start by describing what the story should accomplish." }
+                }
+                for m in chat.iter() {
+                    {
+                        let who = if m.role == "ai" { "Assistant" } else { "You" };
+                        let cls = if m.role == "ai" { "authoring-msg ai" } else { "authoring-msg user" };
+                        rsx! {
+                            div { class: "{cls}",
+                                span { class: "authoring-msg-role", "{who}" }
+                                p { class: "authoring-msg-text", "{m.text}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div { class: "authoring-input-row",
+                textarea {
+                    class: "authoring-input",
+                    rows: 3,
+                    placeholder: "Describe the requirements, or answer the assistant's question…",
+                    value: "{message}",
+                    oninput: move |e| message.set(e.value()),
+                }
+                button {
+                    class: "btn-run",
+                    disabled: sending() || message().trim().is_empty(),
+                    onclick: {
+                        let id = uow_id.clone();
+                        move |_| {
+                            let id = id.clone();
+                            let mut refresh = refresh;
+                            let toasts = toasts;
+                            let msg = message().trim().to_string();
+                            if msg.is_empty() { return; }
+                            sending.set(true);
+                            spawn(async move {
+                                match post_author_message(&id, &msg).await {
+                                    Some(_) => {
+                                        message.set(String::new());
+                                        refresh += 1;
+                                    }
+                                    None => {
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "The authoring assistant did not respond. Try again.".to_string(),
+                                        );
+                                    }
+                                }
+                                sending.set(false);
+                            });
+                        }
+                    },
+                    if sending() { "Drafting…" } else { "Send" }
+                }
+            }
+
+            // ── Live draft preview ────────────────────────────────────────────
+            div { class: "authoring-preview",
+                p { class: "uow-dev-section-h", "Draft preview" }
+                if has_draft {
+                    p { class: "uow-dev-title", "{draft_title}" }
+                    div { class: "chat-md", dangerous_inner_html: "{body_html}" }
+                } else {
+                    p { class: "section-hint", "No draft yet — send a message to start the draft." }
+                }
+            }
+
+            // ── Push to board & link ──────────────────────────────────────────
+            div { class: "authoring-publish",
+                p { class: "uow-dev-section-h", "Push to board" }
+                if repos.is_empty() {
+                    p { class: "section-hint", "No repos on the active project. Add one to publish the story." }
+                } else {
+                    div { class: "authoring-publish-row",
+                        label { class: "authoring-repo-label", "Target repo" }
+                        select {
+                            class: "authoring-repo-select",
+                            value: "{target_repo}",
+                            onchange: move |e| target_repo.set(e.value()),
+                            for r in repos.iter() {
+                                option { value: "{r}", "{r}" }
+                            }
+                        }
+                        button {
+                            class: "btn-run",
+                            disabled: publishing() || !has_draft || target_repo().is_empty(),
+                            onclick: {
+                                let id = uow_id.clone();
+                                move |_| {
+                                    let id = id.clone();
+                                    let repo = target_repo();
+                                    let mut sel = sel;
+                                    let mut uows_refresh = uows_refresh;
+                                    let toasts = toasts;
+                                    publishing.set(true);
+                                    spawn(async move {
+                                        match post_publish(&id, &repo).await {
+                                            PublishOutcome::Ok => {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Info,
+                                                    "Story published to the board and linked.".to_string(),
+                                                );
+                                                uows_refresh += 1;
+                                                // Re-select the SAME UoW id: it is now a linked UoW,
+                                                // so the dev controls render in place.
+                                                sel.set(GovDevSel::Uow(id.clone()));
+                                            }
+                                            PublishOutcome::Rejected(reason) => {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    reason,
+                                                );
+                                            }
+                                            PublishOutcome::Failed => {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    "Could not reach the server to publish.".to_string(),
+                                                );
+                                            }
+                                        }
+                                        publishing.set(false);
+                                    });
+                                }
+                            },
+                            if publishing() { "Publishing…" } else { "Push to board & link" }
+                        }
+                    }
+                    p { class: "section-hint", "Creates a GitHub issue from the draft and links this Unit of Work to it." }
+                }
+            }
+        }
+    }
+}
+
 /// The dev controls for a selected Unit of Work. Reuses the EXISTING governed-dev
 /// mechanisms — run the governed fleet THROUGH THE GATE, the clarify back-and-forth, and
 /// sign-off — keyed to this UoW's id (the same key the existing endpoints use). Adds an
@@ -4250,10 +4643,13 @@ fn UowDevControls(uow: UowListEntry) -> Element {
     let uow_key = uow.id.clone();
 
     // A local copy of the work item so "Pull latest" can refresh the displayed metadata
-    // without re-fetching the whole UoW list.
-    let mut item = use_signal(|| uow.work_item.clone());
+    // without re-fetching the whole UoW list. `UowDevControls` is only rendered for a
+    // LINKED UoW (its work item is `Some`); fall back to a default if somehow absent.
+    let mut item = use_signal(|| uow.work_item.clone().unwrap_or_default());
     // Re-sync the displayed item when the selected UoW changes (prop change).
-    use_effect(use_reactive(&uow.work_item, move |wi| item.set(wi)));
+    use_effect(use_reactive(&uow.work_item, move |wi| {
+        item.set(wi.unwrap_or_default())
+    }));
 
     // The reused per-UoW UoW panel / run live behind a refresh tick, same as the old page.
     let uow_refresh = use_signal(|| 0u32);
@@ -4340,7 +4736,7 @@ fn UowDevControls(uow: UowListEntry) -> Element {
     // The repo's assignable users, fetched once per work item (the practical mention
     // set). Degrades to empty (no token / error) → the dropdown simply never shows.
     let assignees_res = {
-        let wid = uow.work_item.id.clone();
+        let wid = uow.work_item.clone().unwrap_or_default().id;
         use_resource(move || {
             let wid = wid.clone();
             async move { fetch_work_item_assignees(&wid).await }
@@ -11250,13 +11646,15 @@ mod tests {
         let uows = vec![
             UowListEntry {
                 id: "uow-1".to_string(),
-                work_item: wi("github:acme/web#10"),
+                work_item: Some(wi("github:acme/web#10")),
                 stage: UowStage::Development,
+                authoring: false,
             },
             UowListEntry {
                 id: "uow-2".to_string(),
-                work_item: wi("github:acme/web#11"),
+                work_item: Some(wi("github:acme/web#11")),
                 stage: UowStage::Intake,
+                authoring: false,
             },
         ];
         // A match returns the right UoW (drives "Open Unit of Work").

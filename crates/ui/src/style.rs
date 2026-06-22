@@ -3356,6 +3356,40 @@ html, body {
 /* The Post-comment button sits below the composer with breathing room (TASK 2). */
 .uow-comment .btn-run { margin-top: 12px; }
 
+/* ── AI story authoring panel (2026-06-22) ─────────────────────────────────── */
+.uow-dev-section-h { font-size: 13px; font-weight: 700; color: var(--ink); margin: 18px 0 8px; }
+.authoring-chat {
+  display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  padding: 14px 16px; max-height: 360px; overflow-y: auto;
+}
+.authoring-msg { display: flex; flex-direction: column; gap: 3px; max-width: 90%; }
+.authoring-msg.user { align-self: flex-end; align-items: flex-end; }
+.authoring-msg.ai { align-self: flex-start; align-items: flex-start; }
+.authoring-msg-role { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); }
+.authoring-msg-text {
+  margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--ink); white-space: pre-wrap;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px; background: var(--paper);
+}
+.authoring-msg.user .authoring-msg-text { background: var(--accent-wash); border-color: #e5c9bd; }
+.authoring-input-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
+.authoring-input {
+  flex: 1; resize: vertical; font: inherit; font-size: 13.5px; line-height: 1.5; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 10px; background: var(--paper); padding: 9px 11px;
+}
+.authoring-preview {
+  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px;
+}
+.authoring-publish {
+  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px;
+}
+.authoring-publish-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.authoring-repo-label { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.authoring-repo-select {
+  font: inherit; font-size: 13px; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 8px; background: var(--paper); padding: 7px 10px;
+}
+
 /* @-mention autocomplete: the composer wrapper is the positioning context so the
    dropdown anchors to the textarea. */
 .uow-comment-box { position: relative; }
