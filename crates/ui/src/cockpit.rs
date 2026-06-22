@@ -2168,17 +2168,27 @@ enum StartRunOutcome {
 /// [`StartRunOutcome::Blocked`] (with the gate's reason) when the no-code-first gate
 /// refuses the start because the story's decisions are not all approved. A transport
 /// or decode failure maps to [`StartRunOutcome::Failed`].
-/// Build the request body for a development run (frozen contract):
-/// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`.
-/// Extracted as a pure fn so the wire shape is unit-testable.
-fn dev_run_body(tier_map: &TierMapView) -> serde_json::Value {
-    serde_json::json!({
+/// Build the request body for a development run:
+/// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`,
+/// plus `"skip_layer2": true` ONLY when the one-time bootstrap toggle is on (omitted
+/// otherwise, so the default-off behaviour is exactly today's). `skip_layer2` is the
+/// bootstrap escape hatch: it skips ONLY the post-task layer-2 lint/test bounce so a
+/// brownfield repo can install the tooling layer-2 needs. Layer 1 (the security gate)
+/// and the no-code-first decisions gate still apply. Extracted as a pure fn so the wire
+/// shape is unit-testable.
+fn dev_run_body(tier_map: &TierMapView, skip_layer2: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "tier_map": {
             "strongest": tier_map.strongest,
             "balanced": tier_map.balanced,
             "fast": tier_map.fast,
         }
-    })
+    });
+    // Only include the flag when set, so a normal run's body is byte-for-byte today's.
+    if skip_layer2 {
+        body["skip_layer2"] = serde_json::Value::Bool(true);
+    }
+    body
 }
 
 /// Percent-encode a value for use as a single URL PATH SEGMENT.
@@ -2200,8 +2210,12 @@ fn enc_seg(s: &str) -> String {
     out
 }
 
-async fn start_dev_run(story_id: &str, tier_map: &TierMapView) -> StartRunOutcome {
-    let body = dev_run_body(tier_map);
+async fn start_dev_run(
+    story_id: &str,
+    tier_map: &TierMapView,
+    skip_layer2: bool,
+) -> StartRunOutcome {
+    let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
         .post(format!("{}/api/stories/{}/run", crate::BFF_URL, enc_seg(story_id)))
         .json(&body)
@@ -9301,6 +9315,12 @@ fn UowStepRunControls(
     let sid_approve = story_id.clone();
     let sid_dev = story_id.clone();
 
+    // One-time BOOTSTRAP toggle (default OFF, per-run, NOT persisted): when on, this dev
+    // run skips ONLY the layer-2 post-task lint/test bounce so a brownfield repo can land
+    // the linters/checkers layer-2 needs. The security gate (layer 1) + the no-code-first
+    // decisions gate still apply. The architect turns it back off after the tooling lands.
+    let mut bootstrap_skip_layer2 = use_signal(|| false);
+
     rsx! {
         div { class: "uow-lifecycle",
             span { class: "uow-field-label", "Lifecycle" }
@@ -9369,6 +9389,21 @@ fn UowStepRunControls(
                             }
                         }
                         p { class: "section-hint", "The strongest tier orchestrates and delegates simpler work to the balanced and fast tiers." }
+                        // One-time bootstrap escape hatch (default OFF, per-run). Skips ONLY
+                        // layer-2; the security gate (layer 1) still applies.
+                        label { class: "uow-bootstrap-toggle",
+                            input {
+                                r#type: "checkbox",
+                                checked: bootstrap_skip_layer2(),
+                                onchange: move |e| bootstrap_skip_layer2.set(e.checked()),
+                            }
+                            span { class: "uow-bootstrap-text",
+                                span { class: "uow-bootstrap-label", "Bootstrap run — skip layer-2 checks" }
+                                span { class: "uow-bootstrap-hint",
+                                    "For the run that installs the linters/checkers layer-2 needs. The security gate (layer 1) still applies. Turn off afterward."
+                                }
+                            }
+                        }
                         div { class: "run-control-row",
                             button {
                                 class: "btn-run",
@@ -9379,8 +9414,9 @@ fn UowStepRunControls(
                                         balanced: dev_balanced(),
                                         fast: dev_fast(),
                                     };
+                                    let skip_l2 = bootstrap_skip_layer2();
                                     spawn(async move {
-                                        match start_dev_run(&sid, &tm).await {
+                                        match start_dev_run(&sid, &tm, skip_l2).await {
                                             StartRunOutcome::Started(rid) => {
                                                 poll_run_to_done(rid, active_run, uow_refresh).await
                                             }
@@ -9410,7 +9446,9 @@ fn UowStepRunControls(
             // enforces this too; disabling avoids a guaranteed-409 click).
             div { class: "uow-lifecycle-actions",
                 button {
-                    class: "uow-stage-btn",
+                    // Transition action → the onboarding SECONDARY variant (bordered),
+                    // distinct from the accent primary run buttons but on the same system.
+                    class: "btn-secondary",
                     disabled: stage != UowStage::Investigating,
                     onclick: move |_| {
                         let sid = sid_approve.clone();
@@ -10217,14 +10255,38 @@ mod tests {
             balanced: "sonnet-x".to_string(),
             fast: "haiku-x".to_string(),
         };
-        let body = dev_run_body(&tm);
+        let body = dev_run_body(&tm, false);
         let tier = body.get("tier_map").expect("tier_map key present");
         assert_eq!(tier.get("strongest").unwrap(), "opus-x");
         assert_eq!(tier.get("balanced").unwrap(), "sonnet-x");
         assert_eq!(tier.get("fast").unwrap(), "haiku-x");
         // Exactly the three tier keys, nothing else.
         assert_eq!(tier.as_object().unwrap().len(), 3);
+        // Default (skip_layer2 = false): body is exactly today's — just tier_map, no flag.
         assert_eq!(body.as_object().unwrap().len(), 1);
+        assert!(body.get("skip_layer2").is_none());
+    }
+
+    /// The bootstrap toggle adds `skip_layer2: true` to the body ONLY when on, and never
+    /// when off (so a normal run is byte-for-byte the existing contract).
+    #[test]
+    fn dev_run_body_includes_skip_layer2_only_when_on() {
+        let tm = TierMapView {
+            strongest: "opus-x".to_string(),
+            balanced: "sonnet-x".to_string(),
+            fast: "haiku-x".to_string(),
+        };
+        // OFF: no flag at all.
+        let off = dev_run_body(&tm, false);
+        assert!(off.get("skip_layer2").is_none(), "off must omit the flag");
+
+        // ON: the flag is present and true; tier_map is unchanged.
+        let on = dev_run_body(&tm, true);
+        assert_eq!(on.get("skip_layer2").unwrap(), &serde_json::Value::Bool(true));
+        let tier = on.get("tier_map").expect("tier_map still present");
+        assert_eq!(tier.get("strongest").unwrap(), "opus-x");
+        // Exactly tier_map + skip_layer2.
+        assert_eq!(on.as_object().unwrap().len(), 2);
     }
 
     /// The default TierMapView feeds the per-phase model defaults. Investigation defaults
@@ -10235,7 +10297,7 @@ mod tests {
         assert!(!tm.strongest.is_empty());
         assert!(!tm.balanced.is_empty());
         assert!(!tm.fast.is_empty());
-        let body = dev_run_body(&tm);
+        let body = dev_run_body(&tm, false);
         let tier = body.get("tier_map").unwrap();
         assert_eq!(tier.get("strongest").unwrap(), &tm.strongest);
     }

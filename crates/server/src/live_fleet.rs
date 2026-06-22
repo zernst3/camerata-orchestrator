@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use camerata_fleet::tier::TierMap;
 use camerata_fleet::{
-    build_from_plan_with_model_and_iterations, build_from_plan_with_tier_map, locate_gateway_bin,
-    BuildEvent,
+    build_from_plan_with_model_iterations_and_layer2, build_from_plan_with_tier_map_and_layer2,
+    locate_gateway_bin, BuildEvent,
 };
 use camerata_intake::{Plan, PlanTask, TaskKind};
 
@@ -33,6 +33,7 @@ pub async fn execute_live_run(
     story_desc: String,
     model: Option<String>,
     max_iterations: usize,
+    skip_layer2: bool,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -57,6 +58,8 @@ pub async fn execute_live_run(
         }
     };
 
+    announce_bootstrap_if_skipping(&store, &run_id, skip_layer2);
+
     // A minimal plan from the story: one backend implementer task.
     let plan = Plan {
         app_name: story_title.clone(),
@@ -74,12 +77,13 @@ pub async fn execute_live_run(
     let rid_cb = run_id.clone();
     let seq = AtomicUsize::new(0);
 
-    let result = build_from_plan_with_model_and_iterations(
+    let result = build_from_plan_with_model_iterations_and_layer2(
         &plan,
         &root,
         &gateway_bin,
         model.as_deref(),
         max_iterations,
+        skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &seq, event),
     )
     .await;
@@ -108,6 +112,7 @@ pub async fn execute_live_run_tiered(
     story_desc: String,
     tier_map: TierMap,
     max_iterations: usize,
+    skip_layer2: bool,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -147,6 +152,8 @@ pub async fn execute_live_run_tiered(
         },
     );
 
+    announce_bootstrap_if_skipping(&store, &run_id, skip_layer2);
+
     // A tiered plan from the story: the lead implementer (Backend → Strongest) owns the
     // domain logic and acts as orchestrator, and a follow-on Test task (→ Fast) covers
     // the mechanical verification. Both run behind the gate; only the model differs.
@@ -173,17 +180,40 @@ pub async fn execute_live_run_tiered(
     let rid_cb = run_id.clone();
     let seq = AtomicUsize::new(0);
 
-    let result = build_from_plan_with_tier_map(
+    let result = build_from_plan_with_tier_map_and_layer2(
         &plan,
         &root,
         &gateway_bin,
         &tier_map,
         max_iterations,
+        skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &seq, event),
     )
     .await;
 
     finish_live_run(&store, &run_id, result);
+}
+
+/// Push a visible info event when a run is a layer-2 bootstrap bypass, so the cockpit
+/// makes it obvious that the post-task lint/test bounce is skipped for THIS run. Layer 1
+/// (the deny-before-write gate) still applies; this only announces the layer-2 skip.
+fn announce_bootstrap_if_skipping(store: &RunStore, run_id: &str, skip_layer2: bool) {
+    if !skip_layer2 {
+        return;
+    }
+    store.push_event(
+        run_id,
+        GateEvent {
+            seq: 0,
+            layer: "fleet".to_string(),
+            verdict: "info".to_string(),
+            rule: None,
+            detail: "Bootstrap run: layer-2 checks (post-task lint/test bounce) are SKIPPED \
+                     for this one run so the linters/checkers can be installed. The security \
+                     gate (layer 1) still applies. Turn this off after the tooling lands."
+                .to_string(),
+        },
+    );
 }
 
 /// Record a single [`BuildEvent`] as run gate activity. Shared by the single-model and

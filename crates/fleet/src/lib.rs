@@ -54,6 +54,27 @@ impl CheckRunner for NoopChecks {
     }
 }
 
+/// Select the layer-2 (post-task lint/test bounce) runner for a worktree.
+///
+/// Normal runs use the language-matched [`runner_for_worktree`] (Rust/JS/Go/Python),
+/// which is fail-closed: a repo with a manifest but no lint/test wired returns
+/// "could-not-run", a hard failure. That is correct governance, but it deadlocks the
+/// ONE bootstrapping run that would *install* the tooling layer-2 needs.
+///
+/// When `skip_layer2` is `true` (the explicit, default-OFF bootstrap escape hatch),
+/// the run uses [`NoopChecks`] for layer 2 — no post-task lint/test bounce — so the
+/// tool-installing run can land. This skips ONLY layer 2. Layer 1 (the deny-before-write
+/// gate every spawned agent runs behind) and the server-side no-code-first decisions gate
+/// are unaffected: the gate is never bypassed. See
+/// `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
+fn layer2_runner(worktree: &Path, skip_layer2: bool) -> Box<dyn CheckRunner> {
+    if skip_layer2 {
+        Box::new(NoopChecks)
+    } else {
+        runner_for_worktree(worktree)
+    }
+}
+
 // ─── governed_role ────────────────────────────────────────────────────────────
 
 /// Build a governed role from the real corpus, named `role_name`, and ensure
@@ -348,6 +369,36 @@ pub async fn build_from_plan_with_model_and_iterations(
     max_iterations: usize,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_model_iterations_and_layer2(
+        plan,
+        root,
+        gateway_bin,
+        model,
+        max_iterations,
+        false,
+        on_event,
+    )
+    .await
+}
+
+/// Like [`build_from_plan_with_model_and_iterations`], but with an explicit
+/// `skip_layer2` bootstrap flag.
+///
+/// `skip_layer2 = false` is identical to [`build_from_plan_with_model_and_iterations`]
+/// (the real, language-matched layer-2 runner). `skip_layer2 = true` runs this ONE run
+/// with a no-op layer-2 runner ([`NoopChecks`]) so a brownfield repo can land the linters
+/// /checkers layer-2 needs without tripping fail-closed "could-not-run". This skips ONLY
+/// layer 2 — layer 1 (the deny-before-write gate) is unchanged. See
+/// `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
+pub async fn build_from_plan_with_model_iterations_and_layer2(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    model: Option<&str>,
+    max_iterations: usize,
+    skip_layer2: bool,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
     // ── Scaffold the shared worktree ─────────────────────────────────────────
@@ -405,11 +456,11 @@ pub async fn build_from_plan_with_model_and_iterations(
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
-    // `runner_for_worktree` detects the worktree language (Cargo.toml -> Rust,
-    // package.json -> JS/TS, go.mod -> Go, pyproject/requirements/Pipfile ->
-    // Python) and returns the matching CheckRunner; unknown trees degrade to a
-    // logged NoopChecks. The coordinator still takes &dyn CheckRunner.
-    let checks = runner_for_worktree(&worktree);
+    // `layer2_runner` returns the language-matched CheckRunner via
+    // `runner_for_worktree` (Cargo.toml -> Rust, package.json -> JS/TS, go.mod -> Go,
+    // pyproject/requirements/Pipfile -> Python) for a normal run, or a NoopChecks for an
+    // explicit `skip_layer2` bootstrap run. The coordinator still takes &dyn CheckRunner.
+    let checks = layer2_runner(&worktree, skip_layer2);
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
@@ -487,6 +538,33 @@ pub async fn build_from_plan_with_tier_map(
     gateway_bin: &Path,
     tier_map: &tier::TierMap,
     max_iterations: usize,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_tier_map_and_layer2(
+        plan,
+        root,
+        gateway_bin,
+        tier_map,
+        max_iterations,
+        false,
+        on_event,
+    )
+    .await
+}
+
+/// Like [`build_from_plan_with_tier_map`], but with an explicit `skip_layer2`
+/// bootstrap flag (same semantics as
+/// [`build_from_plan_with_model_iterations_and_layer2`]): `false` keeps the real,
+/// language-matched layer-2 runner; `true` runs this ONE tiered run with a no-op
+/// layer-2 runner so the tool-installing bootstrap run can land. Skips ONLY layer 2;
+/// layer 1 is unchanged.
+pub async fn build_from_plan_with_tier_map_and_layer2(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    tier_map: &tier::TierMap,
+    max_iterations: usize,
+    skip_layer2: bool,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
@@ -575,11 +653,11 @@ pub async fn build_from_plan_with_tier_map(
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
-    // `runner_for_worktree` detects the worktree language (Cargo.toml -> Rust,
-    // package.json -> JS/TS, go.mod -> Go, pyproject/requirements/Pipfile ->
-    // Python) and returns the matching CheckRunner; unknown trees degrade to a
-    // logged NoopChecks. The coordinator still takes &dyn CheckRunner.
-    let checks = runner_for_worktree(&worktree);
+    // `layer2_runner` returns the language-matched CheckRunner via
+    // `runner_for_worktree` (Cargo.toml -> Rust, package.json -> JS/TS, go.mod -> Go,
+    // pyproject/requirements/Pipfile -> Python) for a normal run, or a NoopChecks for an
+    // explicit `skip_layer2` bootstrap run. The coordinator still takes &dyn CheckRunner.
+    let checks = layer2_runner(&worktree, skip_layer2);
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
@@ -659,6 +737,53 @@ mod tests {
 
         let lib = std::fs::read_to_string(dir.join("src").join("lib.rs")).unwrap();
         assert!(lib.contains("placeholder"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── layer2_runner (bootstrap layer-2 bypass) ─────────────────────────────
+
+    /// `skip_layer2 = true` selects the no-op layer-2 runner so a bootstrap run can land
+    /// the tooling; `false` selects the real, language-matched (fail-closed) runner.
+    ///
+    /// Asserted behaviorally on a JS worktree whose `package.json` declares NO lint/test
+    /// script: the real runner is fail-closed there (returns `Err`, "could-not-run" — the
+    /// exact deadlock the bypass exists to break), while the no-op runner returns
+    /// `Ok(empty)`. This is token- and network-free: the JS runner bails before any
+    /// install step. Confirms the bypass skips layer 2 (and only layer 2).
+    #[tokio::test]
+    async fn layer2_runner_skips_when_bootstrap_and_runs_real_otherwise() {
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-fleet-test-layer2-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A JS manifest with no lint/test → the real runner fails closed.
+        std::fs::write(dir.join("package.json"), "{ \"name\": \"x\" }").unwrap();
+
+        let role = Role {
+            name: "x".into(),
+            rule_subset: vec![],
+            allowed_paths: vec![],
+        };
+
+        // skip_layer2 = false → real (JS) runner → fail-closed Err (the deadlock).
+        let real = layer2_runner(&dir, false);
+        let real_res = real.check(&role, &dir).await;
+        assert!(
+            real_res.is_err(),
+            "the real layer-2 runner must fail closed on a manifest with no lint/test wired"
+        );
+
+        // skip_layer2 = true → no-op runner → Ok(empty), so the bootstrap run can proceed.
+        let noop = layer2_runner(&dir, true);
+        let noop_res = noop.check(&role, &dir).await;
+        assert_eq!(
+            noop_res.expect("the bootstrap no-op runner must not error"),
+            Vec::<RuleId>::new(),
+            "the bootstrap no-op runner reports no violations (skips layer 2)"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
