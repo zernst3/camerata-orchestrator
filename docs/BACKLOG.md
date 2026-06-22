@@ -3,6 +3,24 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Gemini provider (paid API key only — consumer subscription path dead) (2026-06-22, BLOCKED)
+
+Zach wanted to use his **Gemini Pro subscription** in Camerata the way he uses Claude. **Not
+possible:** Google deprecated consumer access to `gemini-cli` on **2026-06-18** (free / AI Pro /
+Ultra / individual Code Assist), pushing consumers to the closed-source **Antigravity CLI**.
+Same-as-Claude use now requires a **paid `GEMINI_API_KEY`** (paid Gemini project or Vertex;
+restriction-scoped keys as of 2026-06-19) — extra cost, not the subscription. Deferred per Zach
+("only if I can use my Pro plan now at no extra cost"). Antigravity CLI not researched (closed-
+source, no documented headless/JSON/MCP parity).
+
+Groundwork preserved so a paid-key wire-up is fast: provider seam (`Vendor`/`MODELS` in llm.rs);
+gate proven reproducible on gemini-cli (`tools.core: []` + MCP-only `includeTools` +
+`security.disableYoloMode`/`disableAlwaysAllow`, exclude `run_shell_command`, pin version + leak
+test); token meter is provider-agnostic so Gemini usage lights up automatically. Stage A:
+`gemini --output-format json` → `{response, stats}` (no cost field → derive from tokens). Full
+design + spike findings: `docs/decisions/2026-06-22_gemini_provider_cli.md`. **Revisit IF** Zach
+gets a paid Gemini/Vertex key OR Antigravity proves integrable.
+
 ## Cost estimate: model the calibration pass + bias HIGH (2026-06-17, PARKED)
 
 **Park until before a customer sees it** — immaterial at single-dollar scans, but the bias
