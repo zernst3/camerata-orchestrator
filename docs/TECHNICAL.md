@@ -175,9 +175,9 @@ unit-testable without spawning real subprocesses.
 ### The cross-language runners and the worktree selector (`crates/checks/src/multilang.rs`)
 
 The Rust runner was historically the ONLY layer-2 gate, hardcoded at every
-fleet/po-demo injection site, so a JS, Python, or Go worktree got no meaningful
+fleet/po-demo injection site, so a non-Rust worktree got no meaningful
 bounce-and-revise. `multilang.rs` closes that gap. It adds, mirroring the Rust
-runner's shape:
+runner's shape (one runner per supported language):
 
 - `JsCheckRunner` — lockfile-pinned install (`npm ci` / `pnpm install
   --frozen-lockfile` / `yarn install --frozen-lockfile`, detected via
@@ -191,6 +191,19 @@ runner's shape:
   `Pipfile`-only tree fails closed: pipenv is not auto-invoked.)
 - `GoCheckRunner` — `gofmt -l .` (non-empty stdout = unformatted), `go vet
   ./...`, `go test ./...`. Failures map to `LAYER2-GO-CHECKS-1`.
+- `RubyCheckRunner` (manifest `Gemfile`) — `bundle install` + `bundle exec rubocop`
+  + `bundle exec rspec`/`rake test`, pinned by `Gemfile.lock`. Maps to
+  `LAYER2-RUBY-CHECKS-1`.
+- `JavaCheckRunner` (manifest `pom.xml` for Maven, `build.gradle`/`build.gradle.kts`
+  for Gradle) — `./mvnw -q verify` / `./gradlew check`, preferring the repo's wrapper
+  for pinning and falling back to global `mvn`/`gradle`. Maps to `LAYER2-JAVA-CHECKS-1`.
+- `CSharpCheckRunner` (manifest `*.csproj`/`*.sln`) — `dotnet format
+  --verify-no-changes` + `dotnet build` + `dotnet test`, SDK pinned by `global.json`.
+  Maps to `LAYER2-CSHARP-CHECKS-1`.
+
+All SEVEN languages the corpus ships rules for now have a layer-2 runner (Rust, JS/TS,
+Python, Go, Ruby, Java, C#). See
+`docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 
 **Repo-pinned toolchain.** Linter/test versions come from the REPO's
 lockfile/manifest, never baked into Camerata: `npm run lint` resolves the repo's
@@ -253,6 +266,36 @@ deterministic process rules (`PROCESS-*`) over commit/PR/branch metadata — the
 fourth enforcement point distinct from the content-layer `CheckRunner`. This gates
 the metadata of the commit or PR Camerata is about to perform.
 
+### Layer-2 bootstrap bypass (`skip_layer2`)
+
+Layer 2 is fail-closed: a repo with a manifest but no lint/test wired returns
+"could-not-run" (a hard failure), not a silent pass. That is correct governance, but it creates
+a **bootstrap deadlock** — the very dev run that would *install* the linters/checkers fails
+layer 2 *because the tools aren't there yet*. The escape hatch is an explicit, default-OFF,
+per-run skip of ONLY layer 2:
+
+- `StartRunReq` (`crates/server/src/lib.rs`) gains `skip_layer2: Option<bool>`
+  (`#[serde(default)]` → absent = off). `start_run` reads it (`unwrap_or(false)`) and threads it
+  through `start_governed_run` into both live executors (`execute_live_run` and
+  `execute_live_run_tiered` in `live_fleet.rs`), which emit a visible cockpit info event when the
+  bypass is active.
+- `crates/fleet/src/lib.rs`: the private `layer2_runner(worktree, skip_layer2)` selects
+  `NoopChecks` when `skip_layer2`, else the real language-matched `runner_for_worktree`. Two
+  additive public entry points (`build_from_plan_with_model_iterations_and_layer2`,
+  `build_from_plan_with_tier_map_and_layer2`) take the flag; the existing entry points delegate
+  with `skip_layer2 = false`, so every existing caller is unchanged.
+- **The gate is NEVER bypassed.** The bootstrap option skips only the post-task layer-2 lint/test
+  bounce. Layer 1 (the MCP deny-before-write gate — agents are still spawned with `gated_write`
+  only, `Task` disallowed) and the no-code-first decisions gate (`ensure_development_gate`) are
+  UNCHANGED in both the on and off cases.
+- The UI exposes it as a clearly-labeled, default-OFF, non-sticky per-run checkbox on the
+  `DecisionsApproved` development-run control: "Bootstrap run — skip layer-2 checks". The POST
+  body includes `"skip_layer2": true` ONLY when on; when off, the body is byte-for-byte today's
+  contract.
+
+See `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md` and
+`docs/decisions/2026-06-22_uow_button_styling_and_bootstrap_bypass.md`.
+
 ---
 
 ## 4. Agent runtime
@@ -299,6 +342,49 @@ Each corpus file has fields: `id`, `title`, `enforcement`, `domain`,
 `qualifies` (optional summary), `[decision]` (question + why + default), and
 `[[option]]` blocks. Unknown fields are silently ignored (no
 `deny_unknown_fields`) so future corpus fields don't break the loader.
+
+### Two opt-in/tier schema flags (`opt_in_only`, `layer3_only`)
+
+`RuleToml` and the public `Rule` (`crates/rules/src/lib.rs`) carry two rule-level
+booleans, both `#[serde(default)]` → `false`, so every existing corpus TOML loads
+unchanged. They are threaded through `load_one` (the `RuleToml → Rule` conversion)
+and each has an accessor:
+
+- **`opt_in_only`** (`Rule::is_opt_in_only()`) — a grounded rule that must NEVER be
+  auto-recommended / pre-checked during onboarding, even when it is grounded/verified
+  and stack-relevant. It still appears in the proposal list so the architect can
+  deliberately opt in; it is just never pre-ticked. Consumed in `propose_corpus_rules`
+  (`crates/server/src/onboard.rs`), which ANDs `!r.is_opt_in_only()` into the
+  auto-recommend computation:
+  `is_auto_recommended: (is_suggested || r.domain == "agentic") && r.is_auto_recommended() && !r.is_opt_in_only()`.
+- **`layer3_only`** (`Rule::is_layer3_only()`) — a CI-tier rule that must never run at
+  layer-2 or at scan time (too heavy / not locally runnable). Consumed by the
+  scan-time preview (`scan_tools.rs`, which excludes `layer3_only` rules from the
+  preview pass) and the check runners.
+
+### The two CI/CD security rules
+
+The corpus ships two CI/CD-domain security rules in `crates/rules/principles/ci-cd/`
+that exist ONLY to GENERATE CI stories (a DevOps engineer wires the tool) — they are
+NOT agent directives. Both: `enforcement = mechanical`, `domain = "ci-cd"`,
+`opt_in_only = true`, `verification = grounded`, rule-level `default = false`, and NO
+`[decision].default` (selecting forces a conscious tier choice — the amber "must
+choose" state):
+
+- **`CICD-SEMGREP-SECURITY-SCAN-1`** — "Run the Semgrep security suite (CI + scan
+  preview)". `layer3_only = false` (Semgrep CE is single-file, light enough to run at
+  scan preview + layer-2 + CI). Options: `semgrep-community-edition` (free LGPL-2.1
+  OSS CLI, runs on any repo incl. private, ~3,000 community rules, SARIF) |
+  `semgrep-appsec-platform-pro` (paid cross-file taint analysis, ~20,000 Pro rules,
+  managed platform). `linter = "semgrep"`.
+- **`CICD-CODEQL-SECURITY-SCAN-1`** — "Run the CodeQL security suite in CI (layer-3
+  only)". `layer3_only = true` (whole-program DB build is too heavy for scan/in-loop).
+  Options: `codeql-public-free` (free ONLY on public/OSS repos; private requires
+  GitHub Advanced Security, paid per active committer; CI / layer-3 ONLY) |
+  `codeql-ghas-paid` (GHAS for private repos, per-committer). `linter = "codeql"`.
+
+See `docs/decisions/2026-06-22_ci_security_rules_partA.md` and
+`docs/decisions/2026-06-22_ci_security_rules_and_scan_time_preview.md`.
 
 ### EnforcementKind
 
@@ -636,7 +722,92 @@ whose `qualifies` defines it as an `EXPLAIN`/`pg_stat_statements` check on a liv
 those from a static code digest yields only weak, low-confidence findings, so the scan skips
 them and they ride `.camerata/ci-checks.json` instead. The excluded ids are surfaced on
 `ScanReport.excluded_mechanical_rules` (shown in the scan header). The corpus is the source of
-each rule's tier; rules absent from the corpus (custom) default to scannable.
+each rule's tier; rules absent from the corpus (custom) default to scannable. The mechanical
+rules dropped here are NOT discarded — they feed the scan-time deterministic preview below,
+which runs their own tools instead of the LLM.
+
+### Scan-time deterministic preview (`crates/server/src/scan_tools.rs`)
+
+Mechanical rules stay out of the AI review (above), but Camerata still gives the architect a
+deterministic read on them at scan time: for EACH selected mechanical rule that is scan-runnable
+(mechanical AND NOT `layer3_only`), `run_scan_tools` runs the rule's OWN tool itself with a
+Camerata-supplied config and folds the results into triage as **preview findings** — even when
+the rule is not yet wired into the repo. This is decoupled from the gate: the **repo** is the
+source of truth for the GATE (layer-2/3, authoritative, repo-pinned, no drift); the **scan is an
+advisory preview**, so it does not need to be repo-sourced. A preview uses Camerata's installed
+tool version, which may differ from what the repo eventually pins — preview is indicative, the
+gate is authoritative.
+
+Mechanism:
+1. **linter → tool.** `tool_for_rule` / `tool_for_linter` derive the rule's tool from its corpus
+   `linter` source: `clippy: …`/`clippy::…` → clippy; `Ruff: …`/bare `RUF…`/`S…` codes → ruff;
+   `semgrep` → semgrep; an eslint-family id → eslint. The `ScanTool` enum has those four
+   variants.
+2. **group + run once per tool.** `group_by_tool` groups the selected rules by tool (and collects
+   ungrouped rules with no driveable tool); `run_scan_tools` runs each tool ONCE with a
+   Camerata-supplied selector (`selector_for_linter`): clippy `-W clippy::<lint>`, ruff
+   `--select <codes>`, eslint `--no-eslintrc --rule … --format sarif`, semgrep
+   `--sarif --config p/ci`.
+3. **parse.** SARIF preferred where the tool emits it (`parse_sarif` — semgrep native, eslint via
+   `@microsoft/eslint-formatter-sarif`), per-tool JSON otherwise (`parse_ruff_json` for ruff
+   `--output-format json`, `parse_clippy_json` for clippy `--message-format=json` NDJSON), all
+   into the existing `Finding` shape (file / line / rule-id / message / severity). clippy / ruff /
+   eslint / semgrep are driven end-to-end.
+
+The `Finding` shape gained two `#[serde(default)]` back-compatible fields: `preview: bool` and
+`preview_tool: Option<String>`. A preview finding is **deterministic but advisory** — a stable
+tool rule-id (so triage treats it like the deterministic floor and it stays OUT of the LLM
+review, saving tokens), but NOT enforcement: its `status` is `suppressed-baseline` (never reads
+as an enforced gate hit) and its detail carries "NOT enforced until wired into CI." The CI story
+still has to wire the rule for the gate to block on it.
+
+**Graceful, never a false clean.** A missing tool, unparseable output, or a mechanical rule whose
+linter Camerata doesn't drive end-to-end (golangci-lint, rubocop, Checkstyle, Roslyn, etc.)
+yields a benign NOTE finding (`note_finding`, "Could not preview X — enforces once wired"), itself
+a `preview` finding so it surfaces in the preview lane, never an empty (clean) result. **CodeQL
+and the paid cloud tiers never preview** — they are `layer3_only`; `split_scannable_rules` filters
+them before the pass and `group_by_tool` defends against them too.
+
+**Wiring.** `run_scan_tools` is invoked at both audit entry points via a shared
+`merge_scan_preview` helper (`lib.rs`): `onboard_audit` (sync) and `onboard_audit_start` (async
+job; the preview merges into the report the job stores, which `onboard_audit_job` serves). The
+triage table's **Authority** column has a third tier — `preview` ("Preview · not enforced until
+wired"), distinct from the green "Rule · enforced" floor badge and the blue "AI · advisory"
+badge — filterable, with `preview` + `preview_tool` added to the CSV export. See
+`docs/decisions/2026-06-22_ci_scan_preview_partB.md`.
+
+### Scan-type selector and deterministic progress
+
+**Scan-type selector.** At audit-start the architect picks WHICH passes run. `AuditReq` (both
+`/api/onboard/audit` and `/api/onboard/audit/start`) carries `run_ai_review: bool` and
+`run_deterministic: bool`, BOTH `#[serde(default = "default_true")]` so an old/omitting client
+keeps today's both-scans behaviour. `effective_scan_modes(run_ai_review, run_deterministic)`
+resolves the pair: if BOTH arrive false it forces both back to true (returns
+`(true, true, coerced=true)`) — never a no-op scan (default-both, deliberately not a 4xx, since
+both-false is only reachable by a hand-crafted call). `audit_repos` gates each pass on its flag:
+`run_ai_review == false` skips the ENTIRE AI review (no carried findings, no `ai_audit::audit_repo`,
+no deep tier) — **zero model calls / no tokens** (asserted by
+`deterministic_only_runs_floor_and_skips_ai`); `run_deterministic == false` skips the always-on
+floor (`audit_files`) AND `merge_scan_preview`. The UI exposes two checkboxes ("AI architectural
+review", "Deterministic scans (floor + linters)"), both default ON; the deep-tier toggle is hidden
+when AI review is off.
+
+**Deterministic-scan progress.** Only the AI agents previously showed progress during a scan. The
+async job (`JobState`, `crates/server/src/jobs.rs`) gained a `deterministic: DetProgress` section
+separate from the AI `done`/`total`: `DetProgress { tools: Vec<DetToolProgress>, done, total }`,
+each `DetToolProgress { tool, status, findings }` with status `starting | running | done`
+(`det_status` constants). `JobStore` drives it: `det_register_tool` (add-if-missing, grows
+`total`, idempotent), `det_tool_running`, `det_tool_done(tool, findings)` (increments `done` once,
+idempotent). The floor is one tool row; each preview linter is another; `unrouted` collects rules
+with no driveable tool. The floor reports progress from `audit_repos`; `run_scan_tools` takes a
+`progress: Option<(&JobStore, &str)>` arg that pre-registers every tool (accurate denominator)
+then streams each running → done with its findings count; `merge_scan_preview` threads the job
+through. Because live progress is only pollable on the async job path, the UI routes a
+**deterministic-only** scan (`run_deterministic && !run_ai_review`) through the job path regardless
+of the picked batch mode. The `DeterministicProgress` component (`cockpit.rs`) renders ABOVE the
+AI agent-activity drawer (overall done/total bar + per-tool rows) — the primary progress view in
+deterministic-only mode, where the AI drawer is empty. See
+`docs/decisions/2026-06-22_scan_ux_selector_and_det_progress.md`.
 
 ### Onboarding emits stories; the dev layer does the work
 
@@ -647,6 +818,17 @@ pickup. The "wire mechanical rules into CI" step likewise files a GitHub issue
 (`onboard_ci_rules` → `create_issue`), not a run. Actually *running* a resolve-now or CI story
 through the governed pipeline (the ingest) is Pillar 2. (The old `onboard_fix` endpoint and the
 "Fix the audited items" panel — which launched runs from onboarding — were removed.)
+
+**CI-wiring targets the repo's canonical check command (serves both layers).** Layer 2
+(Camerata's in-loop post-task check during a governed run) and layer 3 (the repo's own CI on
+every PR) run the SAME checks — the repo's lint/test commands — differing only in where/when. So
+the wiring stories `onboard_ci_rules` files (both the mechanical and architectural story bodies
+plus the shared preamble) instruct wiring each check into the repo's **canonical check command**
+(the lint/test command layer 2 runs) **and** the CI workflow. One wiring covers both: layer 2
+picks it up automatically (it runs the repo's lint/test), layer 3 runs the same command on every
+PR (catching non-Camerata changes too). The prior wording was CI-only, which on a repo with no
+pre-existing lint script could produce a CI-only step layer 2 never invokes. See
+`docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
 
 ---
 
@@ -818,6 +1000,15 @@ project a chosen work item onto a UoW. The handlers (in `lib.rs`, using the
 - `POST /api/workitems/comment` `{ work_item_id, body }` — comment back onto the
   source issue. Needs the token. (Echo suppression for write-back loops lives in
   the worktracker sync layer; see §12.)
+- `POST /api/workitems/comments` `{ work_item_id }` → `{ comments: [{ author, body,
+  created_at }] }` — fetch the issue's comment thread for the work-item modal. Backed by
+  `github_issues::get_issue_comments`. Token-less / malformed-id / fetch-error → empty list
+  (graceful at the endpoint layer, never an error).
+- `POST /api/workitems/assignees` `{ work_item_id }` → `{ users: ["login", …] }` — the repo's
+  assignable users, driving the comment box's `@`-mention autocomplete. Backed by
+  `github_issues::get_assignees`. Token-less / error → empty list (the dropdown simply never
+  shows). The candidate set is GitHub's repo **assignees** (the practical mention set, not full
+  org membership); per-provider mention search is FUTURE.
 - `GET /api/uows` — list all Units of Work, each resolved with the `WorkItem` it
   references (from the story spine) and its lifecycle `stage`.
 - `POST /api/uow/from-workitem` `{ work_item_id }` — create a UoW referencing the
@@ -1006,6 +1197,90 @@ is a governed spawn, not a bypass.
 See `docs/decisions/2026-06-21_uow_be_increment1.md` and
 `docs/decisions/2026-06-21_uow_delegate_tool_increment2.md`.
 
+### AI story-authoring (blank UoW → drafted issue → board → auto-link)
+
+The inverse of `from-workitem`: start with a UoW and *author* the issue with AI, instead of
+adopting an existing one. This is **LLM text generation** (it drafts/refines an issue), NOT a
+code-writing agent — there is **no `gated_write` and no code writes** in this path, so the
+development gate is not involved (same class as the chat assistant). The governance gate stays on
+the governed dev run AFTER the UoW is linked. Three endpoints (`crates/server/src/lib.rs`,
+reusing `onboard::create_issue` + `Llm` + `github_issues`):
+
+- `POST /api/uow/blank` → `{ uow_id }`. Creates a blank DRAFT UoW: a `draft-<token>` id,
+  `work_item = None`, an empty `authoring` state. It lists in `/api/uows` with `work_item: null`
+  and `authoring: true`.
+- `POST /api/uow/:story_id/author` `{ message }` → the updated `UnitOfWork`. The first message is
+  the requirements prompt; subsequent ones are chat turns. The handler appends the user message,
+  calls `Llm::complete` with a story-authoring system prompt that returns minified JSON
+  `{ "title", "body", "reply" }` (parsed by `parse_author_response`, tolerating JSON / fenced /
+  prose), updates `draft_title`/`draft_body`, appends the AI reply, persists. The prompt instructs
+  the model to ASK ONE clarifying question when requirements are ambiguous. **Token-less / LLM-off
+  degrades gracefully**: the user turn is still saved, the draft is left unchanged, and the AI turn
+  carries an "AI drafting is unavailable" note.
+- `POST /api/uow/:story_id/publish` `{ repo: "owner/repo" }` → `{ uow_id, work_item }`. Reuses
+  `onboard::create_issue(...)` to open the GitHub issue, parses the new number from the returned
+  `html_url`, builds the canonical story via `github_issues::issue_to_story`, upserts it onto the
+  spine (like `uow_from_workitem`), then **links** the draft UoW to it. Requires a token; returns
+  a clear non-2xx when the token is absent, the repo is malformed, or the draft has no title.
+
+`UnitOfWork` gained two `#[serde(default)]` (back-compat) fields: `authoring:
+Option<AuthoringState>` (`Some` for a draft being authored — `{ requirements_prompt, chat:
+Vec<AuthorChatMessage{role,text}>, draft_title, draft_body }`) and `work_item: Option<String>`
+(the linked work-item story id for a published draft; `None` for a normal UoW, whose KEY *is* the
+work-item story id, and for an unpublished draft). New store methods: `create_blank`,
+`append_authoring_turn`, `link_work_item`.
+
+**Draft-id-no-rekey choice.** The draft keeps its `draft-<token>` id as its store key for its
+whole lifecycle. On publish it is NOT re-keyed to `owner/repo#num`; the new `work_item` field
+carries the real work-item story id instead. This avoids a re-key migration (and any in-flight
+run/lifecycle state keyed by the draft id stays valid). `/api/uows` resolves a draft's work item
+by its `work_item` link, falling back to the key for a normal UoW.
+
+UI (`cockpit.rs`): `NewAuthoredUowButton` in the Governed Development left nav creates the draft
+and opens `StoryAuthoringPanel` (a clarification chat → `POST /author`, a live draft preview, a
+target-repo picker, a "Push to board & link" button → `POST /publish`); on success `UowDevControls`
+takes over. See `docs/decisions/2026-06-22_uow_ai_story_authoring.md` and
+`docs/decisions/2026-06-22_uow_ai_story_authoring_build.md`.
+
+### AI-assisted Update-branch (gated conflict resolution)
+
+The GitHub PR "Update branch" affordance, AI-assisted: pick a source branch and merge it INTO the
+UoW's branch, with a gated agent resolving any conflicts — without weakening the governance gate.
+Two endpoints + one per-UoW UI control (`crates/server/src/update_branch_run.rs`, routes in
+`lib.rs`):
+
+- `POST /api/uow/:story_id/branches` → `{ "local": [...], "origin": [...] }`. Lists the branches
+  this UoW can merge FROM. The repo is derived from the story id (`owner/repo#num` →
+  `owner/repo`) and resolved to its local clone via `resolve_repo_dir`. `local` = `git branch`;
+  `origin` = `git branch -r` with the `origin/` prefix stripped and `origin/HEAD` dropped.
+  Token-less / no-clone / unresolvable → empty lists (graceful).
+- `POST /api/uow/:story_id/update-branch` `{ source_branch, source, model? }` → `{ run_id }`.
+  `source` is `"local"` or `"origin"`. Returns a 4xx (no run) when `source` is malformed,
+  `source_branch` is empty, the UoW has no branch yet, the repo can't be derived, or it isn't
+  resolved to a local clone. Otherwise it creates a run (pollable via `GET /api/runs/:id`) and
+  spawns the merge work.
+
+**Merge → conflict → gated-agent flow** (`execute_update_branch_run`): check out the UoW branch
+(`switch_branch`); for an origin source `git fetch` it first (the token is injected ONLY into that
+fetch's transient authenticated URL, per the `workspace.rs` token rule); `git merge --no-edit
+<ref>` (`merge_source`). A clean merge auto-commits and reports success; a conflict spawns ONE
+gated agent to resolve the markers and `git add` — the agent does NOT commit or push; the SERVER
+completes the merge commit. The gated agent is built from the SAME
+`camerata_fleet::governed_role` + `camerata_agent::prepare_session` machinery the investigation
+runner uses, so it carries the identical `--allowedTools` = `gated_write` only and the identical
+denylist (`Task`, `Write`, `Bash`, …); its only mutation path is layer-1, it cannot spawn
+sub-agents, and the repo dir jails its writes. None of `crates/agent`, `crates/gateway`, or
+`crates/fleet` internals were modified.
+
+**Fail-closed.** A non-conflict merge failure (unknown ref, dirty tree) is a hard error, not a
+false conflict (`merge_source` distinguishes the two). Live mode off (`CAMERATA_LIVE_BUILD != 1`)
++ conflicts → abort the merge and report an honest "conflicts need the AI resolver" failure (a
+clean merge still succeeds — pure local git). If the agent fails, leaves any path conflicted, or
+the merge commit won't complete → `git merge --abort` (tree restored) and the run reports failure.
+A verification step re-runs `git diff --diff-filter=U` AFTER the agent finishes, so a model that
+claims success without resolving is caught. The control lives in `UowDevControls` (`cockpit.rs`).
+See `docs/decisions/2026-06-22_uow_ai_update_branch.md`.
+
 ---
 
 ## 11. Cockpit UI
@@ -1057,12 +1332,39 @@ reached via the "Governed Development" tab. Its left nav (`GovDevSel`) is an
     Decisions Approved → Development → Awaiting QA → Signed Off), with the run control for the
     active phase rendered inline. At Intake: model select + **▶ Begin investigation** (single-model).
     At Decisions Approved: Strongest/Balanced/Fast tier selects + **▶ Run development (governed)**
-    (three-tier, orchestrator-led). At Investigating: **Approve decisions** transition only.
-  - The **Add comment to issue** box with @-mention support (replaces the removed "Ask the team"
-    clarify panel).
-  - **Pull latest work item**, gate self-check, loop-guard control, agent activity, `UowPanel`
-    (post-run read-out), live run + provenance + sign-off.
+    (three-tier, orchestrator-led) + the default-OFF **"Bootstrap run — skip layer-2 checks"**
+    toggle (§3 bootstrap bypass). At Investigating: **Approve decisions** transition only. The
+    per-run tier selects are run OVERRIDES that default from the project tier-map (the default is
+    edited in the gear popup below).
+  - An **Open work item** button (next to "Open issue ↗") that opens the `WorkItemDetail` modal
+    for this UoW — with a **Comments** section (fetched per work-item id, each comment rendered
+    through `md_to_html`) and the modal's redundant create/open-UoW affordance hidden
+    (`show_uow_action = false`).
+  - The **Add comment to issue** box with GitHub-style inline `@`-mention autocomplete (the active
+    tail `@partial` triggers a dropdown of the repo's assignable users; replaces the removed
+    manual "mention @handle" row and the older "Ask the team" clarify panel). Pure helpers
+    (`active_mention_partial`, `apply_mention_selection`, `filter_mention_candidates`) drive it.
+  - An **Update branch (AI-assisted)** control (§10): a local/origin branch picker + model select +
+    button that drives `AgentActivity` on the returned run.
+  - **Pull latest work item**, gate self-check, agent activity, `UowPanel` (post-run read-out),
+    live run + provenance + sign-off.
   This is the surface that replaced the retired adopt-issue flow (§10).
+
+A `ProjectSettingsGear` button sits in a `govdev-gear-row` at the top of the Governed Development
+left nav (always visible regardless of which UoW is selected). It opens a `proj-settings-modal`
+popup holding the **project-scoped** settings that used to be rendered inline (which made
+project-level settings read like per-UoW fields): the **loop guard** (`LoopGuardControl` →
+`project.max_iterations`) and the **default tier-map** (`TierMapEditor` → `project.tier_map`).
+`TierMapEditor` ALSO stays in the Rules view as a second discoverability surface (both write the
+same project row). The UoW dev controls now show only per-UoW state. See
+`docs/decisions/2026-06-22_project_settings_gear_popup.md` and
+`docs/decisions/2026-06-21_uow_workitem_ux.md`.
+
+The **deterministic-scan progress** component (`DeterministicProgress`) and the **scan-type
+selector** checkboxes live on the Onboard tab's audit UI (§6), not here.
+
+`NewAuthoredUowButton` in the left nav creates a blank draft UoW and opens `StoryAuthoringPanel`
+(the AI story-authoring surface, §10) in place of `UowDevControls` until the draft is published.
 
 ### Chorale tables
 
