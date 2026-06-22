@@ -332,22 +332,24 @@ Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
 | Point | Enforces on | Example |
 |---|---|---|
 | **Layer 1** (MCP tool gate) | one write's file content, before it executes | no hardcoded secret reaches disk |
-| **Layer 2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`) |
+| **Layer 2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`, `bundle exec rubocop`/`rspec`, `./mvnw verify`/`./gradlew check`, `dotnet format`/`build`/`test`) |
 | **Integration gate** | the assembled tree (cross-agent) | API contract between two agents agrees |
 | **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
 
-**Layer 2 is cross-language and polyglot — across four supported languages.** It is no longer
+**Layer 2 is cross-language and polyglot — across all seven supported languages.** It is no longer
 Rust-only: for each worktree it runs the checks for every **supported** language present — **Rust,
-JavaScript/TypeScript, Python, and Go** — using the **repo's own lockfile-pinned toolchain** (the
-same tool versions the repo's CI uses, installed from the repo's lockfile, never baked into
-Camerata). It is **fail-closed**: if a toolchain is missing, a check isn't defined, or dep install
-fails, the task is treated as **not verified** (an error), never a clean pass. So code is pre-linted
-at dev time across those four languages.
+JavaScript/TypeScript, Python, Go, Ruby, Java, and C#** — using the **repo's own pinned toolchain**
+(the same tool versions the repo's CI uses, taken from the repo's lockfile/wrapper/SDK pin, never
+baked into Camerata). It is **fail-closed**: if a toolchain is missing, a check isn't defined, or dep
+install fails, the task is treated as **not verified** (an error), never a clean pass. So code is
+pre-linted at dev time across all seven languages.
 
-> The corpus also ships **Ruby, Java, and C#** rules, but those languages **do not have a layer-2
-> runner yet** — their rules ride as agent directives and CI (layer 3) until a runner is added. A
-> worktree whose only language is Ruby/Java/C# currently gets no layer-2 check (it falls back to a
-> logged no-op). Adding a runner is a clean follow-up on the same `CheckRunner` seam.
+> Each language uses its own pinned tooling: Rust via `cargo`, JS/TS via the lockfile-detected
+> package manager (`npm`/`pnpm`/`yarn`), Python in an isolated venv from `requirements.txt`/
+> `pyproject.toml`, Go via `go.mod`, **Ruby** via `Gemfile.lock` + bundler (`bundle exec rubocop` +
+> `rspec`/`rake test`), **Java** via the repo's `./mvnw verify` / `./gradlew check` wrapper, and
+> **C#** via `dotnet format`/`build`/`test` (SDK pinned by `global.json`). This matches the seven
+> languages the rule corpus ships rules for — the layer-2 language gap is closed.
 
 Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo** (contracts),
 **process** (workflow conventions). The agent has no `git`, so Camerata is the sole committer.

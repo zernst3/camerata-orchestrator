@@ -16,6 +16,12 @@
 //! - [`JsCheckRunner`]   — lockfile-pinned `npm`/`pnpm`/`yarn` install + `npm run lint` + `npm run test`.
 //! - [`PythonCheckRunner`] — `.camerata-venv` isolation + lockfile-pinned `ruff check` + `pytest`.
 //! - [`GoCheckRunner`]   — `gofmt -l` + `go vet` + `go test ./...`.
+//! - [`RubyCheckRunner`] — `Gemfile.lock`-pinned `bundle install` + `bundle exec rubocop` + `bundle exec rspec`/`rake test`.
+//! - [`JavaCheckRunner`] — wrapper-pinned `./mvnw -q verify` (Maven) or `./gradlew check` (Gradle).
+//! - [`CSharpCheckRunner`] — `global.json`-pinned `dotnet format --verify-no-changes` + `dotnet build` + `dotnet test`.
+//!
+//! Together with [`crate::RustCheckRunner`] these cover all SEVEN languages the
+//! rule corpus ships rules for; the layer-2 language gap is closed.
 //!
 //! # Repo-pinned toolchain principle
 //!
@@ -74,6 +80,9 @@ const PRUNED_DIRS: &[&str] = &[
     ".next",
     "__pycache__",
     ".venv",
+    ".gradle",
+    "obj",
+    "bin",
 ];
 
 // ─── coarse per-language layer-2 rule ids ────────────────────────────────────
@@ -91,6 +100,21 @@ pub fn python_checks_rule() -> RuleId {
 /// Coarse layer-2 rule id for a Go worktree.
 pub fn go_checks_rule() -> RuleId {
     RuleId("LAYER2-GO-CHECKS-1".to_string())
+}
+
+/// Coarse layer-2 rule id for a Ruby worktree.
+pub fn ruby_checks_rule() -> RuleId {
+    RuleId("LAYER2-RUBY-CHECKS-1".to_string())
+}
+
+/// Coarse layer-2 rule id for a Java worktree.
+pub fn java_checks_rule() -> RuleId {
+    RuleId("LAYER2-JAVA-CHECKS-1".to_string())
+}
+
+/// Coarse layer-2 rule id for a C# worktree.
+pub fn csharp_checks_rule() -> RuleId {
+    RuleId("LAYER2-CSHARP-CHECKS-1".to_string())
 }
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
@@ -536,6 +560,386 @@ impl CheckRunner for GoCheckRunner {
     }
 }
 
+// ─── Ruby runner ─────────────────────────────────────────────────────────────
+
+/// Layer-2 gate for a Ruby worktree (`Gemfile`).
+///
+/// # Repo-pinned toolchain
+///
+/// Linter and test-tool versions come from the REPO's `Gemfile.lock` via
+/// bundler, never baked into Camerata. We install the locked gem set with
+/// `bundle install` and then invoke every check through `bundle exec`, so the
+/// exact rubocop / rspec / rake versions the repo's CI uses are the ones that
+/// run. A fresh per-task worktree installs gems once via bundler's shared cache.
+///
+/// # Steps
+///
+/// 1. `bundle install` to materialise the locked gem set (fail closed if it
+///    fails — a worktree whose deps cannot install cannot be verified).
+/// 2. Lint: `bundle exec rubocop` — only run if the repo declares a rubocop
+///    config (`.rubocop.yml`). If no rubocop config AND no test command exists,
+///    fail closed (nothing to verify).
+/// 3. Test: `bundle exec rspec` if a `spec/` dir is present, else
+///    `bundle exec rake test` if a `Rakefile` is present. Whichever the repo
+///    defines.
+///
+/// # Honesty (fail-closed)
+///
+/// - `bundle` missing → spawn `Err` propagates (toolchain missing).
+/// - `bundle install` fails → `Err` (install failure).
+/// - Neither a rubocop config nor a runnable test command is defined → `Err`
+///   ("could-not-run", never a silent clean).
+pub struct RubyCheckRunner {
+    /// Override for the `bundle` binary path (used in tests to inject a fake binary).
+    #[cfg(test)]
+    pub bundle_bin_override: Option<String>,
+}
+
+impl RubyCheckRunner {
+    /// Create a standard `RubyCheckRunner`.
+    pub fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            bundle_bin_override: None,
+        }
+    }
+
+    /// The `bundle` program to invoke (override-aware in tests).
+    fn bundle_program(&self) -> String {
+        #[cfg(test)]
+        {
+            self.bundle_bin_override
+                .clone()
+                .unwrap_or_else(|| "bundle".to_string())
+        }
+        #[cfg(not(test))]
+        {
+            "bundle".to_string()
+        }
+    }
+
+    /// Does the repo declare a rubocop config at the worktree root?
+    fn has_rubocop(worktree: &Path) -> bool {
+        worktree.join(".rubocop.yml").is_file() || worktree.join(".rubocop.yaml").is_file()
+    }
+
+    /// The repo's test command, if any: rspec (a `spec/` dir) takes precedence
+    /// over rake (`Rakefile`). Returns the `bundle exec` sub-args.
+    fn test_args(worktree: &Path) -> Option<Vec<&'static str>> {
+        if worktree.join("spec").is_dir() {
+            return Some(vec!["exec", "rspec"]);
+        }
+        if worktree.join("Rakefile").is_file() {
+            return Some(vec!["exec", "rake", "test"]);
+        }
+        None
+    }
+
+    /// Run `bundle install` (fail closed if it fails).
+    async fn ensure_gems_installed(&self, worktree: &Path) -> anyhow::Result<()> {
+        let bundle = self.bundle_program();
+        let out = run_command(worktree, &bundle, &["install"])
+            .await
+            .with_context(|| format!("running `{bundle} install` (is bundler installed?)"))?;
+        if !out.success {
+            anyhow::bail!(
+                "RubyCheckRunner: `{bundle} install` failed (fail-closed: not reporting clean)\n{}",
+                out.combined
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Default for RubyCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CheckRunner for RubyCheckRunner {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        let has_rubocop = Self::has_rubocop(worktree);
+        let test_args = Self::test_args(worktree);
+
+        // Honesty stance: a Ruby worktree with NEITHER a rubocop config nor a
+        // runnable test command cannot be layer-2 verified. Fail closed.
+        if !has_rubocop && test_args.is_none() {
+            anyhow::bail!(
+                "RubyCheckRunner could not verify {}: no `.rubocop.yml` and no `spec/` (rspec) or `Rakefile` (rake test) found (fail-closed: not reporting clean)",
+                worktree.display()
+            );
+        }
+
+        // Install the locked gem set; fail closed on failure.
+        self.ensure_gems_installed(worktree).await?;
+
+        let bundle = self.bundle_program();
+        let mut violations = Vec::new();
+
+        if has_rubocop {
+            let lint = run_command(worktree, &bundle, &["exec", "rubocop"])
+                .await
+                .with_context(|| format!("running `{bundle} exec rubocop`"))?;
+            violations.extend(map_command_to_rule(&lint, ruby_checks_rule()));
+        }
+
+        if let Some(args) = test_args {
+            let test = run_command(worktree, &bundle, &args)
+                .await
+                .with_context(|| format!("running `{bundle} {}`", args.join(" ")))?;
+            violations.extend(map_command_to_rule(&test, ruby_checks_rule()));
+        }
+
+        violations.dedup_by(|a, b| a.0 == b.0);
+        Ok(violations)
+    }
+}
+
+// ─── Java runner ─────────────────────────────────────────────────────────────
+
+/// Which build tool a Java worktree uses, and whether the repo ships a wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JavaBuildTool {
+    /// `pom.xml` present → Maven. `wrapper` is true if `./mvnw` exists.
+    Maven { wrapper: bool },
+    /// `build.gradle`/`build.gradle.kts` present → Gradle. `wrapper` is true if
+    /// `./gradlew` exists.
+    Gradle { wrapper: bool },
+}
+
+impl JavaBuildTool {
+    /// Detect the build tool from the manifests at the worktree root. Maven
+    /// (`pom.xml`) takes precedence over Gradle when both are present.
+    pub fn detect(worktree: &Path) -> Option<Self> {
+        if worktree.join("pom.xml").is_file() {
+            return Some(Self::Maven {
+                wrapper: worktree.join("mvnw").is_file(),
+            });
+        }
+        if worktree.join("build.gradle").is_file()
+            || worktree.join("build.gradle.kts").is_file()
+        {
+            return Some(Self::Gradle {
+                wrapper: worktree.join("gradlew").is_file(),
+            });
+        }
+        None
+    }
+
+    /// The program + args to run the build's verify/check + tests. Prefers the
+    /// repo's wrapper (`./mvnw` / `./gradlew`) for toolchain pinning; falls back
+    /// to a global `mvn`/`gradle`.
+    ///
+    /// - Maven: `verify` (runs the full lifecycle incl. test + any configured
+    ///   checkstyle/spotbugs bound to the build).
+    /// - Gradle: `check` (the standard aggregate task: test + any configured
+    ///   verification plugins).
+    pub fn check_command(&self) -> (String, Vec<String>) {
+        match self {
+            Self::Maven { wrapper } => {
+                let program = if *wrapper { "./mvnw" } else { "mvn" };
+                (program.to_string(), vec!["-q".into(), "verify".into()])
+            }
+            Self::Gradle { wrapper } => {
+                let program = if *wrapper { "./gradlew" } else { "gradle" };
+                (program.to_string(), vec!["check".into()])
+            }
+        }
+    }
+}
+
+/// Layer-2 gate for a Java worktree (`pom.xml` for Maven, or
+/// `build.gradle`/`build.gradle.kts` for Gradle).
+///
+/// # Repo-pinned toolchain
+///
+/// Prefers the repo's OWN build wrapper (`./mvnw` / `./gradlew`), which pins the
+/// exact Maven/Gradle version the repo's CI uses. Only when no wrapper is present
+/// does it fall back to a global `mvn`/`gradle`. Plugin/linter versions
+/// (checkstyle, spotbugs, etc.) come from the repo's build config and run as part
+/// of the verify/check lifecycle — they are not baked into Camerata.
+///
+/// # Steps
+///
+/// - Maven: `./mvnw -q verify` (or `mvn -q verify`). `verify` runs compile +
+///   test + any verification plugins the repo binds to the build.
+/// - Gradle: `./gradlew check` (or `gradle check`). `check` is Gradle's standard
+///   aggregate verification task (test + configured plugins).
+///
+/// # Honesty (fail-closed)
+///
+/// - No `pom.xml`/`build.gradle`/`build.gradle.kts` at the root → `Err`
+///   (could-not-run).
+/// - The build tool binary (wrapper or global) cannot be spawned → spawn `Err`
+///   propagates (toolchain missing).
+/// - A non-zero build/test exit maps to [`java_checks_rule`].
+pub struct JavaCheckRunner {
+    /// Override for the build-tool program (used in tests to inject a fake binary).
+    /// `None` means auto-detect (wrapper-preferred) from the worktree.
+    #[cfg(test)]
+    pub program_override: Option<String>,
+}
+
+impl JavaCheckRunner {
+    /// Create a standard `JavaCheckRunner`.
+    pub fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            program_override: None,
+        }
+    }
+}
+
+impl Default for JavaCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CheckRunner for JavaCheckRunner {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        let tool = JavaBuildTool::detect(worktree).ok_or_else(|| {
+            anyhow::anyhow!(
+                "JavaCheckRunner could not verify {}: no pom.xml / build.gradle / build.gradle.kts found (fail-closed: not reporting clean)",
+                worktree.display()
+            )
+        })?;
+
+        let (program, args) = tool.check_command();
+
+        // In tests, allow the program to be overridden to a fake binary.
+        #[cfg(test)]
+        let program = self.program_override.clone().unwrap_or(program);
+
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let out = run_command(worktree, &program, &arg_refs)
+            .await
+            .with_context(|| {
+                format!(
+                    "running `{program} {}` (is the build tool / wrapper available?)",
+                    args.join(" ")
+                )
+            })?;
+
+        let mut violations = map_command_to_rule(&out, java_checks_rule());
+        violations.dedup_by(|a, b| a.0 == b.0);
+        Ok(violations)
+    }
+}
+
+// ─── C# runner ───────────────────────────────────────────────────────────────
+
+/// Layer-2 gate for a C# / .NET worktree (`*.csproj` or `*.sln`).
+///
+/// # Repo-pinned toolchain
+///
+/// The SDK version is pinned by the repo's `global.json` if present; `dotnet`
+/// honours it automatically when invoked from the worktree, so the SDK the
+/// repo's CI uses is the one that runs. Analyzer + formatter rules come from the
+/// repo's project files (`.editorconfig`, package references), not from Camerata.
+///
+/// # Steps
+///
+/// 1. `dotnet format --verify-no-changes` (lint: fails if any file would be
+///    reformatted).
+/// 2. `dotnet build` (compiles + runs the Roslyn analyzers the repo configures).
+/// 3. `dotnet test` (the repo's test suite).
+///
+/// # Honesty (fail-closed)
+///
+/// - No `*.csproj`/`*.sln` at the root → `Err` (could-not-run).
+/// - `dotnet` cannot be spawned → spawn `Err` propagates (toolchain missing).
+/// - A non-zero exit on any step maps to [`csharp_checks_rule`].
+pub struct CSharpCheckRunner {
+    /// Override for the `dotnet` binary path (used in tests to inject a fake binary).
+    #[cfg(test)]
+    pub dotnet_bin_override: Option<String>,
+}
+
+impl CSharpCheckRunner {
+    /// Create a standard `CSharpCheckRunner`.
+    pub fn new() -> Self {
+        Self {
+            #[cfg(test)]
+            dotnet_bin_override: None,
+        }
+    }
+
+    /// The `dotnet` program to invoke (override-aware in tests).
+    fn dotnet_program(&self) -> String {
+        #[cfg(test)]
+        {
+            self.dotnet_bin_override
+                .clone()
+                .unwrap_or_else(|| "dotnet".to_string())
+        }
+        #[cfg(not(test))]
+        {
+            "dotnet".to_string()
+        }
+    }
+
+    /// Does the worktree root hold a `*.csproj` or `*.sln`?
+    fn has_project(worktree: &Path) -> bool {
+        let entries = match std::fs::read_dir(worktree) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".csproj") || name.ends_with(".sln") {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Default for CSharpCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CheckRunner for CSharpCheckRunner {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        if !Self::has_project(worktree) {
+            anyhow::bail!(
+                "CSharpCheckRunner could not verify {}: no *.csproj or *.sln found (fail-closed: not reporting clean)",
+                worktree.display()
+            );
+        }
+
+        let dotnet = self.dotnet_program();
+        let mut violations = Vec::new();
+
+        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"])
+            .await
+            .with_context(|| {
+                format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
+            })?;
+        violations.extend(map_command_to_rule(&fmt, csharp_checks_rule()));
+
+        let build = run_command(worktree, &dotnet, &["build"])
+            .await
+            .with_context(|| format!("running `{dotnet} build`"))?;
+        violations.extend(map_command_to_rule(&build, csharp_checks_rule()));
+
+        let test = run_command(worktree, &dotnet, &["test"])
+            .await
+            .with_context(|| format!("running `{dotnet} test`"))?;
+        violations.extend(map_command_to_rule(&test, csharp_checks_rule()));
+
+        violations.dedup_by(|a, b| a.0 == b.0);
+        Ok(violations)
+    }
+}
+
 // ─── language detection + selector ───────────────────────────────────────────
 
 /// The language a worktree was detected as, by its manifest file(s).
@@ -545,6 +949,9 @@ pub enum WorktreeLanguage {
     JavaScript,
     Python,
     Go,
+    Ruby,
+    Java,
+    CSharp,
     /// No recognised manifest. The loop degrades to [`NoopChecks`]; the
     /// selector logs that no layer-2 runner matched.
     Unknown,
@@ -598,7 +1005,33 @@ pub fn detect_language(worktree: &Path) -> WorktreeLanguage {
     {
         return WorktreeLanguage::Python;
     }
+    if worktree.join("Gemfile").is_file() {
+        return WorktreeLanguage::Ruby;
+    }
+    if worktree.join("pom.xml").is_file()
+        || worktree.join("build.gradle").is_file()
+        || worktree.join("build.gradle.kts").is_file()
+    {
+        return WorktreeLanguage::Java;
+    }
+    if dir_has_extension(worktree, ".csproj") || dir_has_extension(worktree, ".sln") {
+        return WorktreeLanguage::CSharp;
+    }
     WorktreeLanguage::Unknown
+}
+
+/// True if `dir` directly holds a file whose name ends with `ext` (e.g. a
+/// `*.csproj`/`*.sln`). Used for languages whose manifest is a glob, not a fixed
+/// filename. Unreadable dirs return false (best-effort, like the manifest walk).
+fn dir_has_extension(dir: &Path, ext: &str) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    entries.flatten().any(|entry| {
+        entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+            && entry.file_name().to_string_lossy().ends_with(ext)
+    })
 }
 
 /// The manifest filenames that mark each language, in precedence order within a
@@ -612,6 +1045,12 @@ fn language_for_manifest(file_name: &str) -> Option<WorktreeLanguage> {
         "package.json" => Some(WorktreeLanguage::JavaScript),
         "go.mod" => Some(WorktreeLanguage::Go),
         "pyproject.toml" | "requirements.txt" | "Pipfile" => Some(WorktreeLanguage::Python),
+        "Gemfile" => Some(WorktreeLanguage::Ruby),
+        "pom.xml" | "build.gradle" | "build.gradle.kts" => Some(WorktreeLanguage::Java),
+        // C# manifests are globs, not fixed names; matched by extension.
+        other if other.ends_with(".csproj") || other.ends_with(".sln") => {
+            Some(WorktreeLanguage::CSharp)
+        }
         _ => None,
     }
 }
@@ -659,7 +1098,10 @@ fn lang_ord(lang: WorktreeLanguage) -> u8 {
         WorktreeLanguage::JavaScript => 1,
         WorktreeLanguage::Python => 2,
         WorktreeLanguage::Go => 3,
-        WorktreeLanguage::Unknown => 4,
+        WorktreeLanguage::Ruby => 4,
+        WorktreeLanguage::Java => 5,
+        WorktreeLanguage::CSharp => 6,
+        WorktreeLanguage::Unknown => 7,
     }
 }
 
@@ -742,6 +1184,9 @@ impl PolyglotCheckRunner {
                     WorktreeLanguage::JavaScript => Box::new(JsCheckRunner::new()),
                     WorktreeLanguage::Python => Box::new(PythonCheckRunner::new()),
                     WorktreeLanguage::Go => Box::new(GoCheckRunner),
+                    WorktreeLanguage::Ruby => Box::new(RubyCheckRunner::new()),
+                    WorktreeLanguage::Java => Box::new(JavaCheckRunner::new()),
+                    WorktreeLanguage::CSharp => Box::new(CSharpCheckRunner::new()),
                     WorktreeLanguage::Unknown => return None,
                 };
                 Some((lang, dir, runner))
@@ -805,7 +1250,8 @@ pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
     if detected.is_empty() {
         eprintln!(
             "[camerata-checks] no layer-2 runner matched worktree {} \
-             (no Cargo.toml / package.json / go.mod / pyproject.toml|requirements.txt|Pipfile \
+             (no Cargo.toml / package.json / go.mod / pyproject.toml|requirements.txt|Pipfile / \
+             Gemfile / pom.xml|build.gradle|build.gradle.kts / *.csproj|*.sln \
              found anywhere outside pruned dirs {PRUNED_DIRS:?}); \
              degrading to NoopChecks — layer-2 bounce-and-revise is INACTIVE for this tree",
             worktree.display()
@@ -919,6 +1365,48 @@ mod tests {
         let dir = tmp();
         fs::write(dir.join("Pipfile"), "[packages]\n").unwrap();
         assert_eq!(detect_language(&dir), WorktreeLanguage::Python);
+    }
+
+    #[test]
+    fn detect_ruby_from_gemfile() {
+        let dir = tmp();
+        fs::write(dir.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::Ruby);
+    }
+
+    #[test]
+    fn detect_java_from_pom_xml() {
+        let dir = tmp();
+        fs::write(dir.join("pom.xml"), "<project></project>\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::Java);
+    }
+
+    #[test]
+    fn detect_java_from_build_gradle() {
+        let dir = tmp();
+        fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::Java);
+    }
+
+    #[test]
+    fn detect_java_from_build_gradle_kts() {
+        let dir = tmp();
+        fs::write(dir.join("build.gradle.kts"), "plugins { java }\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::Java);
+    }
+
+    #[test]
+    fn detect_csharp_from_csproj() {
+        let dir = tmp();
+        fs::write(dir.join("App.csproj"), "<Project></Project>\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::CSharp);
+    }
+
+    #[test]
+    fn detect_csharp_from_sln() {
+        let dir = tmp();
+        fs::write(dir.join("App.sln"), "Microsoft Visual Studio Solution File\n").unwrap();
+        assert_eq!(detect_language(&dir), WorktreeLanguage::CSharp);
     }
 
     #[test]
@@ -1340,6 +1828,244 @@ mod tests {
         );
     }
 
+    // ── Ruby runner ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ruby_no_rubocop_and_no_tests_fails_closed() {
+        let dir = tmp();
+        // A Gemfile but no .rubocop.yml, no spec/, no Rakefile.
+        fs::write(dir.join("Gemfile"), "source 'x'\n").unwrap();
+        let err = RubyCheckRunner::new()
+            .check(&role(), &dir)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("could not verify"),
+            "expected fail-closed error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ruby_passes_when_bundle_exec_succeeds() {
+        let dir = tmp();
+        fs::write(dir.join("Gemfile"), "source 'x'\n").unwrap();
+        fs::write(dir.join(".rubocop.yml"), "{}\n").unwrap();
+        fs::create_dir(dir.join("spec")).unwrap();
+
+        // Fake bundle that exits 0 for every subcommand (install/exec rubocop/exec rspec).
+        let bin_dir = tmp();
+        write_fake_bin(&bin_dir, "fake-bundle", &dir, 0);
+        let runner = RubyCheckRunner {
+            bundle_bin_override: Some(bin_dir.join("fake-bundle").to_string_lossy().into_owned()),
+        };
+
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(violations.is_empty(), "clean bundle run -> no violations: {violations:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ruby_bounces_when_a_check_fails() {
+        let dir = tmp();
+        fs::write(dir.join("Gemfile"), "source 'x'\n").unwrap();
+        fs::write(dir.join(".rubocop.yml"), "{}\n").unwrap();
+
+        // install (exit 0) would normally be needed, but our fake exits non-zero
+        // for everything. install runs first and would fail-close. Instead use a
+        // fake that fails only after install by exiting non-zero throughout, and
+        // assert it surfaces as Err (install fail) — that is the fail-closed path.
+        let bin_dir = tmp();
+        write_fake_bin(&bin_dir, "fake-bundle-fail", &dir, 1);
+        let runner = RubyCheckRunner {
+            bundle_bin_override: Some(
+                bin_dir.join("fake-bundle-fail").to_string_lossy().into_owned(),
+            ),
+        };
+
+        let err = runner.check(&role(), &dir).await.unwrap_err();
+        assert!(
+            err.to_string().contains("install` failed"),
+            "bundle install failure must fail closed: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ruby_install_passes_but_rubocop_bounces() {
+        let dir = tmp();
+        fs::write(dir.join("Gemfile"), "source 'x'\n").unwrap();
+        fs::write(dir.join(".rubocop.yml"), "{}\n").unwrap();
+
+        // A bundle that exits 0 for `install` but 1 for `exec ...`. The first
+        // positional arg distinguishes them.
+        let bin_dir = tmp();
+        let script_path = bin_dir.join("fake-bundle-rubocop");
+        let script = "#!/bin/sh\ncase \"$1\" in\n  install) exit 0 ;;\n  *) exit 1 ;;\nesac\n";
+        fs::write(&script_path, script).unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = RubyCheckRunner {
+            bundle_bin_override: Some(script_path.to_string_lossy().into_owned()),
+        };
+
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(
+            violations.contains(&ruby_checks_rule()),
+            "failing rubocop should bounce: {violations:?}"
+        );
+    }
+
+    // ── Java runner ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn java_build_tool_detects_maven_with_wrapper() {
+        let dir = tmp();
+        fs::write(dir.join("pom.xml"), "<project></project>\n").unwrap();
+        fs::write(dir.join("mvnw"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            JavaBuildTool::detect(&dir),
+            Some(JavaBuildTool::Maven { wrapper: true })
+        );
+    }
+
+    #[test]
+    fn java_build_tool_falls_back_to_global_when_no_wrapper() {
+        let dir = tmp();
+        fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let tool = JavaBuildTool::detect(&dir).unwrap();
+        assert_eq!(tool, JavaBuildTool::Gradle { wrapper: false });
+        let (program, _args) = tool.check_command();
+        assert_eq!(program, "gradle", "no wrapper -> global gradle");
+    }
+
+    #[test]
+    fn java_maven_prefers_wrapper_program() {
+        let tool = JavaBuildTool::Maven { wrapper: true };
+        let (program, args) = tool.check_command();
+        assert_eq!(program, "./mvnw");
+        assert!(args.contains(&"verify".to_string()));
+    }
+
+    #[tokio::test]
+    async fn java_missing_manifest_fails_closed() {
+        let dir = tmp(); // no pom.xml / build.gradle
+        let err = JavaCheckRunner::new()
+            .check(&role(), &dir)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("could not verify"),
+            "expected fail-closed error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn java_passes_when_build_succeeds() {
+        let dir = tmp();
+        fs::write(dir.join("pom.xml"), "<project></project>\n").unwrap();
+        let bin_dir = tmp();
+        write_fake_bin(&bin_dir, "fake-mvn", &dir, 0);
+        let runner = JavaCheckRunner {
+            program_override: Some(bin_dir.join("fake-mvn").to_string_lossy().into_owned()),
+        };
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(violations.is_empty(), "clean build -> no violations: {violations:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn java_bounces_when_build_fails() {
+        let dir = tmp();
+        fs::write(dir.join("build.gradle"), "plugins { id 'java' }\n").unwrap();
+        let bin_dir = tmp();
+        write_fake_bin(&bin_dir, "fake-gradle-fail", &dir, 1);
+        let runner = JavaCheckRunner {
+            program_override: Some(
+                bin_dir.join("fake-gradle-fail").to_string_lossy().into_owned(),
+            ),
+        };
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(
+            violations.contains(&java_checks_rule()),
+            "failing build should bounce: {violations:?}"
+        );
+    }
+
+    // ── C# runner ─────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn csharp_missing_project_fails_closed() {
+        let dir = tmp(); // no *.csproj / *.sln
+        let err = CSharpCheckRunner::new()
+            .check(&role(), &dir)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("could not verify"),
+            "expected fail-closed error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn csharp_passes_when_dotnet_succeeds() {
+        let dir = tmp();
+        fs::write(dir.join("App.csproj"), "<Project></Project>\n").unwrap();
+        let bin_dir = tmp();
+        // Fake dotnet: exit 0 for format/build/test.
+        write_fake_bin(&bin_dir, "fake-dotnet", &dir, 0);
+        let runner = CSharpCheckRunner {
+            dotnet_bin_override: Some(bin_dir.join("fake-dotnet").to_string_lossy().into_owned()),
+        };
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(violations.is_empty(), "clean dotnet run -> no violations: {violations:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn csharp_bounces_when_a_step_fails() {
+        let dir = tmp();
+        fs::write(dir.join("App.sln"), "Solution\n").unwrap();
+        let bin_dir = tmp();
+        // dotnet that fails `format` (exit 1 for everything is fine — we just need a bounce).
+        write_fake_bin(&bin_dir, "fake-dotnet-fail", &dir, 1);
+        let runner = CSharpCheckRunner {
+            dotnet_bin_override: Some(
+                bin_dir.join("fake-dotnet-fail").to_string_lossy().into_owned(),
+            ),
+        };
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(
+            violations.contains(&csharp_checks_rule()),
+            "failing dotnet step should bounce: {violations:?}"
+        );
+    }
+
+    // ── polyglot composite includes the new languages ─────────────────────────
+
+    #[tokio::test]
+    async fn polyglot_composite_includes_ruby_java_csharp() {
+        let dir = tmp();
+        let rb = dir.join("rb");
+        let jv = dir.join("jv");
+        let cs = dir.join("cs");
+        fs::create_dir_all(&rb).unwrap();
+        fs::create_dir_all(&jv).unwrap();
+        fs::create_dir_all(&cs).unwrap();
+        fs::write(rb.join("Gemfile"), "source 'x'\n").unwrap();
+        fs::write(jv.join("pom.xml"), "<project></project>\n").unwrap();
+        fs::write(cs.join("App.csproj"), "<Project></Project>\n").unwrap();
+
+        let composite = PolyglotCheckRunner::from_detected(detect_languages(&dir));
+        assert_eq!(
+            composite.project_count(),
+            3,
+            "composite should include Ruby + Java + C#"
+        );
+    }
+
     // ── selector returns the right runner; unknown -> noop reports clean ──────
 
     #[tokio::test]
@@ -1421,6 +2147,26 @@ mod tests {
         assert!(detected.contains(&(WorktreeLanguage::JavaScript, ui)));
         assert!(detected.contains(&(WorktreeLanguage::Python, api)));
         assert!(detected.contains(&(WorktreeLanguage::Go, tool)));
+    }
+
+    #[test]
+    fn detect_languages_finds_ruby_java_csharp() {
+        let dir = tmp();
+        let svc = dir.join("svc");
+        let api = dir.join("api");
+        let app = dir.join("app");
+        fs::create_dir_all(&svc).unwrap();
+        fs::create_dir_all(&api).unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(svc.join("Gemfile"), "source 'x'\n").unwrap();
+        fs::write(api.join("pom.xml"), "<project></project>\n").unwrap();
+        fs::write(app.join("App.csproj"), "<Project></Project>\n").unwrap();
+
+        let detected = detect_languages(&dir);
+        assert_eq!(detected.len(), 3, "should detect all three: {detected:?}");
+        assert!(detected.contains(&(WorktreeLanguage::Ruby, svc)));
+        assert!(detected.contains(&(WorktreeLanguage::Java, api)));
+        assert!(detected.contains(&(WorktreeLanguage::CSharp, app)));
     }
 
     #[test]
