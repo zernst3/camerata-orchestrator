@@ -4610,11 +4610,14 @@ fn findings_csv(findings: &[FindingView]) -> String {
     // full fidelity. `also_matches` carries the other rule ids the location-merge folded in,
     // so no rule is dropped from the export (space-separated; the grouping the UI shows is
     // recoverable from rule_id + also_matches + path + line).
-    let mut out =
-        String::from("repo,severity,status,rule_id,also_matches,path,line,snippet,detail\n");
+    // `preview`/`preview_tool` carry the scan-time deterministic-preview provenance (Part B):
+    // a preview finding is deterministic but NOT enforced until the CI story wires it.
+    let mut out = String::from(
+        "repo,severity,status,rule_id,also_matches,path,line,snippet,detail,preview,preview_tool\n",
+    );
     for f in findings {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_field(&f.repo),
             csv_field(&f.severity),
             csv_field(&f.status),
@@ -4624,6 +4627,8 @@ fn findings_csv(findings: &[FindingView]) -> String {
             f.line,
             csv_field(&f.snippet),
             csv_field(&f.detail),
+            f.preview,
+            csv_field(f.preview_tool.as_deref().unwrap_or("")),
         ));
     }
     out
@@ -4667,6 +4672,16 @@ struct FindingView {
     /// the detail modal.
     #[serde(default)]
     also_matches: Vec<String>,
+    /// PREVIEW (CI-security Part B): the server's scan-time deterministic preview pass ran
+    /// the rule's underlying tool ITSELF and produced this finding, even though the rule is
+    /// NOT yet wired into the repo's gate. Deterministic (stable tool rule-id) but ADVISORY:
+    /// "preview — not enforced until wired". Defaults to `false` (back-compatible).
+    #[serde(default)]
+    preview: bool,
+    /// For a preview finding, the tool that produced it (`clippy` | `ruff` | `eslint` |
+    /// `semgrep`). `None` for non-preview findings. Shown in the Authority badge label.
+    #[serde(default)]
+    preview_tool: Option<String>,
 }
 
 fn default_finding_status() -> String {
@@ -5960,8 +5975,15 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         // enforcement-vs-convention split rendered as a column. NOTE: advisory covers BOTH
         // `AI-*` invented ids AND the AI judging code against a corpus rule (e.g. RUST-DIOXUS-11)
         // — the old `AI-` prefix check mislabeled the latter as enforced. Keyed on the floor set.
+        // PREVIEW is a THIRD authority tier between enforced and advisory: a scan-time
+        // deterministic-tool finding (stable rule-id, no model in the trust path) that is NOT
+        // yet wired into the repo's gate. It must read DISTINCTLY from an enforced floor hit
+        // ("preview — not enforced until wired") AND from an AI-advisory finding (deterministic,
+        // not model-inferred). The CI story still has to wire it for the gate to block on it.
         ColumnDef::new(ColumnId("authority"), "Authority", |f: &FindingView| {
-            CellValue::Text(if is_enforced_floor(&f.rule_id) {
+            CellValue::Text(if f.preview {
+                "preview".to_string()
+            } else if is_enforced_floor(&f.rule_id) {
                 "enforced".to_string()
             } else {
                 "advisory".to_string()
@@ -5969,16 +5991,21 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         })
         .sortable()
         .filter(FilterKind::MultiSelect {
-            options: vec!["enforced".to_string(), "advisory".to_string()],
+            options: vec![
+                "enforced".to_string(),
+                "preview".to_string(),
+                "advisory".to_string(),
+            ],
         })
         .render_kind(RenderKind::Badge(
             BadgeVariantMap::new()
-                // chorale 0.2.3 added blue/purple to the palette, so the two authorities
+                // chorale 0.2.3 added blue/purple to the palette, so the authorities
                 // read as distinct colors (no more gray fallback collision).
                 .with("enforced", BadgeVariant::new("Rule · enforced", "green"))
+                .with("preview", BadgeVariant::new("Preview · not enforced until wired", "purple"))
                 .with("advisory", BadgeVariant::new("AI · advisory", "blue")),
         ))
-        .initial_width(170.0),
+        .initial_width(220.0),
         ColumnDef::new(ColumnId("type"), "Finding type", |f: &FindingView| {
             CellValue::Text(f.rule_id.clone())
         })
@@ -10530,7 +10557,9 @@ fn DocsView() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{dev_run_body, estimate_audit_cost, TierMapView};
+    use super::{
+        dev_run_body, estimate_audit_cost, is_enforced_floor, FindingView, TierMapView,
+    };
 
     /// The development-run body must match the frozen backend contract exactly:
     /// `{ "tier_map": { "strongest", "balanced", "fast" } }`.
@@ -11224,5 +11253,52 @@ mod tests {
             ..make_rule("R-1", "mechanical", None)
         };
         assert!(first_linter(&rule).is_none());
+    }
+
+    // ── CI-security Part B: scan-time preview findings in triage ──────────────
+
+    /// The Authority column's classification: a preview finding reads "preview"
+    /// (distinct from an enforced floor hit and from an AI-advisory finding). This
+    /// mirrors the inline accessor in `finding_columns`.
+    fn authority_label(f: &FindingView) -> &'static str {
+        if f.preview {
+            "preview"
+        } else if is_enforced_floor(&f.rule_id) {
+            "enforced"
+        } else {
+            "advisory"
+        }
+    }
+
+    #[test]
+    fn preview_finding_labeled_distinctly() {
+        // A scan-time preview finding (deterministic tool, not yet wired): "preview".
+        let preview: FindingView = serde_json::from_str(
+            r#"{"repo":"me/api","path":"q.py","line":12,"rule_id":"S608",
+                "severity":"medium","snippet":"x","detail":"d",
+                "preview":true,"preview_tool":"ruff"}"#,
+        )
+        .unwrap();
+        assert!(preview.preview);
+        assert_eq!(preview.preview_tool.as_deref(), Some("ruff"));
+        assert_eq!(authority_label(&preview), "preview");
+
+        // An enforced floor finding stays "enforced".
+        let floor: FindingView = serde_json::from_str(
+            r#"{"repo":"me/api","path":"a.rs","line":1,
+                "rule_id":"SEC-NO-HARDCODED-SECRETS-1","severity":"high",
+                "snippet":"x","detail":"d"}"#,
+        )
+        .unwrap();
+        assert!(!floor.preview, "absent preview field defaults to false (back-compat)");
+        assert_eq!(authority_label(&floor), "enforced");
+
+        // An AI-advisory finding (no preview, not a floor id) stays "advisory".
+        let ai: FindingView = serde_json::from_str(
+            r#"{"repo":"me/api","path":"x.rs","line":2,"rule_id":"AI-FOO",
+                "severity":"medium","snippet":"x","detail":"d"}"#,
+        )
+        .unwrap();
+        assert_eq!(authority_label(&ai), "advisory");
     }
 }

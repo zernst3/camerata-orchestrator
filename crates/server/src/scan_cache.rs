@@ -336,6 +336,8 @@ mod tests {
             detail: "d".to_string(),
             status: "active".to_string(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         }
     }
 

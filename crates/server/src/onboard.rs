@@ -52,11 +52,49 @@ pub struct Finding {
     /// layering + DI + entities-chain" instead of emitting five near-duplicate rows.
     #[serde(default)]
     pub also_matches: Vec<String>,
+    /// PREVIEW flag (CI-security Part B). `true` when this finding came from the
+    /// SCAN-TIME deterministic preview pass ([`crate::scan_tools::run_scan_tools`]):
+    /// Camerata ran the rule's underlying tool itself with a supplied config, even
+    /// though the rule is not yet wired into the repo's gate. A preview finding is
+    /// ADVISORY-but-deterministic: stable rule-id (treated like the floor, NOT the
+    /// AI bucket), but NOT enforcement — the CI story must still wire it for the gate
+    /// to block on it. The UI labels these "preview — not enforced until wired".
+    /// Defaults to `false` (back-compatible: an absent field = a normal finding).
+    #[serde(default)]
+    pub preview: bool,
+    /// For a preview finding, the tool that produced it (`clippy` | `ruff` | `eslint`
+    /// | `semgrep`), or a graceful note's source. `None` for non-preview findings.
+    /// Surfaced in the UI badge tooltip and the CSV. Carried so a preview is honest
+    /// about which tool/version generated it (the gate may pin a different version).
+    #[serde(default)]
+    pub preview_tool: Option<String>,
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
 fn default_status() -> String {
     "active".to_string()
+}
+
+impl Default for Finding {
+    /// A blank finding with sensible defaults — `status = "active"`, `preview = false`.
+    /// Lets call sites (and the scan-tools preview pass) build a finding with
+    /// `..Finding::default()` instead of spelling out every field, so adding a new
+    /// field doesn't break every literal.
+    fn default() -> Self {
+        Self {
+            repo: String::new(),
+            path: String::new(),
+            line: 0,
+            rule_id: String::new(),
+            severity: String::new(),
+            snippet: String::new(),
+            detail: String::new(),
+            status: default_status(),
+            also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
+        }
+    }
 }
 
 /// One alternative the architect can codify for a proposed rule.
@@ -282,6 +320,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 detail: title_for(rule_id),
                 status: default_status(),
                 also_matches: Vec::new(),
+                preview: false,
+                preview_tool: None,
             });
         }
     }
@@ -1394,6 +1434,8 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
                 .to_string(),
             status: "active".to_string(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         });
     }
 }
@@ -2457,6 +2499,8 @@ mod tests {
             detail: "d".into(),
             status: "active".into(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -2484,6 +2528,8 @@ mod tests {
                 detail: "d".into(),
                 status: "active".into(),
                 also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
             },
             Finding {
                 repo: "me/web".into(),
@@ -2495,6 +2541,8 @@ mod tests {
                 detail: "d".into(),
                 status: "active".into(),
                 also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -2527,6 +2575,8 @@ mod tests {
             detail: "detail text".to_string(),
             status: "active".to_string(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         }
     }
 
@@ -2662,6 +2712,8 @@ mod tests {
             detail: "contains a \"quoted\" word and a comma, here".into(),
             status: "active".into(),
             also_matches: Vec::new(),
+            preview: false,
+            preview_tool: None,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");

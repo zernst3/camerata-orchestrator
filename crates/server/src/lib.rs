@@ -40,6 +40,7 @@ pub mod routine;
 pub mod run;
 pub mod scan_cache;
 pub mod scan_routing;
+pub mod scan_tools;
 pub mod schedule;
 pub mod model_tier;
 pub mod settings;
@@ -1807,10 +1808,21 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// low-confidence findings (e.g. "an index probably exists in a migration somewhere"). The
 /// corpus is the source of each rule's tier; a rule absent from the corpus (e.g. a custom rule)
 /// defaults to scannable.
-/// Returns `(scannable, excluded_ci_tier_ids)`.
+/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus)`.
+///
+/// `preview_rules` are the SUBSET of the excluded (CI-tier mechanical) rules that
+/// the SCAN-TIME deterministic preview pass ([`crate::scan_tools::run_scan_tools`])
+/// can run locally: mechanical, and NOT `layer3_only` (CodeQL / paid tiers never
+/// preview). The loaded `corpus` is returned so the caller can resolve each rule's
+/// linter source without re-loading it.
 async fn split_scannable_rules(
     selected: Vec<crate::onboard::SelectedRule>,
-) -> (Vec<crate::onboard::SelectedRule>, Vec<String>) {
+) -> (
+    Vec<crate::onboard::SelectedRule>,
+    Vec<String>,
+    Vec<crate::onboard::SelectedRule>,
+    Option<camerata_rules::RuleSet>,
+) {
     let corpus_path = camerata_rules::corpus_path();
     let set = if corpus_path.exists() {
         Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
@@ -1823,16 +1835,27 @@ async fn split_scannable_rules(
             .map(|r| r.enforcement.is_ci_enforced())
             .unwrap_or(false)
     };
+    // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only.
+    let is_preview_runnable = |id: &str| -> bool {
+        set.as_ref()
+            .and_then(|s| s.get_by_id(id))
+            .map(|r| r.enforcement.is_ci_enforced() && !r.is_layer3_only())
+            .unwrap_or(false)
+    };
     let mut scannable = Vec::new();
     let mut excluded = Vec::new();
+    let mut preview = Vec::new();
     for r in selected {
         if is_ci_tier(&r.id) {
+            if is_preview_runnable(&r.id) {
+                preview.push(r.clone());
+            }
             excluded.push(r.id);
         } else {
             scannable.push(r);
         }
     }
-    (scannable, excluded)
+    (scannable, excluded, preview, set)
 }
 
 async fn onboard_audit(
@@ -1863,7 +1886,10 @@ async fn onboard_audit(
         })
         .collect();
     // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
+    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW
+    // pass below, which runs the rule's deterministic tool itself and folds in preview findings.
+    let (selected, excluded_mechanical, preview_rules, corpus) =
+        split_scannable_rules(selected).await;
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
@@ -1899,7 +1925,42 @@ async fn onboard_audit(
         state.scan_cache.put(id, manifest);
     }
     report.excluded_mechanical_rules = excluded_mechanical;
+    // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
+    // and fold their findings into triage as preview findings (advisory, not enforced).
+    merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref()).await;
     Json(report)
+}
+
+/// Run the scan-time deterministic preview pass over each local repo source and append
+/// its preview findings to the report. A no-op when there are no preview-runnable rules
+/// (or the corpus is unavailable). Preview findings are ADVISORY-but-deterministic — they
+/// carry stable tool rule-ids, stay OUT of the LLM review, and are labeled "not enforced
+/// until wired" in the UI. layer3_only rules were already excluded by `split_scannable_rules`.
+async fn merge_scan_preview(
+    report: &mut crate::onboard::ScanReport,
+    sources: &[(String, std::path::PathBuf)],
+    preview_rules: &[crate::onboard::SelectedRule],
+    corpus: Option<&camerata_rules::RuleSet>,
+) {
+    if preview_rules.is_empty() {
+        return;
+    }
+    let Some(set) = corpus else { return };
+    let lookup = |id: &str| set.get_by_id(id);
+    for (spec, dir) in sources {
+        // Only the rules bound to this repo (or project-level) preview against it.
+        let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+            .iter()
+            .filter(|r| r.applies_to(spec))
+            .cloned()
+            .collect();
+        if for_repo.is_empty() {
+            continue;
+        }
+        let mut previews =
+            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup).await;
+        report.findings.append(&mut previews);
+    }
 }
 
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
@@ -1926,7 +1987,9 @@ async fn onboard_audit_start(
         })
         .collect();
     // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    let (selected, excluded_mechanical) = split_scannable_rules(selected).await;
+    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW.
+    let (selected, excluded_mechanical, preview_rules, corpus) =
+        split_scannable_rules(selected).await;
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
@@ -1980,6 +2043,8 @@ async fn onboard_audit_start(
             scan_cache.put(id, manifest);
         }
         report.excluded_mechanical_rules = excluded_mechanical;
+        // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired).
+        merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref()).await;
         jobs.finish(&jid, report);
     });
 
