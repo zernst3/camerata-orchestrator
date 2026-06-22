@@ -8,7 +8,6 @@ default = false
 
 [decision]
 question = "What position does the project take on: Feature flags via env var or runtime config; no long-lived feature branches?"
-default = "feature-flags-via-env-var-or-runtime-config-no-l"
 why = "Long-lived feature branches drift from main and the merge cost grows superlinearly with the branch's age. Flag-gating lets the work merge incrementally while keeping the feature dark in production until it is ready, which collapses the integration risk into many small reviews rather than one large one. A flag is also testable in production: it can be enabled for an internal user, a small percentage, or a canary environment without redeploying. Long-lived feature branches drift from main and the merge cost grows with branch age, with integration bugs all surfacing at once at merge time rather than incrementally. Defaulting flags on with a kill switch flips the failure mode: a regression is on for everyone until someone notices and trips the switch, which defeats the safety property the flag is supposed to provide. Shipping conditional code based on environment without a gate couples release shape to environment topology, and staging and prod diverge in ways that are hard to test and hard to roll back."
 
 [[option]]

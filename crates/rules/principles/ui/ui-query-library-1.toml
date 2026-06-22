@@ -8,7 +8,6 @@ default = false
 
 [decision]
 question = "What position does the project take on: All UI data fetches go through a query library, never ad-hoc fetch and store?"
-default = "all-ui-data-fetches-go-through-a-query-library-n"
 why = "Modern query libraries solve a list of problems that components otherwise re-solve inconsistently per call site: stale data, double-fired requests, no revalidation policy, manual invalidation after every mutation, no shared cache across components reading the same key. Adopting one is mostly a default-acceptance move; declining it means re-implementing the same machinery worse, in each consumer. The library is also where SSR or hydration behavior gets configured once, rather than at every call site. Ad-hoc fetch-and-store at each call site has no de-dup, no shared cache between components reading the same data, manual invalidation everywhere, and subtle bugs around effect dependencies and race conditions on remounts. A global store with imperative loaders works for slow-moving data but every component that reads must subscribe explicitly, and invalidation and refetch policy bolt on awkwardly and are easy to get wrong. Server-side rendering only with no client cache is acceptable for fully-static or fully-streamed UIs but falls over the moment a single interaction needs to re-read a value."
 
 [[option]]

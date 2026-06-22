@@ -8,7 +8,6 @@ default = false
 
 [decision]
 question = "What position does the project take on: Hot reads sit behind a TTL cache with explicit write-side invalidation?"
-default = "hot-reads-sit-behind-a-ttl-cache-with-explicit-w"
 why = "Cache hits are typically sub-millisecond while a database round trip is tens of milliseconds; the speedup is on the order of 20 to 50 times for the common path, free per request once warmed. Explicit invalidation on the write side keeps stale-read windows short, and the TTL catches the cases the invalidation logic misses: cross-service writes, missed code paths, schema-level changes, manual DB edits. TTL length is a per-service call against staleness tolerance; the rule commits to having a TTL, not to a specific value. Skipping the cache layer entirely makes every request pay the database round trip; it works fine at low volume but accumulates latency cost as the system grows, and there is no graceful migration once the hot reads become a bottleneck. Cache with TTL only and no write-side invalidation is simpler to implement but produces longer windows of stale reads, and a request that just made a change cannot reflect it until the TTL expires, which surfaces as 'why did my update not stick' UX bugs. Cache with invalidation only and no TTL is correct under explicit writes but unsafe when something changes outside the invalidation paths (backfill scripts, replication catch-up, manual DB edits, third-party data ingest), because the cache then carries indefinitely stale data with no backstop."
 
 [[option]]
