@@ -50,6 +50,13 @@ A **project** holds its repos, ruleset, and onboarded state. From the **Projects
   project with the same name, Camerata **warns before overwriting**. Your own workspace settings are
   never touched. After import the repos have no local paths yet — resolve them in the Rules view (§5).
 
+**Project config vs. project data:** the exported JSON contains only the project's transferable
+config (repos, ruleset, onboarded state, tier map). Units of Work, the story spine, onboarding
+drafts, and local repo paths are **local to each developer** and are never included in an export.
+UoWs represent in-progress dev-lifecycle state (branch, stage, run history, decisions, sign-off) and
+are machine-local — transferring them would produce overlapping work across developers. When you
+import a project on a new machine you start with no UoWs; they accumulate as you work.
+
 ---
 
 ## 2. The cockpit views
@@ -242,23 +249,65 @@ and selects the existing one instead of making a duplicate.
 
 ### The UoW dev controls
 
-Below the table is a list of **UoW cards**. Open one to get the governed dev controls:
+Below the table is a list of **UoW cards**. Open one to get the governed dev controls.
 
-- **Run this work (governed)** — runs the fleet under the gate. **Layer 1** denies a forbidden write
-  before it touches disk; **Layer 2** re-checks each task with the repo's own toolchain (e.g.
-  `fmt`/`clippy`/`test`); the **worktree jail** confines every write. Without `CAMERATA_LIVE_BUILD=1`
-  this runs token-free/scripted (the gate deciding is still real); with it set + `claude` connected,
-  a real `claude -p` fleet.
-- **Lifecycle strip + transitions** — the card shows the lifecycle stages (Intake → Investigating →
-  Decisions approved → Development → Awaiting QA → Signed off) as a progress strip. The two
-  architect-driven forward transitions are buttons: **Begin investigation** (enabled at Intake) and
-  **Approve decisions** (enabled at Investigating); later stages are driven by the engine and the
-  sign-off action.
-- **Ask the team** (the human↔AI clarify loop) — compose a clarifying question (with a **Suggest
-  questions (AI)** helper) and post it for an answer, the back-and-forth between the engineer and the
-  human owner.
-- **Add comment to issue** — write a comment that is posted back onto the source issue via the
-  tracker adapter (**Post comment**).
+**All AI runs are step-bound on the UoW lifecycle** — there is no standalone "run" button separate
+from the lifecycle strip. Each phase of the lifecycle has its own control, shown inline with that
+step. The lifecycle stages are:
+
+> **Intake → Investigating → Decisions Approved → Development → Awaiting QA → Signed Off**
+
+The lifecycle strip shows the stages as a progress bar with the current stage highlighted. The
+control for the active phase renders directly beneath it.
+
+#### Intake: Begin investigation
+
+At the **Intake** stage, a single **model select** and a **▶ Begin investigation** button appear.
+
+- The model defaults to the active project's strongest tier; you can change it for this run.
+- Clicking the button runs a **single gated investigation agent** that reads the issue/story,
+  surfaces decisions and tradeoffs, and records an investigation note onto the UoW. The stage
+  advances to **Investigating** as the run begins.
+  (`POST /api/uow/:id/begin-investigation { "model": "<id>" }` → `{ "run_id", "story_id" }`.)
+- Without `CAMERATA_LIVE_BUILD=1`, the investigation run completes with a placeholder note; with
+  it set and `claude` connected, a real `claude -p` investigation agent runs.
+
+#### Investigating: Approve decisions
+
+At the **Investigating** stage, the architect reviews the investigation note and the decisions the
+agent surfaced. When all decision records are approved, click **Approve decisions** to advance the
+stage to **Decisions Approved**. The server enforces this gate: the development run is blocked until
+every decision record is marked approved (a `409` is returned if you try to skip ahead).
+
+#### Decisions Approved: Run development (governed)
+
+At the **Decisions Approved** stage, three per-tier model selects appear — **Strongest**, **Balanced**,
+and **Fast** — each defaulting from the active project's tier map and editable for this run without
+changing the saved project defaults. Click **▶ Run development (governed)** to start the build.
+
+**How the tiered run works:** the **Strongest-tier agent is the orchestrator and lead.** It does the
+complex, one-way-door work itself. For well-scoped simpler subtasks it can use the governed
+`mcp__camerata__delegate` tool to hand the task to the Balanced or Fast tier. The gate stays
+universal across all tiers: every delegate child is spawned gated (`gated_write` only, `Task`
+disallowed), delegation is only one level deep (children cannot re-delegate), and escalation is
+parent-driven (a child returns an `INCOMPLETE:` signal and the orchestrator re-handles it). The raw
+`Task` tool stays disallowed for every agent — delegation goes through `delegate`, not `Task`.
+
+Without `CAMERATA_LIVE_BUILD=1` the run is token-free/scripted and the gate enforcement is still
+real. With it set and `claude` connected, a real multi-tier `claude -p` fleet runs.
+
+#### Later stages (Development → Awaiting QA → Signed Off)
+
+Once a development run starts, the remaining stage transitions are engine-driven:
+
+- **Development → Awaiting QA** is set by the fleet when the run finishes.
+- **Signed Off** is the architect's explicit act after reviewing the run's diff + gate results.
+
+**Other controls on every UoW card:**
+
+- **Add comment to issue** — write a comment posted back onto the source issue via the tracker
+  adapter. Use @-mentions to loop a teammate in; GitHub resolves the handle. This replaces the old
+  "Ask the team" clarify panel, which has been removed.
 - **Pull latest work item** — re-pull just this one item from the tracker (a full refresh, no cache).
 - **Sign off this run** — review the run's diff + gate results (rules in force, deny/allow tallies,
   total bounces) and **✓ Sign off this run**; provenance is written back.
@@ -543,7 +592,9 @@ The mechanical rules in the current corpus are grounded (each maps to a real, na
 **Create/open a project → onboard each repo (browse to its local folder → scan the local code → pick
 per-repo rules → Add rules to repo(s): local branch+push → optionally audit + triage + wire CI) →
 manage the ruleset in the Rules view → in Governed Development, pull work items, create a Unit of Work
-from one, run governed work → review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
-push/PR and the AI audit + governed dev. Export/import a project to move it between machines; resolve
-local repo paths on the receiving side. Use the chat bubble to ask data-driven questions
-about your active project.
+from one → Begin investigation (Intake, single-model run) → Approve decisions (Investigating) → Run
+development governed (Decisions Approved, three-tier orchestrator-led run) → review → sign off.**
+Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the push/PR and the AI
+audit + governed dev. Export/import a project (config only; UoWs stay local) to move it between
+machines; resolve local repo paths on the receiving side. Use the chat bubble to ask data-driven
+questions about your active project.

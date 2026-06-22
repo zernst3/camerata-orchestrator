@@ -872,6 +872,127 @@ UoW API routes include `GET /api/uow`, `GET /api/uow/:story_id`,
 `POST .../status`, `POST .../branch`, `POST .../history`, plus the lifecycle
 transition and sign-off endpoints.
 
+### Config vs. data storage separation
+
+Project **config** (transferable) and project **data** (local) are kept in separate stores:
+
+| Category | Store / file | Transfers in export? |
+|---|---|---|
+| Project config | `projects.json` — repos, ruleset, onboarded state, `tier_map` | YES — the export is config-only |
+| Units of Work | `uow.json` | NO — local to each developer |
+| Story spine | `stories.json` (`InMemoryStoryStore`) | NO |
+| Onboarding draft | `onboarding-draft.json` | NO |
+| Local repo paths | `settings.json` (`repo_paths`) | NO |
+
+UoWs carry in-progress dev-lifecycle state (stage, branch, gate provenance, decision records, run
+history, sign-off). Transferring them would cause two developers who import the same project to
+inherit each other's half-finished work. Export stays config-only by design.
+
+See `docs/decisions/2026-06-21_project_config_vs_data_separation.md`.
+
+### Investigation run (`POST /api/uow/:story_id/begin-investigation`)
+
+The investigation run transitions the UoW from **Intake → Investigating** and then runs a single
+gated investigation agent.
+
+**Request:** `{ "model": "<id>" }` (optional body; `null`/blank/absent defaults to the active
+project's `tier_map.strongest`).
+
+**Response:** `{ "run_id": "<id>", "story_id": "<id>" }` so the UI can poll `GET /api/runs/:id`.
+
+**Behavior:**
+1. `state.uow.begin_investigation(story_id)` runs the lifecycle state machine. If the UoW is not at
+   Intake, the handler returns `409` with the transition error and starts no run.
+2. The model is resolved: caller → project `tier_map.strongest` → shipped strongest default.
+3. A run entry (`mode = "investigation"`) is created in the `RunStore` and
+   `investigation_run::execute_investigation_run(...)` is spawned.
+
+The investigation runner (`crates/server/src/investigation_run.rs`) drives a **single** gated
+`claude -p` agent built from the same fleet machinery as the dev run
+(`camerata_fleet::governed_role("Investigator")`). It is NOT the multi-stage development fleet. The
+agent's allowed tools are `gated_write` only; `Task`, `Write`, `Bash`, etc. are on the disallowed
+list. The agent reads the issue/story, surfaces decisions and tradeoffs, and records its output
+verbatim as an `InvestigationArtifact` note on the UoW. Decision-record extraction from that note
+remains an architect action through the existing `POST /api/uow/:story_id/decisions` endpoint.
+
+Without `CAMERATA_LIVE_BUILD=1` the runner records a clearly-labelled placeholder note; no real
+`claude` process is spawned, keeping CI token-free.
+
+### Tiered development run (`POST /api/stories/:id/run` with `tier_map`)
+
+**Request (extended, back-compatible):**
+```jsonc
+{
+  "model": "<string|null>",          // single-model path (existing back-compat)
+  "tier_map": {                       // NEW: three-tier orchestrator path
+    "strongest": "<model-id>",
+    "balanced":  "<model-id>",
+    "fast":      "<model-id>"
+  }
+}
+```
+Absent body, absent `tier_map`, or `tier_map: null` takes the existing single-`model` path. When
+`tier_map` is present it takes precedence over `model`. The no-code-first gate runs before either
+path is chosen; a `tier_map` does not bypass it.
+
+**Tiered fleet wiring** (`crates/server/src/live_fleet.rs` →
+`camerata_fleet::build_from_plan_with_tier_map`):
+
+`execute_live_run_tiered` builds a two-stage plan: a **Lead implementer** task classified
+`TaskKind::Backend` (→ `CapabilityBand::Strongest`) and a **Tester** task classified
+`TaskKind::Test` (→ `CapabilityBand::Fast`). `build_from_plan_with_tier_map` resolves each task's
+model from the `TierMap` via `tier::model_for_task`, then:
+
+1. Identifies the **lead stage** — the first task that maps to `Strongest`
+   (`orchestrator::lead_stage_index`).
+2. Prepares an **orchestrator session** for the lead stage only
+   (`orchestrator::prepare_orchestrator_session`): the lead's MCP config carries
+   `CAMERATA_DELEGATE_ENABLED=1` and the tier→model JSON so the gateway boots in orchestrator mode
+   and the `delegate` tool is live.
+3. All other stages (including delegate children) receive a standard non-orchestrator MCP config.
+   Their `--allowedTools` excludes `delegate`.
+
+### Governed `delegate` MCP tool (`mcp__camerata__delegate`)
+
+**What it is.** The lead (orchestrator) agent has access to one additional tool:
+`mcp__camerata__delegate`. It is registered on the gateway ONLY when the gateway boots in
+orchestrator mode (i.e. for the lead stage's gateway process). Non-lead gateways refuse `delegate`
+calls at the handler level.
+
+**Input:** `{ "subtask": "<instruction>", "tier": "fast" | "balanced" }`.
+
+**What the handler does** (`crates/gateway/src/delegate.rs::run_delegated`):
+1. Checks the explicit **depth guard** (`depth < max_depth`; default `max_depth = 1`). Refuses with
+   `DelegateError::DepthExceeded` if tripped, without spawning.
+2. Resolves `tier → model` from the orchestrator config's tier-model map (case-insensitive).
+   Refuses for unknown tiers without spawning.
+3. Writes a per-child session (rules file + child MCP config). The child MCP config does NOT carry
+   `CAMERATA_DELEGATE_ENABLED`, so the child's gateway is not in orchestrator mode.
+4. Builds a `ClaudeCliDriver` with `orchestrator = false` (so `delegate` is absent from its
+   `--allowedTools`) pinned to the tier's model and the shared worktree.
+5. Spawns one `claude -p` child, captures its output, and returns it to the orchestrator.
+
+**Depth guarantee — two independent layers:**
+- **Structural (primary).** A delegate child is spawned with `orchestrator = false` and its gateway
+  lacks `CAMERATA_DELEGATE_ENABLED`. The child structurally cannot delegate; depth is inherently 1.
+- **Explicit counter (belt-and-suspenders).** `OrchestratorConfig` tracks `depth` / `max_depth`.
+  `run_delegated` refuses at `depth >= max_depth` and threads `depth + 1` into the child's env.
+
+**Escalation is parent-driven.** A child either completes its subtask or returns a message starting
+with `INCOMPLETE:`. The orchestrator reads the tool result and decides to re-handle the work or
+re-delegate to a higher tier. No child-to-parent callback exists.
+
+**Gate preservation.** Every delegate child carries:
+- `--allowedTools` = `gated_write` only (same as the orchestrator, minus `delegate`).
+- `--disallowedTools` includes `Task`, `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`
+  (unchanged from every other agent in the fleet).
+- Same worktree jail (`CAMERATA_WORKTREE_ROOT`) and same rule subset as the orchestrator.
+The raw `Task` tool stays disallowed for every agent, including the orchestrator. The `delegate` tool
+is a governed spawn, not a bypass.
+
+See `docs/decisions/2026-06-21_uow_be_increment1.md` and
+`docs/decisions/2026-06-21_uow_delegate_tool_increment2.md`.
+
 ---
 
 ## 11. Cockpit UI
@@ -916,10 +1037,19 @@ reached via the "Governed Development" tab. Its left nav (`GovDevSel`) is an
 - `IssueManagementPanel` — the GitHub-specific piece (connection summary + the
   manual "pull" action: the adapter seam), then a provider-agnostic
   `WorkItemTable` + `WorkItemDetail` that operate purely on the `WorkItem` DTO.
-- Selecting a UoW renders `UowDevControls` — the existing governed-dev mechanisms
-  (run-through-the-gate, clarify, sign-off), keyed by the UoW's story id, so the
-  gate is never bypassed. This is the surface that replaced the retired
-  adopt-issue flow (§10).
+- Selecting a UoW renders `UowDevControls` — the step-bound governed-dev surface
+  keyed by the UoW's story id. The old standalone "Run this work (governed)" button is gone;
+  runs are now bound to the UoW lifecycle stage. `UowDevControls` contains:
+  - `UowStepRunControls` — the lifecycle strip (`UowLifecycleStrip`: Intake → Investigating →
+    Decisions Approved → Development → Awaiting QA → Signed Off), with the run control for the
+    active phase rendered inline. At Intake: model select + **▶ Begin investigation** (single-model).
+    At Decisions Approved: Strongest/Balanced/Fast tier selects + **▶ Run development (governed)**
+    (three-tier, orchestrator-led). At Investigating: **Approve decisions** transition only.
+  - The **Add comment to issue** box with @-mention support (replaces the removed "Ask the team"
+    clarify panel).
+  - **Pull latest work item**, gate self-check, loop-guard control, agent activity, `UowPanel`
+    (post-run read-out), live run + provenance + sign-off.
+  This is the surface that replaced the retired adopt-issue flow (§10).
 
 ### Chorale tables
 
