@@ -3709,7 +3709,11 @@ fn GovernedDevPage() -> Element {
                     },
                     GovDevSel::Uow(uid) => {
                         match uows.iter().find(|u| u.id == uid).cloned() {
-                            Some(u) => rsx! { UowDevControls { uow: u } },
+                            // Key by the UoW id so switching UoWs REMOUNTS the controls with
+                            // fresh per-UoW state. Without the key, Dioxus reused one instance and
+                            // just swapped the prop, so the first UoW's use_signal/use_resource
+                            // state (dev status, stage, run model, etc.) bled into every other UoW.
+                            Some(u) => rsx! { UowDevControls { key: "{u.id}", uow: u } },
                             // The UoW vanished from the list (e.g. between refreshes): fall back.
                             None => rsx! {
                                 p { class: "section-hint", "That Unit of Work is no longer available." }
