@@ -2772,7 +2772,13 @@ async fn fetch_work_item_assignees(work_item_id: &str) -> Vec<String> {
 /// tracking is a follow-up; the tail case covers the overwhelming common path (type then
 /// mention).
 fn active_mention_partial(value: &str) -> Option<&str> {
-    let last = value.split_whitespace().next_back()?;
+    // A trailing whitespace means the user just finished a token (e.g. a completed
+    // mention + space): there is no ACTIVE token, so the dropdown closes.
+    if value.is_empty() || value.ends_with(char::is_whitespace) {
+        return None;
+    }
+    // The last whitespace-delimited token is the active one.
+    let last = value.rsplit(char::is_whitespace).next()?;
     let partial = last.strip_prefix('@')?;
     // A second `@` inside the token (e.g. an email-ish `a@b`) is not a mention token.
     if partial.contains('@') {
