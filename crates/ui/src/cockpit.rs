@@ -9897,6 +9897,9 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 span { class: "live-run-title", "Governed run" }
                 span { class: "live-run-mode", "{mode_label}" }
                 span { class: "live-run-status {status_cls}", "{status_label}" }
+                if !run.done {
+                    crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
+                }
             }
             p { class: "panel-sub", "{sub}" }
             p { class: "panel-sub live-events-caption",
@@ -9921,7 +9924,14 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                     }
                 }
                 if run.events.is_empty() {
-                    p { class: "live-events-empty", "Spinning up the fleet…" }
+                    if run.done {
+                        p { class: "live-events-empty", "No activity recorded for this run." }
+                    } else {
+                        div { class: "live-events-empty",
+                            crate::bombe::BombeSpinner { title: "Spinning up the fleet\u{2026}".to_string() }
+                            p { "Spinning up the fleet\u{2026}" }
+                        }
+                    }
                 }
             }
 
