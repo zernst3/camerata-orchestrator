@@ -80,6 +80,17 @@ No GitHub issue filed for this yet — banked here as a QA item.
       (per-tool starting/running/done + findings count, overall done/total). In deterministic-only
       mode it's the primary progress view.
 
+## ★ Author a story from a blank UoW with AI (NEW — needs QA)
+
+- [ ] **Create a UoW with no story.** A "new / author a story" action makes a blank UoW (no work
+      item linked yet).
+- [ ] **Prompt requirements → AI drafts a story** (title + body), with a **back-and-forth
+      clarification chat** that refines it.
+- [ ] **Push to board.** Pick a project repo; the drafted story is created as a **GitHub Issue**.
+- [ ] **Auto-link.** The UoW links to the new issue and behaves like a normal story-linked UoW
+      (dev runs, etc.).
+- [ ] Graceful without a GitHub token (can draft, but push needs the token).
+
 ## Known v1 limits (by design — not bugs)
 
 - Jobs are in-memory (don't survive an app restart — correct, since the work can't either).
