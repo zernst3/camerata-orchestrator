@@ -537,15 +537,31 @@ impl UowStore {
     // ── public API ────────────────────────────────────────────────────────────
 
     /// Return the UoW for `story_id`, creating a default one if it does not exist yet.
+    ///
+    /// When this materializes a NEW UoW it persists immediately. Without this, a UoW
+    /// created via `/api/uow/from-workitem` (which only calls `get_or_create`, with no
+    /// follow-up mutating call) never reached `uow.json` and vanished between sessions —
+    /// the architect would create UoWs and find them gone on reopening Camerata.
     pub fn get_or_create(&self, story_id: &str) -> UnitOfWork {
-        let mut map = self.mem.lock().expect("uow mutex poisoned");
-        map.entry(story_id.to_string())
-            .or_insert_with(|| UnitOfWork {
-                story_id: story_id.to_string(),
-                updated: Self::now_rfc3339(),
-                ..Default::default()
-            })
-            .clone()
+        // Materialize under the lock, then release it BEFORE flushing (flush re-locks the
+        // same mutex — flushing while holding the guard would deadlock).
+        let (uow, created) = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let created = !map.contains_key(story_id);
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    updated: Self::now_rfc3339(),
+                    ..Default::default()
+                })
+                .clone();
+            (uow, created)
+        };
+        if created {
+            self.flush();
+        }
+        uow
     }
 
     /// All known UoWs, in arbitrary order.

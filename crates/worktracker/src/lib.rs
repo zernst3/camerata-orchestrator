@@ -734,12 +734,40 @@ pub trait StoryStore: Send + Sync {
 #[derive(Default)]
 pub struct InMemoryStoryStore {
     stories: Mutex<Vec<CanonicalStory>>,
+    /// When set, the spine is rehydrated from this JSON file on construction and
+    /// re-flushed on every `upsert`, so stories (and therefore the UoWs that
+    /// reference them) survive a restart. `None` = pure in-memory (tests / demo seed).
+    path: Option<std::path::PathBuf>,
 }
 
 impl InMemoryStoryStore {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A store persisted to (and rehydrated from) `path`. Survives restarts — without
+    /// this the spine was in-memory only, so UoWs created from work items rendered blank
+    /// (and could not be run) after reopening Camerata.
+    pub fn at(path: std::path::PathBuf) -> Self {
+        let stories = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<CanonicalStory>>(&s).ok())
+            .unwrap_or_default();
+        Self {
+            stories: Mutex::new(stories),
+            path: Some(path),
+        }
+    }
+
+    /// Persist the current spine to the backing file (no-op when in-memory). Takes the
+    /// already-held slice so it never re-locks the mutex (deadlock-safe).
+    fn flush(&self, stories: &[CanonicalStory]) {
+        if let Some(p) = &self.path {
+            if let Ok(s) = serde_json::to_string(stories) {
+                let _ = std::fs::write(p, s);
+            }
+        }
     }
 
     /// A store pre-seeded with representative stories across lifecycle states, so
@@ -814,6 +842,7 @@ impl StoryStore for InMemoryStoryStore {
             Some(existing) => *existing = story,
             None => guard.push(story),
         }
+        self.flush(&guard);
         Ok(())
     }
 }

@@ -160,6 +160,10 @@ impl AppState {
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+            // The story spine must persist too: a UoW references its story by id, and
+            // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
+            // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
+            state.stories = Arc::new(InMemoryStoryStore::at(dir.join("stories.json")));
             // Central artifact store (ROUTE-A): per-story decision records + investigation
             // notes are versioned here. Opened on the same data dir as the other stores.
             // Best-effort: if the store can't be opened (no runtime handle, or sqlx error),
