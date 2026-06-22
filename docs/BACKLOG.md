@@ -3,6 +3,18 @@
 Deferred work and known gaps not yet scheduled. Newest intent at the top. UI-only
 follow-ups live in `UI_BACKLOG.md`; this file is for engine + cross-cutting items.
 
+## Live model-list fetch from Anthropic /v1/models (hybrid) (2026-06-22)
+
+The UI's model picker is fed by the hardcoded `MODELS` const in `llm.rs` (id + label + per-Mtok
+pricing) via `GET /api/models`. Nice-to-have: when an `ANTHROPIC_API_KEY` is present, fetch the live
+model list from Anthropic's `GET /v1/models` so new models appear automatically; fall back to the
+const otherwise. **Two hard caveats** (why this is a nice-to-have, not a need): (1) `/v1/models` is
+authenticated — useless on the CLI/subscription path with no key; (2) the Models API does NOT return
+pricing, so `price_in`/`price_out` (needed for the cost estimate) must STAY a local `id → {price_in,
+price_out}` map regardless — auto-pull refreshes the LIST only, never pricing. Models change only a
+few times a year, so editing the const on a new release is low-cost. Build = live fetch (key-gated) +
+local pricing map + const fallback. Deferred — Zach is on subscription (no key) this week.
+
 ## Gemini provider (paid API key only — consumer subscription path dead) (2026-06-22, BLOCKED)
 
 Zach wanted to use his **Gemini Pro subscription** in Camerata the way he uses Claude. **Not
