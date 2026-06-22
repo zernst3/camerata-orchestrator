@@ -2059,6 +2059,42 @@ html, body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap;
 }
 
+/* Scan-type selector (Part C): the two "what to scan" checkboxes. */
+.scan-type-selector { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+
+/* Deterministic-scan progress — rendered ABOVE the AI agent-activity drawer. Styled to
+   sit consistently with the async-job progress bar above. */
+.det-progress {
+  margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--surface);
+}
+.det-progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.det-progress-title { font-size: 12.5px; font-weight: 800; color: var(--ink); }
+.det-progress-count {
+  font-size: 11.5px; font-weight: 600; color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap;
+}
+.det-progress-track {
+  height: 8px; border-radius: 999px; background: var(--accent-wash);
+  overflow: hidden; margin: 8px 0 10px;
+}
+.det-progress-fill {
+  height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width .4s var(--ease);
+}
+.det-progress-tools { display: flex; flex-direction: column; gap: 5px; }
+.det-tool { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.det-tool-glyph { width: 14px; text-align: center; font-weight: 700; }
+.det-tool-name { font-weight: 600; color: var(--ink); min-width: 110px; }
+.det-tool-findings, .det-tool-state {
+  font-size: 11px; color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.det-tool-done .det-tool-glyph { color: #2f8f5b; }
+.det-tool-running .det-tool-glyph { color: var(--accent); }
+.det-tool-starting { opacity: .65; }
+.det-progress-note { display: block; font-size: 11px; color: var(--ink-faint); margin-top: 9px; line-height: 1.5; }
+
 /* Estimated token-usage badge in the Agent-activity detail. */
 .agent-tokens {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;

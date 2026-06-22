@@ -5416,6 +5416,8 @@ async fn audit_against(
     thorough: bool,
     incremental: bool,
     deep: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
 ) -> Option<ScanReportView> {
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
@@ -5429,6 +5431,8 @@ async fn audit_against(
             "thorough": thorough,
             "incremental": incremental,
             "deep": deep,
+            "run_ai_review": run_ai_review,
+            "run_deterministic": run_deterministic,
         }))
         .send()
         .await
@@ -5632,6 +5636,30 @@ fn human_tokens(t: u64) -> String {
     }
 }
 
+/// One deterministic-scan tool's live progress (mirror of the server's `DetToolProgress`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+struct DetToolProgressView {
+    #[serde(default)]
+    tool: String,
+    /// `starting` | `running` | `done`.
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    findings: usize,
+}
+
+/// The deterministic pass's progress (mirror of the server's `DetProgress`): per-tool rows
+/// plus an overall done/total. Drives the "Deterministic scan" progress component.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+struct DetProgressView {
+    #[serde(default)]
+    tools: Vec<DetToolProgressView>,
+    #[serde(default)]
+    done: usize,
+    #[serde(default)]
+    total: usize,
+}
+
 /// A polled async-audit job (`GET /api/onboard/audit/job/:id`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 struct JobStateView {
@@ -5643,6 +5671,9 @@ struct JobStateView {
     total: usize,
     #[serde(default)]
     findings: Vec<FindingView>,
+    /// Live deterministic-pass progress (floor + preview tools). Empty until a tool registers.
+    #[serde(default)]
+    deterministic: DetProgressView,
     #[serde(default)]
     report: Option<ScanReportView>,
     #[serde(default)]
@@ -5668,6 +5699,8 @@ async fn audit_job_start(
     thorough: bool,
     incremental: bool,
     deep: bool,
+    run_ai_review: bool,
+    run_deterministic: bool,
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
@@ -5681,6 +5714,8 @@ async fn audit_job_start(
             "thorough": thorough,
             "incremental": incremental,
             "deep": deep,
+            "run_ai_review": run_ai_review,
+            "run_deterministic": run_deterministic,
         }))
         .send()
         .await
@@ -5722,11 +5757,15 @@ async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
 /// final report, clearing the shared `active_audit_job` so a later mount doesn't re-resume.
 /// Shared by the manual start AND the resume-on-mount path. Gives up after a few misses (the
 /// job vanished, e.g. the server restarted) so it can't spin forever.
+#[allow(clippy::too_many_arguments)]
 async fn poll_job(
     jid: String,
     mut audit: Signal<Option<ScanReportView>>,
     mut auditing: Signal<bool>,
     mut job_progress: Signal<Option<(usize, usize, usize)>>,
+    // Live DETERMINISTIC-pass progress (floor + preview tools), rendered by the
+    // "Deterministic scan" component above the AI agent-activity drawer. `None` clears it.
+    mut det_progress: Signal<Option<DetProgressView>>,
     mut active_audit_job: Signal<Option<String>>,
 ) {
     let mut misses = 0u32;
@@ -5736,17 +5775,24 @@ async fn poll_job(
             Some(js) => {
                 misses = 0;
                 job_progress.set(Some((js.done, js.total, js.findings.len())));
+                // Surface the deterministic progress whenever any tool has registered, so the
+                // component appears the moment the floor starts (not only once findings land).
+                if js.deterministic.total > 0 {
+                    det_progress.set(Some(js.deterministic.clone()));
+                }
                 match js.status.as_str() {
                     "done" => {
                         audit.set(js.report);
                         auditing.set(false);
                         job_progress.set(None);
+                        det_progress.set(None);
                         active_audit_job.set(None);
                         break;
                     }
                     "failed" => {
                         auditing.set(false);
                         job_progress.set(None);
+                        det_progress.set(None);
                         active_audit_job.set(None);
                         break;
                     }
@@ -5758,11 +5804,76 @@ async fn poll_job(
                 if misses >= 3 {
                     auditing.set(false);
                     job_progress.set(None);
+                    det_progress.set(None);
                     active_audit_job.set(None);
                     break;
                 }
             }
         }
+    }
+}
+
+/// The "Deterministic scan" progress component — rendered ABOVE the AI agent-activity drawer.
+/// Shows the deterministic pass's per-tool state (start/run/done + findings count) and an
+/// overall done/total bar. It's the PRIMARY progress view in deterministic-only mode, where
+/// the AI drawer is empty. Styled to match the existing job-progress UI.
+#[component]
+fn DeterministicProgress(progress: DetProgressView) -> Element {
+    let pct = (progress.done * 100)
+        .checked_div(progress.total)
+        .unwrap_or(0)
+        .min(100);
+    rsx! {
+        div { class: "det-progress",
+            div { class: "det-progress-head",
+                span { class: "det-progress-title", "Deterministic scan" }
+                span { class: "det-progress-count", "{progress.done}/{progress.total} tools" }
+            }
+            div { class: "det-progress-track",
+                div { class: "det-progress-fill", style: "width: {pct}%" }
+            }
+            div { class: "det-progress-tools",
+                for t in progress.tools.iter() {
+                    {
+                        let label = det_tool_label(&t.tool);
+                        let status_class = match t.status.as_str() {
+                            "done" => "det-tool det-tool-done",
+                            "running" => "det-tool det-tool-running",
+                            _ => "det-tool det-tool-starting",
+                        };
+                        let glyph = match t.status.as_str() {
+                            "done" => "\u{2713}",   // ✓
+                            "running" => "\u{2026}", // …
+                            _ => "\u{00b7}",         // ·
+                        };
+                        rsx! {
+                            div { key: "{t.tool}", class: "{status_class}",
+                                span { class: "det-tool-glyph", "{glyph}" }
+                                span { class: "det-tool-name", "{label}" }
+                                if t.status == "done" {
+                                    span { class: "det-tool-findings", "{t.findings} finding(s)" }
+                                } else {
+                                    span { class: "det-tool-state", "{t.status}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            span { class: "det-progress-note",
+                "Deterministic scans run locally — no LLM, no tokens. The security floor is always-on; preview tools (clippy/ruff/eslint/semgrep) run for your selected mechanical rules."
+            }
+        }
+    }
+}
+
+/// Friendly label for a deterministic tool name. `floor` is the always-on security scanner;
+/// the rest are the scan-preview linters; `unrouted` collects rules with no driveable tool.
+fn det_tool_label(tool: &str) -> String {
+    match tool {
+        "floor" => "Security floor".to_string(),
+        "unrouted" => "Unrouted rules".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -8193,6 +8304,13 @@ fn ScanResults(report: ScanReportView) -> Element {
     // threat model) after the standard audit and attaches the results as `report.deep`.
     // Output is ADVISORY — never a SOC-2 report or a penetration test.
     let mut audit_deep = use_signal(|| false);
+    // Scan-type selector (Part C): which scans to run. Both default ON (today's behaviour).
+    // "AI architectural review" = the LLM scan of architectural/structured/prose rules (and
+    // the deep tier). "Deterministic scans" = the always-on security floor + the mechanical
+    // preview linters — fast, no LLM, no tokens. Deselecting AI sends `run_ai_review=false`
+    // (the server makes zero model calls); deselecting deterministic skips the floor + preview.
+    let mut run_ai_review = use_signal(|| true);
+    let mut run_deterministic = use_signal(|| true);
     // pw/cockpit-ui Feature 5: feature-flag map. Controls per-feature affordances —
     // SOC-2 section visibility, deep-export scope. Fetched once on mount; degrades
     // gracefully (all flags default to false) when the server is old.
@@ -8203,13 +8321,16 @@ fn ScanResults(report: ScanReportView) -> Element {
         .unwrap_or_default();
     // Live progress for an async job: (passes done, passes total, findings so far).
     let mut job_progress = use_signal(|| Option::<(usize, usize, usize)>::None);
+    // Live DETERMINISTIC-pass progress (floor + preview tools), rendered above the AI
+    // agent-activity drawer. Primary progress view in deterministic-only mode (no AI drawer).
+    let mut det_progress = use_signal(|| Option::<DetProgressView>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let active_audit_job = use_context::<Signal<Option<String>>>();
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
-            poll_job(jid, audit, auditing, job_progress, active_audit_job).await;
+            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job).await;
         }
     });
     // Selected-rule count, set by ProposedRulesTable and read here for the cost estimate
@@ -8687,32 +8808,45 @@ fn ScanResults(report: ScanReportView) -> Element {
                             let mode = audit_mode();
                             let thorough = audit_thorough();
                             let deep = audit_deep();
+                            // Scan-type selector: both default true; if a user somehow unticks
+                            // both, send both true (the server also coerces — never a no-op).
+                            let mut ai = run_ai_review();
+                            let mut det = run_deterministic();
+                            if !ai && !det { ai = true; det = true; }
                             // Full scan forces a clean pass; otherwise the scan is incremental
                             // (only files changed since the last scan cost AI tokens).
                             let incremental = !audit_full_scan();
+                            // Deterministic-only is fast, but its PROGRESS is only pollable on
+                            // the async job path (the sync path holds one request and returns
+                            // the final report). So route a deterministic-ONLY scan through the
+                            // job path regardless of the picked mode — that's where the
+                            // per-tool progress streams into the "Deterministic scan" component.
+                            let deterministic_only = det && !ai;
+                            let use_job = mode == "job" || deterministic_only;
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
                             audit.set(None);
                             job_progress.set(None);
+                            det_progress.set(None);
                             auditing.set(true);
-                            if mode == "job" {
+                            if use_job {
                                 // Async job: submit, record the id (app-scope, so a later
                                 // mount can resume), then poll. The server runs it decoupled
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
-                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep).await else {
+                                    let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
                                         auditing.set(false);
                                         return;
                                     };
                                     active_audit_job.set(Some(jid.clone()));
-                                    poll_job(jid, audit, auditing, job_progress, active_audit_job).await;
+                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job).await;
                                 });
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep).await);
+                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await);
                                     auditing.set(false);
                                 });
                             }
@@ -8756,6 +8890,40 @@ fn ScanResults(report: ScanReportView) -> Element {
                             }
                         }
                         span { class: "audit-model-hint", "Recalibrates severity + flags low-confidence findings. Default = the scan model; pick a stronger one for cheap-scan-plus-smart-verify." }
+                    }
+                }
+                // Scan-type selector (Part C) — pick WHICH scans run. Both default ON
+                // (today's behaviour). Deterministic-only is fast and uses no LLM / no tokens.
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "What to scan" }
+                    div { class: "scan-type-selector",
+                        label { class: "audit-thorough-toggle",
+                            input {
+                                r#type: "checkbox",
+                                checked: run_ai_review(),
+                                disabled: auditing(),
+                                onchange: move |e| run_ai_review.set(e.checked()),
+                            }
+                            span { "AI architectural review" }
+                        }
+                        label { class: "audit-thorough-toggle",
+                            input {
+                                r#type: "checkbox",
+                                checked: run_deterministic(),
+                                disabled: auditing(),
+                                onchange: move |e| run_deterministic.set(e.checked()),
+                            }
+                            span { "Deterministic scans (floor + linters)" }
+                        }
+                    }
+                    span { class: "audit-model-hint",
+                        if run_deterministic() && !run_ai_review() {
+                            "Deterministic-only: the always-on security floor + the mechanical preview linters run LOCALLY — fast, no LLM, NO TOKENS. The AI review is skipped entirely (zero model calls). Best for a quick check or QA of the deterministic pass."
+                        } else if run_ai_review() && !run_deterministic() {
+                            "AI-only: the LLM checks the code against your selected architectural/structured/prose rules. The deterministic floor + preview linters are skipped."
+                        } else {
+                            "Both run (default): the deterministic floor + linters (free, no tokens) AND the AI architectural review. Untick AI for a fast, token-free deterministic-only scan. At least one must be ticked — unticking both runs both."
+                        }
                     }
                 }
                 // Execution mode — speed/scale knob, separate from the model (quality) and
@@ -8814,7 +8982,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                 // Gated on the `soc2` feature flag — hidden entirely when soc2 is disabled
                 // (this is the SOC-2-headlined surface; set via .camerata/features.toml or
                 // CAMERATA_FEATURE_SOC2=false). The server also skips the lens when off.
-                if feature_flags.soc2 {
+                if feature_flags.soc2 && run_ai_review() {
                     div { class: "audit-model-row",
                         label { class: "audit-model-label", "Deep compliance & security (opt-in)" }
                         label { class: "audit-thorough-toggle",
@@ -8970,6 +9138,13 @@ fn ScanResults(report: ScanReportView) -> Element {
                         crate::bombe::BombeSpinner { title: "Camerata is auditing\u{2026}".to_string() }
                         span { class: "audit-thinking-label", "Camerata is auditing your code\u{2026}" }
                     }
+                }
+                // Deterministic-scan PROGRESS — rendered ABOVE the AI agent-activity drawer.
+                // Shows the deterministic pass's per-tool start/run/done + findings count and
+                // an overall done/total. It's the PRIMARY progress view in deterministic-only
+                // mode (where the AI drawer below is empty).
+                if let Some(dp) = det_progress() {
+                    DeterministicProgress { progress: dp }
                 }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung). Shown ONLY for
@@ -10558,8 +10733,49 @@ fn DocsView() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        dev_run_body, estimate_audit_cost, is_enforced_floor, FindingView, TierMapView,
+        det_tool_label, dev_run_body, estimate_audit_cost, is_enforced_floor, FindingView,
+        JobStateView, TierMapView,
     };
+
+    /// The job-state view deserializes the server's `deterministic` progress section
+    /// (per-tool rows + done/total). An old server omitting the field defaults to empty.
+    #[test]
+    fn job_state_view_parses_deterministic_progress() {
+        let json = r#"{
+            "status": "running", "done": 0, "total": 0, "findings": [],
+            "deterministic": {
+                "tools": [
+                    {"tool": "floor", "status": "done", "findings": 3},
+                    {"tool": "clippy", "status": "running", "findings": 0}
+                ],
+                "done": 1, "total": 2
+            }
+        }"#;
+        let js: JobStateView = serde_json::from_str(json).unwrap();
+        assert_eq!((js.deterministic.done, js.deterministic.total), (1, 2));
+        assert_eq!(js.deterministic.tools.len(), 2);
+        assert_eq!(js.deterministic.tools[0].tool, "floor");
+        assert_eq!(js.deterministic.tools[0].status, "done");
+        assert_eq!(js.deterministic.tools[0].findings, 3);
+        assert_eq!(js.deterministic.tools[1].status, "running");
+
+        // Back-compat: a payload WITHOUT the field deserializes to an empty progress.
+        let legacy: JobStateView =
+            serde_json::from_str(r#"{"status":"running","done":1,"total":4,"findings":[]}"#)
+                .unwrap();
+        assert_eq!((legacy.deterministic.done, legacy.deterministic.total), (0, 0));
+        assert!(legacy.deterministic.tools.is_empty());
+    }
+
+    /// The per-tool label maps the wire tool names to friendly labels.
+    #[test]
+    fn deterministic_tool_labels() {
+        assert_eq!(det_tool_label("floor"), "Security floor");
+        assert_eq!(det_tool_label("unrouted"), "Unrouted rules");
+        // Linters pass through unchanged.
+        assert_eq!(det_tool_label("clippy"), "clippy");
+        assert_eq!(det_tool_label("ruff"), "ruff");
+    }
 
     /// The development-run body must match the frozen backend contract exactly:
     /// `{ "tier_map": { "strongest", "balanced", "fast" } }`.

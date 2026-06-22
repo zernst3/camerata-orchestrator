@@ -1786,11 +1786,37 @@ struct AuditReq {
     /// report and not a penetration test.
     #[serde(default)]
     deep: bool,
+    /// Scan-type selector (Part C) — run the AI architectural review (the LLM scan of
+    /// architectural/structured/prose rules, plus the deep tier when `deep`). Defaults to
+    /// TRUE (today's behaviour). When false the audit makes NO model calls — the LLM passes
+    /// are skipped entirely (no tokens). If BOTH this and `run_deterministic` arrive false,
+    /// `effective_scan_modes` forces both back to true (never a no-op scan).
+    #[serde(default = "default_true")]
+    run_ai_review: bool,
+    /// Scan-type selector (Part C) — run the DETERMINISTIC scans: the always-on security
+    /// floor plus the scan-time mechanical preview pass. Defaults to TRUE. When false the
+    /// floor + `merge_scan_preview` are skipped. Deterministic-only (this true, `run_ai_review`
+    /// false) is fast and uses no LLM / no tokens.
+    #[serde(default = "default_true")]
+    run_deterministic: bool,
 }
 
 /// serde default for an opt-OUT boolean (defaults to `true` when the field is absent).
 fn default_true() -> bool {
     true
+}
+
+/// Resolve the scan-type selector flags into the effective `(run_ai_review, run_deterministic)`
+/// pair. Both default true; a request that turns BOTH off is a no-op scan, so we force both
+/// back ON rather than do nothing (the decision: default-both over a 4xx — the scan still runs
+/// useful work and the UI keeps both checked, so this is only reachable by a hand-crafted
+/// request). Returns the pair plus whether a both-false coercion happened (for a note).
+fn effective_scan_modes(run_ai_review: bool, run_deterministic: bool) -> (bool, bool, bool) {
+    if !run_ai_review && !run_deterministic {
+        (true, true, true)
+    } else {
+        (run_ai_review, run_deterministic, false)
+    }
 }
 
 /// The transcript key the scan/audit AI activity registers under (the Agent-activity
@@ -1893,6 +1919,9 @@ async fn onboard_audit(
     let model = req.model.filter(|m| !m.trim().is_empty());
     let calibration_model = req.calibration_model.filter(|m| !m.trim().is_empty());
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
+    // Scan-type selector: resolve the two flags (both-false coerces to both-true).
+    let (run_ai_review, run_deterministic, _coerced) =
+        effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
@@ -1917,6 +1946,8 @@ async fn onboard_audit(
         prior.as_ref(),
         req.deep,
         state.feature_flags.soc2,
+        run_ai_review,
+        run_deterministic,
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -1927,7 +1958,11 @@ async fn onboard_audit(
     report.excluded_mechanical_rules = excluded_mechanical;
     // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
     // and fold their findings into triage as preview findings (advisory, not enforced).
-    merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref()).await;
+    // Gated on the deterministic selection — deselecting deterministic scans skips it too.
+    // (No job here, so no live deterministic progress on the synchronous path.)
+    if run_deterministic {
+        merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
+    }
     Json(report)
 }
 
@@ -1941,6 +1976,10 @@ async fn merge_scan_preview(
     sources: &[(String, std::path::PathBuf)],
     preview_rules: &[crate::onboard::SelectedRule],
     corpus: Option<&camerata_rules::RuleSet>,
+    // The async job to report per-tool deterministic progress into (`(store, id)`), or `None`
+    // on the synchronous path. When set, each preview tool registers + streams running → done
+    // with its findings count, mirroring the floor's progress.
+    job: Option<(&crate::jobs::JobStore, &str)>,
 ) {
     if preview_rules.is_empty() {
         return;
@@ -1958,7 +1997,7 @@ async fn merge_scan_preview(
             continue;
         }
         let mut previews =
-            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup).await;
+            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, job).await;
         report.findings.append(&mut previews);
     }
 }
@@ -1995,6 +2034,9 @@ async fn onboard_audit_start(
     let mode = crate::ai_audit::ScanMode::parse(req.mode.as_deref());
     let thorough = req.thorough;
     let deep = req.deep;
+    // Scan-type selector: resolve the two flags (both-false coerces to both-true).
+    let (run_ai_review, run_deterministic, _coerced) =
+        effective_scan_modes(req.run_ai_review, req.run_deterministic);
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
@@ -2036,6 +2078,8 @@ async fn onboard_audit_start(
             prior.as_ref(),
             deep,
             soc2_enabled,
+            run_ai_review,
+            run_deterministic,
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
@@ -2043,8 +2087,19 @@ async fn onboard_audit_start(
             scan_cache.put(id, manifest);
         }
         report.excluded_mechanical_rules = excluded_mechanical;
-        // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired).
-        merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref()).await;
+        // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
+        // the deterministic selection; reports per-tool progress into the job so the cockpit's
+        // deterministic progress view shows each preview tool start/run/done live.
+        if run_deterministic {
+            merge_scan_preview(
+                &mut report,
+                &sources,
+                &preview_rules,
+                corpus.as_ref(),
+                Some((&jobs, &jid)),
+            )
+            .await;
+        }
         jobs.finish(&jid, report);
     });
 
@@ -5655,6 +5710,30 @@ mod tests {
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Scan-type selector flags default to TRUE when absent (today's behaviour: both scans run).
+    #[test]
+    fn audit_req_scan_type_flags_default_true() {
+        let req: AuditReq = serde_json::from_str(r#"{"repos":["me/api"]}"#).unwrap();
+        assert!(req.run_ai_review, "run_ai_review defaults true");
+        assert!(req.run_deterministic, "run_deterministic defaults true");
+        // Explicit false is honored.
+        let req: AuditReq =
+            serde_json::from_str(r#"{"repos":["me/api"],"run_ai_review":false}"#).unwrap();
+        assert!(!req.run_ai_review);
+        assert!(req.run_deterministic, "the other flag stays true");
+    }
+
+    /// `effective_scan_modes`: both-false is never a no-op — it coerces back to both-true and
+    /// flags the coercion. Any other combination passes through untouched.
+    #[test]
+    fn effective_scan_modes_never_a_no_op() {
+        assert_eq!(effective_scan_modes(true, true), (true, true, false));
+        assert_eq!(effective_scan_modes(true, false), (true, false, false));
+        assert_eq!(effective_scan_modes(false, true), (false, true, false));
+        // Both off -> forced back on, coercion flagged.
+        assert_eq!(effective_scan_modes(false, false), (true, true, true));
     }
 
     fn arm_rule(id: &str, scope: &str, repos: &[&str]) -> crate::arm::ArmRule {

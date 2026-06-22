@@ -19,6 +19,44 @@ use serde::Serialize;
 
 use crate::onboard::{Finding, ScanReport};
 
+/// The lifecycle status of one deterministic scan tool, mirroring how the AI passes stream
+/// `running` → `done` into the transcript. Stable wire strings so the UI can style each state.
+pub mod det_status {
+    /// Queued but not started.
+    pub const STARTING: &str = "starting";
+    /// The tool is executing.
+    pub const RUNNING: &str = "running";
+    /// The tool finished (findings counted).
+    pub const DONE: &str = "done";
+}
+
+/// One deterministic-scan tool's live progress: which tool, its lifecycle status, and how
+/// many findings it has produced so far. The "floor" (the always-on security scanner) is one
+/// such entry; each scan-preview tool (clippy/ruff/eslint/semgrep) is another. Keyed by
+/// `tool` so a status/findings update locates the right row.
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct DetToolProgress {
+    /// The tool name (`floor`, `clippy`, `ruff`, `eslint`, `semgrep`, …).
+    pub tool: String,
+    /// `starting` | `running` | `done` (see [`det_status`]).
+    pub status: String,
+    /// Findings this tool has produced so far.
+    pub findings: usize,
+}
+
+/// The deterministic pass's overall progress: every tool's per-row state plus an aggregate
+/// done/total so the UI can render a single bar AND the per-tool breakdown. Mirrors the AI
+/// passes' `done`/`total` shape so the cockpit renders both consistently.
+#[derive(Clone, Debug, Serialize, Default, PartialEq)]
+pub struct DetProgress {
+    /// Per-tool rows in registration order (floor first, then each preview tool).
+    pub tools: Vec<DetToolProgress>,
+    /// Tools finished (`status == done`).
+    pub done: usize,
+    /// Tools known so far (grows as the floor + each preview tool registers).
+    pub total: usize,
+}
+
 /// A live audit job's state, as the UI polls it.
 #[derive(Clone, Debug, Serialize, Default)]
 pub struct JobState {
@@ -30,6 +68,12 @@ pub struct JobState {
     pub total: usize,
     /// Findings discovered so far — a live preview (pre-final calibration).
     pub findings: Vec<Finding>,
+    /// Live progress of the DETERMINISTIC pass (the always-on floor + the scan-preview
+    /// tools) — per-tool status + findings + an overall done/total. Separate from the AI
+    /// `done`/`total` above so the UI can show a "Deterministic scan" progress view even in
+    /// deterministic-only mode (where the AI agent drawer is empty).
+    #[serde(default)]
+    pub deterministic: DetProgress,
     /// The final, authoritative report once `status == "done"`.
     pub report: Option<ScanReport>,
     /// A human note (e.g. the failure reason).
@@ -92,6 +136,62 @@ impl JobStore {
     /// Append findings discovered by a pass (live preview).
     pub fn add_findings(&self, id: &str, findings: Vec<Finding>) {
         self.with(id, |j| j.findings.extend(findings));
+    }
+
+    /// Register a deterministic tool that is about to run (status `starting`), growing the
+    /// deterministic `total`. Idempotent on `tool`: registering an ALREADY-KNOWN tool is a
+    /// no-op (it neither double-counts the total NOR resets an in-flight/done status — so a
+    /// later `det_tool_done` still sees its true prior state). Called as the floor and each
+    /// preview tool come into scope, so the per-tool list + denominator build up live.
+    pub fn det_register_tool(&self, id: &str, tool: &str) {
+        self.with(id, |j| {
+            if j.deterministic.tools.iter().any(|t| t.tool == tool) {
+                return;
+            }
+            j.deterministic.tools.push(DetToolProgress {
+                tool: tool.to_string(),
+                status: det_status::STARTING.to_string(),
+                findings: 0,
+            });
+            j.deterministic.total += 1;
+        });
+    }
+
+    /// Mark a deterministic tool as `running`. Registers it first if unseen (so a caller can
+    /// skip the explicit register step). Does not change the done count.
+    pub fn det_tool_running(&self, id: &str, tool: &str) {
+        self.det_register_tool(id, tool);
+        self.with(id, |j| {
+            if let Some(t) = j.deterministic.tools.iter_mut().find(|t| t.tool == tool) {
+                t.status = det_status::RUNNING.to_string();
+            }
+        });
+    }
+
+    /// Mark a deterministic tool `done` with its final findings count, incrementing the
+    /// deterministic `done` aggregate once (a re-finish of an already-done tool is a no-op on
+    /// the aggregate). Registers the tool first if unseen.
+    pub fn det_tool_done(&self, id: &str, tool: &str, findings: usize) {
+        self.det_register_tool(id, tool);
+        self.with(id, |j| {
+            if let Some(t) = j.deterministic.tools.iter_mut().find(|t| t.tool == tool) {
+                let was_done = t.status == det_status::DONE;
+                t.status = det_status::DONE.to_string();
+                t.findings = findings;
+                if !was_done {
+                    j.deterministic.done += 1;
+                }
+            }
+        });
+    }
+
+    /// Snapshot the deterministic progress (test/poll helper).
+    #[must_use]
+    pub fn det_progress(&self, id: &str) -> Option<DetProgress> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(id).map(|j| j.deterministic.clone()))
     }
 
     /// Record the Anthropic Message Batch id on the job. Called by the batch scan mode
@@ -193,6 +293,68 @@ mod tests {
         assert_eq!(store.get(&a).unwrap().status, "failed");
         assert_eq!(store.get(&a).unwrap().message.as_deref(), Some("no token"));
         assert!(store.get("job-nope").is_none());
+    }
+
+    /// The deterministic-progress model: registering tools grows `total`, a start→done
+    /// transition increments `done` exactly once, and findings counts are recorded per tool.
+    #[test]
+    fn deterministic_progress_lifecycle() {
+        let store = JobStore::new();
+        let id = store.create();
+
+        // Nothing yet.
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (0, 0));
+        assert!(p.tools.is_empty());
+
+        // The floor registers + runs + finishes.
+        store.det_tool_running(&id, "floor");
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (0, 1), "running grows total, not done");
+        assert_eq!(p.tools[0].tool, "floor");
+        assert_eq!(p.tools[0].status, det_status::RUNNING);
+
+        store.det_tool_done(&id, "floor", 3);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (1, 1), "done increments once");
+        assert_eq!(p.tools[0].status, det_status::DONE);
+        assert_eq!(p.tools[0].findings, 3);
+
+        // A second tool: register (starting) then done.
+        store.det_register_tool(&id, "clippy");
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (1, 2));
+        assert_eq!(p.tools[1].status, det_status::STARTING);
+
+        store.det_tool_done(&id, "clippy", 0);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (2, 2));
+
+        // Re-finishing an already-done tool must not double-count.
+        store.det_tool_done(&id, "clippy", 5);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (2, 2), "re-finish is idempotent on done");
+        assert_eq!(p.tools[1].findings, 5);
+    }
+
+    /// The deterministic progress serializes onto the job state with its `tools`/`done`/
+    /// `total` shape (the wire contract the UI's poll deserializes).
+    #[test]
+    fn deterministic_progress_serializes() {
+        let store = JobStore::new();
+        let id = store.create();
+        store.det_tool_done(&id, "floor", 2);
+        let js = store.get(&id).unwrap();
+        let json = serde_json::to_string(&js).unwrap();
+        assert!(json.contains("\"deterministic\""));
+        assert!(json.contains("\"floor\""));
+        assert!(json.contains("\"tools\""));
+        // A round-trip back into a Value confirms the nested shape.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["deterministic"]["done"].as_u64(), Some(1));
+        assert_eq!(v["deterministic"]["total"].as_u64(), Some(1));
+        assert_eq!(v["deterministic"]["tools"][0]["tool"].as_str(), Some("floor"));
+        assert_eq!(v["deterministic"]["tools"][0]["findings"].as_u64(), Some(2));
     }
 
     /// `set_batch_id` persists the batch id on the job, and `finish` clears it.

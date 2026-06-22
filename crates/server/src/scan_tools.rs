@@ -473,17 +473,39 @@ async fn run_capture_stdout(
 /// working tree. `selected` is the SELECTED set (the caller passes the mechanical
 /// scan-runnable subset — but this fn re-checks `is_ci_enforced` + `layer3_only`
 /// defensively via [`group_by_tool`]).
+///
+/// `progress` — when `Some`, the pass reports PER-TOOL progress into the job
+/// (`(store, job_id)`): each tool registers (`starting`), is marked `running` before
+/// it executes, and `done` with its findings count when it finishes — mirroring how the
+/// AI passes stream progress. `None` runs silently (the synchronous path that has no job).
 pub async fn run_scan_tools<'r>(
     repo: &str,
     dir: &Path,
     selected: &[SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+    progress: Option<(&crate::jobs::JobStore, &str)>,
 ) -> Vec<Finding> {
     let (by_tool, ungrouped) = group_by_tool(selected, lookup);
     let mut findings = Vec::new();
 
+    // Pre-register every tool we know we'll drive so the progress denominator is accurate
+    // from the start (the UI shows the full set of tools queued, not one-at-a-time growth).
+    if let Some((jstore, jid)) = progress {
+        for tool in by_tool.keys() {
+            jstore.det_register_tool(jid, tool.name());
+        }
+        if !ungrouped.is_empty() {
+            jstore.det_register_tool(jid, "unrouted");
+        }
+    }
+
     // Note any selected mechanical rule we couldn't route to a driven tool, so a
     // preview gap is visible rather than a silent clean.
+    if let Some((jstore, jid)) = progress {
+        if !ungrouped.is_empty() {
+            jstore.det_tool_running(jid, "unrouted");
+        }
+    }
     for sr in &ungrouped {
         findings.push(note_finding(
             repo,
@@ -495,19 +517,37 @@ pub async fn run_scan_tools<'r>(
             ),
         ));
     }
+    if let Some((jstore, jid)) = progress {
+        if !ungrouped.is_empty() {
+            jstore.det_tool_done(jid, "unrouted", ungrouped.len());
+        }
+    }
 
     for (tool, rules) in by_tool {
-        match run_one_tool(repo, dir, tool, &rules, lookup).await {
-            Ok(mut fs) => findings.append(&mut fs),
-            Err(e) => findings.push(note_finding(
-                repo,
-                tool.name(),
-                format!(
-                    "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
-                    rules.len(),
-                    tool.name()
-                ),
-            )),
+        if let Some((jstore, jid)) = progress {
+            jstore.det_tool_running(jid, tool.name());
+        }
+        let produced = match run_one_tool(repo, dir, tool, &rules, lookup).await {
+            Ok(mut fs) => {
+                let n = fs.len();
+                findings.append(&mut fs);
+                n
+            }
+            Err(e) => {
+                findings.push(note_finding(
+                    repo,
+                    tool.name(),
+                    format!(
+                        "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
+                        rules.len(),
+                        tool.name()
+                    ),
+                ));
+                1
+            }
+        };
+        if let Some((jstore, jid)) = progress {
+            jstore.det_tool_done(jid, tool.name(), produced);
         }
     }
 
@@ -848,7 +888,7 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a NOTE finding, NOT an empty (clean) result.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let out = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup).await;
+        let out = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
         assert!(!out.is_empty(), "missing tool must yield a note, not a clean");
         assert!(out.iter().all(|f| f.preview), "the note is a preview finding");
         assert!(out

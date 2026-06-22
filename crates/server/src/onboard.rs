@@ -1721,6 +1721,14 @@ pub async fn audit_repos(
     // false, ONLY the soc2 lens is skipped inside `run_deep_tier`; the other two lenses still
     // run. Pass `true` to restore full three-lens behaviour (the old default).
     soc2_enabled: bool,
+    // Scan-type selector (Part C). `run_ai_review` gates the LLM architectural passes (the
+    // semantic per-repo audit AND the deep tier) — false skips ALL model calls / tokens.
+    // `run_deterministic` gates the always-on security floor (`audit_files`). Both default
+    // true (today's behaviour) at the request layer; if BOTH arrive false the caller forces
+    // them back to true (never a no-op scan). The scan-preview pass is gated by the caller
+    // (`merge_scan_preview`) on the same `run_deterministic` flag.
+    run_ai_review: bool,
+    run_deterministic: bool,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
@@ -1797,7 +1805,7 @@ pub async fn audit_repos(
                 files_total += files.len();
                 // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
                 // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
-                if deep {
+                if deep && run_ai_review {
                     deep_inputs.push((spec.to_string(), files.clone()));
                 }
                 stacks.push(detect_stack(spec, &files));
@@ -1806,9 +1814,23 @@ pub async fn audit_repos(
                 // hardcoded secrets / raw-SQL concat are unsafe in any code repo. It is
                 // token-free, so it ALWAYS runs over the whole tree (never incremental) —
                 // the floor must never go stale.
-                let mut repo_findings = audit_files(spec, &files);
-                if let Some((jstore, jid)) = job {
-                    jstore.add_findings(jid, repo_findings.clone());
+                //
+                // Scan-type selector (Part C): the floor is the DETERMINISTIC pass. When the
+                // user deselects deterministic scans (`run_deterministic == false`) the floor
+                // is skipped. It also emits PER-TOOL progress into the job (tool name `floor`,
+                // running → done with its findings count) so the cockpit's deterministic
+                // progress view has live state even in deterministic-only mode.
+                let mut repo_findings = Vec::new();
+                if run_deterministic {
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_running(jid, "floor");
+                    }
+                    let floor = audit_files(spec, &files);
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_done(jid, "floor", floor.len());
+                        jstore.add_findings(jid, floor.clone());
+                    }
+                    repo_findings = floor;
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -1832,40 +1854,51 @@ pub async fn audit_repos(
                 }
                 // The AI findings that apply to this repo after the scan: carried-forward
                 // (unchanged files) ∪ freshly audited (changed files).
-                let mut ai_for_repo: Vec<Finding> = part.carried.clone();
-                if let Some((jstore, jid)) = job {
-                    // Carried findings are real results for this run — surface them in the
-                    // live preview alongside the floor.
-                    jstore.add_findings(jid, part.carried.clone());
-                }
-                // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY findings.
-                // Skipped entirely when nothing changed (a fully-cached repo costs zero tokens).
-                if part.changed.is_empty() {
-                    if effective_prior.is_some() && !files.is_empty() {
-                        notes.push(format!(
-                            "{spec}: no changes — AI audit skipped (fully cached)"
-                        ));
+                //
+                // Scan-type selector (Part C): the ENTIRE AI review is gated on
+                // `run_ai_review`. When it's false we make NO model calls — no carried
+                // findings (those are AI results from a prior run), no per-repo audit, no
+                // tokens. A deterministic-only scan therefore never touches the LLM.
+                let mut ai_for_repo: Vec<Finding> = Vec::new();
+                if run_ai_review {
+                    ai_for_repo = part.carried.clone();
+                    if let Some((jstore, jid)) = job {
+                        // Carried findings are real results for this run — surface them in the
+                        // live preview alongside the floor.
+                        jstore.add_findings(jid, part.carried.clone());
                     }
-                } else {
-                    match crate::ai_audit::audit_repo(
-                        &llm,
-                        spec,
-                        &part.changed,
-                        &semantic,
-                        model,
-                        calibration_model,
-                        mode,
-                        thorough,
-                        feedback,
-                        job,
-                        Some(&meter),
-                        Some(&files),
-                    )
-                    .await
-                    {
-                        Ok((ai_findings, _ai_rules)) => ai_for_repo.extend(ai_findings),
-                        Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                    // AI audit parameterized by THIS repo's SEMANTIC rules only: ADVISORY
+                    // findings. Skipped when nothing changed (a fully-cached repo costs zero
+                    // tokens).
+                    if part.changed.is_empty() {
+                        if effective_prior.is_some() && !files.is_empty() {
+                            notes.push(format!(
+                                "{spec}: no changes — AI audit skipped (fully cached)"
+                            ));
+                        }
+                    } else {
+                        match crate::ai_audit::audit_repo(
+                            &llm,
+                            spec,
+                            &part.changed,
+                            &semantic,
+                            model,
+                            calibration_model,
+                            mode,
+                            thorough,
+                            feedback,
+                            job,
+                            Some(&meter),
+                            Some(&files),
+                        )
+                        .await
+                        {
+                            Ok((ai_findings, _ai_rules)) => ai_for_repo.extend(ai_findings),
+                            Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                        }
                     }
+                } else if !files.is_empty() {
+                    notes.push(format!("{spec}: AI review deselected — deterministic only"));
                 }
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
@@ -1891,7 +1924,9 @@ pub async fn audit_repos(
     // results are merged into one tier-level report and attached. Spend folds into the same
     // meter (so the actual-vs-estimated readout includes the deep tier). It is the most
     // expensive tier — that is why it is opt-in and never default (#62).
-    let deep_report = if deep && !deep_inputs.is_empty() {
+    // Deep tier is three LLM lenses — part of the AI review. When AI review is deselected it
+    // never runs, even if `deep` was somehow set (the UI hides the deep toggle in that mode).
+    let deep_report = if run_ai_review && deep && !deep_inputs.is_empty() {
         let mut per_repo = Vec::new();
         for (spec, files) in &deep_inputs {
             let dr = crate::ai_audit::run_deep_tier(
@@ -2909,5 +2944,94 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// Build a throwaway local "repo" (a dir with a `.git` marker + one source file carrying
+    /// a hardcoded secret the deterministic floor flags). Returned as the `sources` shape
+    /// `audit_repos` consumes. The secret guarantees the floor produces ≥1 finding so the
+    /// gating assertions have a concrete signal to check.
+    fn scratch_repo_with_secret() -> (tempfile::TempDir, Vec<(String, std::path::PathBuf)>) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(
+            dir.path().join("config.rs"),
+            "let cfg = load();\nconst TOKEN = \"ghp_0123456789012345678901234567890123456\";\nok();\n",
+        )
+        .unwrap();
+        let sources = vec![("me/api".to_string(), dir.path().to_path_buf())];
+        (dir, sources)
+    }
+
+    /// Scan-type selector: with deterministic ON and AI review OFF, the audit runs the
+    /// always-on floor (catching the secret) and makes NO model call — a token-free assertion
+    /// that the AI passes are bypassed. (`run_ai_review = false` is exactly the path that skips
+    /// every `audit_repo` / deep-tier LLM call, so this test never touches a model.)
+    #[tokio::test]
+    async fn deterministic_only_runs_floor_and_skips_ai() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, _manifest) = audit_repos(
+            &sources,
+            &[],            // no semantic rules
+            Vec::new(),     // no extra notes
+            None,           // model
+            None,           // calibration model
+            crate::ai_audit::ScanMode::Parallel,
+            false,          // thorough
+            None,           // feedback
+            None,           // job
+            None,           // incremental_prior
+            false,          // deep
+            true,           // soc2_enabled
+            false,          // run_ai_review  -> AI path fully skipped (no model call)
+            true,           // run_deterministic -> floor runs
+        )
+        .await;
+        // The floor caught the secret.
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "deterministic floor must flag the secret: {:?}",
+            report.findings
+        );
+        // No AI usage was recorded — the AI review was skipped end-to-end.
+        let calls = report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0);
+        assert_eq!(calls, 0, "AI review skipped -> zero model calls");
+    }
+
+    /// Scan-type selector: with deterministic OFF (and AI review OFF too, to stay token-free),
+    /// the floor is skipped — the secret is NOT flagged. Pairing AI-off keeps the test from
+    /// invoking a model; the assertion isolates the deterministic-floor gate.
+    #[tokio::test]
+    async fn deterministic_off_skips_floor() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, _manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off (token-free)
+            false, // run_deterministic off -> floor skipped
+        )
+        .await;
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "deterministic OFF must skip the floor: {:?}",
+            report.findings
+        );
+        let calls = report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0);
+        assert_eq!(calls, 0, "AI also off -> zero model calls");
     }
 }
