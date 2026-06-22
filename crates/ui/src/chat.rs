@@ -415,11 +415,39 @@ async fn fetch_models() -> Option<ModelsResp> {
         .ok()
 }
 
-async fn send_chat(prompt: &str, model: &str, system: &str) -> Option<ChatResp> {
+/// A prior chat turn sent to the server so the model has conversation context.
+/// Mirrors `ChatTurn` in `crates/server/src/lib.rs`; role is "user" or "assistant".
+#[derive(Clone, serde::Serialize)]
+struct ChatHistoryTurn {
+    role: &'static str,
+    content: String,
+}
+
+/// Build the history payload from the current turns signal.
+/// Converts the local `Turn` (role = "you" | "ai") into the server-facing
+/// `ChatHistoryTurn` (role = "user" | "assistant"). The new message being sent
+/// is NOT included — that is `prompt` on the request.
+fn turns_to_history(turns: &[Turn]) -> Vec<ChatHistoryTurn> {
+    turns
+        .iter()
+        .map(|t| ChatHistoryTurn {
+            role: if t.role == "you" { "user" } else { "assistant" },
+            content: t.text.clone(),
+        })
+        .collect()
+}
+
+async fn send_chat(
+    prompt: &str,
+    model: &str,
+    system: &str,
+    history: Vec<ChatHistoryTurn>,
+) -> Option<ChatResp> {
     let body = serde_json::json!({
         "prompt": prompt,
         "model": model,
         "system": system,
+        "history": history,
     });
     reqwest::Client::new()
         .post(format!("{}/api/chat", crate::BFF_URL))
@@ -714,11 +742,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         &uow_sec,
                                         finding_kd.as_ref(),
                                     );
+                                    // Snapshot prior turns BEFORE appending the new user message —
+                                    // the server renders history + the new prompt separately.
+                                    let history = turns_to_history(&turns.read());
                                     turns.write().push(Turn { role: "you", text: prompt.clone() });
                                     draft.set(String::new());
                                     sending.set(true);
                                     spawn(async move {
-                                        let reply = send_chat(&prompt, &mdl, &sys).await;
+                                        let reply = send_chat(&prompt, &mdl, &sys, history).await;
                                         sending.set(false);
                                         match reply {
                                             Some(r) if !r.text.trim().is_empty() => {
@@ -762,11 +793,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         &uow_sec,
                                         finding_btn.as_ref(),
                                     );
+                                    // Snapshot prior turns BEFORE appending the new user message —
+                                    // the server renders history + the new prompt separately.
+                                    let history = turns_to_history(&turns.read());
                                     turns.write().push(Turn { role: "you", text: prompt.clone() });
                                     draft.set(String::new());
                                     sending.set(true);
                                     spawn(async move {
-                                        let reply = send_chat(&prompt, &mdl, &sys).await;
+                                        let reply = send_chat(&prompt, &mdl, &sys, history).await;
                                         sending.set(false);
                                         match reply {
                                             Some(r) if !r.text.trim().is_empty() => {

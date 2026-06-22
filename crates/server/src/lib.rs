@@ -4183,6 +4183,14 @@ async fn list_models() -> Json<serde_json::Value> {
     }))
 }
 
+/// One prior turn in a research-chat conversation, sent by the UI with each POST so the
+/// model has memory of the thread. role must be "user" or "assistant".
+#[derive(serde::Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct ChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(serde::Deserialize)]
 struct ChatReq {
     prompt: String,
@@ -4190,10 +4198,76 @@ struct ChatReq {
     model: String,
     #[serde(default)]
     system: Option<String>,
+    /// Prior turns in chronological order (oldest first). Empty on the first message.
+    /// The UI accumulates turns client-side and sends them with every POST.
+    /// Back-compat: omitted or null → treated as empty (same as before this fix).
+    #[serde(default)]
+    history: Vec<ChatTurn>,
+}
+
+/// Maximum number of prior turns to embed in the prompt. Oldest turns beyond this limit
+/// are dropped (FIFO) to keep token usage bounded. A "turn" is one user + one assistant
+/// exchange, so 20 turns ≈ 40 messages ≈ several thousand tokens of context at most.
+const CHAT_HISTORY_TURN_CAP: usize = 20;
+
+/// Render prior conversation turns into a transcript block that is prepended to the
+/// user's new message. When history is empty (first message or back-compat), returns
+/// `None` so the caller can fall back to the bare single-prompt path.
+///
+/// Format:
+/// ```text
+/// Conversation so far:
+/// User: <content>
+/// Assistant: <content>
+/// ...
+///
+/// User's new message:
+/// <prompt>
+/// ```
+///
+/// Roles are normalized: "user" maps to "User", anything else (including "assistant")
+/// maps to "Assistant". The recent-window cap (`CHAT_HISTORY_TURN_CAP`) is applied
+/// before rendering — oldest turns are dropped first.
+pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
+    if history.is_empty() {
+        return prompt.to_string();
+    }
+
+    // Apply cap: keep only the most-recent CHAT_HISTORY_TURN_CAP turns.
+    // (Each element of `history` is a single message; cap on messages, not pairs.)
+    let cap = CHAT_HISTORY_TURN_CAP;
+    let capped: &[ChatTurn] = if history.len() > cap {
+        // Drop the oldest turns — always drop from the front (FIFO eviction).
+        &history[history.len() - cap..]
+    } else {
+        history
+    };
+
+    let mut out = String::from("Conversation so far:\n");
+    for turn in capped {
+        let label = if turn.role == "user" {
+            "User"
+        } else {
+            "Assistant"
+        };
+        out.push_str(label);
+        out.push_str(": ");
+        out.push_str(&turn.content);
+        out.push('\n');
+    }
+    out.push_str("\nUser's new message:\n");
+    out.push_str(prompt);
+    out
 }
 
 /// The research chat: one completion through the configured backend. The side-by-side
 /// chatbot uses this; it's also the smoke test that the model wiring works.
+///
+/// When `history` is present in the request body, prior turns are embedded into the
+/// prompt text as a transcript block before the new message (see `render_chat_prompt`).
+/// The grounding system prompt (`system`) is passed through unchanged so all four
+/// context layers remain intact. An empty or absent `history` behaves exactly as before
+/// this fix (back-compat: the single-prompt path is unaffected).
 async fn chat(
     State(state): State<AppState>,
     Json(req): Json<ChatReq>,
@@ -4202,7 +4276,9 @@ async fn chat(
     // Research chat is a UI-PICKED non-fleet step: an explicit request model wins; otherwise
     // the active project's per-step default applies (DEFAULT_MODEL floor only with no project).
     let model = step_model_or(&state, crate::project::StepKind::ResearchChat, Some(&req.model));
-    let mut r = crate::llm::LlmRequest::new(req.prompt).with_model(model);
+    // Embed history into the prompt when prior turns exist; otherwise use the bare prompt.
+    let full_prompt = render_chat_prompt(&req.history, &req.prompt);
+    let mut r = crate::llm::LlmRequest::new(full_prompt).with_model(model);
     if let Some(system) = req.system {
         r = r.with_system(system);
     }
@@ -7975,5 +8051,175 @@ mod tests {
         assert_eq!(entry["authoring"], false, "linked draft is no longer authoring");
         assert_eq!(entry["work_item"]["number"], 7);
         assert_eq!(entry["work_item"]["repo"], "me/api");
+    }
+
+    // ── render_chat_prompt — conversation-context embedding ───────────────────
+    //
+    // These tests cover the prompt-rendering helper directly (no model calls).
+    // They guard: (a) history-present path embeds prior turns and the new message,
+    // (b) empty-history path reproduces the bare single-prompt (back-compat),
+    // (c) the cap drops the oldest turns when history exceeds CHAT_HISTORY_TURN_CAP,
+    // (d) role labels render correctly ("user" → "User", "assistant" → "Assistant").
+
+    fn make_turn(role: &str, content: &str) -> ChatTurn {
+        ChatTurn {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    /// (b) Back-compat: empty history must produce exactly the bare prompt, unchanged.
+    #[test]
+    fn render_chat_prompt_empty_history_returns_bare_prompt() {
+        let result = render_chat_prompt(&[], "Hello, world!");
+        assert_eq!(
+            result, "Hello, world!",
+            "empty history must return the bare prompt unchanged (back-compat)"
+        );
+    }
+
+    /// (b) Back-compat: also verify with an empty string prompt.
+    #[test]
+    fn render_chat_prompt_empty_history_empty_prompt_returns_empty() {
+        let result = render_chat_prompt(&[], "");
+        assert_eq!(result, "", "empty history + empty prompt returns empty string");
+    }
+
+    /// (a) History present: rendered prompt contains the prior user turn.
+    #[test]
+    fn render_chat_prompt_includes_prior_user_turn() {
+        let history = vec![make_turn("user", "What is SEC-1?")];
+        let result = render_chat_prompt(&history, "Can you elaborate?");
+        assert!(
+            result.contains("User: What is SEC-1?"),
+            "rendered prompt must include prior user turn; got: {result:?}"
+        );
+    }
+
+    /// (a) History present: rendered prompt contains the prior assistant turn.
+    #[test]
+    fn render_chat_prompt_includes_prior_assistant_turn() {
+        let history = vec![
+            make_turn("user", "What is SEC-1?"),
+            make_turn("assistant", "SEC-1 bans hardcoded secrets."),
+        ];
+        let result = render_chat_prompt(&history, "Can you elaborate?");
+        assert!(
+            result.contains("Assistant: SEC-1 bans hardcoded secrets."),
+            "rendered prompt must include prior assistant turn; got: {result:?}"
+        );
+    }
+
+    /// (a) History present: the new message appears after the transcript block.
+    #[test]
+    fn render_chat_prompt_new_message_appears_after_history() {
+        let history = vec![
+            make_turn("user", "First question"),
+            make_turn("assistant", "First answer"),
+        ];
+        let new_msg = "Second question";
+        let result = render_chat_prompt(&history, new_msg);
+        // The transcript block must come before the new message.
+        let history_pos = result.find("Conversation so far:").expect("missing header");
+        let new_msg_pos = result.find(new_msg).expect("missing new message");
+        assert!(
+            history_pos < new_msg_pos,
+            "history transcript must precede new message (history at {history_pos}, new at {new_msg_pos})"
+        );
+        // The section header "User's new message:" must also be present.
+        assert!(
+            result.contains("User's new message:"),
+            "missing 'User's new message:' label"
+        );
+        assert!(
+            result.contains(new_msg),
+            "new message must appear in the rendered prompt"
+        );
+    }
+
+    /// (a) History with a full user+assistant exchange: both turns and the new message present.
+    #[test]
+    fn render_chat_prompt_full_exchange_then_new_message() {
+        let history = vec![
+            make_turn("user", "Tell me about ARCH-1"),
+            make_turn("assistant", "ARCH-1 enforces layered boundaries."),
+        ];
+        let result = render_chat_prompt(&history, "How does it differ from ARCH-2?");
+        assert!(result.contains("User: Tell me about ARCH-1"));
+        assert!(result.contains("Assistant: ARCH-1 enforces layered boundaries."));
+        assert!(result.contains("How does it differ from ARCH-2?"));
+    }
+
+    /// (d) Role labels: "user" maps to "User", "assistant" maps to "Assistant".
+    #[test]
+    fn render_chat_prompt_role_labels_are_correct() {
+        let history = vec![
+            make_turn("user", "u-content"),
+            make_turn("assistant", "a-content"),
+        ];
+        let result = render_chat_prompt(&history, "new");
+        assert!(result.contains("User: u-content"), "user role must render as 'User'");
+        assert!(result.contains("Assistant: a-content"), "assistant role must render as 'Assistant'");
+    }
+
+    /// (d) Any non-"user" role (including "assistant") maps to "Assistant".
+    #[test]
+    fn render_chat_prompt_unknown_role_renders_as_assistant() {
+        let history = vec![make_turn("ai", "reply")];
+        let result = render_chat_prompt(&history, "next");
+        assert!(
+            result.contains("Assistant: reply"),
+            "non-user role must render as 'Assistant'; got: {result:?}"
+        );
+    }
+
+    /// (c) Cap: when history exceeds CHAT_HISTORY_TURN_CAP, oldest turns are dropped.
+    #[test]
+    fn render_chat_prompt_cap_drops_oldest_turns() {
+        // Build CHAT_HISTORY_TURN_CAP + 2 turns so the first two are dropped.
+        // Use a format like "unique-msg-NNNN-end" to avoid substring false-positives
+        // (e.g. "msg-1" would match inside "msg-10", "msg-11", etc.).
+        let cap = CHAT_HISTORY_TURN_CAP;
+        let mut history: Vec<ChatTurn> = (0..cap + 2)
+            .map(|i| make_turn("user", &format!("unique-msg-{:04}-end", i)))
+            .collect();
+        // Give the last turn a distinct marker.
+        history.push(make_turn("assistant", "final-assistant-reply"));
+        let total = history.len(); // cap + 3
+        let result = render_chat_prompt(&history, "new-prompt");
+
+        // The first `total - cap` turns must be absent.
+        let dropped_count = total - cap;
+        for i in 0..dropped_count {
+            assert!(
+                !result.contains(&format!("unique-msg-{:04}-end", i)),
+                "turn {i} (oldest) should have been dropped by the cap"
+            );
+        }
+        // The most-recent turn that survived the cap must be present.
+        let first_kept = dropped_count;
+        assert!(
+            result.contains(&format!("unique-msg-{:04}-end", first_kept)),
+            "turn {first_kept} should survive the cap"
+        );
+        // The new prompt is still present.
+        assert!(result.contains("new-prompt"), "new prompt must appear after capped history");
+    }
+
+    /// (c) Cap: when history is exactly at the cap limit, no turns are dropped.
+    #[test]
+    fn render_chat_prompt_at_cap_limit_nothing_dropped() {
+        let cap = CHAT_HISTORY_TURN_CAP;
+        let history: Vec<ChatTurn> = (0..cap)
+            .map(|i| make_turn("user", &format!("msg-{i}")))
+            .collect();
+        let result = render_chat_prompt(&history, "new");
+        // All turns must appear.
+        for i in 0..cap {
+            assert!(
+                result.contains(&format!("msg-{i}")),
+                "turn {i} must not be dropped when at the cap limit"
+            );
+        }
     }
 }
