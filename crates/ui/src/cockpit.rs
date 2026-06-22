@@ -2156,23 +2156,39 @@ enum StartRunOutcome {
     Failed,
 }
 
-/// Start a governed run for a story.
+/// Start a governed DEVELOPMENT run for a story (the build phase, run from the
+/// `DecisionsApproved` step).
+///
+/// Sends the per-UoW tier map so the fleet's orchestrator (the strongest tier)
+/// leads and delegates simpler work to the balanced / fast tiers:
+/// `POST /api/stories/:id/run` with body
+/// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`.
 ///
 /// Returns [`StartRunOutcome::Started`] with the run id on success, or
 /// [`StartRunOutcome::Blocked`] (with the gate's reason) when the no-code-first gate
-/// refuses the start because the story's decisions are not all approved.
-///
-/// `model` is forwarded to every `claude -p` agent in the live-fleet path
-/// (`CAMERATA_LIVE_BUILD=1`). For the token-free scripted path the model is
-/// accepted but ignored server-side. Passing an empty string is equivalent to
-/// passing `None` (server falls back to CLI default).
-async fn start_run(story_id: &str, model: &str) -> StartRunOutcome {
-    let mut req =
-        reqwest::Client::new().post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id));
-    if !model.trim().is_empty() {
-        req = req.json(&serde_json::json!({ "model": model }));
-    }
-    let resp = match req.send().await {
+/// refuses the start because the story's decisions are not all approved. A transport
+/// or decode failure maps to [`StartRunOutcome::Failed`].
+/// Build the request body for a development run (frozen contract):
+/// `{ "tier_map": { "strongest": "<id>", "balanced": "<id>", "fast": "<id>" } }`.
+/// Extracted as a pure fn so the wire shape is unit-testable.
+fn dev_run_body(tier_map: &TierMapView) -> serde_json::Value {
+    serde_json::json!({
+        "tier_map": {
+            "strongest": tier_map.strongest,
+            "balanced": tier_map.balanced,
+            "fast": tier_map.fast,
+        }
+    })
+}
+
+async fn start_dev_run(story_id: &str, tier_map: &TierMapView) -> StartRunOutcome {
+    let body = dev_run_body(tier_map);
+    let resp = match reqwest::Client::new()
+        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id))
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(_) => return StartRunOutcome::Failed,
     };
@@ -2192,6 +2208,32 @@ async fn start_run(story_id: &str, model: &str) -> StartRunOutcome {
         Some(id) => StartRunOutcome::Started(id.to_string()),
         None => StartRunOutcome::Failed,
     }
+}
+
+/// Start an INVESTIGATION run for a story (the intake → investigating transition,
+/// run from the `Intake` step).
+///
+/// `POST /api/uow/:story_id/begin-investigation` with body `{ "model": "<id>" }`;
+/// the server transitions the stage and returns `{ "run_id", "story_id" }`. Returns
+/// the run id on success (to drive the live agent activity) or `None` on any
+/// transport / decode failure or a missing `run_id`.
+async fn begin_investigation_run(story_id: &str, model: &str) -> Option<String> {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/begin-investigation",
+            crate::BFF_URL,
+            story_id
+        ))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .get("run_id")
+        .and_then(|r| r.as_str())
+        .map(String::from)
 }
 
 /// Fetch the current state of a run.
@@ -2259,96 +2301,6 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
         "awaiting_qa" => ("AWAITING QA", "warn"),
         _ => ("RUNNING", "active"),
     }
-}
-
-/// A clarification as the BFF reports it (`/api/stories/:id/clarifications`).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct ClarificationView {
-    id: String,
-    story_id: String,
-    question: String,
-    addressee: String,
-    answer: Option<String>,
-    answered_by: Option<String>,
-    /// The persisted lifecycle state from the BFF (`"asked"` | `"answered"`).
-    /// Optional + defaulted so the view stays robust to any older payload that
-    /// predates the explicit field; rendering still derives open/answered from
-    /// `answer`, and this mirrors it for clients that prefer the explicit state.
-    #[serde(default)]
-    state: Option<String>,
-}
-
-/// Fetch the clarifications on a story.
-async fn fetch_clarifications(story_id: &str) -> Option<Vec<ClarificationView>> {
-    reqwest::get(format!(
-        "{}/api/stories/{}/clarifications",
-        crate::BFF_URL,
-        story_id
-    ))
-    .await
-    .ok()?
-    .json::<Vec<ClarificationView>>()
-    .await
-    .ok()
-}
-
-/// Post a clarifying question on a story, addressed to `addressee`.
-async fn post_clarification(
-    story_id: &str,
-    question: &str,
-    addressee: &str,
-) -> Option<ClarificationView> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/api/stories/{}/clarifications",
-            crate::BFF_URL,
-            story_id
-        ))
-        .json(&serde_json::json!({ "question": question, "addressee": addressee }))
-        .send()
-        .await
-        .ok()?
-        .json::<ClarificationView>()
-        .await
-        .ok()
-}
-
-/// AI-suggested clarifying questions for a story (the engineer's genuine unknowns),
-/// for review-then-post.
-async fn suggest_clarifications(story_id: &str) -> Vec<String> {
-    let Ok(resp) = reqwest::Client::new()
-        .post(format!(
-            "{}/api/stories/{}/clarify/suggest",
-            crate::BFF_URL,
-            story_id
-        ))
-        .send()
-        .await
-    else {
-        return Vec::new();
-    };
-    resp.json::<Vec<String>>().await.unwrap_or_default()
-}
-
-/// Record the answer to a clarification.
-async fn answer_clarification(
-    cid: &str,
-    answer: &str,
-    answered_by: &str,
-) -> Option<ClarificationView> {
-    reqwest::Client::new()
-        .post(format!(
-            "{}/api/clarifications/{}/answer",
-            crate::BFF_URL,
-            cid
-        ))
-        .json(&serde_json::json!({ "answer": answer, "answered_by": answered_by }))
-        .send()
-        .await
-        .ok()?
-        .json::<ClarificationView>()
-        .await
-        .ok()
 }
 
 // ── Unit of Work (issue #39) ──────────────────────────────────────────────────
@@ -3451,11 +3403,6 @@ pub fn CockpitApp() -> Element {
     // (App guarantees it's provided before CockpitApp mounts.)
     let _ask_finding_present = use_context::<Signal<Option<crate::chat::FindingContext>>>();
 
-    // A shared refresh tick: bumped whenever a clarification is posted or answered,
-    // so the per-UoW clarify thread refetches. Shared via context with ClarifySection.
-    let clarify_refresh = use_signal(|| 0u32);
-    use_context_provider(|| clarify_refresh);
-
     // Onboard state lifted to app scope so it SURVIVES navigating between cockpit views:
     // the Phase-1 scan result, and the id of an in-flight async audit job. A background
     // job keeps running server-side regardless; these let the UI re-attach (resume the
@@ -3934,7 +3881,7 @@ fn CreateOrOpenUow(
 #[component]
 fn UowDevControls(uow: UowListEntry) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    // The UoW id keys every reused governed-dev endpoint (run, clarify, sign-off, UoW panel).
+    // The UoW id keys every reused governed-dev endpoint (run, sign-off, UoW panel).
     let uow_key = uow.id.clone();
 
     // A local copy of the work item so "Pull latest" can refresh the displayed metadata
@@ -3946,17 +3893,68 @@ fn UowDevControls(uow: UowListEntry) -> Element {
     // The reused per-UoW UoW panel / run live behind a refresh tick, same as the old page.
     let uow_refresh = use_signal(|| 0u32);
 
+    // Increment 1: runs live ON THE STEPS, not a standalone button. We fetch the UoW
+    // here (keyed on the same refresh tick the panel uses) so we know the current
+    // lifecycle `stage` and can render the run control for the ACTIVE phase inline with
+    // the lifecycle strip. The downstream `UowPanel` re-fetches the same UoW for its own
+    // read-out, so the two stay in sync without sharing a fetch.
+    let uow_for_stage = {
+        let sid = uow.id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow(&sid).await }
+        })
+    };
+    let stage = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| u.stage)
+        .unwrap_or_default();
+
     // Live run state for THIS UoW (governed fleet through the gate).
-    let mut active_run = use_signal(|| Option::<RunView>::None);
+    let active_run = use_signal(|| Option::<RunView>::None);
+
+    // Model option list for every per-step selector.
     let run_models_res = use_resource(fetch_audit_models);
-    let mut run_model = use_signal(String::new);
+    let run_models_snap = run_models_res.read().clone().flatten();
+
+    // The active project's tier map seeds the per-phase model defaults: investigation
+    // defaults to the strongest tier; development pre-fills all three tiers. Each is
+    // editable per-UoW for the run, without mutating the saved project tier map.
+    let project_res = use_resource(fetch_active_project);
+    let project_tier_map = project_res
+        .read()
+        .clone()
+        .flatten()
+        .map(|p| p.tier_map)
+        .unwrap_or_default();
+
+    // INVESTIGATION model (single select; default = project strongest).
+    let mut invest_model = use_signal(String::new);
+    // DEVELOPMENT tier models (three selects; defaults from the project tier map).
+    let mut dev_strongest = use_signal(String::new);
+    let mut dev_balanced = use_signal(String::new);
+    let mut dev_fast = use_signal(String::new);
+    // Seed the per-phase selectors from the project tier map once it loads, before the
+    // user has touched them. Re-seeds if the active project changes.
     {
-        let resp = run_models_res.read().clone().flatten();
-        if run_model().is_empty() {
-            if let Some(m) = resp {
-                run_model.set(m.default.clone());
+        let tm = project_tier_map.clone();
+        use_effect(use_reactive(&tm, move |tm| {
+            if invest_model.peek().is_empty() {
+                invest_model.set(tm.strongest.clone());
             }
-        }
+            if dev_strongest.peek().is_empty() {
+                dev_strongest.set(tm.strongest.clone());
+            }
+            if dev_balanced.peek().is_empty() {
+                dev_balanced.set(tm.balanced.clone());
+            }
+            if dev_fast.peek().is_empty() {
+                dev_fast.set(tm.fast.clone());
+            }
+        }));
     }
 
     // Comment-to-issue composer (+ a lightweight @-mention insert).
@@ -3968,7 +3966,6 @@ fn UowDevControls(uow: UowListEntry) -> Element {
 
     let it = item.read().clone();
     let (state_label, state_cls) = work_item_state_badge(&it.state);
-    let run_models_snap = run_models_res.read().clone().flatten();
 
     rsx! {
         div { class: "uow-dev",
@@ -4009,63 +4006,24 @@ fn UowDevControls(uow: UowListEntry) -> Element {
             // ── Loop-guard control (reused) ───────────────────────────────────
             LoopGuardControl {}
 
-            // ── Run the governed fleet THROUGH THE GATE (reused path) ─────────
-            div { class: "run-control-row",
-                button {
-                    class: "btn-run",
-                    onclick: move |_| {
-                        let sid = uow_key.clone();
-                        let md = run_model();
-                        let mut uow_refresh = uow_refresh;
-                        let toasts = toasts;
-                        spawn(async move {
-                            match start_run(&sid, &md).await {
-                                StartRunOutcome::Started(rid) => {
-                                    loop {
-                                        if let Some(rv) = fetch_run(&rid).await {
-                                            let done = rv.done;
-                                            active_run.set(Some(rv));
-                                            if done {
-                                                uow_refresh += 1;
-                                                break;
-                                            }
-                                        }
-                                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-                                    }
-                                }
-                                StartRunOutcome::Blocked(reason) => {
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Warning,
-                                        reason,
-                                    );
-                                }
-                                StartRunOutcome::Failed => {
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Warning,
-                                        "Could not start the governed run.".to_string(),
-                                    );
-                                }
-                            }
-                        });
-                    },
-                    "▶ Run this work (governed)"
-                }
-                if let Some(m) = run_models_snap {
-                    select {
-                        class: "run-model-select",
-                        value: "{run_model}",
-                        onchange: move |e| run_model.set(e.value()),
-                        for opt in m.models.iter() {
-                            option {
-                                value: "{opt.id}",
-                                selected: run_model() == opt.id,
-                                "{opt.label}"
-                            }
-                        }
-                    }
-                }
+            // ── Lifecycle steps with the ACTIVE phase's run control inline ────
+            // Increment 1: runs live ON THE STEPS. The lifecycle strip shows the
+            // ordered stages + the architect transitions ("Approve decisions"), and
+            // the run control for the current phase is rendered inline beneath it —
+            // it REPLACES the prior phase's control rather than stacking. The
+            // investigation control owns the Intake → Investigating transition (with
+            // its own model select); the development control runs the gated build with
+            // a per-tier model map. The strongest tier leads and delegates simpler work.
+            UowStepRunControls {
+                story_id: uow_key.clone(),
+                stage,
+                uow_refresh,
+                active_run,
+                models: run_models_snap.clone(),
+                invest_model,
+                dev_strongest,
+                dev_balanced,
+                dev_fast,
             }
 
             // ── Agent activity for the active run (reused) ────────────────────
@@ -8993,23 +8951,82 @@ fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> Element {
 ///
 /// NOTE: branch + history are designed to be auto-populated by the governed run
 /// (Pillar 2). They are settable via the API endpoints; the UI shows them here.
-/// The governed-development lifecycle strip + early-stage transition controls
-/// (Pillar 2). Renders the six-stage progression with the current stage highlighted,
-/// and exposes the two architect-driven forward transitions whose preconditions this
-/// UI can satisfy directly:
-///
-/// - **Begin investigation** (Intake → Investigating).
-/// - **Approve decisions** (Investigating → DecisionsApproved), which the server gates
-///   on the story's decision records and 409s (with a precise reason) if not all are
-///   approved.
-///
-/// The later stages are driven by the engine, not buttons here: `Development` and
-/// `Awaiting QA` are set by the gated run (and its provenance watcher), and
-/// `SignedOff` by the explicit sign-off action in [`RunProvenancePanel`]. A blocked
-/// transition raises a toast carrying the server's reason so the architect sees
-/// exactly what is missing.
+/// A `<select>` of model options, generic over the bound signal. Renders nothing
+/// until the model list has loaded. Used by every per-step run control.
 #[component]
-fn UowLifecycleStrip(story_id: String, stage: UowStage, uow_refresh: Signal<u32>) -> Element {
+fn ModelSelect(models: Option<AuditModelsResp>, selected: Signal<String>) -> Element {
+    let mut selected = selected;
+    rsx! {
+        if let Some(m) = models {
+            select {
+                class: "run-model-select",
+                value: "{selected}",
+                onchange: move |e| selected.set(e.value()),
+                for opt in m.models.iter() {
+                    option {
+                        value: "{opt.id}",
+                        selected: selected() == opt.id,
+                        "{opt.label}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Poll a started run to completion, pushing each snapshot to `active_run` and
+/// bumping `uow_refresh` once it finishes (so the panel / stage re-fetch). Shared by
+/// the investigation and development run controls.
+async fn poll_run_to_done(
+    run_id: String,
+    mut active_run: Signal<Option<RunView>>,
+    mut uow_refresh: Signal<u32>,
+) {
+    loop {
+        if let Some(rv) = fetch_run(&run_id).await {
+            let done = rv.done;
+            active_run.set(Some(rv));
+            if done {
+                uow_refresh += 1;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    }
+}
+
+/// The lifecycle strip + the run control for the CURRENT phase, rendered inline with
+/// the steps (Increment 1). Runs live ON THE STEPS: the control shown is the one for
+/// the active stage and it REPLACES the prior phase's control rather than stacking.
+///
+/// - **Intake** → a single model `<select>` (default = project strongest, editable)
+///   beside a **Begin investigation** button that calls `begin_investigation_run` and
+///   then drives the live agent activity on the returned run. The server transitions
+///   the stage Intake → Investigating.
+/// - **Investigating** → the architect's **Approve decisions** transition
+///   (Investigating → DecisionsApproved), which the server gates on the story's
+///   decision records and 409s (with a precise reason) if not all are approved.
+/// - **DecisionsApproved** → three per-tier model `<select>`s (Strongest / Balanced /
+///   Fast, defaulted from the project tier map, editable for this run) beside a
+///   **Run development (governed)** button that calls `start_dev_run` with the tier
+///   map. The strongest tier leads and delegates simpler work to the others.
+///
+/// Later stages (`Development`, `AwaitingQa`, `SignedOff`) are engine-driven — set by
+/// the gated run, its provenance watcher, and the explicit sign-off — so no run
+/// control is shown for them here. A blocked transition or run raises a toast carrying
+/// the server's reason.
+#[component]
+fn UowStepRunControls(
+    story_id: String,
+    stage: UowStage,
+    uow_refresh: Signal<u32>,
+    active_run: Signal<Option<RunView>>,
+    models: Option<AuditModelsResp>,
+    invest_model: Signal<String>,
+    dev_strongest: Signal<String>,
+    dev_balanced: Signal<String>,
+    dev_fast: Signal<String>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     // The full ordered progression, rendered as a strip with the reached stages lit.
@@ -9022,33 +9039,9 @@ fn UowLifecycleStrip(story_id: String, stage: UowStage, uow_refresh: Signal<u32>
         UowStage::SignedOff,
     ];
 
-    // Drive a forward transition: POST, then either bump the refresh tick (success) or
-    // toast the server's block/failure reason. Spawned from a button's onclick.
-    async fn drive(
-        story_id: String,
-        action: &'static str,
-        mut uow_refresh: Signal<u32>,
-        toasts: Signal<Vec<crate::toast::Toast>>,
-    ) {
-        match post_uow_transition(&story_id, action).await {
-            TransitionOutcome::Ok => {
-                uow_refresh += 1;
-            }
-            TransitionOutcome::Blocked(reason) => {
-                crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, reason);
-            }
-            TransitionOutcome::Failed => {
-                crate::toast::push_toast(
-                    toasts,
-                    crate::toast::ToastKind::Warning,
-                    "Could not advance the lifecycle stage.".to_string(),
-                );
-            }
-        }
-    }
-
     let sid_begin = story_id.clone();
     let sid_approve = story_id.clone();
+    let sid_dev = story_id.clone();
 
     rsx! {
         div { class: "uow-lifecycle",
@@ -9067,25 +9060,116 @@ fn UowLifecycleStrip(story_id: String, stage: UowStage, uow_refresh: Signal<u32>
                     }
                 }
             }
-            // The two architect-driven forward transitions, each enabled only at the
-            // stage it applies to (the server enforces this too; disabling here just
-            // avoids a guaranteed-409 click).
+
+            // The run control for the CURRENT phase, inline with the steps. Only one
+            // shows at a time — it replaces the prior phase's control.
+            match stage {
+                // INVESTIGATION: model select + Begin investigation (Intake → Investigating).
+                UowStage::Intake => rsx! {
+                    div { class: "uow-step-control",
+                        p { class: "uow-step-h", "Investigation" }
+                        div { class: "run-control-row",
+                            button {
+                                class: "btn-run",
+                                onclick: move |_| {
+                                    let sid = sid_begin.clone();
+                                    let md = invest_model();
+                                    spawn(async move {
+                                        match begin_investigation_run(&sid, &md).await {
+                                            Some(rid) => poll_run_to_done(rid, active_run, uow_refresh).await,
+                                            None => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not begin the investigation run.".to_string(),
+                                            ),
+                                        }
+                                    });
+                                },
+                                "▶ Begin investigation"
+                            }
+                            ModelSelect { models: models.clone(), selected: invest_model }
+                        }
+                        p { class: "section-hint", "Runs an investigation pass, then advances the stage to Investigating." }
+                    }
+                },
+                // DECISIONS APPROVED → ready to run development: 3 tier selects + run.
+                UowStage::DecisionsApproved => rsx! {
+                    div { class: "uow-step-control",
+                        p { class: "uow-step-h", "Development" }
+                        div { class: "uow-tier-grid",
+                            div { class: "uow-tier-field",
+                                span { class: "uow-field-label", "Strongest" }
+                                ModelSelect { models: models.clone(), selected: dev_strongest }
+                            }
+                            div { class: "uow-tier-field",
+                                span { class: "uow-field-label", "Balanced" }
+                                ModelSelect { models: models.clone(), selected: dev_balanced }
+                            }
+                            div { class: "uow-tier-field",
+                                span { class: "uow-field-label", "Fast" }
+                                ModelSelect { models: models.clone(), selected: dev_fast }
+                            }
+                        }
+                        p { class: "section-hint", "The strongest tier orchestrates and delegates simpler work to the balanced and fast tiers." }
+                        div { class: "run-control-row",
+                            button {
+                                class: "btn-run",
+                                onclick: move |_| {
+                                    let sid = sid_dev.clone();
+                                    let tm = TierMapView {
+                                        strongest: dev_strongest(),
+                                        balanced: dev_balanced(),
+                                        fast: dev_fast(),
+                                    };
+                                    spawn(async move {
+                                        match start_dev_run(&sid, &tm).await {
+                                            StartRunOutcome::Started(rid) => {
+                                                poll_run_to_done(rid, active_run, uow_refresh).await
+                                            }
+                                            StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                reason,
+                                            ),
+                                            StartRunOutcome::Failed => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not start the governed development run.".to_string(),
+                                            ),
+                                        }
+                                    });
+                                },
+                                "▶ Run development (governed)"
+                            }
+                        }
+                    }
+                },
+                _ => rsx! {},
+            }
+
+            // Architect transition: Approve decisions (Investigating → DecisionsApproved).
+            // Kept where it was — enabled only at the Investigating stage (the server
+            // enforces this too; disabling avoids a guaranteed-409 click).
             div { class: "uow-lifecycle-actions",
-                button {
-                    class: "uow-stage-btn",
-                    disabled: stage != UowStage::Intake,
-                    onclick: move |_| {
-                        let sid = sid_begin.clone();
-                        spawn(drive(sid, "begin-investigation", uow_refresh, toasts));
-                    },
-                    "Begin investigation"
-                }
                 button {
                     class: "uow-stage-btn",
                     disabled: stage != UowStage::Investigating,
                     onclick: move |_| {
                         let sid = sid_approve.clone();
-                        spawn(drive(sid, "approve-decisions", uow_refresh, toasts));
+                        let mut uow_refresh = uow_refresh;
+                        spawn(async move {
+                            match post_uow_transition(&sid, "approve-decisions").await {
+                                TransitionOutcome::Ok => { uow_refresh += 1; }
+                                TransitionOutcome::Blocked(reason) => crate::toast::push_toast(
+                                    toasts, crate::toast::ToastKind::Warning, reason,
+                                ),
+                                TransitionOutcome::Failed => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not advance the lifecycle stage.".to_string(),
+                                ),
+                            }
+                        });
                     },
                     "Approve decisions"
                 }
@@ -9108,7 +9192,6 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
 
     let uow = uow_data.read().clone().flatten();
     let dev_status = uow.as_ref().map(|u| u.dev_status).unwrap_or_default();
-    let stage = uow.as_ref().map(|u| u.stage).unwrap_or_default();
     let branch = uow.as_ref().and_then(|u| u.branch.clone());
     let history = uow.as_ref().map(|u| u.history.clone()).unwrap_or_default();
     let sign_off = uow.as_ref().and_then(|u| u.sign_off.clone());
@@ -9121,13 +9204,10 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
         div { class: "uow-panel",
             p { class: "uow-panel-h", "UNIT OF WORK" }
 
-            // ── Governed-development lifecycle (Pillar 2) ──────────────────────
-            // A read-out of the enforced stage progression plus the buttons that
-            // drive the early transitions (begin investigation, approve decisions).
-            // Later stages (Development, Awaiting QA, Signed off) are driven by the
-            // gated run and the sign-off action below, so they are shown but not
-            // clickable here — the engine drives them, not free navigation.
-            UowLifecycleStrip { story_id: story_id.clone(), stage, uow_refresh }
+            // The governed-development lifecycle strip + per-phase run controls now
+            // live with the steps in `UowStepRunControls` (rendered above this panel by
+            // `UowDevControls`), so runs sit ON the steps. This panel keeps the
+            // post-run read-out: dev status, branch, gate provenance, sign-off, history.
 
             // ── Dev status: 3-state segmented control ──────────────────────────
             div { class: "uow-status-row",
@@ -9225,185 +9305,6 @@ fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
     }
 }
 
-/// The clarify-bridge composer + thread: review a question, pick who to ask (the
-/// per-question addressee picker), post it, and record the reply. Wired to the BFF
-/// in-process; the live-tracker comment write-back is the provider phase.
-#[component]
-fn ClarifySection(story_id: String) -> Element {
-    // Shared with the NEEDS YOU queue so posting/answering refetches both.
-    let mut refresh = use_context::<Signal<u32>>();
-    let sid_res = story_id.clone();
-    let clars = use_resource(move || {
-        let sid = sid_res.clone();
-        let _dep = refresh();
-        async move { fetch_clarifications(&sid).await }
-    });
-
-    let mut question = use_signal(|| {
-        "Should the CSV export include archived members, or only currently active ones?".to_string()
-    });
-    let mut addressee = use_signal(|| "@maria-pm".to_string());
-
-    // Representative suggestions; on a live tracker these come from the ticket's
-    // participants (assignee, reporter), plus "you" and a free-typed handle.
-    let suggestions = ["@maria-pm", "@jdoe", "you"];
-
-    // AI-suggested clarifying questions (the engineer's genuine unknowns), reviewed
-    // before any is dropped into the composer and posted.
-    let mut ai_questions = use_signal(Vec::<String>::new);
-    let mut suggesting = use_signal(|| false);
-    let sid_suggest = story_id.clone();
-
-    let sid_post = story_id.clone();
-
-    rsx! {
-        div { class: "clarify",
-            p { class: "clarify-h", "Ask the team" }
-            p { class: "section-hint", "Review the question, pick who to ask, and post it. In-process now; this posts to the real tracker comment (with an @-mention) in the provider phase." }
-            div { class: "clarify-suggest-row",
-                button {
-                    class: "btn-edit-sm",
-                    disabled: suggesting(),
-                    onclick: move |_| {
-                        let sid = sid_suggest.clone();
-                        suggesting.set(true);
-                        spawn(async move {
-                            ai_questions.set(suggest_clarifications(&sid).await);
-                            suggesting.set(false);
-                        });
-                    },
-                    if suggesting() { "Thinking…" } else { "Suggest questions (AI)" }
-                }
-                span { class: "section-hint", "The lead engineer lists what it genuinely needs answered — click one to load it." }
-            }
-            if !ai_questions().is_empty() {
-                div { class: "clarify-suggestions",
-                    for (i , q) in ai_questions().iter().enumerate() {
-                        {
-                            let qq = q.clone();
-                            rsx! {
-                                button {
-                                    key: "{i}",
-                                    class: "clarify-suggestion",
-                                    onclick: move |_| question.set(qq.clone()),
-                                    "{q}"
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            textarea {
-                class: "clarify-q",
-                value: "{question}",
-                rows: "2",
-                oninput: move |e| question.set(e.value()),
-            }
-            p { class: "clarify-label", "Ask:" }
-            div { class: "clarify-addressees",
-                for s in suggestions {
-                    {
-                        let sel = addressee() == s;
-                        let cls = if sel { "addressee-chip sel" } else { "addressee-chip" };
-                        rsx! {
-                            button {
-                                class: "{cls}",
-                                onclick: move |_| addressee.set(s.to_string()),
-                                "{s}"
-                            }
-                        }
-                    }
-                }
-                input {
-                    class: "addressee-input",
-                    placeholder: "or type a handle…",
-                    oninput: move |e| addressee.set(e.value()),
-                }
-            }
-            button {
-                class: "btn-run",
-                onclick: move |_| {
-                    let sid = sid_post.clone();
-                    let q = question();
-                    let a = addressee();
-                    spawn(async move {
-                        if post_clarification(&sid, &q, &a).await.is_some() {
-                            refresh += 1;
-                        }
-                    });
-                },
-                "Post the question"
-            }
-
-            div { class: "clarify-thread",
-                {
-                    match clars() {
-                        Some(Some(list)) if !list.is_empty() => rsx! {
-                            for c in list {
-                                ClarificationCard { clar: c, refresh }
-                            }
-                        },
-                        Some(Some(_)) => rsx! { p { class: "section-hint", "No questions posted yet." } },
-                        Some(None) => rsx! { p { class: "section-hint", "(Couldn't load the thread.)" } },
-                        None => rsx! { p { class: "section-hint", "Loading…" } },
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// One clarification in the thread: shows the question + addressee, an answer input
-/// while open, or the recorded reply once answered.
-#[component]
-fn ClarificationCard(clar: ClarificationView, refresh: Signal<u32>) -> Element {
-    let mut refresh = refresh;
-    let mut answer_text = use_signal(String::new);
-    let open = clar.answer.is_none();
-    let cid = clar.id.clone();
-    let cls = if open {
-        "clar-card open"
-    } else {
-        "clar-card answered"
-    };
-
-    rsx! {
-        div { class: "{cls}",
-            p { class: "clar-card-q", "{clar.question}" }
-            p { class: "clar-card-meta", "to {clar.addressee}" }
-            if open {
-                div { class: "clar-answer-row",
-                    input {
-                        class: "addressee-input",
-                        placeholder: "record the reply…",
-                        value: "{answer_text}",
-                        oninput: move |e| answer_text.set(e.value()),
-                    }
-                    button {
-                        class: "btn-restart",
-                        onclick: move |_| {
-                            let cid = cid.clone();
-                            let ans = answer_text();
-                            spawn(async move {
-                                if !ans.is_empty()
-                                    && answer_clarification(&cid, &ans, "you").await.is_some()
-                                {
-                                    refresh += 1;
-                                }
-                            });
-                        },
-                        "Record answer"
-                    }
-                }
-            } else {
-                div { class: "clar-answered",
-                    span { class: "clar-answer-by", "{clar.answered_by.clone().unwrap_or_default()} answered" }
-                    p { class: "clar-answer-text", "{clar.answer.clone().unwrap_or_default()}" }
-                }
-            }
-        }
-    }
-}
 
 // ── Docs view ─────────────────────────────────────────────────────────────────
 
@@ -10047,7 +9948,39 @@ fn DocsView() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::estimate_audit_cost;
+    use super::{dev_run_body, estimate_audit_cost, TierMapView};
+
+    /// The development-run body must match the frozen backend contract exactly:
+    /// `{ "tier_map": { "strongest", "balanced", "fast" } }`.
+    #[test]
+    fn dev_run_body_matches_frozen_contract() {
+        let tm = TierMapView {
+            strongest: "opus-x".to_string(),
+            balanced: "sonnet-x".to_string(),
+            fast: "haiku-x".to_string(),
+        };
+        let body = dev_run_body(&tm);
+        let tier = body.get("tier_map").expect("tier_map key present");
+        assert_eq!(tier.get("strongest").unwrap(), "opus-x");
+        assert_eq!(tier.get("balanced").unwrap(), "sonnet-x");
+        assert_eq!(tier.get("fast").unwrap(), "haiku-x");
+        // Exactly the three tier keys, nothing else.
+        assert_eq!(tier.as_object().unwrap().len(), 3);
+        assert_eq!(body.as_object().unwrap().len(), 1);
+    }
+
+    /// The default TierMapView feeds the per-phase model defaults. Investigation defaults
+    /// to the strongest tier; the dev-run body carries all three.
+    #[test]
+    fn default_tier_map_seeds_all_three_tiers() {
+        let tm = TierMapView::default();
+        assert!(!tm.strongest.is_empty());
+        assert!(!tm.balanced.is_empty());
+        assert!(!tm.fast.is_empty());
+        let body = dev_run_body(&tm);
+        let tier = body.get("tier_map").unwrap();
+        assert_eq!(tier.get("strongest").unwrap(), &tm.strongest);
+    }
 
     /// Sequential mode (1 batch per chunk) has no caching reuse across batches — the
     /// estimate must match the pre-caching math (full digest price every pass).
