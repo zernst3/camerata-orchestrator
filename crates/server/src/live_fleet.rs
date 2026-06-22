@@ -226,7 +226,12 @@ pub async fn execute_live_run(
         }],
     };
 
-    let root = std::env::temp_dir().join(format!("camerata-live-{}", std::process::id()));
+    // Per-run scaffold dir. Keyed by BOTH the pid AND the run id so two concurrent dev
+    // runs in the SAME process (e.g. two UoWs building at once) never collide on the temp
+    // scaffold. (This path builds a fresh app from a plan in a throwaway temp dir; it does
+    // NOT touch any repo clone or UoW branch, so it needs no git worktree — just a unique dir.)
+    let root =
+        std::env::temp_dir().join(format!("camerata-live-{}-{}", std::process::id(), run_id));
 
     // Start the gate-decision sink + tailer so REAL layer-1 decisions from the gateway
     // subprocesses are folded into the run's events. Shares its seq with the fleet's
@@ -335,7 +340,10 @@ pub async fn execute_live_run_tiered(
         ],
     };
 
-    let root = std::env::temp_dir().join(format!("camerata-live-tiered-{}", std::process::id()));
+    // Per-run scaffold dir, keyed by pid AND run id (see `execute_live_run`): two concurrent
+    // tiered dev runs in the same process must not share the throwaway build scaffold.
+    let root = std::env::temp_dir()
+        .join(format!("camerata-live-tiered-{}-{}", std::process::id(), run_id));
 
     let obs = start_gate_observability(&store, &run_id, &root);
     let seq = obs.seq.clone();

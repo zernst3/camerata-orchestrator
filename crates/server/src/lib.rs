@@ -423,6 +423,33 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
     crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
 
+    // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
+    // records from every known repo clone. A crashed/killed run can leave a worktree dir
+    // gone but still registered; `git worktree prune` reconciles. Best-effort + non-blocking.
+    {
+        let projects = state.projects.clone();
+        let settings = state.settings.clone();
+        tokio::spawn(async move {
+            let workspace_root = settings.workspace_root();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for project in projects.list() {
+                for repo in &project.repos {
+                    if !seen.insert(repo.clone()) {
+                        continue;
+                    }
+                    let override_path = settings.repo_path(repo);
+                    if let Some(clone) = crate::workspace::resolve_repo_dir(
+                        override_path.as_deref(),
+                        workspace_root.as_deref(),
+                        repo,
+                    ) {
+                        crate::workspace::prune_worktrees(&clone).await;
+                    }
+                }
+            }
+        });
+    }
+
     // Shutdown hook: on Ctrl+C / SIGTERM, reap any in-flight `claude` audit subprocesses
     // before exiting so a signal-driven quit never orphans them (kill_on_drop only covers
     // graceful runtime shutdown). A hard SIGKILL of the app is uncatchable and not covered.
@@ -1061,6 +1088,25 @@ async fn sign_off_run(
                 );
                 // Re-read the UoW with the updated history so the response is current.
                 uow = state.uow.get_or_create(&run.story_id);
+            }
+        }
+    }
+
+    // ── Per-UoW worktree teardown (Decision 1) ───────────────────────────────
+    // Sign-off ends this UoW's active dev lifecycle, so its per-UoW worktree can be
+    // reclaimed. Best-effort + non-fatal: a missing worktree, an unresolved repo, or a
+    // git error never blocks sign-off. The shared clone and the branch itself are left
+    // intact (the branch may still be wanted for the PR); only the extra checkout is removed.
+    if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
+        if let Some(repo) = repo_from_story_id(&run.story_id) {
+            let override_path = state.settings.repo_path(&repo);
+            let workspace_root = state.settings.workspace_root();
+            if let Some(clone) = crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                &repo,
+            ) {
+                crate::workspace::remove_uow_worktree(&clone, branch).await;
             }
         }
     }
@@ -5341,13 +5387,22 @@ async fn uow_update_branch(
     };
     let override_path = state.settings.repo_path(&repo);
     let workspace_root = state.settings.workspace_root();
-    let Some(dir) = crate::workspace::resolve_repo_dir(
+    // Per-UoW worktree (Decision 1): the UoW's branch is checked out in its OWN worktree off
+    // the shared clone, not in the shared clone itself — so two same-repo UoWs never collide on
+    // a checkout. This is the canonical dir where this UoW's code lives; ship/push (Phase 2)
+    // will reuse it. `None` when the repo isn't a local clone (no override + no workspace root,
+    // or the clone doesn't exist yet) — same condition `resolve_repo_dir` would have failed on.
+    let Some(dir) = crate::workspace::resolve_uow_worktree(
         override_path.as_deref(),
         workspace_root.as_deref(),
         &repo,
-    ) else {
+        &target_branch,
+    )
+    .await
+    else {
         return bad(
-            "repo not resolved locally — set its path in the Rules view before updating the branch"
+            "repo not resolved locally — set its path in the Rules view (and start development \
+             so the repo is cloned) before updating the branch"
                 .to_string(),
         );
     };

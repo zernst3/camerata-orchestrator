@@ -374,6 +374,218 @@ pub async fn apply_local_and_push(
     Ok(dir.to_string_lossy().into_owned())
 }
 
+// ── Per-UoW git worktrees (issue: per-UoW worktrees + PR lifecycle, Decision 1) ──
+//
+// Two Units of Work on the SAME repo can't both check out their branch in the one
+// shared clone — git refuses ("branch is already checked out"). The fix is git
+// worktrees: a repo's shared clone keeps the `.git` object store, and each UoW gets
+// its OWN working tree off it, checked out on the UoW's branch. N branches checked
+// out at once, one object store.
+//
+// Invariant: a branch can be checked out in only ONE worktree, so each UoW MUST have
+// a distinct branch (already true — UoW branches are keyed by story). If two UoWs ever
+// shared a branch they would, by definition, share a worktree — `ensure_uow_worktree`
+// returns the existing worktree for a branch rather than erroring, so that degenerate
+// case degrades to "they collaborate in one tree" instead of failing.
+
+/// The directory that holds a repo's per-UoW worktrees, nested under the shared clone:
+/// `<clone>/.camerata-worktrees`. One subdir per UoW branch lives here.
+fn worktrees_root(clone: &Path) -> PathBuf {
+    clone.join(".camerata-worktrees")
+}
+
+/// Canonicalize `p` for a STABLE worktree identity, falling back to `p` unchanged if the
+/// path can't be canonicalized (e.g. it doesn't exist yet). `git worktree list` reports
+/// fully-resolved paths (e.g. macOS `/var` → `/private/var`); a freshly-constructed
+/// `<clone>/.camerata-worktrees/<branch>` is NOT resolved. Canonicalizing both sides means
+/// the path returned for a brand-new worktree string-matches the one `git worktree list`
+/// reports on the next resolve — so reuse is idempotent and callers get one stable identity.
+fn canonical_or_self(p: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&p).unwrap_or(p)
+}
+
+/// Sanitize a git branch name into a single safe directory segment. Branch names may
+/// contain `/` (e.g. `camerata/story-7`) and other path-hostile characters; encode them
+/// so the result is one flat, collision-resistant segment. `/` → `__`, and any char that
+/// isn't alphanumeric / `.` / `-` / `_` → `-`. Distinct branches map to distinct dirs
+/// for the inputs Camerata produces (branch names are slug-like).
+pub fn sanitize_branch_segment(branch: &str) -> String {
+    let mut out = String::with_capacity(branch.len());
+    let mut chars = branch.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' => out.push_str("__"),
+            c if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' => out.push(c),
+            _ => out.push('-'),
+        }
+    }
+    if out.is_empty() {
+        out.push_str("uow");
+    }
+    out
+}
+
+/// Find the worktree path that currently has `branch` checked out, if any, by scanning
+/// `git worktree list --porcelain`. Returns the absolute worktree path. This is how we
+/// honor "a branch is already checked out elsewhere" gracefully: rather than letting
+/// `git worktree add` error, we locate and reuse the existing worktree.
+async fn worktree_for_branch(clone: &Path, branch: &str) -> Option<PathBuf> {
+    let out = git(Some(clone), &["worktree", "list", "--porcelain"])
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Porcelain output is paragraphs separated by blank lines; each has a `worktree <path>`
+    // line and (when on a branch) a `branch refs/heads/<name>` line.
+    let want = format!("refs/heads/{branch}");
+    let mut current_path: Option<PathBuf> = None;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            current_path = Some(PathBuf::from(p.trim()));
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            if b.trim() == want {
+                return current_path.clone();
+            }
+        } else if line.trim().is_empty() {
+            current_path = None;
+        }
+    }
+    None
+}
+
+/// Ensure a per-UoW worktree for `branch` exists off the shared `clone`, checked out on
+/// `branch`, and return its path. Idempotent + collision-safe:
+///
+/// - If `branch` is ALREADY checked out in some worktree (this one or any other), return
+///   that existing path — never error-clobber. This covers both re-resolving the same UoW
+///   (idempotent reuse) and the degenerate "two UoWs share a branch" case.
+/// - Otherwise `git worktree add` a fresh worktree at `<clone>/.camerata-worktrees/<sani>`.
+///   If the target dir already exists on disk but isn't a registered worktree (e.g. a stale
+///   leftover after a prune), it is reused via `git worktree add` with the dir already there
+///   only when it's a valid worktree; a stale non-worktree dir is removed first.
+/// - The branch is created if it doesn't exist yet (`-b`), else checked out (`add <dir> <branch>`).
+///
+/// The `clone` must be an existing git checkout (the caller ensures the clone exists via the
+/// normal clone path). Returns the worktree path on success.
+pub async fn ensure_uow_worktree(clone: &Path, branch: &str) -> anyhow::Result<PathBuf> {
+    if !is_git_repo(clone) {
+        anyhow::bail!(
+            "{}: not a git checkout — clone the repo before creating a UoW worktree",
+            clone.display()
+        );
+    }
+
+    // 1. If the branch is already checked out anywhere, reuse that worktree (collision-safe,
+    //    idempotent). This is the "already checked out elsewhere" graceful path.
+    if let Some(existing) = worktree_for_branch(clone, branch).await {
+        return Ok(canonical_or_self(existing));
+    }
+
+    let dir = worktrees_root(clone).join(sanitize_branch_segment(branch));
+
+    // 2. If the target dir is itself an already-registered worktree (its branch may differ),
+    //    just return it. (Branch match was handled above; this guards the path being live.)
+    if is_git_repo(&dir) {
+        return Ok(canonical_or_self(dir));
+    }
+    // A stale, non-worktree dir at the target path would make `git worktree add` fail; clear it.
+    if dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    if let Some(parent) = dir.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| anyhow::anyhow!("create worktrees dir {}: {e}", parent.display()))?;
+    }
+
+    let dir_str = dir.to_string_lossy().into_owned();
+
+    // 3. Does the branch exist already? If so, check it out into the new worktree; otherwise
+    //    create it (`-b`). A worktree can't check out a branch that's live elsewhere, but we
+    //    already returned that case above.
+    let branch_exists = git(
+        Some(clone),
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+
+    let add = if branch_exists {
+        git(Some(clone), &["worktree", "add", &dir_str, branch]).await?
+    } else {
+        git(Some(clone), &["worktree", "add", "-b", branch, &dir_str]).await?
+    };
+
+    if add.status.success() {
+        return Ok(canonical_or_self(dir));
+    }
+
+    // Last-resort: a race may have created the worktree for this branch between our check and
+    // the add (or the branch became live elsewhere). Re-scan and reuse if so, rather than error.
+    if let Some(existing) = worktree_for_branch(clone, branch).await {
+        return Ok(canonical_or_self(existing));
+    }
+    anyhow::bail!("git worktree add ({branch}): {}", stderr_of(&add))
+}
+
+/// Resolve the per-UoW working directory for `repo` on `branch`: the canonical place this
+/// UoW's code lives in the repo. Resolves the shared clone via [`resolve_repo_dir`]
+/// (override path wins, else `<workspace_root>/<owner>/<repo>`), then ensures + returns the
+/// UoW's own worktree off it. `None` when the repo isn't resolved to a local clone (no
+/// override and no workspace root) or the clone doesn't exist on disk yet — the caller
+/// surfaces that exactly as it does for the shared clone.
+///
+/// This is the seam the dev run / update-branch / (Phase 2) ship+push run through, so two
+/// same-repo UoWs operate in separate worktrees and never collide on a checkout.
+pub async fn resolve_uow_worktree(
+    override_path: Option<&str>,
+    workspace_root: Option<&str>,
+    repo: &str,
+    branch: &str,
+) -> Option<PathBuf> {
+    let clone = resolve_repo_dir(override_path, workspace_root, repo)?;
+    if !is_git_repo(&clone) {
+        return None;
+    }
+    ensure_uow_worktree(&clone, branch).await.ok()
+}
+
+/// Remove a UoW's worktree (best-effort) — used when the UoW is signed off / torn down.
+/// `git worktree remove --force` drops the working tree AND deregisters it (also handling a
+/// dirty tree). Never fatal: a missing/already-removed worktree is fine. Also prunes stale
+/// administrative entries afterward.
+pub async fn remove_uow_worktree(clone: &Path, branch: &str) {
+    if !is_git_repo(clone) {
+        return;
+    }
+    // Prefer removing by the registered path (handles a branch checked out under a path that
+    // doesn't match the sanitized name, e.g. a worktree created out-of-band).
+    let path = worktree_for_branch(clone, branch)
+        .await
+        .unwrap_or_else(|| worktrees_root(clone).join(sanitize_branch_segment(branch)));
+    let path_str = path.to_string_lossy().into_owned();
+    let _ = git(Some(clone), &["worktree", "remove", "--force", &path_str]).await;
+    // Belt-and-suspenders: if the dir lingers (e.g. it was never a registered worktree),
+    // drop it from disk, then prune the admin records.
+    if path.exists() {
+        let _ = tokio::fs::remove_dir_all(&path).await;
+    }
+    prune_worktrees(clone).await;
+}
+
+/// `git worktree prune` on the shared clone: drop administrative records for worktrees whose
+/// directories no longer exist (e.g. removed out-of-band, or a crashed run). Best-effort,
+/// called on startup and after a remove. No-op when `clone` isn't a checkout.
+pub async fn prune_worktrees(clone: &Path) {
+    if !is_git_repo(clone) {
+        return;
+    }
+    let _ = git(Some(clone), &["worktree", "prune"]).await;
+}
+
 // ── Local git controls (issue #37) ───────────────────────────────────────────
 
 /// How far HEAD is ahead of and behind its upstream tracking branch.
@@ -1301,6 +1513,210 @@ mod tests {
         // ── Hard error (unknown ref) is an Err, not a false conflict. ──
         let err = merge_source(&base, "no-such-branch").await;
         assert!(err.is_err(), "unknown ref errors");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Per-UoW worktrees (Decision 1) ──────────────────────────────────────
+
+    #[test]
+    fn sanitize_branch_segment_encodes_slashes_and_unsafe_chars() {
+        assert_eq!(sanitize_branch_segment("camerata/story-7"), "camerata__story-7");
+        assert_eq!(sanitize_branch_segment("feat/a/b"), "feat__a__b");
+        // Alnum, dot, dash, underscore are preserved.
+        assert_eq!(sanitize_branch_segment("v1.2_x-y"), "v1.2_x-y");
+        // Other chars collapse to '-'.
+        assert_eq!(sanitize_branch_segment("a b@c"), "a-b-c");
+        // Distinct branch names stay distinct.
+        assert_ne!(
+            sanitize_branch_segment("feat/x"),
+            sanitize_branch_segment("feat/y")
+        );
+        // Empty → a stable fallback segment (never an empty path).
+        assert_eq!(sanitize_branch_segment(""), "uow");
+    }
+
+    /// Build a throwaway git repo with one commit on `main` and return its dir.
+    #[cfg(test)]
+    fn init_repo_with_commit(dir: &Path) {
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        g(&["init", "-q", "-b", "main"]);
+        g(&["config", "user.email", "t@example.com"]);
+        g(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hi\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "init"]);
+    }
+
+    /// Which branch a worktree dir currently has checked out (for assertions).
+    #[cfg(test)]
+    async fn branch_of(dir: &Path) -> String {
+        let out = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// THE CORE GUARANTEE (what's broken today): two UoWs on the SAME repo with DISTINCT
+    /// branches each get their OWN worktree, BOTH branches checked out at once, no error.
+    #[tokio::test]
+    async fn two_uows_same_repo_distinct_branches_get_separate_worktrees() {
+        let base = std::env::temp_dir().join(format!("cam-wt-two-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        let wt_a = ensure_uow_worktree(&clone, "camerata/story-a")
+            .await
+            .expect("worktree A created");
+        let wt_b = ensure_uow_worktree(&clone, "camerata/story-b")
+            .await
+            .expect("worktree B created");
+
+        // Distinct directories.
+        assert_ne!(wt_a, wt_b, "each UoW gets its own worktree dir");
+        assert!(is_git_repo(&wt_a) && is_git_repo(&wt_b));
+
+        // BOTH branches are checked out simultaneously — the thing the shared clone can't do.
+        assert_eq!(branch_of(&wt_a).await, "camerata/story-a");
+        assert_eq!(branch_of(&wt_b).await, "camerata/story-b");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Re-resolving the SAME UoW returns the SAME worktree (idempotent — no duplicate add).
+    #[tokio::test]
+    async fn ensure_uow_worktree_is_idempotent() {
+        let base = std::env::temp_dir().join(format!("cam-wt-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        let first = ensure_uow_worktree(&clone, "camerata/dup")
+            .await
+            .expect("first");
+        let second = ensure_uow_worktree(&clone, "camerata/dup")
+            .await
+            .expect("second");
+        assert_eq!(first, second, "same UoW resolves to the same worktree");
+
+        // Exactly one worktree for this branch is registered (no duplicate `worktree add`).
+        let listed = worktree_for_branch(&clone, "camerata/dup").await;
+        assert_eq!(listed.as_deref(), Some(first.as_path()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// "Branch already checked out elsewhere" is handled gracefully: when a branch is live in
+    /// an out-of-band worktree, `ensure_uow_worktree` returns THAT path instead of erroring.
+    #[tokio::test]
+    async fn branch_checked_out_elsewhere_is_reused_not_errored() {
+        let base = std::env::temp_dir().join(format!("cam-wt-elsewhere-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        // Create the branch in a worktree OUTSIDE the `.camerata-worktrees` dir (out-of-band).
+        let external = base.join("external-wt");
+        let add = git(
+            Some(&clone),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "camerata/live",
+                &external.to_string_lossy(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(add.status.success(), "external worktree: {}", stderr_of(&add));
+
+        // Resolving the UoW for the same branch must NOT error — it returns the existing path.
+        let resolved = ensure_uow_worktree(&clone, "camerata/live")
+            .await
+            .expect("reuses existing worktree, no error");
+        // Compare canonical forms: `git worktree list` reports resolved paths (macOS
+        // `/var` → `/private/var`), and `ensure_uow_worktree` returns a stable canonical id.
+        assert_eq!(
+            resolved,
+            canonical_or_self(external),
+            "returns the already-checked-out worktree"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// remove + prune behave: removing a UoW worktree deregisters it and drops its dir;
+    /// prune afterward leaves the clone consistent (no error, branch survives for the PR).
+    #[tokio::test]
+    async fn remove_and_prune_behave() {
+        let base = std::env::temp_dir().join(format!("cam-wt-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        let wt = ensure_uow_worktree(&clone, "camerata/teardown")
+            .await
+            .expect("created");
+        assert!(wt.exists());
+
+        remove_uow_worktree(&clone, "camerata/teardown").await;
+        assert!(!wt.exists(), "worktree dir removed");
+        // Deregistered: no worktree holds the branch anymore.
+        assert!(worktree_for_branch(&clone, "camerata/teardown").await.is_none());
+        // The branch itself survives (it may still back a PR).
+        let branch_exists = git(
+            Some(&clone),
+            &["rev-parse", "--verify", "--quiet", "refs/heads/camerata/teardown"],
+        )
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+        assert!(branch_exists, "the branch is left intact after worktree removal");
+
+        // Re-creating after removal works again (and prune of an empty clone is a no-op).
+        prune_worktrees(&clone).await;
+        let again = ensure_uow_worktree(&clone, "camerata/teardown")
+            .await
+            .expect("re-created after removal");
+        assert!(again.exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `resolve_uow_worktree` honors the override path and threads through to a worktree.
+    #[tokio::test]
+    async fn resolve_uow_worktree_uses_override_clone() {
+        let base = std::env::temp_dir().join(format!("cam-wt-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("my-checkout");
+        init_repo_with_commit(&clone);
+
+        let resolved = resolve_uow_worktree(
+            Some(&clone.to_string_lossy()),
+            None,
+            "acme/api",
+            "camerata/story-1",
+        )
+        .await
+        .expect("resolves a worktree from the override clone");
+        assert!(
+            resolved.starts_with(canonical_or_self(clone.clone())),
+            "worktree nested under the clone"
+        );
+        assert_eq!(branch_of(&resolved).await, "camerata/story-1");
+
+        // An unresolved repo (no override, no workspace root) yields None.
+        let none = resolve_uow_worktree(None, None, "acme/api", "b").await;
+        assert!(none.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
     }
