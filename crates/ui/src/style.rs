@@ -3238,6 +3238,17 @@ html, body {
 .govdev-main { padding: 18px 22px; overflow-y: auto; min-width: 0; }
 .govdev-h { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
 
+/* Gear-button row at the top of the govdev left nav. */
+.govdev-gear-row { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.govdev-gear-btn { font-size: 12px; gap: 4px; }
+
+/* Project-settings popup (wider than a rule modal; holds tier-map editor). */
+.proj-settings-modal { max-width: 560px; }
+.proj-settings-scope-note {
+  font-size: 12px; color: var(--ink-soft); margin: 6px 0 16px; font-style: italic;
+}
+.proj-settings-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+
 /* Issue Management panel */
 .issue-mgmt { max-width: 1000px; }
 .issue-conn {

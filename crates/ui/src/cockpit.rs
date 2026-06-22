@@ -3659,6 +3659,75 @@ pub fn CockpitApp() -> Element {
 //                             clarify back-and-forth, sign-off) keyed to the selected UoW,
 //                             plus comment-to-issue + pull-latest. Provider-agnostic.
 
+/// A gear-icon button that opens the project-settings popup.
+///
+/// Contains project-scoped settings that must NOT live inline in a UoW:
+///   - Loop guard (max revise iterations)
+///   - Default tier-map (fast / balanced / strongest model ids)
+#[component]
+fn ProjectSettingsGear() -> Element {
+    let mut open = use_signal(|| false);
+    let active = use_resource(fetch_active_project);
+    let proj = active.read().clone().flatten();
+
+    rsx! {
+        // The gear trigger button.
+        button {
+            class: "btn-edit-sm govdev-gear-btn",
+            title: "Project settings",
+            onclick: move |_| open.set(true),
+            // Unicode gear character
+            "\u{2699}\u{FE0F} Settings"
+        }
+
+        // The popup modal — only rendered when open AND we have a project.
+        if open() {
+            if let Some(p) = proj {
+                div { class: "rule-modal-overlay", onclick: move |_| open.set(false),
+                    div { class: "rule-modal proj-settings-modal", onclick: move |e| e.stop_propagation(),
+                        div { class: "rule-modal-head",
+                            span { class: "rule-modal-id", "Project settings" }
+                            button {
+                                class: "rule-modal-close",
+                                onclick: move |_| open.set(false),
+                                "\u{2715}"
+                            }
+                        }
+                        p { class: "proj-settings-scope-note",
+                            "These settings apply to the entire project and affect all governed runs."
+                        }
+
+                        // ── Loop guard ────────────────────────────────────────────
+                        LoopGuardControl {}
+
+                        // ── Default tier-map ──────────────────────────────────────
+                        div { class: "proj-settings-section",
+                            TierMapEditor { project: p }
+                        }
+                    }
+                }
+            } else {
+                // No active project: show a minimal modal with instructions.
+                div { class: "rule-modal-overlay", onclick: move |_| open.set(false),
+                    div { class: "rule-modal proj-settings-modal", onclick: move |e| e.stop_propagation(),
+                        div { class: "rule-modal-head",
+                            span { class: "rule-modal-id", "Project settings" }
+                            button {
+                                class: "rule-modal-close",
+                                onclick: move |_| open.set(false),
+                                "\u{2715}"
+                            }
+                        }
+                        p { class: "proj-settings-scope-note",
+                            "Create or select a project to configure project-level settings."
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The Governed Development page. Left: "Issue Management" entry + a card per UoW.
 /// Right (main): the issue-management panel, or the selected UoW's dev controls.
 #[component]
@@ -3680,6 +3749,11 @@ fn GovernedDevPage() -> Element {
         div { class: "govdev",
             // ── LEFT NAV: Issue Management + one card per UoW ──────────────────
             aside { class: "govdev-nav",
+                // Gear button: opens the project-settings popup (loop guard + tier map).
+                // Lives at the top of the nav so it's always reachable regardless of UoW selection.
+                div { class: "govdev-gear-row",
+                    ProjectSettingsGear {}
+                }
                 button {
                     class: if sel() == GovDevSel::IssueManagement { "govdev-nav-top on" } else { "govdev-nav-top" },
                     onclick: move |_| sel.set(GovDevSel::IssueManagement),
@@ -4262,8 +4336,9 @@ fn UowDevControls(uow: UowListEntry) -> Element {
             // ── Gate self-check (reused) ──────────────────────────────────────
             GateSelfCheck {}
 
-            // ── Loop-guard control (reused) ───────────────────────────────────
-            LoopGuardControl {}
+            // NOTE: Loop guard (max revise iterations) is a PROJECT-level setting and
+            // has been moved to the gear-icon project-settings popup in GovernedDevPage.
+            // It no longer lives here (per-UoW) to avoid implying it is per-UoW state.
 
             // ── Lifecycle steps with the ACTIVE phase's run control inline ────
             // Increment 1: runs live ON THE STEPS. The lifecycle strip shows the
