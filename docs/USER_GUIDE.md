@@ -55,13 +55,15 @@ A **project** holds its repos, ruleset, and onboarded state. From the **Projects
 ## 2. The cockpit views
 
 Inside a project the nav shows: **Onboard repos · Governed Development · Rules · Routines ·
-Repository Workspace**.
+Repository Workspace · Docs**.
 - **Onboard repos** — bring a repo under governance (§3).
-- **Governed Development** — the story control surface: adopt stories, run governed development with
-  the human↔AI clarify loop, review + sign off (§6).
+- **Governed Development** — the work control surface: pull work items from a tracker, create a Unit
+  of Work (UoW) from one, then run governed development on it with the human↔AI clarify loop, comment
+  back, and sign off (§6).
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
 - **Routines** — schedule governed runs.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
+- **Docs** — the in-app documentation viewer (this guide and the technical reference).
 
 ---
 
@@ -110,15 +112,20 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
      run**. Read them as "the model flagged this pattern," not as a fixed rule. The calibration pass
      recalibrates severity and flags low-confidence ones but never drops any — you make the final call.
 
-   Pick the **model** and the **scan mode**:
+   Pick the **model** and the **scan mode** (four options; Camerata auto-selects a recommended one by
+   the codebase's size):
    - **Parallel** (default) — runs rule-batches concurrently; fastest. Wall-clock is the slowest
      batch, not the sum of every call.
-   - **Sequential** — one call at a time, all rules together; slower but gentlest on rate limits
-     (a fallback when Parallel hits throttling).
-   - **Background job** — same Parallel scan, but it runs server-side and detached: you get a
-     progress view and can walk away while findings stream in. Best for huge / multi-repo scans
-     where a foreground scan would tie up the page. (Parallel and Sequential run in the
-     foreground and block until they finish; Background job is the same work, just detached.)
+   - **Sequential (slower, gentlest)** — one chunk at a time, all rules together; slower but gentlest
+     on rate limits (a fallback when Parallel hits throttling).
+   - **Background job (walk away)** — the Parallel scan, but it runs server-side and detached: you get
+     a progress view and can walk away while findings stream in. Best for huge / multi-repo scans
+     where a foreground scan would tie up the page. (Parallel and Sequential run in the foreground and
+     block until they finish; Background job is the same work, just detached.)
+   - **Batch (50% off — async, API key required)** — submits all passes as a single **Anthropic
+     Message Batch**, for a flat **50% discount on all scan tokens**. Requires `ANTHROPIC_API_KEY` and
+     the `api` backend; results arrive asynchronously (seconds to minutes, up to 24h on very large
+     scans). Best when latency is acceptable in exchange for cost.
 
    **Thorough calibration (opt-in checkbox).** Off by default. When ticked, the calibration pass
    that recalibrates AI-suggested severities runs as a **multi-vote consensus** instead of a single
@@ -148,9 +155,18 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit the working
    copy freely, then click **Open governance PR** (a separate, optional button) when ready —
    **Camerata never opens a PR automatically.** **Applying marks the repo onboarded.**
-6. **Wire mechanical rules into CI** — the final step: file a **story (GitHub issue)** per repo to add
-   the selected mechanical rules to that repo's existing CI as enforced lint gates (checks what's
-   already enforced, adds the rest). Like resolve-now, onboarding *writes the story*; the dev layer
+6. **Add CI-enforced rules** — the final step files **two GitHub-issue stories** per repo, one per
+   deterministic CI-tier track:
+   - **Create mechanical-rules CI story** — wire the selected **mechanical** rules into that repo's CI
+     as enforced lint gates. Mechanical rules map to an existing off-the-shelf linter, so this is the
+     simpler track to wire.
+   - **Create architectural-rules CI story** — wire the selected **architectural** rules into CI.
+     Architectural rules need a **custom checker** (no off-the-shelf linter expresses them) plus team
+     refinement before implementing.
+
+   Each story carries a preamble explaining that both tracks are deterministic (mechanical = off-the-
+   shelf linter; architectural = bespoke custom checker), and the two are filed as separate issues so
+   they can be scheduled independently. Like resolve-now, onboarding *writes the story*; the dev layer
    (Pillar 2) does the work. Separate from the tech-debt issues above.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
@@ -195,28 +211,61 @@ missing, or not a git checkout whose origin matches `owner/repo`.
 
 ---
 
-## 6. Steer a story through its lifecycle (Governed Development)
+## 6. Governed Development (work items → Units of Work → governed dev)
 
-Select a story in the spine. The center stage has clickable stage tabs:
-1. **Intake** — adopted into the spine.
-2. **Investigation** — the lead engineer raises clarifying questions via the bridge (posts a comment
-   on the tracker item; the owner answers; the answer comes back). Review before posting.
-3. **Plan** — decompose the story into child stories, each independently governable.
-4. **Status (execution & gating)** — "Run this story (governed)". The fleet runs under the gate:
-   **Layer 1** denies a forbidden write before it touches disk; **Layer 2** re-checks each task
-   (`fmt`/`clippy`/`test`); the **worktree jail** confines every write. Without `CAMERATA_LIVE_BUILD=1`
-   this runs token-free/scripted (the gate deciding is still real); with it set + `claude` connected,
-   a real `claude -p` fleet.
+The **Governed Development** view is built around two objects:
+- A **WorkItem** is the requirement/story pulled from a tracker (the normalized model). Today the
+  provider is **GitHub Issues**; the WorkItem model is provider-agnostic, and Jira / Azure DevOps /
+  GitHub Projects are **planned per-provider adapters, not yet shipped**.
+- A **Unit of Work (UoW)** is the dev lifecycle that references a WorkItem.
 
-   **Gate self-check (go/no-go).** This view also hosts a one-click **Gate self-check** that proves
-   the gate loop is actually wired *before* you trust it with a story. It runs the deterministic
-   end-to-end probe (no model call, no tokens): it plants one violation for **every rule in the
-   security floor**, confirms **Layer 1 denies each one** before it can touch disk, confirms a clean
-   write is **allowed** (the gate isn't deny-all), and confirms **Layer 2 bounces once on a planted
-   violation and resolves on the revise pass**. It reports a single **GO / NO-GO** verdict with the
-   floor count (e.g. "6/6 floor rules enforced"). GO means deny-before-execute + bounce-and-revise
-   are both live. The same probe runs in CI and as `camerata gate-probe` on the CLI.
-5. **QA & sign-off** — review the diff + gate results, sign off; provenance is written back.
+### Issue Management — pull work items
+
+At the top of the view, an **Issue Management** panel shows the GitHub connection status (`● GitHub
+connected`, or a no-token notice). Click **Pull work items** to do a **manual** pull (there is **no
+auto-poll**) that pulls **all open issues across every repo in the active project** into a
+**WorkItem table with a Repo column**. Click any row to read the full work item (title, body, state,
+labels, and an **Open issue ↗** link to the source).
+
+### Create a Unit of Work from a work item
+
+From a work item's detail, click **Create Unit of Work from this issue**. This is **deduped by
+external reference**: if a UoW already exists for that item the button reads **Open Unit of Work**
+and selects the existing one instead of making a duplicate.
+
+### The UoW dev controls
+
+Below the table is a list of **UoW cards**. Open one to get the governed dev controls:
+
+- **Run this work (governed)** — runs the fleet under the gate. **Layer 1** denies a forbidden write
+  before it touches disk; **Layer 2** re-checks each task with the repo's own toolchain (e.g.
+  `fmt`/`clippy`/`test`); the **worktree jail** confines every write. Without `CAMERATA_LIVE_BUILD=1`
+  this runs token-free/scripted (the gate deciding is still real); with it set + `claude` connected,
+  a real `claude -p` fleet.
+- **Lifecycle strip + transitions** — the card shows the lifecycle stages (Intake → Investigating →
+  Decisions approved → Development → Awaiting QA → Signed off) as a progress strip. The two
+  architect-driven forward transitions are buttons: **Begin investigation** (enabled at Intake) and
+  **Approve decisions** (enabled at Investigating); later stages are driven by the engine and the
+  sign-off action.
+- **Ask the team** (the human↔AI clarify loop) — compose a clarifying question (with a **Suggest
+  questions (AI)** helper) and post it for an answer, the back-and-forth between the engineer and the
+  human owner.
+- **Add comment to issue** — write a comment that is posted back onto the source issue via the
+  tracker adapter (**Post comment**).
+- **Pull latest work item** — re-pull just this one item from the tracker (a full refresh, no cache).
+- **Sign off this run** — review the run's diff + gate results (rules in force, deny/allow tallies,
+  total bounces) and **✓ Sign off this run**; provenance is written back.
+
+### Gate self-check (GO / NO-GO)
+
+The view hosts a one-click **Run gate self-check** that proves the gate loop is actually wired
+*before* you trust it with a work item. It runs the deterministic end-to-end probe (no model call, no
+tokens): it plants one violation for **every enforced gate rule** (the security floor), confirms
+**Layer 1 denies each one** before it can touch disk, confirms a clean write is **allowed** (the gate
+isn't deny-all), and confirms **Layer 2 bounces once on a planted violation and resolves on the
+revise pass**. It reports a single **GO / NO-GO** verdict with the floor count (e.g. "6/6 floor rules
+enforced"). GO means deny-before-execute + bounce-and-revise are both live. The same probe runs in CI
+and as `camerata gate-probe` on the CLI.
 
 ---
 
@@ -227,9 +276,16 @@ Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
 | Point | Enforces on | Example |
 |---|---|---|
 | **Layer 1** (MCP tool gate) | one write's file content, before it executes | no hardcoded secret reaches disk |
-| **Layer 2** (CheckRunner) | one task's diff, after | `fmt`/`clippy`/`test` |
+| **Layer 2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`) |
 | **Integration gate** | the assembled tree (cross-agent) | API contract between two agents agrees |
 | **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
+
+**Layer 2 is cross-language and polyglot.** It is no longer Rust-only: for each worktree it runs the
+checks for **every language present in the repo** (Rust, JavaScript/TypeScript, Python, Go), using the
+**repo's own lockfile-pinned toolchain** — the same tool versions the repo's CI uses, installed from
+the repo's lockfile, never baked into Camerata. It is **fail-closed**: if a toolchain is missing, a
+check isn't defined, or dep install fails, the task is treated as **not verified** (an error), never as
+a clean pass. So code is genuinely pre-linted at dev time across every language in the repo.
 
 Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo** (contracts),
 **process** (workflow conventions). The agent has no `git`, so Camerata is the sole committer.
@@ -242,14 +298,16 @@ The floating chat bubble is a single, context-rich assistant. There are no modes
 
 ### What the assistant can see
 
-A **"What this assistant can see"** strip at the top of the panel lists its four context sources and whether each is currently loaded:
+A **"What this assistant can see"** strip at the top of the panel lists its context sources and whether each is currently loaded:
 
-1. **Canonical docs** (`USER_GUIDE.md`, `TECHNICAL.md`), baked in: the source of truth for features and how things work.
-2. **Project rules** (the corpus plus the active project's selections): what is actually in scope.
-3. **Live development state**, fetched from the development-context endpoint: every Unit of Work with its lifecycle stage, gate/bounce status, and sign-off state, so a "where are we at" question returns a real cross-project status report.
-4. **Active finding**, injected additively when you click **"Ask"** on a specific audit finding, to zoom into one violation without losing the rest of the context.
+1. **Technical reference** (`docs/TECHNICAL.md`), baked in at compile time: how Camerata works.
+2. **User guide** (`docs/USER_GUIDE.md`), baked in at compile time: flows, how-to steps, feature descriptions.
+3. **Governance rules catalog** (the live corpus from `GET /api/corpus-rules`, fetched once per session): every rule with its domain, scope, and alternatives.
+4. **Development state**, fetched from `GET /api/uow` and refreshed each turn: every Unit of Work with its lifecycle stage, gate/bounce status, and sign-off state, so a "where are we at" question returns a real cross-project status report.
 
-The docs and rules form a stable prefix that is cached for cheap reuse; the development snapshot refreshes each turn.
+A fifth row, **Focused finding**, appears only when you click **"Ask"** on a specific audit finding; it injects that finding's rule-id, path, and line additively so the assistant can zoom into one violation without losing the rest of the context.
+
+The technical reference, user guide, and rules catalog form a stable prefix that is cached for cheap reuse; the development snapshot refreshes each turn.
 
 ### Honesty guardrail
 
@@ -335,7 +393,7 @@ Both custom types flow through the Rules view editor and the emission system exa
 
 When you run an **onboarding audit** with the **"Deep report"** checkbox enabled, Camerata runs three advanced analysis lenses over each repo:
 
-1. **SOC-2 gap analysis** — maps detectable practices onto SOC-2 Common-Criteria controls and reports **gaps** (what controls appear to lack implementation). This is a **gap analysis, never a compliance report or certification** — it is advisory and model-inferred.
+1. **SOC-2 gap analysis** — maps detectable practices onto SOC-2 Common-Criteria controls and reports **gaps** (what controls appear to lack implementation). This is a **gap analysis, never a compliance report or certification** — it is advisory and model-inferred. **Note:** the SOC-2 lens is behind the `soc2` feature flag, which ships **OFF** (§12); it runs only if you re-enable the flag.
 2. **Deep security audit** — a layer deeper than the deterministic floor: authorization on write paths, sensitive-data handling, secret flows, trust boundaries. Findings flow into the same triage + tech-debt workflow as the standard audit.
 3. **Threat model** — a structured STRIDE-flavored view: entry points, trust boundaries, data stores, sensitive-data paths, and threats + mitigations.
 
@@ -362,37 +420,41 @@ The SOC-2 lens produces a **gap analysis** — a conversation-starter about what
 
 ---
 
-## 12. Feature flags (opt-in/opt-out)
+## 12. Feature flags (opt-out)
 
-Camerata uses **feature flags** to ship features that are optional or under evaluation without requiring code branching. Flags default **ON** (features enabled) unless otherwise noted.
+Camerata uses **feature flags** to gate features that are optional or under evaluation without code
+branching. Every flag defaults **ON** (opt-out model): a flag absent from all sources is enabled. A
+flag is turned off only by setting it to `false` explicitly.
 
-### Enabling/disabling flags
+### Setting flags
 
-Flags are controlled via **environment variables**, set before launching the app:
+Flags are read from a **`.camerata/features.toml`** file at startup, and can be overridden per-flag by
+an environment variable. Only an explicit `false` disables a flag; an absent or any other value leaves
+it at its configured default.
 
-```bash
-export CAMERATA_FEATURE_<NAME>=false   # Disable the feature
-export CAMERATA_FEATURE_<NAME>=true    # Enable it (or omit if default is on)
-cargo run -p camerata-ui
+```toml
+# .camerata/features.toml
+soc2 = false
 ```
 
-Alternatively, add them to your `.env` file (in the repo root, gitignored):
-
-```env
-# .env (auto-loaded at startup)
-CAMERATA_FEATURE_SOC2_ANALYSIS=false
-CAMERATA_FEATURE_DEEP_SECURITY=true
+```bash
+export CAMERATA_FEATURE_SOC2=false   # env override; disables the flag
+cargo run -p camerata-ui
 ```
 
 ### Current flags
 
-| Flag | Default | What it controls | Note |
-|---|---|---|---|
-| `CAMERATA_FEATURE_SOC2_ANALYSIS` | **OFF** | SOC-2 gap-analysis lens in the deep audit. | Off by default until gap analysis is externally validated (Phase 2). Safe to turn ON; advisory label is mandatory. |
-| `CAMERATA_FEATURE_DEEP_SECURITY` | ON | Deep-security lens (trust boundaries, auth, secrets) in the deep audit. | Always safe. |
-| `CAMERATA_FEATURE_THREAT_MODEL` | ON | Threat-model lens (STRIDE-flavored) in the deep audit. | Always safe. |
+There is currently **one** runtime flag:
 
-When a flag is OFF, the corresponding **scan option is hidden from the UI** and the feature **is not run**, so no cost is incurred and no noise is added to the findings.
+| Flag | Env override | Default | Shipped value | What it controls |
+|---|---|---|---|---|
+| `soc2` | `CAMERATA_FEATURE_SOC2` | ON (opt-out) | **OFF** (the repo's `.camerata/features.toml` sets `soc2 = false`) | The SOC-2 gap-analysis lens in the deep audit tier (§11). |
+
+So although the flag *defaults* on under the opt-out model, **SOC-2 is shipped OFF**: the checked-in
+`.camerata/features.toml` sets `soc2 = false`, so the SOC-2 lens does not run unless you re-enable it.
+When `soc2` is false, only the SOC-2 lens is skipped — the deep-security and threat-model lenses of the
+deep tier still run, and the deep report is valid with an empty SOC-2 section. (Deep-security and
+threat-model are part of the deep tier and are not separately flag-gated today.)
 
 ### Why flags?
 
@@ -463,8 +525,8 @@ The mechanical rules in the current corpus are grounded (each maps to a real, na
 
 **Create/open a project → onboard each repo (browse to its local folder → scan the local code → pick
 per-repo rules → Add rules to repo(s): local branch+push → optionally audit + triage + wire CI) →
-manage the ruleset in the Rules view → adopt stories and run governed work in Governed Development →
-review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
+manage the ruleset in the Rules view → in Governed Development, pull work items, create a Unit of Work
+from one, run governed work → review → sign off.** Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the
 push/PR and the AI audit + governed dev. Export/import a project to move it between machines; resolve
 local repo paths on the receiving side. Use the chat bubble to ask data-driven questions
 about your active project.
