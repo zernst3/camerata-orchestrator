@@ -219,6 +219,105 @@ pub async fn comment_on_issue(
     Ok(v["html_url"].as_str().unwrap_or_default().to_string())
 }
 
+/// One comment on a GitHub issue, flattened for the UoW work-item modal. Only the
+/// fields the UI renders are present (author login, body markdown, ISO created-at).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueComment {
+    /// The comment author's login (e.g. `octocat`). Empty when the API omits it.
+    pub author: String,
+    /// The comment body (markdown). Empty when the comment has none.
+    pub body: String,
+    /// The ISO-8601 created-at timestamp as GitHub returns it (e.g.
+    /// `2026-06-21T12:00:00Z`). Empty when absent. The UI formats it.
+    pub created_at: String,
+}
+
+/// The minimal GitHub issue-comment shape we read from the comments list endpoint.
+/// The `user` member carries the author; we read only its `login`.
+#[derive(Debug, Deserialize)]
+struct RawComment {
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    user: Option<RawUser>,
+}
+
+/// Minimal GitHub user shape (only the login is read).
+#[derive(Debug, Deserialize)]
+struct RawUser {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// Parse the GitHub issue-comments JSON array into [`IssueComment`] rows. Pure (no
+/// I/O) so it is unit-testable against a fixture without a network call or a token.
+pub fn parse_issue_comments(json: &str) -> anyhow::Result<Vec<IssueComment>> {
+    let raw: Vec<RawComment> =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_issue_comments: {e}"))?;
+    Ok(raw
+        .into_iter()
+        .map(|c| IssueComment {
+            author: c.user.and_then(|u| u.login).unwrap_or_default(),
+            body: c.body.unwrap_or_default(),
+            created_at: c.created_at.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Fetch the COMMENTS on ONE issue (`owner/repo#number`) via the GitHub REST API,
+/// returning them oldest-first (GitHub's default order). Used by the UoW work-item
+/// modal. `repo` must be `owner/name`.
+///
+/// Graceful: this is the network primitive; the HTTP-error case bubbles up so the
+/// caller can decide. The token-less / error → empty-list degradation is applied at
+/// the endpoint layer (mirroring the list path), so this stays a thin, honest read.
+pub async fn get_issue_comments(
+    repo: &str,
+    number: u64,
+    token: &str,
+) -> anyhow::Result<Vec<IssueComment>> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{number}/comments?per_page=100",
+        coord.owner, coord.repo
+    );
+    let resp = transport.get(&url).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub get issue #{number} comments: HTTP {}", resp.status);
+    }
+    parse_issue_comments(&resp.body)
+}
+
+/// Parse the GitHub assignees JSON array into a flat list of login strings (the users
+/// who can be assigned to / mentioned on issues in the repo). Pure (no I/O).
+pub fn parse_assignees(json: &str) -> anyhow::Result<Vec<String>> {
+    let raw: Vec<RawUser> =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_assignees: {e}"))?;
+    Ok(raw.into_iter().filter_map(|u| u.login).collect())
+}
+
+/// Fetch the ASSIGNABLE users for `owner/repo` via the GitHub REST API, returning
+/// their logins. These are the users who can be assigned to issues — the practical
+/// @-mention set for the comment box. `repo` must be `owner/name`.
+pub async fn get_assignees(repo: &str, token: &str) -> anyhow::Result<Vec<String>> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/assignees?per_page=100",
+        coord.owner, coord.repo
+    );
+    let resp = transport.get(&url).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub get assignees: HTTP {}", resp.status);
+    }
+    parse_assignees(&resp.body)
+}
+
 /// Build a `CanonicalStory` from an adopted GitHub issue. The canonical id is
 /// namespaced by repo (`<owner>/<repo>#<number>`) so adopting issue #20 from two
 /// different repos produces two distinct spine rows instead of colliding on the
@@ -325,6 +424,51 @@ mod tests {
         assert_eq!(s.body, "");
         let pr = r#"{"number":1,"title":"x","html_url":"u","pull_request":{}}"#;
         assert!(parse_single_issue(pr).is_err());
+    }
+
+    #[test]
+    fn parse_issue_comments_maps_author_body_and_date() {
+        let json = r#"[
+            {
+                "body": "First comment.",
+                "created_at": "2026-06-21T12:00:00Z",
+                "user": { "login": "octocat" }
+            },
+            {
+                "created_at": "2026-06-21T13:00:00Z"
+            }
+        ]"#;
+        let comments = parse_issue_comments(json).expect("parse");
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].author, "octocat");
+        assert_eq!(comments[0].body, "First comment.");
+        assert_eq!(comments[0].created_at, "2026-06-21T12:00:00Z");
+        // Missing user/body deserialize to empty strings, never a panic.
+        assert_eq!(comments[1].author, "");
+        assert_eq!(comments[1].body, "");
+        assert_eq!(comments[1].created_at, "2026-06-21T13:00:00Z");
+    }
+
+    #[test]
+    fn parse_issue_comments_rejects_non_array_json() {
+        assert!(parse_issue_comments("{\"message\":\"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn parse_assignees_flattens_to_logins() {
+        let json = r#"[
+            { "login": "octocat", "id": 1 },
+            { "login": "hubot", "id": 2 },
+            { "id": 3 }
+        ]"#;
+        let users = parse_assignees(json).expect("parse");
+        // The login-less row is dropped (no handle to mention).
+        assert_eq!(users, vec!["octocat", "hubot"]);
+    }
+
+    #[test]
+    fn parse_assignees_rejects_non_array_json() {
+        assert!(parse_assignees("{\"message\":\"Not Found\"}").is_err());
     }
 
     #[test]

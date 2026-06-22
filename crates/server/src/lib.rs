@@ -347,6 +347,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/pull", post(workitems_pull))
         .route("/api/workitems/refresh", post(workitems_refresh))
         .route("/api/workitems/comment", post(workitems_comment))
+        .route("/api/workitems/comments", post(workitems_comments))
+        .route("/api/workitems/assignees", post(workitems_assignees))
         .route("/api/uows", get(uows_list))
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         .route("/api/uow", get(uow_list))
@@ -4285,6 +4287,60 @@ async fn workitems_comment(
     Ok(Json(serde_json::json!({ "ok": true, "url": url })))
 }
 
+/// `POST /api/workitems/comments` body `{ work_item_id }` — read the COMMENTS on the
+/// source issue (GitHub), returning `{ comments: IssueComment[] }` oldest-first.
+///
+/// Degrades gracefully (mirroring the pull path): with no token, or a malformed id, or
+/// a fetch failure, returns an EMPTY comment list (never an error) so the UoW modal can
+/// render "No comments." instead of breaking.
+#[derive(serde::Deserialize)]
+struct WorkItemCommentsReq {
+    work_item_id: String,
+}
+
+async fn workitems_comments(
+    State(_state): State<AppState>,
+    Json(req): Json<WorkItemCommentsReq>,
+) -> Json<serde_json::Value> {
+    let Some(token) = github_token() else {
+        return Json(serde_json::json!({ "comments": [] }));
+    };
+    let Ok((repo, number)) = parse_github_work_item_id(&req.work_item_id) else {
+        return Json(serde_json::json!({ "comments": [] }));
+    };
+    match crate::github_issues::get_issue_comments(&repo, number, &token).await {
+        Ok(comments) => Json(serde_json::json!({ "comments": comments })),
+        Err(_) => Json(serde_json::json!({ "comments": [] })),
+    }
+}
+
+/// `POST /api/workitems/assignees` body `{ work_item_id }` — read the ASSIGNABLE users
+/// for the work item's repo (the practical @-mention set), returning `{ users: [login] }`.
+///
+/// Degrades gracefully: with no token, or a malformed id, or a fetch failure, returns an
+/// EMPTY user list (never an error) so the comment box's @-autocomplete simply shows no
+/// suggestions instead of breaking.
+#[derive(serde::Deserialize)]
+struct WorkItemAssigneesReq {
+    work_item_id: String,
+}
+
+async fn workitems_assignees(
+    State(_state): State<AppState>,
+    Json(req): Json<WorkItemAssigneesReq>,
+) -> Json<serde_json::Value> {
+    let Some(token) = github_token() else {
+        return Json(serde_json::json!({ "users": [] }));
+    };
+    let Ok((repo, _number)) = parse_github_work_item_id(&req.work_item_id) else {
+        return Json(serde_json::json!({ "users": [] }));
+    };
+    match crate::github_issues::get_assignees(&repo, &token).await {
+        Ok(users) => Json(serde_json::json!({ "users": users })),
+        Err(_) => Json(serde_json::json!({ "users": [] })),
+    }
+}
+
 /// Parse a GitHub work-item id (`github:OWNER/REPO#NUMBER`) into `(repo, number)`.
 /// Errors when the provider is not `github` or the shape is malformed.
 fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
@@ -6148,6 +6204,52 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["items"].as_array().unwrap().len(), 0);
         assert!(json["message"].is_string());
+    }
+
+    /// POST /api/workitems/comments degrades gracefully with no token: it returns an
+    /// empty comment list (never an error) so the modal renders "No comments."
+    #[tokio::test]
+    async fn workitems_comments_no_token_returns_empty() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/comments")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["comments"].as_array().unwrap().len(), 0);
+    }
+
+    /// POST /api/workitems/assignees degrades gracefully with no token: it returns an
+    /// empty user list so the @-autocomplete simply shows no suggestions.
+    #[tokio::test]
+    async fn workitems_assignees_no_token_returns_empty() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let body = serde_json::json!({ "work_item_id": "github:o/r#20" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/assignees")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["users"].as_array().unwrap().len(), 0);
     }
 
     /// POST /api/uow/from-workitem creates a UoW on first call and DEDUPES on the
