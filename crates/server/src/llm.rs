@@ -169,6 +169,66 @@ pub fn kill_inflight_claude() {
     }
 }
 
+/// The minimal completion seam the audit depends on.
+///
+/// The audit pipeline ([`crate::ai_audit`]) used to take a concrete `&Llm` everywhere.
+/// That made the AI-failure path (every pass errored) impossible to exercise in a unit
+/// test without a live model, so the load-bearing "surface that the AI review was skipped,
+/// never a silent clean" behavior was untested. This trait is the seam: the audit holds a
+/// `&dyn Completer` and a test can substitute a stub that always errors.
+///
+/// OBJECT-SAFE by construction (so the audit can pass `&dyn Completer` down through ~10
+/// functions without monomorphizing each one): the streaming method takes the delta
+/// callback as `&mut (dyn FnMut(&str) + Send)` rather than a generic `F: FnMut`, which is
+/// what keeps the trait dyn-compatible. The two completion methods mirror [`Llm::complete`]
+/// and [`Llm::complete_streaming`] exactly so the production type is a transparent
+/// implementor (see `impl Completer for Llm`).
+///
+/// `as_any` is the escape hatch for the ONE place that needs concrete `Llm` capability:
+/// the Message-Batches path ([`Llm::submit_batch`] et al.) is API-key-gated and is not part
+/// of this minimal seam, so `audit_repo`'s batch branch downcasts back to `&Llm`. In
+/// production the value is always a real `Llm`, so the downcast always succeeds and the
+/// behavior is unchanged; a non-`Llm` stub (tests) drives only the non-batch paths.
+#[async_trait::async_trait]
+pub trait Completer: Send + Sync {
+    /// Run a completion. Mirrors [`Llm::complete`].
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse>;
+
+    /// Run a completion, streaming text deltas to `on_delta`. Mirrors
+    /// [`Llm::complete_streaming`]; the callback is a `&mut dyn` so the trait stays
+    /// object-safe.
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse>;
+
+    /// Downcast hook for the concrete-only batch path. See the trait doc.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+#[async_trait::async_trait]
+impl Completer for Llm {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        // Delegate to the inherent method — same behavior, no wrapping.
+        Llm::complete(self, req).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        // The inherent `complete_streaming` already takes `&mut (dyn FnMut(&str) + Send)`,
+        // so this is a straight pass-through.
+        Llm::complete_streaming(self, req, on_delta).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// One completion request.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {

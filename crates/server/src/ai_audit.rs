@@ -22,7 +22,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::llm::{Llm, LlmRequest};
+use crate::llm::{Completer, Llm, LlmRequest};
 use crate::onboard::{Finding, ProposedRule};
 
 /// Aggregated REAL usage across every LLM call in one audit — all chunk×rule passes, the
@@ -592,7 +592,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
 pub async fn verify_findings(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     findings: Vec<Finding>,
     calibration_model: Option<&str>,
@@ -839,7 +839,7 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// chunk. The CLI backend ignores this (no-op). Pass `None` to disable caching (default).
 #[allow(clippy::too_many_arguments)]
 async fn audit_pass(
-    llm: &Llm,
+    llm: &dyn Completer,
     audit_model: Option<&str>,
     prompt: String,
     cache_prefix_len: Option<usize>,
@@ -1038,7 +1038,7 @@ impl ScanMode {
 /// under N independently-invented names across N language groups.
 #[allow(clippy::too_many_arguments)]
 async fn run_passes(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -1565,7 +1565,7 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, last_err)`.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_passes(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
@@ -1759,7 +1759,7 @@ async fn run_routed_passes(
 /// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
@@ -1847,8 +1847,19 @@ pub async fn audit_repo(
         } else {
             selected.chunks(batch_size.max(1)).collect()
         };
+        // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
+        // are not part of the minimal `Completer` seam), so recover the concrete `&Llm` via
+        // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
+        // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
+        // can only drive the non-batch real-time path; batch mode is not reachable for it.
+        let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
+            anyhow::anyhow!(
+                "batch mode requires the concrete Llm client (the Message-Batches API is not \
+                 part of the Completer seam); use parallel/sequential mode with a custom completer"
+            )
+        })?;
         run_passes_batch(
-            llm,
+            llm_concrete,
             repo,
             &repo_map,
             &adopted,
@@ -2411,7 +2422,7 @@ pub fn parse_threats(raw: &str) -> (String, Vec<Threat>) {
 /// live. Graceful: on any model failure the lens result carries the error, never panics.
 #[allow(clippy::too_many_arguments)]
 async fn run_prose_lens(
-    llm: &Llm,
+    llm: &dyn Completer,
     lens: DeepLens,
     repo: &str,
     repo_map: &str,
@@ -2500,7 +2511,7 @@ async fn run_prose_lens(
 /// provenance honest.
 #[allow(clippy::too_many_arguments)]
 async fn run_security_lens(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     files: &[(String, String)],
     repo_map: &str,
@@ -2550,7 +2561,7 @@ async fn run_security_lens(
 /// differs. Single-batch (free-form security read), so there is no rule-batch dimension.
 #[allow(clippy::too_many_arguments)]
 async fn run_security_passes(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -2667,7 +2678,7 @@ async fn run_security_passes(
 /// Pass `true` (the flag default) to run all three lenses as before.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_deep_tier(
-    llm: &Llm,
+    llm: &dyn Completer,
     repo: &str,
     files: &[(String, String)],
     audit_model: Option<&str>,
@@ -3984,5 +3995,190 @@ mod tests {
         // Both remain advisory.
         assert!(security.advisory);
         assert!(threat.advisory);
+    }
+
+    // ── Completer seam: AI-failure guard (#audit-llm-seam-guard) ──────────────────────
+    //
+    // These tests exercise the load-bearing behavior that was previously untestable
+    // without a live model: when the LLM is UNAVAILABLE in an AI-review ("both") scan,
+    // every audit pass errors, and `audit_repo` must SURFACE that the AI review was
+    // skipped (return `Err`) — NEVER a silent clean Ok([]) — so the caller
+    // (`onboard::audit_repos`) records "AI audit skipped" while the deterministic floor
+    // findings still return independently. The `Completer` trait is the seam that lets a
+    // test substitute a model client without any token, env mutation, or network.
+
+    use crate::llm::{Completer, LlmRequest, LlmResponse};
+
+    /// A `Completer` whose every call fails — simulates the LLM being unavailable
+    /// (CLI not installed, API key invalid, network down). Both `complete` and
+    /// `complete_streaming` return `Err`, so every audit pass that touches it fails.
+    struct FailingCompleter;
+
+    #[async_trait::async_trait]
+    impl Completer for FailingCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            anyhow::bail!("simulated LLM unavailable (complete)")
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            anyhow::bail!("simulated LLM unavailable (complete_streaming)")
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// A `Completer` that returns canned text — proves the seam works in the OTHER
+    /// direction (a stub can feed the audit findings without a live model). The text is
+    /// the audit's expected JSON shape so `parse_ai_findings` yields a finding.
+    struct StubCompleter {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Completer for StubCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            Ok(LlmResponse {
+                text: self.text.clone(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            on_delta(&self.text);
+            self.complete(LlmRequest::new("")).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// GUARD: in an AI-review scan, when the LLM is unavailable and EVERY pass fails,
+    /// `audit_repo` SURFACES the failure (returns `Err`) instead of silently reporting a
+    /// clean Ok([]). This is the "never a silent clean" contract from `audit_repo`'s
+    /// `ok_passes == 0` branch. `feedback: None` drives the non-streaming `complete` path;
+    /// the streaming path is covered by `audit_repo_surfaces_ai_failure_streaming`.
+    #[tokio::test]
+    async fn audit_repo_surfaces_ai_failure_not_silent_clean() {
+        let llm = FailingCompleter;
+        // One source file + one semantic rule so there is real AI work to attempt
+        // (an empty file set short-circuits to Ok before any pass runs).
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let res = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            None,                  // model
+            None,                  // calibration model
+            ScanMode::Parallel,    // real-time path (the "both" AI-review path)
+            false,                 // thorough
+            None,                  // feedback -> non-streaming complete()
+            None,                  // job
+            None,                  // meter
+            None,                  // map_files
+        )
+        .await;
+        // (1) The AI failure is SURFACED, not swallowed into a clean result.
+        let err = res.expect_err("all passes failed -> audit_repo must return Err, never Ok([])");
+        // (2) It does not fabricate success; the error names the simulated unavailability.
+        assert!(
+            err.to_string().contains("simulated LLM unavailable"),
+            "surfaced error should carry the underlying LLM failure, got: {err}"
+        );
+    }
+
+    /// Same guard for the STREAMING path: an AI-review scan with a transcript store uses
+    /// `complete_streaming`, which also fails — `audit_repo` must still surface `Err`.
+    #[tokio::test]
+    async fn audit_repo_surfaces_ai_failure_streaming() {
+        let llm = FailingCompleter;
+        let store = crate::transcript::TranscriptStore::default();
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let res = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            Some((&store, "job-1")), // feedback present -> streaming path
+            None,
+            None,
+            None,
+        )
+        .await;
+        let err = res.expect_err("streaming all-fail must surface Err, never a silent clean");
+        assert!(
+            err.to_string().contains("simulated LLM unavailable"),
+            "streaming-path error should carry the underlying failure, got: {err}"
+        );
+    }
+
+    /// HAPPY PATH (seam works both ways): a `StubCompleter` returning a canned finding lets
+    /// `audit_repo` complete WITHOUT a live model and yields the parsed finding — proving
+    /// the trait substitution is faithful, not just an error sink.
+    #[tokio::test]
+    async fn audit_repo_with_stub_completer_returns_findings() {
+        // Minimal audit-JSON the parser recognizes: one finding under the adopted rule.
+        let canned = r#"{"findings":[{"rule":"ARCH-NO-DIRECT-DB-1","severity":"high","path":"src/lib.rs","code":"db.execute(query)","title":"direct DB call","detail":"controller calls the database directly"}]}"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { db.execute(query); }\n".to_string(),
+        )];
+        let selected = vec![(
+            "ARCH-NO-DIRECT-DB-1".to_string(),
+            "Controllers must not call the database directly.".to_string(),
+        )];
+        let (findings, _proposed) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors -> audit_repo returns Ok");
+        // The stub's canned finding survived parse + calibration (also stub-served).
+        assert!(
+            findings.iter().any(|f| f.rule_id == "ARCH-NO-DIRECT-DB-1"),
+            "stub-served finding must survive the audit pipeline: {findings:?}"
+        );
     }
 }
