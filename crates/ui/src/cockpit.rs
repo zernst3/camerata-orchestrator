@@ -324,6 +324,17 @@ fn custom_columns() -> Vec<ColumnDef<CustomRuleView>> {
             CellValue::Text(c.body.clone())
         })
         .initial_width(460.0),
+        // Type: custom rules are free-text directives with no formal enforcement
+        // classification. They are prose or structured in practice (prose when
+        // written as a principle; structured when they express a concrete contract),
+        // but cannot be mechanical or architectural without a dev task to build a
+        // checker. We show "prose / structured" honestly rather than fabricating a
+        // single modality. No per-cell tooltip is wired here because the value is
+        // constant across all rows; see the legend below the table for definitions.
+        ColumnDef::new(ColumnId("enf_type"), "Type", |_c: &CustomRuleView| {
+            CellValue::Text("prose / structured".to_string())
+        })
+        .initial_width(140.0),
     ]
 }
 
@@ -371,6 +382,22 @@ fn CustomRulesTable(
                 });
             },
             "Delete selected custom rules"
+        }
+        // Type modality legend: custom rules are always "prose / structured" (free-text
+        // directives). The four modalities are defined here so the architect understands
+        // what they mean without hovering each row (all rows show the same value).
+        details { class: "modality-legend",
+            summary { class: "modality-legend-summary", "Type modality key" }
+            dl { class: "modality-legend-list",
+                dt { "Prose" }
+                dd { "A principle or idiom a human judges \u{2014} a matter of degree (rendered to AGENTS.md)." }
+                dt { "Structured" }
+                dd { "A concrete design contract with a clear conform/violate answer; human-verified, not lint-able (CONVENTIONS.md)." }
+                dt { "Mechanical" }
+                dd { "An existing off-the-shelf linter decides it (clippy, eslint, ruff, golangci-lint, \u{2026})." }
+                dt { "Architectural" }
+                dd { "Deterministic, but needs a bespoke custom checker \u{2014} no off-the-shelf linter expresses it." }
+            }
         }
     }
 }
@@ -705,6 +732,30 @@ impl AppliedRuleRow {
     }
 }
 
+/// Map an enforcement modality string to its badge variant (label + color).
+/// Shared by applied_rule_columns, corpus_columns, and the RowCellRenderer tooltips
+/// so every table uses the same visual language.
+fn enforcement_badges() -> BadgeVariantMap {
+    BadgeVariantMap::new()
+        .with("prose",        BadgeVariant::new("Prose",        "gray"))
+        .with("structured",   BadgeVariant::new("Structured",   "blue"))
+        .with("mechanical",   BadgeVariant::new("Mechanical",   "green"))
+        .with("architectural",BadgeVariant::new("Architectural","yellow"))
+        .with_fallback(BadgeVariant::new("\u{2014}", "gray"))
+}
+
+/// Return the modality definition tooltip text for a given enforcement value.
+/// Used both in modal `title` attributes and in the per-cell RowCellRenderer tooltips.
+fn enforcement_tooltip(enforcement: &str) -> &'static str {
+    match enforcement {
+        "prose"        => "A principle or idiom a human judges \u{2014} a matter of degree (rendered to AGENTS.md).",
+        "structured"   => "A concrete design contract with a clear conform/violate answer; human-verified, not lint-able (CONVENTIONS.md).",
+        "mechanical"   => "An existing off-the-shelf linter decides it (clippy, eslint, ruff, golangci-lint, \u{2026}).",
+        "architectural"=> "Deterministic, but needs a bespoke custom checker \u{2014} no off-the-shelf linter expresses it.",
+        _              => "The enforcement modality for this rule is not yet classified.",
+    }
+}
+
 fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
     let scope_badges = BadgeVariantMap::new()
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
@@ -765,6 +816,22 @@ fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
         })
         .sortable()
         .initial_width(180.0),
+        // Type (enforcement modality): prose / structured / mechanical / architectural.
+        // Sourced from the corpus join; falls back to empty (shown as "—" by the badge
+        // fallback) when the rule id has no corpus entry (custom / unknown ids).
+        // The RowCellRenderer in ProjectRulesTable adds a `title` tooltip explaining
+        // the modality definition; see `enforcement_tooltip()`.
+        ColumnDef::new(ColumnId("enf_type"), "Type", |r: &AppliedRuleRow| {
+            CellValue::Text(
+                r.corpus
+                    .as_ref()
+                    .map(|c| c.enforcement.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(enforcement_badges()))
+        .initial_width(130.0),
     ]
 }
 
@@ -823,6 +890,15 @@ fn corpus_columns() -> Vec<ColumnDef<ProposedRuleView>> {
         )
         .filter(FilterKind::Text)
         .initial_width(220.0),
+        // Type (enforcement modality): prose / structured / mechanical / architectural.
+        // The RowCellRenderer in AllRulesTable adds a `title` tooltip explaining the
+        // modality; see `enforcement_tooltip()`.
+        ColumnDef::new(ColumnId("enf_type"), "Type", |r: &ProposedRuleView| {
+            CellValue::Text(r.enforcement.clone())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(enforcement_badges()))
+        .initial_width(130.0),
     ]
 }
 
@@ -982,6 +1058,25 @@ fn ProjectRulesTable(
     });
 
     let rf = repo_filter();
+
+    // Row-cell renderer for the Type (enforcement modality) column: adds a native
+    // browser `title` tooltip with the modality definition. The renderer captures
+    // no signals (only a free function), so it satisfies Send + Sync.
+    let applied_type_renderers = {
+        let mut m: std::collections::HashMap<ColumnId, RowCellRenderer<AppliedRuleRow>> =
+            std::collections::HashMap::new();
+        m.insert(
+            ColumnId("enf_type"),
+            std::sync::Arc::new(move |r: &AppliedRuleRow, _val: &CellValue| {
+                let enf = r.corpus.as_ref().map(|c| c.enforcement.as_str()).unwrap_or("");
+                let tip = enforcement_tooltip(enf);
+                let label = if enf.is_empty() { "\u{2014}" } else { enf };
+                rsx! { span { title: "{tip}", "{label}" } }
+            }) as RowCellRenderer<AppliedRuleRow>,
+        );
+        RowCellRenderers::new(m)
+    };
+
     rsx! {
         // Repo filter bar — mirrors the onboarding "Repo ruleset:" selector.
         div { class: "repo-select",
@@ -1006,6 +1101,7 @@ fn ProjectRulesTable(
             filter_enabled: true,
             selection_enabled: true,
             sticky_header: true,
+            row_cell_renderers: applied_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(row) = id_map_click.get(&rid) {
                     if let Some(corpus_rule) = &row.corpus {
@@ -1229,6 +1325,23 @@ fn AllRulesTable(
         }
     });
 
+    // Row-cell renderer for the Type (enforcement modality) column in the corpus
+    // (all-rules) table: adds a native browser `title` tooltip with the definition.
+    let corpus_type_renderers = {
+        let mut m: std::collections::HashMap<ColumnId, RowCellRenderer<ProposedRuleView>> =
+            std::collections::HashMap::new();
+        m.insert(
+            ColumnId("enf_type"),
+            std::sync::Arc::new(move |r: &ProposedRuleView, _val: &CellValue| {
+                let enf = r.enforcement.as_str();
+                let tip = enforcement_tooltip(enf);
+                let label = if enf.is_empty() { "\u{2014}" } else { enf };
+                rsx! { span { title: "{tip}", "{label}" } }
+            }) as RowCellRenderer<ProposedRuleView>,
+        );
+        RowCellRenderers::new(m)
+    };
+
     rsx! {
         // The chorale table: "Applied to" column shows the repos (comma-joined text from
         // the accessor). Row click opens the rule detail modal.
@@ -1237,6 +1350,7 @@ fn AllRulesTable(
             sort_enabled: true,
             filter_enabled: true,
             sticky_header: true,
+            row_cell_renderers: corpus_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
                     detail_rule.set(Some(r.clone()));
@@ -1360,7 +1474,11 @@ fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Ele
                     span { class: "rule-modal-tag", "scope \u{00b7} {r.scope}" }
                     span { class: "rule-modal-tag", "kind \u{00b7} {r.kind}" }
                     if !r.enforcement.is_empty() {
-                        span { class: "rule-modal-tag", "enforcement \u{00b7} {r.enforcement}" }
+                        span {
+                            class: "rule-modal-tag",
+                            title: "{enforcement_tooltip(&r.enforcement)}",
+                            "enforcement \u{00b7} {r.enforcement}"
+                        }
                     }
                 }
                 // Sources: the cited corpus source(s) backing this rule's grounding, shown
@@ -6642,7 +6760,11 @@ fn RuleDetailModal() -> Element {
                     span { class: "rule-modal-tag", "scope · {r.scope}" }
                     span { class: "rule-modal-tag", "kind · {r.kind}" }
                     if !r.enforcement.is_empty() {
-                        span { class: "rule-modal-tag", "enforcement · {r.enforcement}" }
+                        span {
+                            class: "rule-modal-tag",
+                            title: "{enforcement_tooltip(&r.enforcement)}",
+                            "enforcement · {r.enforcement}"
+                        }
                     }
                 }
                 p { class: "rule-modal-placement", "Enforced via: {r.placement}" }
