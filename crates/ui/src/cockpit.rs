@@ -3636,6 +3636,9 @@ fn IssueManagementPanel(
     let mut pulling = use_signal(|| false);
     // The work item whose detail is open (by stable id), if any.
     let mut detail_id = use_signal(|| Option::<String>::None);
+    // Bumped on every pull and used as the table's `key`, so the Chorale work-item table
+    // remounts with fresh rows (it initializes its rows once per mount via use_table).
+    let mut pull_seq = use_signal(|| 0u32);
 
     let conn = provider_res.read().clone().flatten();
     let proj = active_proj.read().clone().flatten();
@@ -3686,6 +3689,7 @@ fn IssueManagementPanel(
                             let pulled = pull_work_items().await.unwrap_or_default();
                             items.set(Some(pulled));
                             detail_id.set(None);
+                            pull_seq += 1;
                             pulling.set(false);
                         });
                     },
@@ -3704,11 +3708,9 @@ fn IssueManagementPanel(
                 },
                 Some(list) => rsx! {
                     WorkItemTable {
+                        key: "{pull_seq}",
                         items: list,
-                        uows: uows.clone(),
                         on_open: EventHandler::new(move |id: String| detail_id.set(Some(id))),
-                        uows_refresh,
-                        sel,
                     }
                 },
             }
@@ -3727,62 +3729,68 @@ fn IssueManagementPanel(
     }
 }
 
-/// A provider-agnostic table of `WorkItem`s: columns Repo, #, Title, State, Labels.
-/// Clicking a row opens its detail (via `on_open`). Each row also offers create/open of a
-/// UoW directly (dedup-aware) so the user can act on a selected row without the detail view.
+/// Chorale column set for the work-item table: Repo, #, Title, State (badge), Labels.
+fn work_item_columns() -> Vec<ColumnDef<WorkItem>> {
+    let state_badges = BadgeVariantMap::new()
+        .with("open", BadgeVariant::new("OPEN", "green"))
+        .with("closed", BadgeVariant::new("CLOSED", "gray"))
+        .with_fallback(BadgeVariant::new("Unknown", "gray"));
+    vec![
+        ColumnDef::new(ColumnId("repo"), "Repo", |it: &WorkItem| {
+            CellValue::Text(it.repo.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(180.0),
+        ColumnDef::new(ColumnId("num"), "#", |it: &WorkItem| {
+            CellValue::Text(format!("#{}", it.number))
+        })
+        .sortable()
+        .initial_width(80.0),
+        ColumnDef::new(ColumnId("title"), "Title", |it: &WorkItem| {
+            CellValue::Text(it.title.clone())
+        })
+        .sortable()
+        .filter(FilterKind::Text)
+        .initial_width(420.0),
+        ColumnDef::new(ColumnId("state"), "State", |it: &WorkItem| {
+            CellValue::Text(it.state.to_ascii_lowercase())
+        })
+        .sortable()
+        .render_kind(RenderKind::Badge(state_badges))
+        .initial_width(110.0),
+        ColumnDef::new(ColumnId("labels"), "Labels", |it: &WorkItem| {
+            CellValue::Text(labels_summary(&it.labels))
+        })
+        .filter(FilterKind::Text)
+        .initial_width(240.0),
+    ]
+}
+
+/// A provider-agnostic CHORALE table of `WorkItem`s: columns Repo, #, Title, State, Labels.
+/// Clicking a row opens its detail MODAL via `on_open` — the parent (IssueManagementPanel)
+/// hosts the modal, outside this table's subtree. Create/open-UoW lives in that modal, not
+/// per-row, so the table stays a clean read surface.
 #[component]
-fn WorkItemTable(
-    items: Vec<WorkItem>,
-    uows: Vec<UowListEntry>,
-    on_open: EventHandler<String>,
-    uows_refresh: Signal<u32>,
-    sel: Signal<GovDevSel>,
-) -> Element {
+fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element {
+    let rows: Vec<(RowId, WorkItem)> = use_hook({
+        let items = items.clone();
+        move || items.iter().map(|it| (RowId::new(), it.clone())).collect()
+    });
+    let id_map: std::collections::HashMap<RowId, String> =
+        rows.iter().map(|(r, it)| (*r, it.id.clone())).collect();
+    let handle = use_table(move || TableState::new(rows.clone(), work_item_columns()));
     rsx! {
-        table { class: "wi-table",
-            thead {
-                tr {
-                    th { class: "wi-col-repo", "Repo" }
-                    th { class: "wi-col-num", "#" }
-                    th { class: "wi-col-title", "Title" }
-                    th { class: "wi-col-state", "State" }
-                    th { class: "wi-col-labels", "Labels" }
-                    th { class: "wi-col-act", "" }
+        Table {
+            handle,
+            sort_enabled: true,
+            filter_enabled: true,
+            sticky_header: true,
+            on_row_click: Callback::new(move |rid: RowId| {
+                if let Some(id) = id_map.get(&rid) {
+                    on_open.call(id.clone());
                 }
-            }
-            tbody {
-                for it in items.iter() {
-                    {
-                        let item = it.clone();
-                        let id_open = item.id.clone();
-                        let (state_label, state_cls) = work_item_state_badge(&item.state);
-                        let labels = labels_summary(&item.labels);
-                        let existing = existing_uow_for(&uows, &item.id).cloned();
-                        rsx! {
-                            tr {
-                                class: "wi-row",
-                                onclick: move |_| on_open.call(id_open.clone()),
-                                td { class: "wi-col-repo", "{item.repo}" }
-                                td { class: "wi-col-num", "#{item.number}" }
-                                td { class: "wi-col-title", "{item.title}" }
-                                td { class: "wi-col-state",
-                                    span { class: "wi-state {state_cls}", "{state_label}" }
-                                }
-                                td { class: "wi-col-labels", "{labels}" }
-                                td { class: "wi-col-act",
-                                    CreateOrOpenUow {
-                                        item: item.clone(),
-                                        existing: existing.clone(),
-                                        uows_refresh,
-                                        sel,
-                                        compact: true,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            }),
         }
     }
 }
@@ -3800,28 +3808,37 @@ fn WorkItemDetail(
     let (state_label, state_cls) = work_item_state_badge(&item.state);
     let existing = existing_uow_for(&uows, &item.id).cloned();
     rsx! {
-        div { class: "wi-detail",
-            div { class: "wi-detail-head",
-                span { class: "wi-detail-repo", "{item.repo}" }
-                span { class: "wi-detail-num", "#{item.number}" }
-                span { class: "wi-state {state_cls}", "{state_label}" }
-                button {
-                    class: "wi-detail-close",
-                    onclick: move |_| on_close.call(()),
-                    "Close"
+        // Modal overlay (click backdrop to close); the inner box stops propagation so
+        // clicks inside don't dismiss. Same overlay/box pattern as the rule detail modal.
+        div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
+            div { class: "rule-modal wi-detail-modal", onclick: move |e| e.stop_propagation(),
+                div { class: "wi-detail-head",
+                    span { class: "wi-detail-repo", "{item.repo}" }
+                    span { class: "wi-detail-num", "#{item.number}" }
+                    span { class: "wi-state {state_cls}", "{state_label}" }
+                    button {
+                        class: "rule-modal-close",
+                        onclick: move |_| on_close.call(()),
+                        "\u{2715}"
+                    }
                 }
-            }
-            p { class: "wi-detail-title", "{item.title}" }
-            if item.body.is_empty() {
-                p { class: "wi-detail-body empty", "(no description)" }
-            } else {
-                p { class: "wi-detail-body", "{item.body}" }
-            }
-            if !item.url.is_empty() {
-                a { class: "wi-detail-link", href: "{item.url}", target: "_blank", "Open issue ↗" }
-            }
-            div { class: "wi-detail-actions",
-                CreateOrOpenUow { item: item.clone(), existing, uows_refresh, sel, compact: false }
+                p { class: "wi-detail-title", "{item.title}" }
+                if item.body.is_empty() {
+                    p { class: "wi-detail-body empty", "(no description)" }
+                } else {
+                    // GitHub issue bodies are Markdown — render to HTML (same renderer as
+                    // the chat bubble and docs view), not raw text.
+                    div {
+                        class: "wi-detail-body md chat-turn-text",
+                        dangerous_inner_html: crate::md::md_to_html(&item.body),
+                    }
+                }
+                if !item.url.is_empty() {
+                    a { class: "wi-detail-link", href: "{item.url}", target: "_blank", "Open issue \u{2197}" }
+                }
+                div { class: "wi-detail-actions",
+                    CreateOrOpenUow { item: item.clone(), existing, uows_refresh, sel, compact: false }
+                }
             }
         }
     }
