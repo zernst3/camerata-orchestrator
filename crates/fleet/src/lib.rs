@@ -25,6 +25,7 @@ use camerata_rules::role_from_corpus;
 pub use camerata_rules::DEFAULT_CORPUS_PATH;
 
 pub mod gate_probe;
+pub mod orchestrator;
 pub mod tier;
 
 // ─── Corpus / domain constants ────────────────────────────────────────────────
@@ -508,12 +509,34 @@ pub async fn build_from_plan_with_tier_map(
         roles.push(role);
     }
 
+    // ── Identify the LEAD/orchestrator stage (the first strongest task) ──────
+    // Only this stage gets the governed `delegate` tool (orchestrator mode). All
+    // other stages spawn normally — no delegate env, no delegate in --allowedTools
+    // — which is the depth-1 guarantee. `None` => no delegation this run.
+    let lead_idx = orchestrator::lead_stage_index(&plan.tasks);
+
     // ── Per-session governed drivers ─────────────────────────────────────────
-    let mut spawns = Vec::with_capacity(total);
+    // The lead's session carries an orchestrator mcp-config (delegate ON, tier
+    // map + gateway bin + worktree + depth=0); every other session is ordinary.
+    let mut mcp_config_paths: Vec<String> = Vec::with_capacity(total);
+    let mut is_orchestrator: Vec<bool> = Vec::with_capacity(total);
     for (i, role) in roles.iter().enumerate() {
         let session_dir = root.join(format!("session-{}", i + 1));
-        let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
-        spawns.push(spawn);
+        if Some(i) == lead_idx {
+            let orch = orchestrator::prepare_orchestrator_session(
+                &session_dir,
+                gateway_bin,
+                role,
+                &worktree,
+                tier_map,
+            )?;
+            mcp_config_paths.push(orch.mcp_config.display().to_string());
+            is_orchestrator.push(true);
+        } else {
+            let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
+            mcp_config_paths.push(spawn.mcp_config.display().to_string());
+            is_orchestrator.push(false);
+        }
     }
 
     // Resolve the per-stage model id from the tier map BEFORE moving into the
@@ -524,15 +547,13 @@ pub async fn build_from_plan_with_tier_map(
         .map(|task| tier_map.model_for_task(task).to_string())
         .collect();
 
-    let drivers: Vec<_> = spawns
-        .iter()
-        .enumerate()
-        .map(|(i, spawn)| {
-            spawn
-                .driver
-                .clone()
+    let drivers: Vec<camerata_agent::ClaudeCliDriver> = (0..total)
+        .map(|i| {
+            camerata_agent::ClaudeCliDriver::new(mcp_config_paths[i].clone())
                 .with_worktree(&worktree)
                 .with_model(&per_stage_models[i])
+                // Only the lead gets the delegate tool in --allowedTools.
+                .as_orchestrator(is_orchestrator[i])
         })
         .collect();
 
@@ -545,7 +566,11 @@ pub async fn build_from_plan_with_tier_map(
             role: roles[i].name.clone(),
             kind: task.kind.label().to_string(),
         });
-        let stage_task = stage_task_for(task, &lib_path_display, i == 0);
+        let mut stage_task = stage_task_for(task, &lib_path_display, i == 0);
+        // Tell the lead it can delegate (and how escalation works).
+        if Some(i) == lead_idx {
+            stage_task.push_str(orchestrator::orchestrator_prompt_suffix());
+        }
         stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
     }
 

@@ -24,7 +24,7 @@ use thiserror::Error;
 pub mod session;
 pub use session::{
     prepare_session, render_mcp_config, render_rules_file, SessionError, SessionSpawn,
-    MCP_SERVER_KEY, RULES_FILE_ENV,
+    MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV,
 };
 
 pub mod generic;
@@ -54,24 +54,47 @@ pub enum AgentError {
 /// `camerata` with the single `gated_write` tool.
 pub const GATED_WRITE_TOOL: &str = "mcp__camerata__gated_write";
 
+/// The fully-qualified MCP tool name for governed delegation. Same `camerata`
+/// server key, the `delegate` tool. It is registered on the gateway ONLY when the
+/// gateway boots in orchestrator mode; it is added to `--allowedTools` ONLY for
+/// the orchestrator role. Delegate children NEVER get it (depth-1 guarantee).
+pub const DELEGATE_TOOL: &str = "mcp__camerata__delegate";
+
 /// Read-only built-ins an agent always needs (they cannot mutate the worktree,
 /// so they are safe to allow alongside the governed write path).
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "LS"];
 
-/// Derive the `--allowedTools` list for a role.
+/// Derive the `--allowedTools` list for a role (NON-orchestrator agents).
 ///
 /// Every role gets the read-only built-ins plus the governed MCP write tool —
-/// the agent's ONLY mutation path. This is pure so it is unit-testable without
-/// spawning a process. Future roles can narrow/extend this from
-/// `role.rule_subset`; today the role name is recorded for tracing and all
-/// roles share the same tool surface (writes are gated, not tool-gated).
+/// the agent's ONLY mutation path. The `delegate` tool is NEVER included here;
+/// this is the function every non-orchestrator agent (and every delegate child)
+/// uses, so those agents structurally cannot delegate. This is pure so it is
+/// unit-testable without spawning a process.
 pub fn allowed_tools_for_role(role: &Role) -> Vec<String> {
+    allowed_tools_for_role_with_mode(role, false)
+}
+
+/// Derive the `--allowedTools` list for a role, optionally in **orchestrator
+/// mode**.
+///
+/// When `orchestrator` is `true`, the governed `delegate` tool
+/// ([`DELEGATE_TOOL`]) is added on top of the read-only built-ins and the
+/// governed write tool. This is the ONLY place `delegate` is granted, and it is
+/// granted ONLY to the lead/orchestrator agent. Combined with the gateway only
+/// *registering* the tool in orchestrator mode, this gives the depth-1 guarantee:
+/// a spawned delegate child uses `orchestrator = false`, so it can never
+/// re-delegate.
+pub fn allowed_tools_for_role_with_mode(role: &Role, orchestrator: bool) -> Vec<String> {
     // The role's identity is load-bearing for provenance even though the tool
     // surface is currently uniform; reference it so the mapping is obviously
     // role-derived and a future per-role narrowing has an obvious seam.
     let _ = &role.name;
     let mut tools: Vec<String> = READONLY_BUILTINS.iter().map(|s| s.to_string()).collect();
     tools.push(GATED_WRITE_TOOL.to_string());
+    if orchestrator {
+        tools.push(DELEGATE_TOOL.to_string());
+    }
     tools
 }
 
@@ -103,6 +126,11 @@ pub struct ClaudeCliDriver {
     /// stopped at a governance escalation, once a human has authorized a directive — the
     /// directive is passed as the task and the agent picks up its prior context.
     pub resume_session_id: Option<String>,
+    /// Whether this agent runs in ORCHESTRATOR mode: it additionally gets the
+    /// governed [`DELEGATE_TOOL`] in `--allowedTools`. Only the lead/strongest
+    /// stage sets this; every other agent (and every delegate child) leaves it
+    /// `false`, so they cannot delegate. The default is `false`.
+    pub orchestrator: bool,
 }
 
 impl ClaudeCliDriver {
@@ -116,7 +144,16 @@ impl ClaudeCliDriver {
             worktree: None,
             model: None,
             resume_session_id: None,
+            orchestrator: false,
         }
+    }
+
+    /// Mark this driver as the orchestrator (the lead). Its `--allowedTools` will
+    /// include the governed [`DELEGATE_TOOL`]. Builder form. Use ONLY for the
+    /// lead/strongest stage; delegate children must never set this.
+    pub fn as_orchestrator(mut self, orchestrator: bool) -> Self {
+        self.orchestrator = orchestrator;
+        self
     }
 
     /// Bind this driver to `worktree`: the agent runs with that directory as
@@ -151,9 +188,11 @@ impl ClaudeCliDriver {
             "--strict-mcp-config".to_string(),
             "--mcp-config".to_string(),
             self.mcp_config_path.clone(),
-            // Per-role allowedTools: the governed write tool + read-only builtins.
+            // Per-role allowedTools: the governed write tool + read-only builtins,
+            // PLUS the governed `delegate` tool when (and only when) this driver
+            // is the orchestrator. Delegate children leave `orchestrator = false`.
             "--allowedTools".to_string(),
-            allowed_tools_for_role(role).join(" "),
+            allowed_tools_for_role_with_mode(role, self.orchestrator).join(" "),
             "--disallowedTools".to_string(),
             self.disallowed_builtins.join(" "),
             "--dangerously-skip-permissions".to_string(),
@@ -243,6 +282,69 @@ mod tests {
         assert!(tools.iter().any(|t| t == "Read"));
         // The destructive built-ins must NOT appear in the allow list.
         assert!(!tools.iter().any(|t| t == "Write" || t == "Bash"));
+    }
+
+    #[test]
+    fn delegate_tool_is_absent_for_non_orchestrator_agents() {
+        // The default (non-orchestrator) tool surface must NOT include delegate:
+        // this is the depth-1 guarantee at the allowlist level.
+        let tools = allowed_tools_for_role(&role());
+        assert!(
+            !tools.iter().any(|t| t == DELEGATE_TOOL),
+            "delegate must never be in a non-orchestrator agent's allowlist"
+        );
+        // Belt: the explicit-mode false path agrees.
+        let tools_false = allowed_tools_for_role_with_mode(&role(), false);
+        assert!(!tools_false.iter().any(|t| t == DELEGATE_TOOL));
+    }
+
+    #[test]
+    fn delegate_tool_present_only_in_orchestrator_mode() {
+        let tools = allowed_tools_for_role_with_mode(&role(), true);
+        assert!(
+            tools.iter().any(|t| t == DELEGATE_TOOL),
+            "orchestrator must get the delegate tool"
+        );
+        // It still has the governed write tool and read-only built-ins.
+        assert!(tools.iter().any(|t| t == GATED_WRITE_TOOL));
+        assert!(tools.iter().any(|t| t == "Read"));
+    }
+
+    #[test]
+    fn build_args_includes_delegate_only_for_orchestrator_driver() {
+        let normal = ClaudeCliDriver::new("/tmp/mcp.json");
+        let normal_args = normal.build_args(&role(), "task");
+        let allowed = {
+            let i = normal_args
+                .iter()
+                .position(|a| a == "--allowedTools")
+                .unwrap();
+            normal_args[i + 1].clone()
+        };
+        assert!(
+            !allowed.split(' ').any(|t| t == DELEGATE_TOOL),
+            "non-orchestrator driver must not offer delegate"
+        );
+
+        let lead = ClaudeCliDriver::new("/tmp/mcp.json").as_orchestrator(true);
+        let lead_args = lead.build_args(&role(), "task");
+        let lead_allowed = {
+            let i = lead_args.iter().position(|a| a == "--allowedTools").unwrap();
+            lead_args[i + 1].clone()
+        };
+        assert!(
+            lead_allowed.split(' ').any(|t| t == DELEGATE_TOOL),
+            "orchestrator driver must offer delegate"
+        );
+        // Task stays disallowed for the orchestrator too — delegate is NOT Task.
+        let dis = {
+            let i = lead_args
+                .iter()
+                .position(|a| a == "--disallowedTools")
+                .unwrap();
+            lead_args[i + 1].clone()
+        };
+        assert!(dis.split(' ').any(|t| t == "Task"));
     }
 
     #[test]

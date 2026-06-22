@@ -704,6 +704,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-agent",
  "camerata-core",
  "camerata-rules",
  "regex",

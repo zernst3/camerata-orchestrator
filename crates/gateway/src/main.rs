@@ -44,6 +44,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod delegate;
+use delegate::OrchestratorConfig;
+
 /// Env var the orchestrator points at the per-session rules JSON file.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 
@@ -103,6 +106,14 @@ pub struct WriteArgs {
     pub path: String,
     /// File content.
     pub content: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct DelegateArgs {
+    /// A clear, well-scoped instruction for the delegate child to carry out.
+    pub subtask: String,
+    /// The tier to delegate to: `"fast"` or `"balanced"` (you are `strongest`).
+    pub tier: String,
 }
 
 /// Load the session's rule-subset from `CAMERATA_RULES_FILE` if set, else fall
@@ -167,6 +178,10 @@ pub struct Gateway {
     /// The worktree the agent is jailed to (via `CAMERATA_WORKTREE_ROOT`). When set,
     /// `gated_write` refuses any target outside it, in code, before any rule runs.
     jail_root: Option<Arc<std::path::PathBuf>>,
+    /// Orchestrator-mode config (`None` = the `delegate` tool is disabled). Set only
+    /// when the gateway is launched for the LEAD agent with the delegate env vars.
+    /// When `None`, `delegate` refuses; this is the per-process half of the gate.
+    orchestrator: Option<Arc<OrchestratorConfig>>,
 }
 
 impl Gateway {
@@ -183,6 +198,9 @@ impl Gateway {
             tool_router: Self::tool_router(),
             rule_subset: Arc::new(rule_subset),
             jail_root: load_jail_root().map(Arc::new),
+            // Orchestrator mode is opt-in via env and OFF by default, so every
+            // non-lead agent's gateway refuses `delegate`.
+            orchestrator: OrchestratorConfig::from_env().map(Arc::new),
         }
     }
 
@@ -260,6 +278,44 @@ impl Gateway {
             let _ = f.write_all(line.as_bytes());
         }
         decision
+    }
+
+    /// Governed delegation. ENABLED only in orchestrator mode (the lead agent's
+    /// gateway). Spawns a SINGLE gated `claude -p` child on the requested tier's
+    /// model — gated_write ONLY, `delegate` DISABLED, depth+1, same worktree —
+    /// runs the subtask synchronously, and returns the child's full output. A
+    /// child never calls "up": escalation is parent-driven (the orchestrator reads
+    /// the result and decides). This is the ONLY governed spawn path; the raw CLI
+    /// `Task` tool stays disallowed for every agent.
+    #[tool(
+        name = "delegate",
+        description = "Delegate a well-scoped subtask to a lower tier. Spawns ONE gated child agent on the chosen tier ('fast' or 'balanced'), runs it in the same worktree, and returns its full output. If the child returns text starting with 'INCOMPLETE:' the work was above its tier — do it yourself or re-delegate higher. You cannot be delegated to; you are the strongest tier."
+    )]
+    pub async fn delegate(&self, args: Parameters<DelegateArgs>) -> String {
+        let DelegateArgs { subtask, tier } = args.0;
+
+        // Per-process gate: if this gateway was not launched in orchestrator mode,
+        // refuse. Non-lead agents never set the orchestrator env, so their gateway
+        // lands here. (Their --allowedTools also omits the tool, so this is the
+        // belt to that suspenders.)
+        let Some(config) = self.orchestrator.as_ref() else {
+            eprintln!("[gateway] delegate REFUSED: gateway is not in orchestrator mode");
+            return "DELEGATE REFUSED: this agent is not the orchestrator; \
+                    delegation is not available. Do the work yourself."
+                .to_string();
+        };
+
+        eprintln!(
+            "[gateway] delegate tier={tier} depth={} max_depth={} subtask_len={}",
+            config.depth,
+            config.max_depth,
+            subtask.len()
+        );
+
+        match delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier).await {
+            Ok(output) => output,
+            Err(e) => e.to_string(),
+        }
     }
 }
 

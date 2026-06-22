@@ -25,6 +25,10 @@ path = "src/main.rs"
 [dependencies]
 camerata-core = { path = "../core" }
 camerata-rules = { path = "../rules" }
+# Orchestrator-mode `delegate` tool reuses the agent crate's spawn machinery to
+# launch a GATED child `claude -p` (gated_write only, delegate disabled). agent
+# depends only on core + worktracker, so this adds no normal-build cycle.
+camerata-agent = { path = "../agent" }
 rmcp = { version = "1.7", features = ["server", "transport-io"] }
 tokio = { workspace = true }
 serde = { workspace = true }
