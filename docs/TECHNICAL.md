@@ -13,8 +13,10 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace of 14 crates. All load-bearing code is Rust;
-the only optional non-Rust piece is a future TypeScript AST sidecar described in
+Camerata is a single Rust workspace. The shipped app is 15 crates under
+`crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
+dependency of any app crate). All load-bearing code is Rust; the only optional
+non-Rust piece is a future TypeScript AST sidecar described in
 `docs/ARCHITECTURE.md` that does not exist yet.
 
 ### Workspace members (`Cargo.toml`)
@@ -29,12 +31,18 @@ the only optional non-Rust piece is a future TypeScript AST sidecar described in
 | `camerata-persistence` | lib | SQLite state store (`sqlx`) + JSON provenance. |
 | `camerata-checks` | lib | Layer-2 post-task gate: `CheckRunner` + `cargo fmt`/`cargo clippy`/`cargo test` subprocess runners. |
 | `camerata-fleet` | lib | Reusable governed-fleet build logic, shared by CLI and UI. |
-| `camerata-server` | lib + bin | Axum HTTP/WS server the cockpit talks to. Embedded in the UI process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, UoW, and all HTTP routes. |
+| `camerata-server` | lib + bin | Axum HTTP/WS server the cockpit talks to. Embedded in the UI process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, the WorkItem/UoW layer, and all HTTP routes. |
 | `camerata-cli` | bin (`camerata`) | CLI binary entry point wiring everything together, including `live-demo`. |
 | `camerata-ui` | bin (`camerata-ui`) | Dioxus desktop cockpit. Separate process; talks to the embedded `camerata-server` over localhost HTTP. |
 | `camerata-worktracker` | lib | `WorkItemProvider` port: canonical story shapes, sync policy, native provider, and adapters for GitHub Issues, GitHub Projects v2, Jira Cloud, Azure DevOps Boards. |
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
 | `camerata-deploy` | lib | Tier-2 BYO-infra publish: `DeployTarget` seam + local + Azure adapter. |
+| `camerata-linter-registry` | lib | Citation validator: canonical linter rule-id lists per tool, plus a corpus-scan report used to ground `mechanical` rules to real linter ids (`Verification::Grounded`). |
+
+> The maintainer-only `tools/corpus-verifier` (a separate workspace member,
+> not a `crates/` member) promotes rules `grounded → verified` via a branch + PR.
+> It is the only write path to `verified` and is never a dependency of the
+> shipped app.
 
 ### Process and runtime model
 
@@ -122,9 +130,14 @@ which routes every byte through `evaluate_call` before touching disk. The `Task`
 tool (subagent spawning) is explicitly denied to prevent a child agent regaining
 `Write`/`Bash`.
 
-Gate latency is sub-3 ms over a 71-rule subset (`GOV-1` path check: ~161 µs;
-content rules: ~2 ms). The ~8.5 s `claude -p` round-trip is model inference; the
-gate adds no perceptible latency.
+Gate evaluation is a pure, in-memory pass over the role's rule subset: a path
+check (`GOV-1`) is a substring test; the content rules are pre-compiled regexes
+(`OnceLock<Regex>`). Even over a multi-domain subset of dozens of rule ids the
+cost is dominated by the few content regexes, not the iteration. The `claude -p`
+round-trip is model inference, orders of magnitude larger; the gate adds no
+perceptible latency. (The specific microbenchmark figures previously quoted here
+were point-in-time and are not reproduced from code — treat the relative
+ordering, not absolute numbers, as the durable claim.)
 
 ### Fail-closed behavior
 
@@ -136,8 +149,14 @@ silent allow path for an unregistered session.
 
 ## 3. Layer-2 post-task checks
 
-`crates/checks/src/lib.rs` implements `camerata_core::CheckRunner` for Rust
-worktrees. Three concrete runners, composed by `RustCheckRunner`:
+Layer-2 is the deterministic gate that runs on the agent's OUTPUT after a task
+finishes, in the coordinator's bounce-and-revise loop. It is **cross-language,
+polyglot, repo-pinned, and fail-closed** — no longer Rust-only-hardcoded.
+
+### The Rust runner (`crates/checks/src/lib.rs`)
+
+`RustCheckRunner` implements `camerata_core::CheckRunner` and composes three
+concrete sub-runners:
 
 - `FmtCheckRunner` — shells out to `cargo fmt --check`; maps failure to
   `RuleId("RUST-FMT")`.
@@ -147,12 +166,67 @@ worktrees. Three concrete runners, composed by `RustCheckRunner`:
   test or compile failure to `RuleId("RUST-TEST")`.
 
 `RustCheckRunner::check` runs them sequentially, cheapest-first (fmt errors make
-clippy noisy; a compile failure makes tests redundant). It deduplicates the
-resulting `Vec<RuleId>` so the bounce-back message is clean.
+clippy noisy; a compile failure makes tests redundant) and deduplicates the
+resulting `Vec<RuleId>`. The subprocess invocation layer
+(`crates/checks/src/subprocess.rs`) and the output-to-`RuleId` mapping layer
+(`crates/checks/src/parse.rs`) are kept separate so the mapping logic is
+unit-testable without spawning real subprocesses.
 
-The subprocess invocation layer (`crates/checks/src/subprocess.rs`) and the
-output-to-`RuleId` mapping layer (`crates/checks/src/parse.rs`) are kept separate
-so the mapping logic is unit-testable without spawning real subprocesses.
+### The cross-language runners and the worktree selector (`crates/checks/src/multilang.rs`)
+
+The Rust runner was historically the ONLY layer-2 gate, hardcoded at every
+fleet/po-demo injection site, so a JS, Python, or Go worktree got no meaningful
+bounce-and-revise. `multilang.rs` closes that gap. It adds, mirroring the Rust
+runner's shape:
+
+- `JsCheckRunner` — lockfile-pinned install (`npm ci` / `pnpm install
+  --frozen-lockfile` / `yarn install --frozen-lockfile`, detected via
+  `JsPackageManager::detect`; falls back to `npm install` with no lockfile) into
+  `node_modules` if absent, then the repo's own `npm run lint` and `npm run test`
+  scripts. Both failures map to `LAYER2-JS-CHECKS-1`.
+- `PythonCheckRunner` — isolates deps in a `.camerata-venv` (`python3 -m venv`),
+  installs from the repo's manifest (`pip install -r requirements.txt`, or
+  `pip install -e .` for `pyproject.toml`/`setup.py`), then runs the venv-local
+  `ruff check .` and `pytest`. Failures map to `LAYER2-PY-CHECKS-1`. (A
+  `Pipfile`-only tree fails closed: pipenv is not auto-invoked.)
+- `GoCheckRunner` — `gofmt -l .` (non-empty stdout = unformatted), `go vet
+  ./...`, `go test ./...`. Failures map to `LAYER2-GO-CHECKS-1`.
+
+**Repo-pinned toolchain.** Linter/test versions come from the REPO's
+lockfile/manifest, never baked into Camerata: `npm run lint` resolves the repo's
+`node_modules` binaries, `ruff`/`pytest` are the venv-local ones, Go and Rust are
+pinned by `go.mod` / `rust-toolchain`. The effect is that layer-2 runs the SAME
+toolchain as the repo's CI (layer-3). See
+`docs/decisions/2026-06-21_layer2_repo_pinned_toolchain.md`.
+
+**Polyglot composition.** `runner_for_worktree(worktree)` is the single
+injection point the fleet and po-demo use in place of the old hardcoded
+`RustCheckRunner::new()`. It calls `detect_languages(worktree)`, which
+recursively walks the tree (pruning `node_modules`, `target`, `.git`, vendored
+dirs, etc.) and pairs EVERY detected language with the directory whose manifest
+declared it. It then builds a `PolyglotCheckRunner` that runs one sub-runner per
+`(language, dir)` project — each against ITS subtree, not the worktree root — and
+returns the UNION of their violations (deduped). A single-language repo simply
+yields one sub-runner; a polyglot monorepo gets one per project.
+
+**Fail-closed, on every axis.** A runner that CANNOT run returns `Err`, never a
+false clean:
+- toolchain missing on PATH → spawn `Err` propagates;
+- no check defined (e.g. a `package.json` with neither a `lint` nor a `test`
+  script) → `Err` ("could-not-run" is not a pass);
+- dep install / venv creation failure → `Err`.
+
+`PolyglotCheckRunner` runs ALL sub-runners (it never aborts early) and then, if
+ANY returned `Err`, the composite itself returns `Err` naming every project that
+could not be verified — a half-verified polyglot tree is not a verified one. The
+ONE explicit pass-through is `NoopChecks`: when `detect_languages` finds zero
+recognised manifests, the selector degrades to a no-op AND logs a loud warning.
+That is not the fail-closed path — an unrecognised tree has no toolchain to be
+"missing", so there is no check to fail closed on.
+
+The fleet wiring lives at `crates/fleet/src/lib.rs` (`use
+camerata_checks::runner_for_worktree;`, called where the coordinator's
+`CheckRunner` is constructed).
 
 **Bounce-and-revise loop:** when the coordinator (in `crates/core/`) receives
 violations from the `CheckRunner`, it re-runs the agent with the violated rule ids
@@ -230,14 +304,17 @@ Each corpus file has fields: `id`, `title`, `enforcement`, `domain`,
 
 ```rust
 pub enum EnforcementKind {
-    Prose,       // human-readable rationale only; no generated artifact
-    Structured,  // emits a structured section (e.g. a CONVENTIONS.md entry)
-    Mechanical,  // emits a runnable check (linter, CI gate, etc.)
+    Prose,         // human-readable rationale only; no generated artifact
+    Structured,    // a binary design contract reviewable by a human, but not lint-able
+    Mechanical,    // maps to an existing, named linter rule
+    Architectural, // deterministically checkable, but needs a bespoke AST/static check
 }
 ```
 
 This drives the emit partitioning in `crates/server/src/arm.rs`: prose rules go
-into `AGENTS.md`; structured/mechanical rules go into `CONVENTIONS.md`.
+into `AGENTS.md`; structured / mechanical / architectural rules go into
+`CONVENTIONS.md`. The four-variant model is the precise reference in §5a — read
+that for the conformance-test distinctions.
 
 ### RuleSet and selection
 
@@ -252,11 +329,15 @@ function is pure; `Filter` variants include `ByIds`, `ByDomain`, `ByDomains`,
 ### Role building from corpus
 
 `role_from_corpus(corpus_path, role_name, domains, rule_ids)` loads the corpus
-and selects: universal rules + domain-matched rules + any explicit id overrides.
-The resulting `rule_subset` is sorted alphabetically by id for deterministic
-ordering. `allowed_paths` is derived from the domain list (e.g. `"rust"` →
-`"**/*.rs"`). For the live `Backend` role over `["rust", "rust:seaorm",
-"rust:dioxus", "sql", "agentic"]`, the subset currently contains **71 rules**.
+and selects: universal rules (`domain = "*"`) + domain-matched rules + any
+explicit id overrides. Sub-domain variants like `"rust:dioxus"`/`"rust:seaorm"`
+resolve to the primary component's glob (`domain_to_glob` → `"**/*.rs"`). The
+resulting `rule_subset` is sorted alphabetically by id for deterministic
+ordering; `allowed_paths` is derived from the domain list. For a live multi-domain
+role (e.g. `Backend` over `["rust", "rust:seaorm", "rust:dioxus", "sql",
+"agentic"]`) the subset is the union of universal + those domains' rules — dozens
+of rule ids. The exact count tracks corpus size and is not asserted in code;
+treat the selection RULE, not a fixed number, as the durable claim.
 
 ### Deterministic gate rules vs. LLM-semantic rules
 
@@ -304,7 +385,7 @@ Both carry identical TOML shape (`[decision]` + `[[option]]` blocks). The differ
 **Current corpus counts** (counts drift as rules are added; describe kinds, not hard numbers, when citing):
 prose ~84, structured ~190, mechanical ~57, architectural ~9.
 
-**Render-target routing source of truth:** `crates/server/src/arm.rs` lines 8–10, 136–160 — `prose` → `AGENTS.md`; `structured | mechanical | architectural` → `CONVENTIONS.md`. This is also confirmed in `crates/server/src/onboard.rs` at the `ProposedRule.enforcement` comment (lines 101–103): "prose -> AGENTS.md, the rest -> CONVENTIONS.md, matching camerata-ai's emit partitioning."
+**Render-target routing source of truth:** `crates/server/src/arm.rs` (the module-doc routing note around lines 8–9 and the partition in `arm_files_for_repo`, `enforcement == "prose"` vs `!= "prose"`, around lines 136–160) — `prose` → `AGENTS.md`; `structured | mechanical | architectural` → `CONVENTIONS.md`. This is also confirmed in `crates/server/src/onboard.rs` at the `ProposedRule.enforcement` comment (around lines 102–103): "prose -> AGENTS.md, the rest -> CONVENTIONS.md, matching camerata-ai's emit partitioning."
 
 ### Axis B — where/when rules are actually enforced (the enforcement points)
 
@@ -366,6 +447,11 @@ Every rule carries a `verification` field:
 | `draft` | AI-generated rule; no supporting citation was found. Advisory only; never auto-recommended during onboarding. |
 | `grounded` | The onboarding agents found at least one citation from a trusted source (language docs, style guides, real linter rule ids). Linter-id existence is validated by `crates/linter-registry/`. |
 | `verified` | A human has checked the cited findings and approved the rule. **No agent may set this, by design.** This is a deliberate trust boundary: the machine can ground a claim, only a human certifies it. |
+| `needs_recheck` | A rule that WAS `verified`, but the cited source or linter it was verified against has since drifted (e.g. a version bump moved the rule id). Still backed by a citation and usable, but no longer carries the strongest assertion until a human re-checks it. |
+
+(`Verification` in `crates/rules/src/lib.rs` has these four variants. `grounded`,
+`verified`, and `needs_recheck` are all "backed by a citation"; only `draft` is
+not.)
 
 Current state (honest): the mechanical rules in the corpus are grounded (each maps to a real linter rule). Zero are `verified` yet — that is a human-only step the maintainer has not yet completed. Grounded is the shippable baseline. Verified is the gold standard for citing a rule in a compliance context. The app surfaces these as read-only badges; the maintainer-side verifier tool is the only write path to `verified`.
 
@@ -562,7 +648,7 @@ JSON files in `dirs::data_dir()/camerata/`:
 | `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set. |
 | `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export). |
 | `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
-| `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus` (New/InProgress/Done), and `history: Vec<HistoryEntry>`. |
+| `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, last_run/last_fired, project_id. The auto-fire scheduler (`auto_fire.rs`) ticks over these. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
 
@@ -585,6 +671,20 @@ into the Axum state. `AppState::from_env()` is the real runtime path: it resolve
 `dirs::data_dir()` and passes store paths there; it also selects the worktracker
 provider from the environment (`CAMERATA_GITHUB_TOKEN` present → GitHub; else
 native in-memory). `AppState::seeded()` is the test/demo path.
+
+### Feature flags (`crates/server/src/feature_flags.rs`)
+
+`FeatureFlags` is an **opt-out** model: every field defaults to `true` and is OFF
+only when explicitly set to `false`. Sources, highest-priority first: env override
+(`CAMERATA_FEATURE_<UPPER_NAME>=false`), then `.camerata/features.toml` (or the
+`feature_flags` section of `settings.json`), then the `true` default.
+
+The one shipped flag is `soc2` (`CAMERATA_FEATURE_SOC2`) — the SOC-2 gap-analysis
+lens in the deep audit tier (`run_deep_tier`). Although the field's CODE default is
+`true`, **Camerata ships with SOC-2 OFF**: the repo's `.camerata/features.toml`
+contains `soc2 = false`. The SOC-2 lens code is retained; only its runtime
+execution is gated. Exposed read-only over `GET /api/feature-flags`. Nothing in
+Camerata treats SOC-2 as on-by-default in the shipped build.
 
 ---
 
@@ -648,33 +748,127 @@ and reachable on the current machine, so path issues are surfaced immediately.
 
 ---
 
-## 10. Unit of Work
+## 10. Issue Management → WorkItem → Unit of Work
 
-`crates/server/src/uow.rs` implements the UoW store (issue #39).
+The Governed Development surface is built in three layers, all provider-agnostic
+at the core with a thin per-provider adapter on top.
 
-`UnitOfWork` holds per-story dev context:
+### WorkItem — the normalized requirement (`crates/server/src/workitems.rs`)
+
+A `WorkItem` is the normalized requirement/story shape the UI consumes, mapped
+from ANY provider. It is the surface-level name for what the worktracker's
+canonical story type IS; the underlying code type is still
+`camerata_worktracker::CanonicalStory` and the full rename across the codebase is
+deferred (cosmetic) — see the `from_canonical_story` note in `workitems.rs`. The
+DTO:
+
+```rust
+pub struct WorkItem {
+    pub id: String,        // stable, provider-namespaced: "github:OWNER/REPO#123"
+    pub provider: String,  // "github" (the shipped adapter)
+    pub repo: String,      // "OWNER/REPO"
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,     // "open" | "closed"
+    pub url: String,
+    pub labels: Vec<String>,
+}
+```
+
+`workitems.rs` is the pure (no-I/O) mapping + identity layer:
+`WorkItem::from_github_issue`, `WorkItem::from_canonical_story`, and the
+`work_item_id_to_story_id` / `story_id_for` bridge that strips the `github:`
+provider prefix so a work-item id `github:OWNER/REPO#N` maps to the UoW/story key
+`OWNER/REPO#N`. Dedup-by-external-ref is thus a pure string identity on that key.
+
+### The endpoints (registered in `crates/server/src/lib.rs`)
+
+The old inline `/api/stories/adopt-issue` flow — where the UI typed an owner/repo
+and an issue number — is **superseded** as the Governed Development surface. (The
+`/api/stories/adopt-issue` route still exists in `lib.rs` as a token-free,
+idempotent spine upsert primitive, but it is no longer the UI's adoption path.)
+The new flow is: pull all open issues across the active project's repos, then
+project a chosen work item onto a UoW. The handlers (in `lib.rs`, using the
+`workitems` DTO/bridge) are:
+
+- `POST /api/workitems/pull` — pull ALL open issues across ALL the active
+  project's repos via the GitHub adapter (`github_issues::list_open_issues`),
+  normalized to `WorkItem[]`. **Manual** (user-triggered), **no cache** — every
+  pull is a full refresh. Degrades gracefully: no token / no active project / no
+  repos returns an empty list with a hint message (never an error); a per-repo
+  failure is skipped and the union of repos that resolved is returned.
+- `POST /api/workitems/refresh` `{ work_item_id }` — re-pull ONE item from its
+  source. Needs the token.
+- `POST /api/workitems/comment` `{ work_item_id, body }` — comment back onto the
+  source issue. Needs the token. (Echo suppression for write-back loops lives in
+  the worktracker sync layer; see §12.)
+- `GET /api/uows` — list all Units of Work, each resolved with the `WorkItem` it
+  references (from the story spine) and its lifecycle `stage`.
+- `POST /api/uow/from-workitem` `{ work_item_id }` — create a UoW referencing the
+  work item, **deduped by external ref**: if a UoW already exists for that work
+  item it is returned with `created=false` (never a duplicate). The work item is
+  also ensured on the canonical story spine (idempotent upsert) so `/api/uows`
+  resolves it and the governed-dev endpoints have a story to run against.
+
+GitHub Issues is the shipped adapter. Jira, Azure DevOps, and GitHub Projects v2
+adapters exist in the worktracker port (§12) but are NOT yet wired as UX
+adapters here — they are FUTURE.
+
+### Unit of Work — the dev lifecycle (`crates/server/src/uow.rs`)
+
+`UnitOfWork` is the dev-side projection of a story, keyed by `story_id` (the
+external-ref-derived key above). It has grown well beyond a simple status; the
+shipped struct carries:
 
 ```rust
 pub struct UnitOfWork {
     pub story_id: String,
-    pub branch: Option<String>,     // git branch this work lives on
-    pub dev_status: DevStatus,      // New | InProgress | Done
-    pub history: Vec<HistoryEntry>, // every governed run, note, gate action
-    pub updated: String,            // RFC 3339 last-mutation timestamp
+    pub branch: Option<String>,                 // git branch this work lives on
+    pub dev_status: DevStatus,                   // New | InProgress | Done (coarse badge)
+    pub stage: UowStage,                         // precise lifecycle (see below)
+    pub decisions: Vec<DecisionRecord>,          // read cache; durable home is the ArtifactStore
+    pub history: Vec<HistoryEntry>,              // every governed run, note, gate/stage action
+    pub gate_provenance: Option<GateProvenance>, // frozen gate accounting from the last run
+    pub sign_off: Option<SignOff>,               // architect's explicit QA sign-off (issue #21)
+    pub evidence: Option<UowEvidenceRecord>,     // SOC-2 evidence from the last run (issue #53)
+    pub updated: String,                         // RFC 3339 last-mutation timestamp
 }
 ```
 
-`DevStatus` is orthogonal to the worktracker story's own status: a story can be
-`Planned` (product) while its UoW is `InProgress` (dev started). The cockpit
-renders both.
+- `DevStatus` (New / InProgress / Done) is the coarse badge, orthogonal to the
+  story's own tracker status: a story can be `Planned` (product) while its UoW is
+  `InProgress` (dev started). The cockpit renders both.
+- `stage: UowStage` is the precise governed-development lifecycle (Pillar 2):
+  `Intake → Investigating → DecisionsApproved → Development → AwaitingQa →
+  SignedOff`. It is mutated ONLY through the transition methods on `UowStore`
+  (`begin_investigation`, `approve_decisions`, `start_development`,
+  `finish_development`, and `sign_off`), each running the pure state machine in
+  `crates/server/src/lifecycle.rs`. The decision gate (`approve_decisions` /
+  `start_development`) blocks the move into development until every decision
+  record is approved.
+- `decisions` is a READ CACHE: the durable, version-tracked home for decision
+  records and investigation notes is the central `ArtifactStore` (SQLite,
+  `crates/persistence`), keyed by story id, when one is attached via
+  `with_artifacts`. The inline field stays in sync as the back-compat carrier so
+  an older `uow.json` still loads and is migrated into the store on first
+  store-backed write.
+- `sign_off` is recorded only by the deliberate architect action — Camerata never
+  signs work off on its own. A critical SOC-2 evidence finding
+  (`is_sign_off_blocked`) blocks the `AwaitingQa → SignedOff` transition until an
+  explicit waive-with-reason.
 
-`HistoryEntry` has `ts: String` (RFC 3339), `kind: String` (e.g. `"run"`,
-`"note"`, `"gate_deny"`, `"gate_allow"`), and `text: String`.
+`HistoryEntry` has `ts` (RFC 3339), `kind` (e.g. `"run"`, `"note"`,
+`"gate_deny"`, `"gate_allow"`, `"stage"`, `"sign_off"`, `"provenance"`,
+`"evidence"`), and `text`.
 
-The `UowStore` persists to `<data_dir>/camerata/uow.json` via an
-`Arc<Mutex<HashMap<String, UnitOfWork>>>` with best-effort write-through. API
-routes: `GET /api/uow`, `GET /api/uow/:story_id`, `POST .../status`,
-`POST .../branch`, `POST .../history`.
+`UowStore` persists to `<data_dir>/camerata/uow.json` via an
+`Arc<Mutex<HashMap<String, UnitOfWork>>>` with best-effort write-through; an
+optional `ArtifactStore` handle backs decision/investigation history, and an
+optional `PostStoryHook` (PROC-STORY-DOCS-1) can emit per-story docs at sign-off.
+UoW API routes include `GET /api/uow`, `GET /api/uow/:story_id`,
+`POST .../status`, `POST .../branch`, `POST .../history`, plus the lifecycle
+transition and sign-off endpoints.
 
 ---
 
@@ -696,18 +890,34 @@ The cockpit's top-level state machine is `CockpitScreen` (Projects / InProject).
 `CockpitShell` renders `ProjectGate` until a project is opened, then `CockpitApp`.
 
 Inside a project, `CockpitView` (an enum in `crates/ui/src/cockpit.rs`) selects
-the active tab:
+the active tab. The nav order is: **Onboard repos · Governed Development · Rules ·
+Routines · Repository Workspace · Docs.**
 
 | Variant | Nav label | What it shows |
 |---|---|---|
-| `Stories` | (default) | Story spine (left rail) + center stage (swaps by story status) + inspector (enforced rules, right). |
 | `Onboard` | "Onboard repos" | Brownfield onboarding wizard: scan → audit → propose rules → arm → apply. |
-| `Rules` | (Rules) | Active project ruleset management after onboarding. |
-| `Routines` | (Routines) | Scheduled-routine dashboard. |
-| `Workspace` | (Workspace) | Local workspace: clone repos, checkout status, ship (push + PR). |
+| `Stories` | "Governed Development" (the default landing tab) | The Issue Management + WorkItem table + UoW cards + dev-controls surface. Renders `GovernedDevPage`. |
+| `Rules` | "Rules" | Active project ruleset management after onboarding. |
+| `Routines` | "Routines" | Scheduled-routine dashboard. |
+| `Workspace` | "Repository Workspace" | Local workspace: clone repos, checkout status, ship (push + PR). |
+| `Docs` | "Docs" | In-app documentation viewer: `USER_GUIDE.md` and `TECHNICAL.md` rendered as markdown. |
 
 `CockpitNav` (`fn CockpitNav(view: Signal<CockpitView>)`) renders the tab bar;
 clicking sets `view.set(...)`.
+
+### The Governed Development page
+
+`GovernedDevPage` (`crates/ui/src/cockpit.rs`) is the work-item / UoW surface
+reached via the "Governed Development" tab. Its left nav (`GovDevSel`) is an
+"Issue Management" entry plus a card per UoW:
+
+- `IssueManagementPanel` — the GitHub-specific piece (connection summary + the
+  manual "pull" action: the adapter seam), then a provider-agnostic
+  `WorkItemTable` + `WorkItemDetail` that operate purely on the `WorkItem` DTO.
+- Selecting a UoW renders `UowDevControls` — the existing governed-dev mechanisms
+  (run-through-the-gate, clarify, sign-off), keyed by the UoW's story id, so the
+  gate is never bypassed. This is the surface that replaced the retired
+  adopt-issue flow (§10).
 
 ### Chorale tables
 
@@ -739,40 +949,49 @@ code, headings, lists).
 
 ---
 
-## 12. Worktracker and stories
+## 12. Worktracker port (WorkItemProvider + the story spine)
 
-`crates/worktracker/src/lib.rs` defines the provider port the rest of the stack
-depends on.
+`crates/worktracker/src/lib.rs` defines the ports the rest of the stack depends
+on. This is the layer the §10 WorkItem/UoW surface is built on top of.
 
 ### Canonical shapes
 
-`CanonicalStory` is the normalized story shape the spine renders:
+`CanonicalStory` is the normalized story shape the spine renders — the code-level
+type the surface calls a "WorkItem" (the rename is deferred; see §10). Its actual
+fields:
 
 ```rust
 pub struct CanonicalStory {
-    pub id: String,
-    pub external_ref: Option<ExternalRef>,
+    pub id: String,                         // Camerata's own canonical spine id
+    pub external_ref: Option<ExternalRef>,  // the SOURCE (where it is tracked)
     pub title: String,
+    pub description: String,                // long-form markdown, NOT Option
     pub status: FeatureStatus,
-    pub description: Option<String>,
-    pub repo_targets: Vec<RepoTarget>,
-    // ... etc.
+    pub created_by: String,
+    pub targets: Vec<RepoTarget>,           // BUILD targets (repos the code lands in)
 }
 ```
 
-`FeatureStatus` is Camerata's canonical lifecycle vocabulary (Intake,
+Note `external_ref` (the source/tracker) is independent of `targets` (the build
+repos). `FeatureStatus` is Camerata's canonical lifecycle vocabulary (Intake,
 Investigating, AwaitingClarification, Planned, Executing, Gating, AwaitingQa,
 SignedOff, Done, Blocked, Rejected). Every provider adapter maps to/from this;
 provider-specific status names never leak into the spine.
 
-### StoryStore trait
+### Two distinct traits
 
-`StoryStore` is the async trait `camerata-server` depends on. The implementations
-are:
-- `InMemoryStoryStore` — the in-process store used for demos, tests, and when no
-  external tracker is configured.
-- Provider adapters: `GithubProvider` (GitHub Issues), `GithubProjectsSource`
-  (GitHub Projects v2), `JiraProvider`, `AdoProvider` (Azure DevOps Boards).
+These are separate ports — do not conflate them:
+
+- `StoryStore` — the async spine store `camerata-server` holds as
+  `Arc<dyn StoryStore>` (list/get/upsert canonical stories). The ONLY
+  implementation is `InMemoryStoryStore` (used for demos, tests, and as the live
+  spine cache; `AppState::from_env` selects it).
+- `WorkItemProvider` — the per-item sync port (pull one item, write one item
+  back, post a comment). Implemented by `NativeProvider` (in-process,
+  greenfield/solo) and the external adapters: `GithubProvider` (GitHub Issues),
+  `GithubProjectsSource` (GitHub Projects v2), `JiraProvider` (Jira Cloud),
+  `AdoProvider<T>` (Azure DevOps Boards). GitHub Issues is the only adapter wired
+  into the shipped Governed Development UX (§10); the others are FUTURE.
 
 ### Sync policy
 
