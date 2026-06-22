@@ -363,18 +363,41 @@ pub fn select_backend(pref: Option<&str>, has_api_key: bool) -> Backend {
 }
 
 /// The configured provider: a vendor + transport + model.
-#[derive(Debug, Clone)]
+///
+/// Optionally carries a process-global [`crate::usage_ledger::UsageLedger`] (set via
+/// [`Llm::with_ledger`] / [`Llm::from_env_with_ledger`]). When present, EVERY completion
+/// that flows through [`Llm::complete`] / [`Llm::complete_streaming`] folds its usage into
+/// the ledger and clears/sets the rate-limit flag. This is the single chokepoint that lets
+/// the cumulative cockpit usage meter see ALL model calls regardless of which feature made
+/// them — observability only, no behavior change.
+#[derive(Clone)]
 pub struct Llm {
     vendor: Vendor,
     backend: Backend,
     default_model: String,
     api_key: Option<String>,
+    /// Process-global cumulative usage meter, threaded so the chokepoint records every call.
+    /// `None` in tests / standalone construction (recording is then simply skipped).
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+}
+
+impl std::fmt::Debug for Llm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Llm")
+            .field("vendor", &self.vendor)
+            .field("backend", &self.backend)
+            .field("default_model", &self.default_model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<set>"))
+            .field("ledger", &self.ledger.as_ref().map(|_| "<set>"))
+            .finish()
+    }
 }
 
 impl Llm {
     /// Build from env: `CAMERATA_LLM_VENDOR` (default anthropic), `CAMERATA_LLM_BACKEND`
     /// (cli|api, default cli), `ANTHROPIC_API_KEY` (for the Anthropic api transport),
-    /// `CAMERATA_LLM_MODEL` (default model).
+    /// `CAMERATA_LLM_MODEL` (default model). No usage ledger attached (see
+    /// [`Llm::from_env_with_ledger`] for the cockpit's recording path).
     pub fn from_env() -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
         let pref = std::env::var("CAMERATA_LLM_BACKEND").ok();
@@ -391,6 +414,45 @@ impl Llm {
             backend,
             default_model,
             api_key,
+            ledger: None,
+        }
+    }
+
+    /// Same as [`Llm::from_env`] but with the process-global usage ledger attached, so every
+    /// call this instance makes is recorded into the cumulative cockpit meter. This is the
+    /// constructor every HTTP handler / feature uses, so ALL LLM call paths feed one ledger.
+    pub fn from_env_with_ledger(
+        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
+    ) -> Self {
+        Self::from_env().with_ledger(ledger)
+    }
+
+    /// Attach (or replace) the process-global usage ledger on an existing instance.
+    pub fn with_ledger(
+        mut self,
+        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
+    ) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Fold one completed response into the ledger (model id resolved from the response,
+    /// falling back to the configured default). No-op when no ledger is attached.
+    fn ledger_record(&self, resp: &LlmResponse) {
+        if let Some(l) = &self.ledger {
+            let model = if resp.model.trim().is_empty() {
+                self.default_model.as_str()
+            } else {
+                resp.model.as_str()
+            };
+            l.record(model, resp);
+        }
+    }
+
+    /// Note a failed call against the ledger's rate-limit detector. No-op without a ledger.
+    fn ledger_note_failure(&self, detail: &str) {
+        if let Some(l) = &self.ledger {
+            l.note_failure(detail);
         }
     }
 
@@ -421,28 +483,46 @@ impl Llm {
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req);
-        match (self.vendor, self.backend) {
+        // CHOKEPOINT: every streaming call records into the cumulative ledger (success folds
+        // usage + clears the rate-limit flag; failure runs the rate-limit detector). The `_`
+        // arm delegates to `complete`, which records there — so guard against double-counting
+        // by only recording the directly-served arms here.
+        let result = match (self.vendor, self.backend) {
             (Vendor::Anthropic, Backend::Cli) => {
-                self.complete_cli_streaming(&req, &model, on_delta).await
+                let r = self.complete_cli_streaming(&req, &model, on_delta).await;
+                if let Ok(resp) = &r {
+                    self.ledger_record(resp);
+                }
+                r
             }
             (Vendor::Anthropic, Backend::Api) => {
-                let r = self.complete_api(&req, &model).await?;
-                on_delta(&r.text);
-                Ok(r)
+                let r = self.complete_api(&req, &model).await;
+                if let Ok(resp) = &r {
+                    on_delta(&resp.text);
+                    self.ledger_record(resp);
+                }
+                r
             }
             _ => {
+                // Delegates to `complete`, which already records — do NOT record again here.
                 let r = self.complete(req).await?;
                 on_delta(&r.text);
-                Ok(r)
+                return Ok(r);
             }
+        };
+        if let Err(e) = &result {
+            self.ledger_note_failure(&e.to_string());
         }
+        result
     }
 
     /// Run a completion through the selected vendor + transport. Adding a vendor is a new
     /// match arm here plus its [`MODELS`] entries; the request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req);
-        match self.vendor {
+        // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
+        // + clears the rate-limit flag; failure runs the provider-agnostic rate-limit detector.
+        let result = match self.vendor {
             Vendor::Anthropic => match self.backend {
                 Backend::Cli => self.complete_cli(&req, &model).await,
                 Backend::Api => self.complete_api(&req, &model).await,
@@ -453,7 +533,12 @@ impl Llm {
                  to use the wired vendor.",
                 self.vendor.label()
             ),
+        };
+        match &result {
+            Ok(resp) => self.ledger_record(resp),
+            Err(e) => self.ledger_note_failure(&e.to_string()),
         }
+        result
     }
 
     /// CLI path: a PURE text completion, not an agentic loop. The audit hands the model
@@ -1194,6 +1279,7 @@ mod tests {
             backend: Backend::Cli,
             default_model: "claude-sonnet-4-6".to_string(),
             api_key: None,
+            ledger: None,
         };
         // Empty request model -> default.
         assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-4-6");
@@ -1291,6 +1377,7 @@ mod tests {
             backend: Backend::Api,
             default_model: "gpt".to_string(),
             api_key: None,
+            ledger: None,
         };
         let err = llm.complete(LlmRequest::new("hi")).await.unwrap_err();
         assert!(err.to_string().contains("not wired yet"));
