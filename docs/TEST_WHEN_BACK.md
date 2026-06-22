@@ -91,6 +91,15 @@ No GitHub issue filed for this yet — banked here as a QA item.
       (dev runs, etc.).
 - [ ] Graceful without a GitHub token (can draft, but push needs the token).
 
+## ★ Dev-cycle observability (NEW — needs QA)
+
+- [ ] Hit **Run development**: a concise "Development activity" log shows real events live —
+      **gate decisions** (ALLOWED/DENIED + rule + reason), a **DENY → bounce-back** to the agent,
+      **tier/model** per agent + **delegate** dispatch/return, **layer-2 checks** start→pass/fail
+      (+ violated rules) and each **bounce-and-revise** iteration, and **stage** transitions.
+- [ ] It's concise (no agent chain-of-thought) — what's passed back/forth + what's checked.
+- [ ] The gate still enforces exactly as before (observability only; layer-1 unchanged).
+
 ## Known v1 limits (by design — not bugs)
 
 - Jobs are in-memory (don't survive an app restart — correct, since the work can't either).
