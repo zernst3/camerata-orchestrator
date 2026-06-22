@@ -61,5 +61,15 @@ CodeQL/Semgrep as deterministic check sources and enforces their findings at the
 cover (the gate, the agent loop). The moat is the enforcement stance/point (deterministic,
 deny-before-execute, in-loop, no model in the trust path, provider-neutral), not the integration.
 
+## Scan-type selector (queued — build right after Part B)
+
+At audit-start the user picks WHICH scans to run: **AI architectural review** (the LLM scan of
+architectural/structured/prose rules) and/or **Deterministic scans** (the security floor + the new
+tool-based mechanical preview). Either or both; at least one; default both (today's behavior).
+Deterministic-only is fast/free/no-tokens (and makes QA of the tool pass much easier); AI-only is
+just the judgment review. The audit entry points (`onboard_audit`/`_start`/`_job`) gate each pass by
+the selection; the cockpit audit UI gets the toggle. Sequenced after Part B because it edits the
+same audit pipeline + audit UI.
+
 Relates to [[camerata_layer2_uses_repo_pinned_toolchain]], the universal gate, and the CI-wiring
 both-layers decision.

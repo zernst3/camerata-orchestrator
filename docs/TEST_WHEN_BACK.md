@@ -71,6 +71,10 @@ No GitHub issue filed for this yet — banked here as a QA item.
 - [ ] **Graceful when a tool is missing.** If the local tool can't run, the scan notes
       "couldn't preview X — enforces once wired" rather than a false clean.
 
+- [ ] **★ Scan-type selector.** At audit-start, pick **AI review** and/or **Deterministic scans**.
+      Deterministic-only should run fast with **no LLM/token usage** (floor + tool preview only);
+      AI-only should skip the linters; both = today's behavior. (Great for QA'ing the tool pass.)
+
 ## Known v1 limits (by design — not bugs)
 
 - Jobs are in-memory (don't survive an app restart — correct, since the work can't either).
