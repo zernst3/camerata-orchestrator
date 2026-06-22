@@ -490,6 +490,16 @@ struct StartRunReq {
     /// The two fields are independent; `tier_map` takes precedence when both are sent.
     #[serde(default)]
     tier_map: Option<crate::model_tier::TierMap>,
+    /// One-time BOOTSTRAP escape hatch (default OFF): when `Some(true)`, this single run
+    /// uses a NO-OP layer-2 runner — no post-task lint/test bounce — so a brownfield repo
+    /// can install the linters/checkers that layer-2 needs without tripping the fail-closed
+    /// "could-not-run" deadlock. It skips ONLY layer 2. Layer 1 (the deny-before-write gate
+    /// every spawned agent runs behind) and the no-code-first decisions gate
+    /// (`ensure_development_gate`) are UNCHANGED in both cases — the gate is never bypassed.
+    /// `None`/`false` is exactly today's behaviour (the real per-language CheckRunner). See
+    /// `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
+    #[serde(default)]
+    skip_layer2: Option<bool>,
 }
 
 /// Start a governed run for a story. Returns the run id immediately; the run walks
@@ -503,9 +513,13 @@ async fn start_run(
     Path(story_id): Path<String>,
     req: Option<Json<StartRunReq>>,
 ) -> Response {
-    let (model, tier_map) = match req {
-        Some(Json(r)) => (r.model.filter(|m| !m.trim().is_empty()), r.tier_map),
-        None => (None, None),
+    let (model, tier_map, skip_layer2) = match req {
+        Some(Json(r)) => (
+            r.model.filter(|m| !m.trim().is_empty()),
+            r.tier_map,
+            r.skip_layer2.unwrap_or(false),
+        ),
+        None => (None, None, false),
     };
 
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
@@ -522,7 +536,8 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
-    let (run_id, mode) = start_governed_run(&state, &story_id, model, tier_map).await;
+    let (run_id, mode) =
+        start_governed_run(&state, &story_id, model, tier_map, skip_layer2).await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
         .into_response()
 }
@@ -593,11 +608,19 @@ fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), Strin
 ///
 /// `model` is forwarded to every `claude -p` agent in the live-fleet path. It is
 /// ignored for the scripted path (which makes no agent calls).
+///
+/// `skip_layer2` is the one-time BOOTSTRAP escape hatch (default OFF). When `true`, the
+/// live fleet runs this ONE run with a no-op layer-2 runner (no post-task lint/test
+/// bounce) so a brownfield repo can install the tooling layer-2 needs. It skips ONLY
+/// layer 2: layer 1 (the deny-before-write gate) and the no-code-first decisions gate
+/// (`ensure_development_gate`, already enforced in the caller) are unchanged. The scripted
+/// path has no layer-2 bounce, so the flag is a no-op there.
 async fn start_governed_run(
     state: &AppState,
     story_id: &str,
     model: Option<String>,
     tier_map: Option<crate::model_tier::TierMap>,
+    skip_layer2: bool,
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
@@ -631,6 +654,7 @@ async fn start_governed_run(
                         desc,
                         map,
                         max_iterations,
+                        skip_layer2,
                     )
                     .await
                 });
@@ -638,8 +662,16 @@ async fn start_governed_run(
             // Single-model path (back-compat): one operator-wide model for every agent.
             None => {
                 tokio::spawn(async move {
-                    live_fleet::execute_live_run(store, rid, title, desc, model, max_iterations)
-                        .await
+                    live_fleet::execute_live_run(
+                        store,
+                        rid,
+                        title,
+                        desc,
+                        model,
+                        max_iterations,
+                        skip_layer2,
+                    )
+                    .await
                 });
             }
         }
@@ -5807,6 +5839,31 @@ mod tests {
         let empty: StartRunReq = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(empty.model.is_none());
         assert!(empty.tier_map.is_none());
+    }
+
+    /// `skip_layer2` (the bootstrap escape hatch) parses when present and defaults to
+    /// absent (None) → off, so existing callers are unchanged.
+    #[test]
+    fn start_run_req_parses_skip_layer2_and_defaults_off() {
+        // Present + true.
+        let req: StartRunReq =
+            serde_json::from_value(serde_json::json!({ "skip_layer2": true })).unwrap();
+        assert_eq!(req.skip_layer2, Some(true));
+
+        // Present + false.
+        let req: StartRunReq =
+            serde_json::from_value(serde_json::json!({ "skip_layer2": false })).unwrap();
+        assert_eq!(req.skip_layer2, Some(false));
+
+        // Absent → None (the default-off bootstrap behaviour; today's bodies unchanged).
+        let req: StartRunReq = serde_json::from_value(serde_json::json!({
+            "tier_map": { "strongest": "s", "balanced": "b", "fast": "f" }
+        }))
+        .unwrap();
+        assert!(req.skip_layer2.is_none());
+
+        let empty: StartRunReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.skip_layer2.is_none());
     }
 
     /// The dev run selects the TIERED path when a map is present and the single-model

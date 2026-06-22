@@ -1195,13 +1195,16 @@ html, body {
 .uow-field-label {
   font-size: 11.5px; font-weight: 600; color: var(--ink-soft); min-width: 76px;
 }
-/* Segmented control for the 3-state dev-status selector. */
+/* Segmented control for the 3-state dev-status selector. A genuinely distinct pattern
+   (one control, mutually-exclusive options), but aligned to the shared button system:
+   the system radius (8px), the secondary's small font/weight, and the primary accent for
+   the active segment — so it reads as the same family, not a one-off. */
 .uow-seg {
-  display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden;
+  display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
   background: var(--paper);
 }
 .uow-seg-btn {
-  font-size: 11.5px; font-weight: 600; padding: 4px 11px;
+  font-size: 12px; font-weight: 600; padding: 5px 11px;
   border: none; border-right: 1px solid var(--line); background: transparent;
   color: var(--ink-soft); cursor: pointer; transition: background .12s var(--ease), color .12s var(--ease);
 }
@@ -1374,8 +1377,9 @@ html, body {
   font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 8px;
   cursor: pointer; transition: border-color .15s var(--ease), color .15s var(--ease);
 }
-.btn-secondary:hover { border-color: var(--accent); color: var(--accent-ink); }
+.btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); }
 .btn-secondary.danger:hover { border-color: #c0392b; color: #c0392b; }
+.btn-secondary:disabled { opacity: .45; cursor: not-allowed; }
 /* "+N" chip on a findings "type" cell: N other rule ids the server merged into this row
    (also_matches). Muted so it reads as a secondary annotation, not a second rule. */
 .finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
@@ -2456,13 +2460,9 @@ html, body {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .uow-lifecycle-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.uow-stage-btn {
-  font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 7px;
-  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-  cursor: pointer;
-}
-.uow-stage-btn:hover:not(:disabled) { border-color: var(--accent); }
-.uow-stage-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* The transition action (e.g. Approve decisions) reuses the onboarding `.btn-secondary`
+   variant directly — bordered, same geometry as the accent primary run button — so the
+   UoW controls and the onboarding page read as one button system. */
 
 /* ── Per-phase run control, inline with the lifecycle steps (Increment 1) ──── */
 /* The run control for the ACTIVE phase renders here; it replaces the prior
@@ -2485,6 +2485,21 @@ html, body {
 /* The run-button + model-select row inside a step control: give the side-by-side
    controls comfortable breathing room (TASK 2). */
 .run-control-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* In a side-by-side row, drop btn-run's standalone bottom margin so the primary aligns
+   with the model select beside it — same pattern the onboarding action rows use. The
+   row's `gap` already provides the comfortable breathing room. */
+.run-control-row .btn-run { margin-bottom: 0; }
+/* One-time bootstrap escape-hatch toggle on the development run control: a clearly-
+   labeled, default-off checkbox that skips ONLY layer-2 for the tool-installing run. */
+.uow-bootstrap-toggle {
+  display: flex; align-items: flex-start; gap: 8px; cursor: pointer;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--paper);
+}
+.uow-bootstrap-toggle input { margin-top: 2px; flex: none; cursor: pointer; }
+.uow-bootstrap-text { display: flex; flex-direction: column; gap: 2px; }
+.uow-bootstrap-label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.uow-bootstrap-hint { font-size: 11.5px; line-height: 1.45; color: var(--ink-faint); }
 
 /* Frozen gate provenance read-out on the UoW panel. */
 .uow-provenance {
