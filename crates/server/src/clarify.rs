@@ -12,6 +12,7 @@
 //! the live-transport write-back is deferred to the provider work.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,9 +34,52 @@ pub enum ClarifyState {
     Answered,
 }
 
-/// One clarifying question on a story: who it is addressed to, and the answer once
-/// it comes back.
-#[derive(Clone, Serialize)]
+/// One selectable option on a structured clarification: a label and a short
+/// benefit/drawback description (the `AskUserQuestion` UX). Free-text-only
+/// questions have an empty option list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClarifyOption {
+    /// The short, selectable label (what the answer records).
+    pub label: String,
+    /// A one-line benefit/drawback description shown under the label so the user
+    /// can weigh the choice.
+    pub description: String,
+}
+
+/// A structured answer to a clarification: the selected option label(s) plus an
+/// optional free-text ("Other") note. A pure free-text answer has an empty
+/// `selected` and a `free_text`.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClarifyAnswer {
+    /// The option label(s) the user picked. One for single-select, possibly many
+    /// for multi-select, empty for a free-text-only answer.
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// The free-text ("Other") note, when the question allowed it (or for a pure
+    /// free-text question).
+    #[serde(default)]
+    pub free_text: Option<String>,
+}
+
+impl ClarifyAnswer {
+    /// Render a human-readable one-line summary (selected labels joined with `; `,
+    /// then the free-text appended). This is what populates the back-compat
+    /// `answer` string the queue + tracker write-back display.
+    pub fn summary(&self) -> String {
+        let mut parts: Vec<String> = self.selected.clone();
+        if let Some(ft) = self.free_text.as_ref() {
+            let ft = ft.trim();
+            if !ft.is_empty() {
+                parts.push(ft.to_string());
+            }
+        }
+        parts.join("; ")
+    }
+}
+
+/// One clarifying question on a story: who it is addressed to, the structured
+/// options (if any), and the answer once it comes back.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Clarification {
     pub id: String,
     pub story_id: String,
@@ -43,12 +87,36 @@ pub struct Clarification {
     /// Who the question is addressed to (the per-question pick: a teammate, "you",
     /// or a free-typed handle). Not a standing "PO" role.
     pub addressee: String,
+    /// The structured options to choose from (the `AskUserQuestion` UX). Empty for
+    /// a pure free-text question. `#[serde(default)]` so older persisted JSON
+    /// (which had no options) deserializes cleanly.
+    #[serde(default)]
+    pub options: Vec<ClarifyOption>,
+    /// Whether more than one option may be selected (checkboxes vs. radio).
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Whether the "Other" free-text escape is offered. Defaults to `true` so a
+    /// pure free-text question (empty options + free-text) is the natural fallback,
+    /// and so older persisted JSON (no field) keeps the free-text leg.
+    #[serde(default = "default_true")]
+    pub allow_free_text: bool,
+    /// The human-readable answer summary (selected labels + free-text), kept for
+    /// back-compat, the NEEDS YOU queue display, and the tracker write-back.
     pub answer: Option<String>,
+    /// The structured answer (selected labels + free-text). `None` while open.
+    /// `#[serde(default)]` so older persisted JSON deserializes.
+    #[serde(default)]
+    pub answer_selection: Option<ClarifyAnswer>,
     pub answered_by: Option<String>,
     /// The explicit, persisted lifecycle state. Always consistent with `answer`:
     /// `Answered` iff `answer.is_some()`. Serialized so clients can branch on it
     /// directly rather than re-deriving from the nullable `answer`.
     pub state: ClarifyState,
+}
+
+/// Serde default for `allow_free_text` (true = the "Other" escape is on by default).
+fn default_true() -> bool {
+    true
 }
 
 impl Clarification {
@@ -67,30 +135,88 @@ impl Clarification {
     }
 }
 
-/// Request body to post a clarifying question.
+/// Request body to post a clarifying question. The structured fields are optional:
+/// when `options` is absent/empty the question is a pure free-text question (the
+/// old behaviour), so existing callers keep working.
 #[derive(Deserialize)]
 pub struct PostClarifyReq {
     pub question: String,
     pub addressee: String,
+    #[serde(default)]
+    pub options: Vec<ClarifyOption>,
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Defaults to `true` (the "Other" escape on) when absent, so an old free-text
+    /// post still records a free-text question.
+    #[serde(default = "default_true")]
+    pub allow_free_text: bool,
 }
 
-/// Request body to answer a clarification.
+/// Request body to answer a clarification. `selected`/`free_text` are the structured
+/// answer; `answer` is the legacy free-text field. When `selected` and `free_text`
+/// are both empty/absent, the handler falls back to the legacy `answer` string, so
+/// existing callers keep working.
 #[derive(Deserialize)]
 pub struct AnswerReq {
+    #[serde(default)]
     pub answer: String,
+    #[serde(default)]
+    pub selected: Vec<String>,
+    #[serde(default)]
+    pub free_text: Option<String>,
     pub answered_by: String,
 }
 
-/// In-memory store of clarifications, shared into the handlers.
+/// Store of clarifications, shared into the handlers. In-memory by default
+/// (`new`/`seeded`); when constructed via [`ClarificationStore::at`] it also
+/// rehydrates from and flushes to a JSON file, so open questions + their answers
+/// survive a restart (the resume guarantee).
 #[derive(Clone, Default)]
 pub struct ClarificationStore {
     items: Arc<Mutex<HashMap<String, Clarification>>>,
     counter: Arc<AtomicUsize>,
+    /// The backing JSON file, when persistent. `None` = in-memory only.
+    path: Option<Arc<PathBuf>>,
 }
 
 impl ClarificationStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Persist to (and rehydrate from) `path`. Open clarifications and their answers
+    /// survive a restart, so the user can leave and resume at any open question.
+    ///
+    /// The `counter` is seeded past the highest existing `clar-N` id so a reopened
+    /// store never re-issues an id that's already on disk.
+    pub fn at(path: PathBuf) -> Self {
+        let items: HashMap<String, Clarification> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        // Resume the id counter past anything already persisted.
+        let max_n = items
+            .keys()
+            .filter_map(|k| k.strip_prefix("clar-"))
+            .filter_map(|n| n.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        Self {
+            items: Arc::new(Mutex::new(items)),
+            counter: Arc::new(AtomicUsize::new(max_n)),
+            path: Some(Arc::new(path)),
+        }
+    }
+
+    /// Write the current map to the backing file, if persistent. Best-effort: a
+    /// write failure is silent (the in-memory state stays authoritative). Called
+    /// after every mutation. Must NOT be called while holding the `items` lock.
+    fn flush(&self) {
+        let Some(p) = &self.path else { return };
+        let Ok(map) = self.items.lock() else { return };
+        if let Ok(s) = serde_json::to_string(&*map) {
+            let _ = std::fs::write(p.as_ref(), s);
+        }
     }
 
     /// A store pre-seeded with a couple of open clarifications, so the cockpit's
@@ -123,34 +249,78 @@ impl ClarificationStore {
         v
     }
 
-    /// Post a new (open) clarification for a story; returns it.
+    /// Post a new (open) free-text clarification for a story; returns it. This is the
+    /// back-compat shim: it delegates to [`Self::post_structured`] with no options and
+    /// the free-text escape on.
     pub fn post(&self, story_id: &str, question: &str, addressee: &str) -> Clarification {
+        self.post_structured(story_id, question, addressee, Vec::new(), false, true)
+    }
+
+    /// Post a new (open) STRUCTURED clarification for a story; returns it. `options`
+    /// empty + `allow_free_text` true is a pure free-text question (the back-compat
+    /// case). Flushes to disk if persistent.
+    pub fn post_structured(
+        &self,
+        story_id: &str,
+        question: &str,
+        addressee: &str,
+        options: Vec<ClarifyOption>,
+        multi_select: bool,
+        allow_free_text: bool,
+    ) -> Clarification {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let c = Clarification {
             id: format!("clar-{n}"),
             story_id: story_id.to_string(),
             question: question.to_string(),
             addressee: addressee.to_string(),
+            options,
+            multi_select,
+            allow_free_text,
             answer: None,
+            answer_selection: None,
             answered_by: None,
             state: ClarifyState::Asked,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.insert(c.id.clone(), c.clone());
         }
+        self.flush();
         c
     }
 
-    /// Record an answer on a clarification; returns the updated clarification, or
-    /// `None` if the id is unknown.
+    /// Record a free-text answer on a clarification; returns the updated clarification,
+    /// or `None` if the id is unknown. Back-compat shim: stores the text as both the
+    /// structured free-text and the summary.
     pub fn answer(&self, id: &str, answer: &str, answered_by: &str) -> Option<Clarification> {
-        let mut guard = self.items.lock().ok()?;
-        let c = guard.get_mut(id)?;
-        c.answer = Some(answer.to_string());
-        c.answered_by = Some(answered_by.to_string());
-        // Persist the asked -> answered transition explicitly.
-        c.state = ClarifyState::Answered;
-        Some(c.clone())
+        let sel = ClarifyAnswer {
+            selected: Vec::new(),
+            free_text: Some(answer.to_string()),
+        };
+        self.answer_structured(id, sel, answered_by)
+    }
+
+    /// Record a STRUCTURED answer on a clarification; returns the updated clarification,
+    /// or `None` if the id is unknown. Sets both the structured `answer_selection` and
+    /// the human-readable `answer` summary, then flushes if persistent.
+    pub fn answer_structured(
+        &self,
+        id: &str,
+        selection: ClarifyAnswer,
+        answered_by: &str,
+    ) -> Option<Clarification> {
+        let updated = {
+            let mut guard = self.items.lock().ok()?;
+            let c = guard.get_mut(id)?;
+            c.answer = Some(selection.summary());
+            c.answer_selection = Some(selection);
+            c.answered_by = Some(answered_by.to_string());
+            // Persist the asked -> answered transition explicitly.
+            c.state = ClarifyState::Answered;
+            c.clone()
+        };
+        self.flush();
+        Some(updated)
     }
 
     /// All clarifications for a story, oldest first by id.
@@ -229,6 +399,215 @@ mod tests {
         let answered = store.answer(&c.id, "USD", "maria-pm").expect("exists");
         let json = serde_json::to_string(&answered).expect("serializes");
         assert!(json.contains("\"state\":\"answered\""), "got: {json}");
+    }
+
+    #[test]
+    fn structured_post_then_answer_round_trip() {
+        let store = ClarificationStore::new();
+        let c = store.post_structured(
+            "CAM-1",
+            "Which timezone for reminders?",
+            "@maria-pm",
+            vec![
+                ClarifyOption {
+                    label: "Org timezone".into(),
+                    description: "One consistent send time; simpler to reason about.".into(),
+                },
+                ClarifyOption {
+                    label: "Member timezone".into(),
+                    description: "Reminders land at a sensible local hour per member.".into(),
+                },
+            ],
+            false,
+            true,
+        );
+        assert!(c.is_open());
+        assert_eq!(c.options.len(), 2);
+        assert!(!c.multi_select);
+        assert!(c.allow_free_text);
+
+        let answered = store
+            .answer_structured(
+                &c.id,
+                ClarifyAnswer {
+                    selected: vec!["Member timezone".into()],
+                    free_text: Some("but default to org tz if unknown".into()),
+                },
+                "maria-pm",
+            )
+            .expect("clarification exists");
+        assert!(!answered.is_open());
+        assert_eq!(answered.state, ClarifyState::Answered);
+        let sel = answered.answer_selection.as_ref().expect("structured answer");
+        assert_eq!(sel.selected, vec!["Member timezone".to_string()]);
+        assert_eq!(sel.free_text.as_deref(), Some("but default to org tz if unknown"));
+        // The summary reflects selected labels + free-text.
+        assert_eq!(
+            answered.answer.as_deref(),
+            Some("Member timezone; but default to org tz if unknown")
+        );
+    }
+
+    #[test]
+    fn structured_multi_select() {
+        let store = ClarificationStore::new();
+        let c = store.post_structured(
+            "CAM-1",
+            "Which columns to include?",
+            "you",
+            vec![
+                ClarifyOption { label: "Name".into(), description: "d".into() },
+                ClarifyOption { label: "Email".into(), description: "d".into() },
+                ClarifyOption { label: "Phone".into(), description: "d".into() },
+            ],
+            true,
+            false,
+        );
+        assert!(c.multi_select);
+        assert!(!c.allow_free_text);
+
+        let answered = store
+            .answer_structured(
+                &c.id,
+                ClarifyAnswer {
+                    selected: vec!["Name".into(), "Email".into()],
+                    free_text: None,
+                },
+                "zach",
+            )
+            .expect("exists");
+        let sel = answered.answer_selection.as_ref().unwrap();
+        assert_eq!(sel.selected.len(), 2);
+        assert_eq!(answered.answer.as_deref(), Some("Name; Email"));
+    }
+
+    #[test]
+    fn free_text_only_back_compat() {
+        // The old post/answer shims still work and produce a free-text question/answer.
+        let store = ClarificationStore::new();
+        let c = store.post("CAM-1", "Anything else?", "you");
+        assert!(c.options.is_empty());
+        assert!(c.allow_free_text);
+        assert!(!c.multi_select);
+
+        let answered = store
+            .answer(&c.id, "Yes, also export PDFs.", "zach")
+            .expect("exists");
+        assert_eq!(answered.answer.as_deref(), Some("Yes, also export PDFs."));
+        let sel = answered.answer_selection.as_ref().unwrap();
+        assert!(sel.selected.is_empty());
+        assert_eq!(sel.free_text.as_deref(), Some("Yes, also export PDFs."));
+    }
+
+    #[test]
+    fn persistence_survives_reopen_resume_guarantee() {
+        let dir = std::env::temp_dir().join(format!(
+            "cam-clarify-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clarifications.json");
+
+        let posted_id;
+        {
+            let store = ClarificationStore::at(path.clone());
+            let c = store.post_structured(
+                "CAM-7",
+                "Ship behind a flag?",
+                "@maria-pm",
+                vec![
+                    ClarifyOption { label: "Flag".into(), description: "safer rollout".into() },
+                    ClarifyOption { label: "Direct".into(), description: "simpler".into() },
+                ],
+                false,
+                true,
+            );
+            posted_id = c.id.clone();
+            store
+                .answer_structured(
+                    &c.id,
+                    ClarifyAnswer {
+                        selected: vec!["Flag".into()],
+                        free_text: None,
+                    },
+                    "maria-pm",
+                )
+                .unwrap();
+            // store dropped here
+        }
+
+        // Reopen at the same path: the question + its answer survived the restart.
+        let reopened = ClarificationStore::at(path.clone());
+        let restored = reopened
+            .for_story("CAM-7")
+            .into_iter()
+            .find(|x| x.id == posted_id)
+            .expect("clarification survived restart");
+        assert_eq!(restored.question, "Ship behind a flag?");
+        assert_eq!(restored.options.len(), 2);
+        assert_eq!(restored.state, ClarifyState::Answered);
+        assert_eq!(restored.answer.as_deref(), Some("Flag"));
+        assert_eq!(
+            restored.answer_selection.as_ref().unwrap().selected,
+            vec!["Flag".to_string()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serde_default_loads_legacy_json_without_options() {
+        // A clarification persisted before the structured fields existed: no `options`,
+        // `multi_select`, `allow_free_text`, or `answer_selection`. It must still load.
+        let legacy = r#"{
+            "clar-1": {
+                "id": "clar-1",
+                "story_id": "CAM-1",
+                "question": "Currency?",
+                "addressee": "@maria-pm",
+                "answer": "USD",
+                "answered_by": "maria-pm",
+                "state": "answered"
+            }
+        }"#;
+        let map: HashMap<String, Clarification> =
+            serde_json::from_str(legacy).expect("legacy JSON deserializes");
+        let c = map.get("clar-1").expect("present");
+        assert!(c.options.is_empty());
+        assert!(!c.multi_select);
+        // allow_free_text defaults to true for legacy records.
+        assert!(c.allow_free_text);
+        assert!(c.answer_selection.is_none());
+        assert_eq!(c.answer.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn summary_reflects_selected_and_free_text() {
+        let a = ClarifyAnswer {
+            selected: vec!["A".into(), "B".into()],
+            free_text: Some("note".into()),
+        };
+        assert_eq!(a.summary(), "A; B; note");
+
+        let only_sel = ClarifyAnswer { selected: vec!["A".into()], free_text: None };
+        assert_eq!(only_sel.summary(), "A");
+
+        let only_ft = ClarifyAnswer {
+            selected: vec![],
+            free_text: Some("free".into()),
+        };
+        assert_eq!(only_ft.summary(), "free");
+
+        // Whitespace-only free-text is dropped.
+        let blank_ft = ClarifyAnswer {
+            selected: vec!["A".into()],
+            free_text: Some("   ".into()),
+        };
+        assert_eq!(blank_ft.summary(), "A");
     }
 
     #[test]

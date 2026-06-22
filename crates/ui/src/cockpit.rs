@@ -3089,6 +3089,246 @@ async fn post_author_message(story_id: &str, message: &str) -> Option<AuthoringU
         .ok()
 }
 
+// ── Structured clarifications (AskUserQuestion-style) ────────────────────────────
+
+/// One selectable option on a structured clarification (mirrors the server's
+/// `ClarifyOption`): a label + a benefit/drawback description.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct ClarifyOptionView {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// One clarification (mirrors the server's `Clarification` for the fields the UI
+/// needs). Free-text-only questions have an empty `options` and `allow_free_text`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+struct ClarificationView {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    story_id: String,
+    #[serde(default)]
+    question: String,
+    #[serde(default)]
+    addressee: String,
+    #[serde(default)]
+    options: Vec<ClarifyOptionView>,
+    #[serde(default)]
+    multi_select: bool,
+    #[serde(default)]
+    allow_free_text: bool,
+    #[serde(default)]
+    answer: Option<String>,
+}
+
+/// Fetch the OPEN clarifications for a story (`GET /api/stories/:id/clarifications`,
+/// filtered to open ones client-side). Used to surface a story-authoring pause point.
+async fn fetch_clarifications_for_story(story_id: &str) -> Vec<ClarificationView> {
+    let resp = match reqwest::get(format!(
+        "{}/api/stories/{}/clarifications",
+        crate::BFF_URL,
+        enc_seg(story_id)
+    ))
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+}
+
+/// Fetch only the OPEN clarifications for a story (used as a story-authoring pause point).
+async fn fetch_open_clarifications_for_story(story_id: &str) -> Vec<ClarificationView> {
+    fetch_clarifications_for_story(story_id)
+        .await
+        .into_iter()
+        .filter(|c| c.answer.is_none())
+        .collect()
+}
+
+/// Fetch ALL open clarifications across every story (`GET /api/clarifications`),
+/// driving the NEEDS YOU queue.
+async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
+    let resp = match reqwest::get(format!("{}/api/clarifications", crate::BFF_URL)).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
+}
+
+/// Submit a structured answer to a clarification (`POST /api/clarifications/:cid/answer`).
+/// Posts `{ selected, free_text, answered_by }`. Returns true on success.
+async fn answer_clarification(
+    cid: &str,
+    selected: Vec<String>,
+    free_text: Option<String>,
+) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/clarifications/{}/answer",
+            crate::BFF_URL,
+            enc_seg(cid)
+        ))
+        .json(&serde_json::json!({
+            "selected": selected,
+            "free_text": free_text,
+            "answered_by": "you",
+        }))
+        .send()
+        .await
+        .ok()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// A reusable AskUserQuestion-style panel for one clarification: renders the question,
+/// each option as a label + benefit/drawback description (radio for single-select,
+/// checkboxes for multi-select), plus an "Other" free-text field when `allow_free_text`.
+/// On submit it posts `{selected, free_text}` to the answer endpoint and calls `on_answered`.
+///
+/// Reused at every clarification point in the dev console (the story-authoring pause
+/// point and the NEEDS YOU queue). A pure free-text question (empty options +
+/// `allow_free_text`) renders just the "Other" box, so it stays back-compatible.
+#[component]
+fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler<()>) -> Element {
+    // Selected option labels (one for single-select, many for multi-select).
+    let mut selected = use_signal(Vec::<String>::new);
+    let mut other = use_signal(String::new);
+    let mut submitting = use_signal(|| false);
+
+    let multi = clar.multi_select;
+    let allow_free_text = clar.allow_free_text;
+    let cid = clar.id.clone();
+
+    // A submit is valid once there's at least one selection or non-empty free-text.
+    let can_submit = !selected().is_empty() || !other().trim().is_empty();
+
+    rsx! {
+        div { class: "clarify-q-card",
+            p { class: "clarify-q-question", "{clar.question}" }
+            if !clar.addressee.is_empty() {
+                p { class: "clarify-q-addressee", "for {clar.addressee}" }
+            }
+            div { class: "clarify-q-options",
+                for opt in clar.options.iter() {
+                    {
+                        let label = opt.label.clone();
+                        let checked = selected().contains(&label);
+                        rsx! {
+                            label {
+                                key: "{label}",
+                                class: if checked { "clarify-q-option on" } else { "clarify-q-option" },
+                                input {
+                                    r#type: if multi { "checkbox" } else { "radio" },
+                                    name: "clarify-{cid}",
+                                    checked,
+                                    onchange: {
+                                        let label = label.clone();
+                                        move |_| {
+                                            let mut cur = selected();
+                                            if multi {
+                                                if let Some(pos) = cur.iter().position(|x| x == &label) {
+                                                    cur.remove(pos);
+                                                } else {
+                                                    cur.push(label.clone());
+                                                }
+                                            } else {
+                                                cur = vec![label.clone()];
+                                            }
+                                            selected.set(cur);
+                                        }
+                                    },
+                                }
+                                span { class: "clarify-q-option-body",
+                                    span { class: "clarify-q-option-label", "{opt.label}" }
+                                    span { class: "clarify-q-option-desc", "{opt.description}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if allow_free_text {
+                div { class: "clarify-q-other",
+                    label { class: "clarify-q-other-label",
+                        if clar.options.is_empty() { "Your answer" } else { "Other" }
+                    }
+                    textarea {
+                        class: "clarify-q-other-input",
+                        rows: 2,
+                        placeholder: "Type a different answer…",
+                        value: "{other}",
+                        oninput: move |e| other.set(e.value()),
+                    }
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: submitting() || !can_submit,
+                onclick: {
+                    let cid = cid.clone();
+                    move |_| {
+                        let cid = cid.clone();
+                        let sel = selected();
+                        let ft = {
+                            let t = other().trim().to_string();
+                            if t.is_empty() { None } else { Some(t) }
+                        };
+                        let on_answered = on_answered;
+                        submitting.set(true);
+                        spawn(async move {
+                            let ok = answer_clarification(&cid, sel, ft).await;
+                            submitting.set(false);
+                            if ok {
+                                on_answered.call(());
+                            }
+                        });
+                    }
+                },
+                if submitting() { "Submitting…" } else { "Submit answer" }
+            }
+        }
+    }
+}
+
+/// The NEEDS YOU queue: every OPEN clarification across every story, each rendered as
+/// the AskUserQuestion-style `ClarifyQuestion` so it can be answered in place. These are
+/// the resumable pause points — they persist server-side, so the user can leave and come
+/// back to any unanswered question. Answering one re-fetches the queue (it drops off).
+#[component]
+fn NeedsYouQueue() -> Element {
+    let refresh = use_signal(|| 0u32);
+    let open = use_resource(move || {
+        let _dep = refresh();
+        async move { fetch_all_open_clarifications().await }
+    });
+    let open = open.read().clone().unwrap_or_default();
+
+    rsx! {
+        div { class: "needs-you",
+            p { class: "govdev-nav-label", "NEEDS YOU ({open.len()})" }
+            if open.is_empty() {
+                p { class: "needs-empty", "Nothing waiting on you." }
+            } else {
+                div { class: "needs-list",
+                    for clar in open.iter() {
+                        ClarifyQuestion {
+                            key: "{clar.id}",
+                            clar: clar.clone(),
+                            on_answered: move |_| {
+                                let mut refresh = refresh;
+                                refresh += 1;
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The outcome of publishing a drafted story to the board (`POST /api/uow/:id/publish`).
 enum PublishOutcome {
     /// Published + linked; the UoW is now a normal linked UoW.
@@ -4176,6 +4416,8 @@ fn GovernedDevPage() -> Element {
                 }
                 // ── New Unit of Work: author a story with AI ──────────────────────
                 NewAuthoredUowButton { uows_refresh, sel }
+                // ── NEEDS YOU: open structured clarifications (resumable pause points) ──
+                NeedsYouQueue {}
                 p { class: "govdev-nav-label", "UNITS OF WORK ({uows.len()})" }
                 div { class: "govdev-uow-list",
                     if uows.is_empty() {
@@ -4695,6 +4937,20 @@ fn StoryAuthoringPanel(
     let chat = st.chat.clone();
     let has_draft = !draft_title.trim().is_empty();
 
+    // Open structured clarifications for this draft story. These are resumable pause
+    // points: when the assistant asks a question with options it is posted as a
+    // structured clarification (server-side), surfaced here via the reusable
+    // ClarifyQuestion component, and the answer is fed back into the authoring chat.
+    let open_clars = {
+        let id = uow_id.clone();
+        use_resource(move || {
+            let id = id.clone();
+            let _dep = refresh();
+            async move { fetch_open_clarifications_for_story(&id).await }
+        })
+    };
+    let open_clars = open_clars.read().clone().unwrap_or_default();
+
     rsx! {
         div { class: "uow-dev story-authoring",
             div { class: "uow-dev-head",
@@ -4718,6 +4974,47 @@ fn StoryAuthoringPanel(
                             div { class: "{cls}",
                                 span { class: "authoring-msg-role", "{who}" }
                                 p { class: "authoring-msg-text", "{m.text}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Structured clarification (resumable pause point) ────────────────
+            // When the assistant asked a question with options, answer it here via
+            // the AskUserQuestion-style component. The answer is fed back into the
+            // authoring chat as the next message so the draft refines.
+            for clar in open_clars.iter() {
+                {
+                    let id = uow_id.clone();
+                    let summary_q = clar.question.clone();
+                    rsx! {
+                        div { key: "{clar.id}", class: "authoring-clarify",
+                            ClarifyQuestion {
+                                clar: clar.clone(),
+                                on_answered: move |_| {
+                                    // Feed the answer back into the authoring loop. We re-fetch
+                                    // the clarification's recorded summary by re-drafting from the
+                                    // chat: post the user's choice (summary already saved server-side)
+                                    // as the next author message so the assistant refines the draft.
+                                    let id = id.clone();
+                                    let q = summary_q.clone();
+                                    let mut refresh = refresh;
+                                    spawn(async move {
+                                        // Re-read the now-answered clarification to get its summary,
+                                        // then feed it back as the author's reply.
+                                        let answer_text = fetch_clarifications_for_story(&id)
+                                            .await
+                                            .into_iter()
+                                            .find(|c| c.question == q)
+                                            .and_then(|c| c.answer)
+                                            .unwrap_or_default();
+                                        if !answer_text.trim().is_empty() {
+                                            let _ = post_author_message(&id, &answer_text).await;
+                                        }
+                                        refresh += 1;
+                                    });
+                                },
                             }
                         }
                     }

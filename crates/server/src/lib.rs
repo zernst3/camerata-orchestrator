@@ -164,6 +164,11 @@ impl AppState {
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
+            // Clarifications persist too: every open structured question is a resumable
+            // pause point, so the user can leave and come back to any unanswered question
+            // (and answered ones stay on the record). Survives restarts; safe to delete.
+            state.clarifications =
+                crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
             // The story spine must persist too: a UoW references its story by id, and
             // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
             // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
@@ -1143,9 +1148,14 @@ async fn post_clarification(
     Path(story_id): Path<String>,
     Json(req): Json<PostClarifyReq>,
 ) -> Json<Clarification> {
-    let clar = state
-        .clarifications
-        .post(&story_id, &req.question, &req.addressee);
+    let clar = state.clarifications.post_structured(
+        &story_id,
+        &req.question,
+        &req.addressee,
+        req.options.clone(),
+        req.multi_select,
+        req.allow_free_text,
+    );
 
     if state.provider.live {
         if let Ok(Some(story)) = state.stories.get(&story_id).await {
@@ -1172,9 +1182,21 @@ async fn answer_clarification(
     Path(cid): Path<String>,
     Json(req): Json<AnswerReq>,
 ) -> Result<Json<Clarification>, AppError> {
+    // Structured path: selected options and/or a free-text "Other". When both the
+    // structured fields are empty, fall back to the legacy `answer` string as the
+    // free-text leg, so old callers keep working unchanged.
+    let free_text = match req.free_text.clone() {
+        Some(ft) => Some(ft),
+        None if !req.answer.trim().is_empty() => Some(req.answer.clone()),
+        None => None,
+    };
+    let selection = crate::clarify::ClarifyAnswer {
+        selected: req.selected.clone(),
+        free_text,
+    };
     state
         .clarifications
-        .answer(&cid, &req.answer, &req.answered_by)
+        .answer_structured(&cid, selection, &req.answered_by)
         .map(Json)
         .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))
 }
@@ -4718,16 +4740,21 @@ GitHub-issue-style user story (a title and a markdown body) from a set of requir
 an ongoing clarification chat. Keep one cohesive story: a concise imperative title and a \
 body with sections like Summary, Acceptance Criteria (a checklist), and Notes as warranted. \
 When the requirements are ambiguous or missing key detail, ASK ONE concise clarifying \
-question in your reply and draft the best story you can so far. Respond ONLY with a minified \
-JSON object with exactly these keys: \"title\" (string), \"body\" (string, markdown), and \
-\"reply\" (string: a short conversational message to the author, e.g. your clarifying \
-question or a note on what you changed). Do not wrap the JSON in code fences.";
+question in your reply AND offer the answerer 2-4 concrete options to choose from, each with \
+a short benefit/drawback so they can decide quickly (the AskUserQuestion style). Draft the \
+best story you can so far. Respond ONLY with a minified JSON object with exactly these keys: \
+\"title\" (string), \"body\" (string, markdown), \"reply\" (string: a short conversational \
+message to the author, e.g. your clarifying question or a note on what you changed), and \
+\"options\" (array, possibly empty: when you are asking a clarifying question, 2-4 objects \
+each with \"label\" (a short selectable choice) and \"description\" (its benefit/drawback); \
+leave it as an empty array when you are NOT asking a question). Do not wrap the JSON in code \
+fences.";
 
 /// Parse the LLM's story-authoring response into `(title, body, reply)`. The model is asked
 /// for a JSON object; if it deviates (e.g. wraps in fences or returns prose), we degrade
 /// gracefully: strip a fenced block if present, else treat the whole text as the reply and
 /// leave the draft unchanged signals (empty strings).
-fn parse_author_response(raw: &str) -> (String, String, String) {
+fn parse_author_response(raw: &str) -> (String, String, String, Vec<crate::clarify::ClarifyOption>) {
     let trimmed = raw.trim();
     // Strip a leading/trailing ```json … ``` fence if the model added one.
     let inner = trimmed
@@ -4745,10 +4772,33 @@ fn parse_author_response(raw: &str) -> (String, String, String) {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        return (title, body, reply);
+        // Optional structured options for a clarifying question. Drop any entry missing
+        // a label; an absent/empty array means "not asking a structured question" and
+        // the loop falls back to the free-text reply.
+        let options = v
+            .get("options")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| {
+                        let label = o.get("label").and_then(|x| x.as_str())?.trim().to_string();
+                        if label.is_empty() {
+                            return None;
+                        }
+                        let description = o
+                            .get("description")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Some(crate::clarify::ClarifyOption { label, description })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (title, body, reply, options);
     }
     // Not JSON: keep the raw text as the conversational reply; leave the draft untouched.
-    (String::new(), String::new(), trimmed.to_string())
+    (String::new(), String::new(), trimmed.to_string(), Vec::new())
 }
 
 /// Build the user prompt for the authoring LLM from the prior chat plus the new message.
@@ -4794,9 +4844,9 @@ async fn uow_author(
 
     let llm = crate::llm::Llm::from_env();
     let request = crate::llm::LlmRequest::new(prompt).with_system(STORY_AUTHOR_SYSTEM);
-    let (title, body, reply) = match llm.complete(request).await {
+    let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
-            let (t, b, r) = parse_author_response(&resp.text);
+            let (t, b, r, opts) = parse_author_response(&resp.text);
             // Keep the existing draft when the model returned no usable title/body.
             let title = if t.is_empty() { prior.draft_title.clone() } else { t };
             let body = if b.is_empty() { prior.draft_body.clone() } else { b };
@@ -4805,7 +4855,7 @@ async fn uow_author(
             } else {
                 r
             };
-            (title, body, reply)
+            (title, body, reply, opts)
         }
         Err(e) => {
             // Token-less / LLM-off: don't crash; record a clear note and keep the draft.
@@ -4814,9 +4864,33 @@ async fn uow_author(
                  a model (CLI or ANTHROPIC_API_KEY) and try again.",
                 e
             );
-            (prior.draft_title.clone(), prior.draft_body.clone(), note)
+            (
+                prior.draft_title.clone(),
+                prior.draft_body.clone(),
+                note,
+                Vec::new(),
+            )
         }
     };
+
+    // Structured-clarification upgrade: when the assistant asked a clarifying question
+    // AND offered options, emit it as a STRUCTURED clarification keyed to this draft UoW.
+    // It then surfaces in the NEEDS YOU queue as a resumable pause point, and is answered
+    // via the same AskUserQuestion-style component; the answer feeds back as the next
+    // author message. When the model returned no options we fall back to the free-text
+    // chat reply only (back-compat), posting nothing structured. Story authoring is an
+    // LLM text-generation assist (no gate involved).
+    if !options.is_empty() {
+        state.clarifications.post_structured(
+            &story_id,
+            &reply,
+            "you",
+            options,
+            false,
+            true,
+        );
+    }
+
     let updated = state
         .uow
         .append_authoring_turn(&story_id, &message, &reply, &title, &body);
@@ -7348,22 +7422,43 @@ mod tests {
     /// non-JSON prose (kept as the conversational reply, draft left untouched).
     #[test]
     fn parse_author_response_handles_json_fenced_and_prose() {
-        let (t, b, r) = parse_author_response(
+        let (t, b, r, opts) = parse_author_response(
             "{\"title\":\"Add export\",\"body\":\"## Summary\\nDo it\",\"reply\":\"What format?\"}",
         );
         assert_eq!(t, "Add export");
         assert!(b.contains("Summary"));
         assert_eq!(r, "What format?");
+        // No options key present -> empty (free-text fallback).
+        assert!(opts.is_empty());
 
         // Fenced block is unwrapped.
         let fenced = "```json\n{\"title\":\"T\",\"body\":\"B\",\"reply\":\"R\"}\n```";
-        let (t, b, r) = parse_author_response(fenced);
+        let (t, b, r, opts) = parse_author_response(fenced);
         assert_eq!((t.as_str(), b.as_str(), r.as_str()), ("T", "B", "R"));
+        assert!(opts.is_empty());
 
         // Non-JSON: whole text becomes the reply; title/body empty (caller keeps draft).
-        let (t, b, r) = parse_author_response("Just some prose, no JSON here.");
+        let (t, b, r, opts) = parse_author_response("Just some prose, no JSON here.");
         assert!(t.is_empty() && b.is_empty());
         assert_eq!(r, "Just some prose, no JSON here.");
+        assert!(opts.is_empty());
+    }
+
+    /// When the authoring model asks a clarifying question it returns structured
+    /// `options`; `parse_author_response` surfaces them (label + description) so the
+    /// loop can emit a structured clarification. Entries missing a label are dropped.
+    #[test]
+    fn parse_author_response_extracts_structured_options() {
+        let raw = "{\"title\":\"T\",\"body\":\"B\",\"reply\":\"Which timezone?\",\"options\":[\
+            {\"label\":\"Org tz\",\"description\":\"consistent send time\"},\
+            {\"label\":\"Member tz\",\"description\":\"local hour per member\"},\
+            {\"description\":\"no label, dropped\"}]}";
+        let (_, _, r, opts) = parse_author_response(raw);
+        assert_eq!(r, "Which timezone?");
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].label, "Org tz");
+        assert_eq!(opts[0].description, "consistent send time");
+        assert_eq!(opts[1].label, "Member tz");
     }
 
     /// `POST /api/uow/blank` creates a draft UoW that then lists in `/api/uows` with

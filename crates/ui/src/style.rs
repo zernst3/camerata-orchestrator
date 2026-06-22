@@ -1257,6 +1257,34 @@ html, body {
 .needs-who { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .needs-empty { font-size: 12.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
 
+/* AskUserQuestion-style structured clarification card (reusable). */
+.clarify-q-card {
+  border: 1px solid #f0e2c8; background: #fdf8ef; border-radius: 10px;
+  padding: 11px 12px; display: flex; flex-direction: column; gap: 9px;
+}
+.clarify-q-question { font-size: 13px; font-weight: 700; color: var(--ink); margin: 0; line-height: 1.4; }
+.clarify-q-addressee { font-size: 11px; color: var(--ink-faint); margin: -4px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.clarify-q-options { display: flex; flex-direction: column; gap: 6px; }
+.clarify-q-option {
+  display: flex; align-items: flex-start; gap: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 8px 9px;
+}
+.clarify-q-option:hover { border-color: var(--accent); }
+.clarify-q-option.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-wash); }
+.clarify-q-option input { margin-top: 2px; flex: none; }
+.clarify-q-option-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.clarify-q-option-label { font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.clarify-q-option-desc { font-size: 11.5px; color: var(--ink-soft); line-height: 1.35; }
+.clarify-q-other { display: flex; flex-direction: column; gap: 4px; }
+.clarify-q-other-label { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--ink-faint); }
+.clarify-q-other-input {
+  font: inherit; font-size: 12.5px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 9px; resize: vertical; background: var(--surface); color: var(--ink);
+}
+.clarify-q-other-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.authoring-clarify { margin: 10px 0; }
+.needs-you { margin: 14px 0 4px; }
+
 /* Center stage */
 .cockpit-stage { display: flex; flex-direction: column; min-width: 0; padding: 14px 18px; }
 .stage-tabs { display: flex; gap: 6px; margin-bottom: 14px; }

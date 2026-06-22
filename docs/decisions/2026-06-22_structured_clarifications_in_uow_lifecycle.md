@@ -40,6 +40,34 @@ auto-saved so the user can leave and resume at any pause point.
   with it in context) on answer. Design when building Phase 3. The gate is unchanged — asking a
   question is not a write.
 
+## Status — split into 3a (done) and 3b (pending)
+
+**Phase 3a — DONE (foundation + the easy clarification point).** Shipped on
+`feat/structured-clarify-3a`:
+- **Structured model** (`clarify.rs`): `ClarifyOption{label, description}`; `Clarification`
+  gained `options`, `multi_select`, `allow_free_text` (all `#[serde(default)]`, `allow_free_text`
+  defaults true); `ClarifyAnswer{selected, free_text}` stored on `answer_selection` with `answer`
+  kept as the human-readable summary (selected labels + free-text). `post_structured` /
+  `answer_structured` with the old `post` / `answer` as free-text shims. Back-compat preserved.
+- **Auto-save + resume** (`clarify.rs` + `lib.rs`): `ClarificationStore::at(path)` (load-or-new) +
+  flush-on-mutate; wired to `clarifications.json` in the data-dir block. Open questions + answers
+  survive a restart = resume at any open question.
+- **Endpoints** (`lib.rs`): `PostClarifyReq` / `AnswerReq` gained optional structured fields
+  (serde default → free-text when absent); handlers call the structured store methods.
+- **Story-authoring upgrade** (`uow_author`): the LLM now returns an optional `options` array; when
+  present the question is emitted as a structured clarification (free-text fallback when absent).
+- **Reusable UI** (`cockpit.rs`): an `AskUserQuestion`-style `ClarifyQuestion` component
+  (options + benefit/drawback + radio/checkbox + "Other" free-text), reused in the
+  story-authoring pause point AND a `NeedsYouQueue` (open clarifications across all stories).
+- Tests: structured round-trip, multi-select, free-text back-compat, the persistence/resume
+  guarantee, serde-default loading legacy JSON, summary string.
+
+**Phase 3b — PENDING (the hard part).** Gated dev/investigation agent-emit + the pause/resume
+channel: a mid-write dev/investigation agent RAISING a structured question, the run PAUSING
+(persist) and SURFACING it, then RESUMING (feed the answer back / re-spawn with it in context) on
+answer. The structured model + store + UI from 3a are reused as-is; 3b only adds the agent→run
+channel. The gate is unchanged — asking a question is not a write.
+
 ## Sequence
 worktrees (Phase 1) → PR lifecycle (Phase 2) → structured clarifications (Phase 3). Sequential
 because all three touch `lib.rs` / `uow.rs` / `cockpit.rs`; concurrent agents there would collide.
