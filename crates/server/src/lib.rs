@@ -35,6 +35,7 @@ pub mod llm;
 pub mod notify;
 pub mod onboard;
 pub mod pr;
+pub mod dev_implement_run;
 pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
@@ -719,37 +720,128 @@ async fn start_governed_run(
             .active()
             .map(|p| p.max_iterations)
             .unwrap_or(1);
-        match tier_map {
-            // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
-            // strongest tier leading. The single `model` is ignored when a map is given.
-            Some(map) => {
-                tokio::spawn(async move {
-                    live_fleet::execute_live_run_tiered(
-                        store,
-                        rid,
-                        title,
-                        desc,
-                        map,
-                        max_iterations,
-                        skip_layer2,
-                    )
-                    .await
-                });
-            }
-            // Single-model path (back-compat): one operator-wide model for every agent.
-            None => {
-                tokio::spawn(async move {
-                    live_fleet::execute_live_run(
-                        store,
-                        rid,
-                        title,
-                        desc,
-                        model,
-                        max_iterations,
-                        skip_layer2,
-                    )
-                    .await
-                });
+
+        // ── Brownfield vs. greenfield dispatch ────────────────────────────────
+        //
+        // When the UoW's repo worktree is RESOLVABLE (a local clone exists on disk),
+        // use the brownfield in-place implement path: the agent edits the EXISTING
+        // codebase on the UoW's branch, and the server commits. The spec comes from
+        // the UoW's APPROVED decisions (the no-code-first gate already verified them).
+        //
+        // When the worktree is NOT resolvable (no local clone, no workspace root), fall
+        // back to the greenfield scaffolder (execute_live_run / _tiered) which builds a
+        // new app from a plan in a throwaway temp dir.
+        //
+        // GATE UNCHANGED in both paths: `ensure_development_gate` (the no-code-first
+        // check) runs above, and every agent spawned here uses `governed_role` +
+        // `gated_write`-only tools regardless of which branch is taken.
+        //
+        // `story_id` is a `&str` reference that doesn't outlive the function; own it
+        // early so the tokio::spawn closure can capture it as `'static`.
+        let story_id_owned = story_id.to_string();
+        let uow_data = state.uow.get_or_create(story_id);
+        let uow_branch = uow_data
+            .branch
+            .as_deref()
+            .filter(|b| !b.trim().is_empty())
+            .map(|b| b.to_string());
+        let decisions = state.uow.decisions_for(story_id);
+
+        // Try to resolve the UoW's worktree from the active project's settings.
+        // We require an active project to have a resolvable workspace root / repo override.
+        let worktree = if let (Some(branch), Some(_proj)) = (
+            uow_branch.as_deref(),
+            state.projects.active(),
+        ) {
+            // Derive repo from story_id (owner/repo#num → owner/repo).
+            let repo_from_story = story_id
+                .rsplit_once('#')
+                .map(|(r, _)| r)
+                .unwrap_or(story_id);
+            let override_path = state.settings.repo_path(repo_from_story);
+            let workspace_root = state.settings.workspace_root();
+            crate::workspace::resolve_uow_worktree(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo_from_story,
+                branch,
+            )
+            .await
+        } else {
+            None
+        };
+
+        if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
+            // Brownfield: implement in-place in the UoW's worktree.
+            let dir = worktree.expect("is_brownfield guarantees Some");
+            let uow_store = state.uow.clone();
+            let repo = story_id
+                .rsplit_once('#')
+                .map(|(r, _)| r.to_string())
+                .unwrap_or_else(|| story_id.to_string());
+            let branch = uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"));
+            let token = github_token();
+            // For the tiered path we pick the strongest model for the implementer; for
+            // the single-model path we use the caller's model (or the default).
+            let impl_model = match &tier_map {
+                Some(map) => map.strongest.clone(),
+                None => model
+                    .clone()
+                    .unwrap_or_else(crate::model_tier::default_strongest_model),
+            };
+            tokio::spawn(async move {
+                crate::dev_implement_run::execute_dev_implement_run(
+                    store,
+                    uow_store,
+                    rid,
+                    story_id_owned,
+                    title,
+                    desc,
+                    repo,
+                    dir,
+                    branch,
+                    decisions,
+                    token,
+                    impl_model,
+                    max_iterations,
+                    skip_layer2,
+                )
+                .await
+            });
+        } else {
+            // Greenfield fallback: scaffold a new app from the plan in a throwaway dir.
+            match tier_map {
+                // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
+                // strongest tier leading. The single `model` is ignored when a map is given.
+                Some(map) => {
+                    tokio::spawn(async move {
+                        live_fleet::execute_live_run_tiered(
+                            store,
+                            rid,
+                            title,
+                            desc,
+                            map,
+                            max_iterations,
+                            skip_layer2,
+                        )
+                        .await
+                    });
+                }
+                // Single-model path (back-compat): one operator-wide model for every agent.
+                None => {
+                    tokio::spawn(async move {
+                        live_fleet::execute_live_run(
+                            store,
+                            rid,
+                            title,
+                            desc,
+                            model,
+                            max_iterations,
+                            skip_layer2,
+                        )
+                        .await
+                    });
+                }
             }
         }
     } else {
