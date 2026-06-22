@@ -58,6 +58,14 @@ pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 /// what the gate decided; it never changes the decision.
 pub const GATE_EVENTS_FILE_ENV: &str = "CAMERATA_GATE_EVENTS_FILE";
 
+/// Optional env override for the clarification-request JSONL sink path (Phase 3b). When
+/// set, every `ask_clarification` call is appended (one JSON object per line) to this
+/// file. When unset, the path is derived from [`RULES_FILE_ENV`] (a
+/// `clarify-requests.jsonl` sibling of the per-session rules file), so the orchestrator
+/// that wrote the rules file always knows where to read questions from. This is the
+/// agent→run channel; it carries STRUCTURED questions, never writes to the repo.
+pub const CLARIFY_REQUESTS_FILE_ENV: &str = "CAMERATA_CLARIFY_REQUESTS_FILE";
+
 /// One structured gate-decision record, appended as a single JSONL line to the sink.
 ///
 /// Recording-only: this mirrors what [`Gateway::gated_write`] already decided, so the
@@ -87,6 +95,67 @@ fn default_gate_kind() -> String {
     "gate".to_string()
 }
 
+/// One selectable option on a structured clarification the agent raises. Mirrors the 3a
+/// `ClarifyOption` shape (label + benefit/drawback description) so the server can post it
+/// into the existing clarify store without translation. Serde-shaped, no logic.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ClarifyRequestOption {
+    /// The short, selectable label (what the answer records).
+    pub label: String,
+    /// A one-line benefit/drawback so the human can weigh the choice.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// A structured clarification the GATED agent raises mid-run, recorded to the
+/// clarify-request sink. This is the wire shape between the gateway subprocess and the
+/// server: the server reads these back, posts them into the 3a clarify store keyed to the
+/// run's story, and pauses the run. Recording-only — building or serializing one cannot
+/// write to the repo or change any gate verdict (asking a question is not a write).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClarificationRequestRecord {
+    /// The question text.
+    pub question: String,
+    /// The structured options (empty = a pure free-text question).
+    #[serde(default)]
+    pub options: Vec<ClarifyRequestOption>,
+    /// Whether more than one option may be selected.
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Whether the "Other" free-text escape is offered. Defaults true (the 3a default).
+    #[serde(default = "default_true")]
+    pub allow_free_text: bool,
+    /// Unix-epoch milliseconds when the question was recorded.
+    pub ts_ms: u128,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Append a clarification-request record to the clarify-request JSONL sink (best-effort).
+///
+/// The agent→run channel for Phase 3b. RECORDING-ONLY: a write failure is ignored. This
+/// never touches the repo (it appends to the per-session sink, a sibling of the rules
+/// file, which lives OUTSIDE the worktree jail) and cannot change any gate verdict.
+fn append_clarify_request(record: &ClarificationRequestRecord) {
+    let Some(path) = clarify_requests_sink_path() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(record) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Resolve the structured gate-decision sink path: [`GATE_EVENTS_FILE_ENV`] if set,
 /// else a `gate-events.jsonl` sibling of the [`RULES_FILE_ENV`] file. Returns `None`
 /// when neither is configured (e.g. standalone/test runs) — then no sink is written and
@@ -99,6 +168,24 @@ pub fn gate_events_sink_path() -> Option<std::path::PathBuf> {
     let rules_path = std::path::PathBuf::from(rules);
     let dir = rules_path.parent()?;
     Some(dir.join("gate-events.jsonl"))
+}
+
+/// Resolve the clarification-request sink path: [`CLARIFY_REQUESTS_FILE_ENV`] if set,
+/// else a `clarify-requests.jsonl` sibling of the [`RULES_FILE_ENV`] file. This is the
+/// agent→run channel for Phase 3b: when the agent calls `ask_clarification`, the gateway
+/// appends the STRUCTURED question here (one JSON object per line). The server reads this
+/// file back after the agent returns, posts the question into the 3a clarify store, and
+/// pauses the run at `AwaitingClarification`. Like [`gate_events_sink_path`], this is a
+/// RECORDING channel only: writing a question never touches the repo and cannot change a
+/// gate verdict. Returns `None` when nothing is configured (standalone/test runs).
+pub fn clarify_requests_sink_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(CLARIFY_REQUESTS_FILE_ENV) {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    let rules = std::env::var_os(RULES_FILE_ENV)?;
+    let rules_path = std::path::PathBuf::from(rules);
+    let dir = rules_path.parent()?;
+    Some(dir.join("clarify-requests.jsonl"))
 }
 
 /// Build a [`GateDecisionRecord`] from a gate outcome. PURE: the verdict/rule/reason are
@@ -221,6 +308,23 @@ pub struct WriteArgs {
     pub path: String,
     /// File content.
     pub content: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct AskClarificationArgs {
+    /// The question to put to the human (a product/design decision you cannot make
+    /// yourself).
+    pub question: String,
+    /// Structured options to choose from, each with a one-line benefit/drawback. Leave
+    /// empty for a pure free-text question.
+    #[serde(default)]
+    pub options: Vec<ClarifyRequestOption>,
+    /// Whether more than one option may be selected (checkboxes vs. radio).
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Whether the "Other" free-text escape is offered. Default true.
+    #[serde(default = "default_true")]
+    pub allow_free_text: bool,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -402,6 +506,53 @@ impl Gateway {
         decision
     }
 
+    /// Raise a STRUCTURED clarifying question to the human (Phase 3b). READ-CLASS: this
+    /// tool does NOT write to the repo, does NOT spawn anything, and does NOT escalate.
+    /// It records the question to the per-session clarify-request sink (a sibling of the
+    /// rules file, OUTSIDE the worktree jail) so the server can post it into the clarify
+    /// store and PAUSE the run. The agent should call this ONCE for the single most
+    /// blocking decision, then END its turn — the question is the pause point; a human
+    /// answers and the run is RE-SPAWNED with the answer in context. Asking a question is
+    /// not a write, so the gate is unaffected: there is no new write path here.
+    #[tool(
+        name = "ask_clarification",
+        description = "Raise ONE structured clarifying question to the human when a product/design decision blocks you and you cannot make it yourself. Provide the question plus optional structured options (each with a short benefit/drawback). This does NOT write any files; it pauses the run for a human answer. After calling it, STOP and end your turn — you will be resumed with the answer. Do not guess past a real blocking decision."
+    )]
+    pub async fn ask_clarification(&self, args: Parameters<AskClarificationArgs>) -> String {
+        let AskClarificationArgs {
+            question,
+            options,
+            multi_select,
+            allow_free_text,
+        } = args.0;
+
+        let record = ClarificationRequestRecord {
+            question: question.clone(),
+            options,
+            multi_select,
+            allow_free_text,
+            ts_ms: now_ms(),
+        };
+
+        eprintln!(
+            "[gateway] ask_clarification recorded ({} option(s)): {}",
+            record.options.len(),
+            question
+        );
+
+        // Record to the agent→run channel. RECORDING-ONLY: writes to the per-session
+        // sink outside the worktree jail; touches no repo file; cannot change a gate
+        // verdict. There is deliberately no filesystem write of repo content here.
+        append_clarify_request(&record);
+
+        format!(
+            "CLARIFICATION RECORDED: \"{question}\". This question has been posted to the \
+             human for an answer. STOP now and end your turn — the run will pause and you \
+             will be resumed with the answer appended to your context. Do not attempt to \
+             proceed past this decision."
+        )
+    }
+
     /// Governed delegation. ENABLED only in orchestrator mode (the lead agent's
     /// gateway). Spawns a SINGLE gated `claude -p` child on the requested tier's
     /// model — gated_write ONLY, `delegate` DISABLED, depth+1, same worktree —
@@ -579,6 +730,94 @@ mod gate_sink_tests {
             Some(std::path::PathBuf::from("/tmp/session-1/gate-events.jsonl"))
         );
         std::env::remove_var(super::RULES_FILE_ENV);
+    }
+}
+
+#[cfg(test)]
+mod clarify_tool_tests {
+    use super::*;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    // Serialize env-mutating clarify tests so they're order-independent in the binary.
+    static CLARIFY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn clarify_sink_path_prefers_explicit_then_derives_from_rules_dir() {
+        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(CLARIFY_REQUESTS_FILE_ENV, "/tmp/explicit-clarify.jsonl");
+        assert_eq!(
+            clarify_requests_sink_path(),
+            Some(std::path::PathBuf::from("/tmp/explicit-clarify.jsonl"))
+        );
+        std::env::remove_var(CLARIFY_REQUESTS_FILE_ENV);
+
+        std::env::set_var(RULES_FILE_ENV, "/tmp/session-9/rules.json");
+        assert_eq!(
+            clarify_requests_sink_path(),
+            Some(std::path::PathBuf::from("/tmp/session-9/clarify-requests.jsonl"))
+        );
+        std::env::remove_var(RULES_FILE_ENV);
+    }
+
+    #[tokio::test]
+    async fn ask_clarification_records_a_structured_question_to_the_sink() {
+        let _guard = CLARIFY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "cam-clarify-tool-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = dir.join("clarify-requests.jsonl");
+        std::env::set_var(CLARIFY_REQUESTS_FILE_ENV, &sink);
+
+        // A gateway with the default subset; ask_clarification is independent of rules.
+        let gw = Gateway::with_rules(vec![gov1_rule()]);
+        let out = gw
+            .ask_clarification(Parameters(AskClarificationArgs {
+                question: "Which timezone for reminders?".to_string(),
+                options: vec![
+                    ClarifyRequestOption {
+                        label: "Org timezone".to_string(),
+                        description: "one consistent send time".to_string(),
+                    },
+                    ClarifyRequestOption {
+                        label: "Member timezone".to_string(),
+                        description: "local hour per member".to_string(),
+                    },
+                ],
+                multi_select: false,
+                allow_free_text: true,
+            }))
+            .await;
+
+        std::env::remove_var(CLARIFY_REQUESTS_FILE_ENV);
+
+        // The tool's return tells the agent to STOP — the pause point.
+        assert!(out.contains("CLARIFICATION RECORDED"));
+        assert!(out.to_lowercase().contains("stop"));
+
+        // The sink holds exactly one structured record, faithfully.
+        let text = std::fs::read_to_string(&sink).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 1);
+        let rec: ClarificationRequestRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(rec.question, "Which timezone for reminders?");
+        assert_eq!(rec.options.len(), 2);
+        assert_eq!(rec.options[0].label, "Org timezone");
+        assert!(!rec.multi_select);
+        assert!(rec.allow_free_text);
+
+        // CRITICAL: ask_clarification writes ONLY to the sink (outside any worktree), and
+        // does NOT write any repo file — it created nothing else in the dir.
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "only the sink file should exist: {entries:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -26,6 +26,11 @@ pub enum RunStatus {
     Planned,
     Executing,
     Gating,
+    /// Phase 3b: the run is PAUSED on a structured clarifying question the gated agent
+    /// raised mid-run. The open clarification (in the 3a clarify store) is the pause
+    /// point, auto-saved; the run resumes when a human answers it. A run in this state is
+    /// not `done`: it is parked, waiting on the human.
+    AwaitingClarification,
     AwaitingQa,
 }
 

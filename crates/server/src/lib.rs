@@ -17,6 +17,7 @@ pub mod ai_audit;
 pub mod arm;
 pub mod auto_fire;
 pub mod clarify;
+pub mod clarify_resume;
 pub mod connections;
 pub mod decompose;
 pub mod draft;
@@ -82,6 +83,12 @@ pub struct AppState {
     stories: Arc<dyn StoryStore>,
     runs: RunStore,
     clarifications: ClarificationStore,
+    /// Phase 3b: persisted resume contexts for runs paused on a clarification, keyed by
+    /// the clarification id. When a gated agent asks a question the run parks at
+    /// `AwaitingClarification` and the context to re-spawn it is stored here; the answer
+    /// endpoint consumes it to resume. Persisted alongside the clarify store so a pause
+    /// point survives a restart.
+    clarify_resume: crate::clarify_resume::ClarifyResumeStore,
     provider: ProviderHandle,
     decompositions: DecompositionStore,
     routines: RoutineStore,
@@ -119,6 +126,7 @@ impl AppState {
             stories,
             runs: RunStore::new(),
             clarifications: ClarificationStore::new(),
+            clarify_resume: crate::clarify_resume::ClarifyResumeStore::new(),
             provider: ProviderHandle::native(),
             decompositions: DecompositionStore::new(),
             routines: RoutineStore::new(),
@@ -169,6 +177,10 @@ impl AppState {
             // (and answered ones stay on the record). Survives restarts; safe to delete.
             state.clarifications =
                 crate::clarify::ClarificationStore::at(dir.join("clarifications.json"));
+            // Phase 3b: resume contexts for runs paused on a clarification persist next to
+            // the clarify store, so a parked run can still resume after a restart.
+            state.clarify_resume =
+                crate::clarify_resume::ClarifyResumeStore::at(dir.join("clarify-resume.json"));
             // The story spine must persist too: a UoW references its story by id, and
             // /api/uows resolves the WorkItem from the spine. An in-memory spine meant
             // restored UoWs rendered blank (and couldn't be run). Persist it alongside.
@@ -1194,11 +1206,43 @@ async fn answer_clarification(
         selected: req.selected.clone(),
         free_text,
     };
-    state
+    let answered = state
         .clarifications
         .answer_structured(&cid, selection, &req.answered_by)
-        .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))
+        .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))?;
+
+    // Phase 3b: if a gated run is PARKED on this clarification, resume it now. The resume
+    // context is consumed (no double-resume); the re-spawned agent gets the original task
+    // plus the question plus this answer. The gate is unchanged — the resume rebuilds the
+    // SAME governed role + gated session. Only the investigation phase resumes today; the
+    // enum keeps the dev-phase resume a closed, explicit future branch.
+    if let Some(ctx) = state.clarify_resume.take(&cid) {
+        let answer_summary = answered
+            .answer
+            .clone()
+            .unwrap_or_else(|| req.answer.clone());
+        match ctx.phase {
+            crate::clarify_resume::PausedPhase::Investigation => {
+                let runs = state.runs.clone();
+                let uow = state.uow.clone();
+                let clarifications = state.clarifications.clone();
+                let resume = state.clarify_resume.clone();
+                tokio::spawn(async move {
+                    crate::investigation_run::resume_investigation_after_clarification(
+                        runs,
+                        uow,
+                        clarifications,
+                        resume,
+                        ctx,
+                        answer_summary,
+                    )
+                    .await;
+                });
+            }
+        }
+    }
+
+    Ok(Json(answered))
 }
 
 /// Which work-tracker provider is active, and whether it is a live external tracker.
@@ -5357,11 +5401,21 @@ async fn uow_begin_investigation(
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
+        let clarifications = state.clarifications.clone();
+        let resume = state.clarify_resume.clone();
         let rid = run_id.clone();
         let sid = story_id.clone();
         tokio::spawn(async move {
             crate::investigation_run::execute_investigation_run(
-                runs, uow, rid, sid, title, desc, model,
+                runs,
+                uow,
+                clarifications,
+                resume,
+                rid,
+                sid,
+                title,
+                desc,
+                model,
             )
             .await;
         });
