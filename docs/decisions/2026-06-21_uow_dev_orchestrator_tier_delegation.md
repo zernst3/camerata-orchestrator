@@ -27,19 +27,36 @@ includes `Task`). That is the capability-based, prompt-proof core of the gate
 ([[camerata_gate_universal_enforcement]]). Letting the orchestrator call `Task` directly would
 let it spawn a child that escapes the gate — NOT acceptable.
 
-## Decision: fleet-mediated delegation (gate-preserving)
+## Decision: fleet-mediated delegation (gate-preserving) — TARGET design B, built in two increments
 
-Delegation is **fleet-mediated**, not agent-spawned:
+Delegation is **fleet-mediated**, never agent-spawned. `Task` (the CLI's ungoverned subagent
+spawner) stays disallowed for EVERY agent; spawning is done by the fleet, which gates every child
+with only `gated_write`. Two wirings were considered:
 
-1. The top-tier (orchestrator) agent does the complex work AND emits a structured
-   **delegation plan** (which subtasks → which tier).
-2. The **fleet** spawns the mid/low-tier agents for those subtasks — each still gated with only
-   `gated_write`. `Task` stays disallowed for every agent.
+- **A — plan, then dispatch:** the orchestrator emits a full delegation plan as output; the fleet
+  spawns the tier agents from it. Fully deterministic, but the plan is committed up front, so a
+  subtask that turns out harder than estimated has **no escalation path**.
+- **B — governed `delegate` tool + parent-driven escalation (TARGET):** the orchestrator gets ONE
+  extra capability, a Camerata-owned `delegate(subtask, tier)` MCP tool (NOT `Task`). It delegates
+  mid-run; the gateway routes the call; the fleet spawns a gated child on the chosen tier and
+  returns the result to the orchestrator, which stays in the loop.
 
-This yields Zach's "parent decides delegation" model while every agent stays capability-confined
-and the gate invariant holds. The fleet already has the tier infra (`TierMap`, `classify_task`,
-`build_from_plan_with_tier_map` in `crates/fleet/src/tier.rs`); the change is making the
-orchestrator's plan drive delegation instead of a fixed complexity heuristic.
+**Why B:** dynamic escalation. A delegate that hits work above its tier just **returns**
+("incomplete / above my tier / reason") — it never calls "up." The **orchestrator** reads that
+return and reroutes (does it itself, or re-delegates higher). Escalation is therefore
+**parent-driven**, with no child→parent up-calls to design, and the delegation-depth guard
+collapses to a **trivial counter** (max re-delegations per task). The gate holds throughout — every
+spawned agent at every tier is born with only `gated_write`.
+
+**Build order (nothing throwaway — A's machinery is B's foundation):**
+- **Increment 1 (deterministic core):** fleet spawns gated tier agents; per-UoW tier-map override;
+  runs move onto the lifecycle steps; orchestrator emits a plan and the fleet dispatches. Airtight
+  and independently useful.
+- **Increment 2:** the live `delegate` MCP tool + parent-driven escalation + the depth counter.
+
+The fleet already has the tier infra (`TierMap`, `classify_task`, `build_from_plan_with_tier_map`
+in `crates/fleet/src/tier.rs`). The change in increment 1 is making the orchestrator's plan drive
+delegation instead of a fixed complexity heuristic; increment 2 makes delegation live + escalatable.
 
 ## Implementation scope (FE + BE)
 
