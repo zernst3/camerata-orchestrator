@@ -1376,6 +1376,45 @@ html, body {
 }
 .cockpit-nav-tab:hover { color: var(--ink); }
 .cockpit-nav-tab.on { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-card); }
+
+/* Cumulative LLM usage meter — pinned to the right of the cockpit nav. Observability only. */
+.usage-meter-wrap { margin-left: auto; position: relative; }
+.usage-meter {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+  font-size: 11.5px; font-weight: 700; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.usage-meter-loading { margin-left: auto; opacity: .7; }
+.usage-meter:hover { color: var(--ink); border-color: var(--ink-faint); }
+.usage-num { color: var(--ink); }
+.usage-unit { color: var(--ink-faint); font-weight: 600; font-size: 10.5px; }
+.usage-sep { color: var(--ink-faint); }
+.usage-dim { color: var(--ink-faint); font-weight: 600; font-size: 11.5px; }
+/* Amber rate-limited badge: distinct from the normal readout so it can't be missed. */
+.usage-meter-rl {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid #e0a44a; background: #fdf2dd; color: #92600c;
+  font-size: 11.5px; font-weight: 800; padding: 4px 11px; border-radius: 999px;
+}
+.usage-rl-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #d97a06;
+  animation: usage-rl-pulse 1.1s ease-in-out infinite;
+}
+@keyframes usage-rl-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+/* By-model breakdown dropdown. */
+.usage-breakdown {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 50;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 9px;
+  box-shadow: var(--shadow-card); padding: 8px; min-width: 280px;
+}
+.usage-breakdown-empty { font-size: 12px; color: var(--ink-faint); padding: 4px 6px; }
+.usage-breakdown-table { width: 100%; border-collapse: collapse; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.usage-breakdown-table th { text-align: left; color: var(--ink-faint); font-weight: 700; padding: 3px 6px; border-bottom: 1px solid var(--line); }
+.usage-breakdown-table td { color: var(--ink-soft); padding: 3px 6px; border-bottom: 1px solid var(--line-soft); }
+.usage-breakdown-table .usage-r { text-align: right; }
+
 .cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-width: 0; }
 .cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
 .cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }

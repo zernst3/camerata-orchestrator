@@ -1729,6 +1729,11 @@ pub async fn audit_repos(
     // (`merge_scan_preview`) on the same `run_deterministic` flag.
     run_ai_review: bool,
     run_deterministic: bool,
+    // Process-global cumulative usage ledger. When `Some`, the audit's `Llm` is built WITH it
+    // attached, so every audit/calibration/deep-tier model call folds into the cockpit's
+    // session-wide usage meter (in addition to the per-audit `UsageMeter` below). `None` in
+    // tests / non-cockpit callers — recording is then simply skipped. Observability only.
+    ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
@@ -1748,7 +1753,10 @@ pub async fn audit_repos(
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
     let mut deep_inputs: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    let llm = crate::llm::Llm::from_env();
+    let llm = match ledger {
+        Some(l) => crate::llm::Llm::from_env_with_ledger(l),
+        None => crate::llm::Llm::from_env(),
+    };
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
     let meter = crate::ai_audit::UsageMeter::default();
@@ -2984,6 +2992,7 @@ mod tests {
             true,           // soc2_enabled
             false,          // run_ai_review  -> AI path fully skipped (no model call)
             true,           // run_deterministic -> floor runs
+            None,           // usage_ledger
         )
         .await;
         // The floor caught the secret.
@@ -3021,6 +3030,7 @@ mod tests {
             true,
             false, // run_ai_review off (token-free)
             false, // run_deterministic off -> floor skipped
+            None,  // usage_ledger
         )
         .await;
         assert!(

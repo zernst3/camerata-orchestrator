@@ -50,6 +50,7 @@ pub mod suppression;
 pub mod terminal;
 pub mod transcript;
 pub mod uow;
+pub mod usage_ledger;
 pub mod update_branch_run;
 pub mod workitems;
 pub mod workspace;
@@ -109,6 +110,11 @@ pub struct AppState {
     /// on top. Every flag defaults to `true`; a flag is OFF only when explicitly set to
     /// `false`. Cloned into handlers via the shared `AppState`.
     pub feature_flags: crate::feature_flags::FeatureFlags,
+    /// Process/session-global cumulative LLM usage ledger (tokens + $ + calls + by-model +
+    /// rate-limited state). EVERY model call routed through `Llm::from_env_with_ledger`
+    /// folds into this; the `/api/usage` endpoint snapshots it for the cockpit's persistent
+    /// usage meter. Provider-agnostic: keys off the vendor-neutral `LlmResponse` usage fields.
+    pub usage_ledger: Arc<crate::usage_ledger::UsageLedger>,
 }
 
 impl AppState {
@@ -133,7 +139,16 @@ impl AppState {
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             artifacts: None,
             feature_flags: crate::feature_flags::FeatureFlags::default(),
+            usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
         }
+    }
+
+    /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
+    /// model call made through it is recorded into the cumulative cockpit meter. Every handler
+    /// that needs the LLM goes through this (instead of bare `Llm::from_env`) so the ledger
+    /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
+    pub fn llm(&self) -> crate::llm::Llm {
+        crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
     }
 
     /// Build state seeded with the representative spine + seeded open clarifications,
@@ -330,6 +345,7 @@ pub fn router(state: AppState) -> Router {
         // AI: the model provider seam (CLI locally, Anthropic API in production). The
         // research chat and every AI step call models through this.
         .route("/api/chat", post(chat))
+        .route("/api/usage", get(usage))
         .route("/api/models", get(list_models))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
@@ -2027,6 +2043,7 @@ async fn onboard_audit(
         state.feature_flags.soc2,
         run_ai_review,
         run_deterministic,
+        Some(state.usage_ledger.clone()),
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -2136,6 +2153,8 @@ async fn onboard_audit_start(
     };
     let scan_cache = state.scan_cache.clone();
     let soc2_enabled = state.feature_flags.soc2;
+    // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
+    let usage_ledger = state.usage_ledger.clone();
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -2159,6 +2178,7 @@ async fn onboard_audit_start(
             soc2_enabled,
             run_ai_review,
             run_deterministic,
+            Some(usage_ledger.clone()),
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
@@ -3627,7 +3647,7 @@ async fn decompose_propose(
         .map_err(AppError)?
         .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
-    let llm = crate::llm::Llm::from_env();
+    let llm = state.llm();
     let children = crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm).await;
     Ok(Json(children))
 }
@@ -3653,7 +3673,7 @@ async fn suggest_clarifications(
         "Story: {}\n\nDescription: {}",
         story.title, story.description
     );
-    let llm = crate::llm::Llm::from_env();
+    let llm = state.llm();
     let questions = match llm
         .complete(crate::llm::LlmRequest::new(user).with_system(system))
         .await
@@ -3738,6 +3758,7 @@ async fn create_routine(
 /// (`authored_by: claude`). If the model is unreachable it falls back to the
 /// deterministic scaffold (`authored_by: scaffold`) so the form never dead-ends.
 async fn draft_routine_prompt(
+    State(state): State<AppState>,
     Json(req): Json<crate::routine::DraftPromptReq>,
 ) -> Json<crate::routine::DraftPromptResp> {
     let system = "You are Camerata's lead engineer. The user describes WHAT they want a \
@@ -3750,7 +3771,7 @@ async fn draft_routine_prompt(
         "Permission scope: {}\n\nWhat the user wants:\n{}",
         req.scope, req.intent
     );
-    let llm = crate::llm::Llm::from_env();
+    let llm = state.llm();
     match llm
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -3890,7 +3911,7 @@ async fn chat_escalation(
         .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
     let system = crate::escalation::chat_system_prompt(&esc);
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
-    let llm = crate::llm::Llm::from_env();
+    let llm = state.llm();
     let reply = match llm
         .complete(
             crate::llm::LlmRequest::new(user)
@@ -3932,7 +3953,7 @@ async fn answer_escalation(
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
     let driver = crate::escalation::LlmTranslator {
-        llm: crate::llm::Llm::from_env(),
+        llm: state.llm(),
     };
     let model = state
         .routines
@@ -4014,13 +4035,25 @@ struct ChatReq {
 
 /// The research chat: one completion through the configured backend. The side-by-side
 /// chatbot uses this; it's also the smoke test that the model wiring works.
-async fn chat(Json(req): Json<ChatReq>) -> Result<Json<crate::llm::LlmResponse>, AppError> {
-    let llm = crate::llm::Llm::from_env();
+async fn chat(
+    State(state): State<AppState>,
+    Json(req): Json<ChatReq>,
+) -> Result<Json<crate::llm::LlmResponse>, AppError> {
+    let llm = state.llm();
     let mut r = crate::llm::LlmRequest::new(req.prompt).with_model(req.model);
     if let Some(system) = req.system {
         r = r.with_system(system);
     }
     Ok(Json(llm.complete(r).await?))
+}
+
+/// `GET /api/usage` — the cumulative, session-wide LLM usage snapshot for the cockpit's
+/// persistent usage meter: total input/output/cache tokens, derived/reported $ cost, call
+/// count, a by-model breakdown, and the current rate-limited state. Provider-agnostic (keys
+/// off the vendor-neutral `LlmResponse` usage fields), so it works for Claude today and for
+/// a future Gemini arm with no change. Observability only — reading it changes nothing.
+async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::UsageSnapshot> {
+    Json(state.usage_ledger.snapshot())
 }
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
@@ -4842,7 +4875,7 @@ async fn uow_author(
     let prior = before.authoring.unwrap_or_default();
     let prompt = build_author_prompt(&prior.chat, &message);
 
-    let llm = crate::llm::Llm::from_env();
+    let llm = state.llm();
     let request = crate::llm::LlmRequest::new(prompt).with_system(STORY_AUTHOR_SYSTEM);
     let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
@@ -6457,6 +6490,73 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["status"], "ok");
+    }
+
+    /// `/api/usage` returns the cumulative ledger snapshot in the documented shape, and
+    /// reflects calls recorded on the shared ledger (proving the endpoint reads the same
+    /// state the chokepoint writes). Provider-agnostic: records an Anthropic-shaped (cost
+    /// present) and a Gemini-shaped (tokens only, derived cost) call.
+    #[tokio::test]
+    async fn usage_endpoint_shape_and_accumulation() {
+        let state = AppState::seeded();
+        // Anthropic-shaped: cost reported directly.
+        state.usage_ledger.record(
+            "claude-opus-4-8",
+            &crate::llm::LlmResponse {
+                text: String::new(),
+                model: "claude-opus-4-8".to_string(),
+                backend: "cli".to_string(),
+                cost_usd: Some(0.05),
+                input_tokens: Some(1000),
+                output_tokens: Some(500),
+                cache_read_input_tokens: 10,
+                cache_creation_input_tokens: 20,
+            },
+        );
+        // Gemini-shaped: no cost field, known model id -> derived cost (sonnet 3/15 per Mtok).
+        state.usage_ledger.record(
+            "claude-sonnet-4-6",
+            &crate::llm::LlmResponse {
+                text: String::new(),
+                model: "claude-sonnet-4-6".to_string(),
+                backend: "api".to_string(),
+                cost_usd: None,
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(1_000_000),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+        );
+
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Documented payload shape.
+        assert_eq!(json["input_tokens"], 1_001_000);
+        assert_eq!(json["output_tokens"], 1_000_500);
+        assert_eq!(json["cache_read"], 10);
+        assert_eq!(json["cache_creation"], 20);
+        assert_eq!(json["calls"], 2);
+        assert_eq!(json["rate_limited"], false);
+        assert!(json["last_rate_limit"].is_null());
+        // 0.05 (reported) + 18.0 (derived sonnet) = 18.05.
+        let cost = json["total_cost_usd"].as_f64().unwrap();
+        assert!((cost - 18.05).abs() < 1e-6, "got {cost}");
+        // by_model array of {model,tokens,cost,calls}, sorted by descending cost (sonnet first).
+        let by_model = json["by_model"].as_array().unwrap();
+        assert_eq!(by_model.len(), 2);
+        assert_eq!(by_model[0]["model"], "claude-sonnet-4-6");
+        assert_eq!(by_model[0]["calls"], 1);
+        assert_eq!(by_model[0]["tokens"], 2_000_000);
     }
 
     #[tokio::test]

@@ -144,6 +144,78 @@ async fn fetch_projects() -> Option<Vec<ProjectView>> {
     bff_get_json::<Vec<ProjectView>>("/api/projects").await
 }
 
+// ── Cumulative LLM usage meter (`GET /api/usage`) ───────────────────────────────────
+// Provider-agnostic: the server derives a $ figure from token usage when the backend
+// doesn't report one (the Gemini-shape case), so this readout works for Claude now and a
+// future Gemini arm unchanged. Observability only.
+
+/// One model's slice of the cumulative usage breakdown.
+#[derive(Clone, PartialEq, Default, serde::Deserialize)]
+struct ModelUsageView {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    tokens: u64,
+    #[serde(default)]
+    cost: f64,
+    #[serde(default)]
+    calls: u64,
+}
+
+/// The last rate-limit event the server observed.
+#[derive(Clone, PartialEq, Default, serde::Deserialize)]
+struct RateLimitEventView {
+    #[serde(default)]
+    when_unix: u64,
+    #[serde(default)]
+    detail: String,
+}
+
+/// The cumulative session-wide usage snapshot from `GET /api/usage`.
+#[derive(Clone, PartialEq, Default, serde::Deserialize)]
+struct UsageView {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read: u64,
+    #[serde(default)]
+    cache_creation: u64,
+    #[serde(default)]
+    total_cost_usd: f64,
+    #[serde(default)]
+    calls: u64,
+    #[serde(default)]
+    by_model: Vec<ModelUsageView>,
+    #[serde(default)]
+    rate_limited: bool,
+    #[serde(default)]
+    last_rate_limit: Option<RateLimitEventView>,
+}
+
+impl UsageView {
+    /// Total tokens (input + output) for the compact headline figure.
+    fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
+async fn fetch_usage() -> Option<UsageView> {
+    bff_get_json::<UsageView>("/api/usage").await
+}
+
+/// Format a token count compactly: 12 / 3.4k / 1.2M.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 async fn fetch_active_project() -> Option<ProjectView> {
     bff_get_json::<Option<ProjectView>>("/api/projects/active")
         .await
@@ -3995,6 +4067,104 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 class: cls(CockpitView::Docs),
                 onclick: move |_| view.set(CockpitView::Docs),
                 "Docs"
+            }
+            // Persistent cumulative usage meter, pinned to the right of the nav row.
+            UsageMeter {}
+        }
+    }
+}
+
+/// A compact, always-visible cumulative LLM usage readout (tokens · $ · calls), polling
+/// `GET /api/usage` every few seconds. When the server reports `rate_limited`, it swaps the
+/// normal readout for a distinct amber "Rate-limited — retrying" badge. Clicking it toggles
+/// a small by-model breakdown. Provider-agnostic by virtue of the endpoint: the $ figure is
+/// derived from tokens when the backend doesn't report one (the Gemini-shape case).
+#[component]
+fn UsageMeter() -> Element {
+    let mut usage = use_signal(|| None::<UsageView>);
+    let mut expanded = use_signal(|| false);
+
+    // Poll every ~4s, forever, mirroring the `poll_job` cadence pattern. A failed fetch
+    // leaves the last good value in place (the meter never flickers to empty on a blip).
+    use_future(move || async move {
+        loop {
+            if let Some(u) = fetch_usage().await {
+                usage.set(Some(u));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+    });
+
+    let Some(u) = usage() else {
+        // Until the first poll lands, render a neutral placeholder so the nav layout is stable.
+        return rsx! {
+            div { class: "usage-meter usage-meter-loading", title: "Cumulative LLM usage",
+                span { class: "usage-dim", "usage —" }
+            }
+        };
+    };
+
+    if u.rate_limited {
+        let detail = u
+            .last_rate_limit
+            .as_ref()
+            .map(|e| e.detail.clone())
+            .unwrap_or_else(|| "provider is throttling requests".to_string());
+        return rsx! {
+            div { class: "usage-meter usage-meter-rl", title: "{detail}",
+                span { class: "usage-rl-dot" }
+                span { "Rate-limited — retrying" }
+            }
+        };
+    }
+
+    let tokens = fmt_tokens(u.total_tokens());
+    let cost = format!("${:.2}", u.total_cost_usd);
+    let calls = u.calls;
+    let by_model = u.by_model.clone();
+    let is_expanded = expanded();
+
+    rsx! {
+        div { class: "usage-meter-wrap",
+            button {
+                class: "usage-meter",
+                title: "Cumulative LLM usage this session — click for the by-model breakdown",
+                onclick: move |_| expanded.toggle(),
+                span { class: "usage-num", "{tokens}" }
+                span { class: "usage-unit", "tok" }
+                span { class: "usage-sep", "·" }
+                span { class: "usage-num", "{cost}" }
+                span { class: "usage-sep", "·" }
+                span { class: "usage-num", "{calls}" }
+                span { class: "usage-unit", "calls" }
+            }
+            if is_expanded {
+                div { class: "usage-breakdown",
+                    if by_model.is_empty() {
+                        div { class: "usage-breakdown-empty", "No model calls yet." }
+                    } else {
+                        table { class: "usage-breakdown-table",
+                            thead {
+                                tr {
+                                    th { "Model" }
+                                    th { class: "usage-r", "Tokens" }
+                                    th { class: "usage-r", "Cost" }
+                                    th { class: "usage-r", "Calls" }
+                                }
+                            }
+                            tbody {
+                                for m in by_model.iter() {
+                                    tr { key: "{m.model}",
+                                        td { "{m.model}" }
+                                        td { class: "usage-r", "{fmt_tokens(m.tokens)}" }
+                                        td { class: "usage-r", "${m.cost:.2}" }
+                                        td { class: "usage-r", "{m.calls}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
