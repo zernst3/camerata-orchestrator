@@ -1407,6 +1407,13 @@ html, body {
 .live-event.allow { border-left-color: #2f8f5b; background: #f0f8f3; }
 .live-event.info { border-left-color: var(--ink-faint); background: #fbfaf7; }
 .live-event.info .live-event-verdict { color: var(--ink-soft); }
+.live-event.revise { border-left-color: #c08a2e; background: #fbf2dd66; }
+.live-event.revise .live-event-verdict { color: #b07d22; }
+.live-event.delegate { border-left-color: #5b6fb0; background: #eef0f9; }
+.live-event.delegate .live-event-verdict { color: #4a5da0; }
+.live-event.tier { border-left-color: #7a5bb0; background: #f3eef9; }
+.live-event.tier .live-event-verdict { color: #6a4aa0; }
+.live-events-caption { font-size: 11.5px; color: var(--ink-faint); margin: 6px 0 0; }
 .live-run-mode { font-size: 10.5px; font-weight: 700; letter-spacing: .03em; padding: 3px 8px; border-radius: 6px; background: var(--accent-wash); color: var(--accent-ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .live-event-head { display: flex; align-items: center; gap: 9px; margin-bottom: 3px; }
 .live-event-verdict { font-size: 10.5px; font-weight: 700; letter-spacing: .05em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

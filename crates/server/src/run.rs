@@ -30,14 +30,22 @@ pub enum RunStatus {
 }
 
 /// One real gate verdict recorded during a run.
+///
+/// Reused, by design, for ALL of the dev-cycle observability layers (not just the
+/// layer-1 gate): the `layer` field discriminates the source ("layer-1" = the
+/// deny-before-execute gate; "layer-2" = the post-task lint/test check; "delegate" =
+/// delegation dispatch/return; "tier" = the model routing for a spawned agent;
+/// "stage"/"fleet" = lifecycle), and `verdict` carries the per-layer outcome
+/// ("allow"/"deny" for the gate; "pass"/"fail" for layer-2; "info"/"dispatch" etc.
+/// elsewhere). No new field is needed — the UI keys off `layer` + `verdict`.
 #[derive(Clone, Serialize)]
 pub struct GateEvent {
     pub seq: usize,
-    /// Which enforcement layer produced it ("layer-1" for the deny-before-execute gate).
+    /// Which observability layer produced it (see the struct doc).
     pub layer: String,
-    /// "deny" or "allow", straight from the real gate decision.
+    /// The per-layer outcome (see the struct doc).
     pub verdict: String,
-    /// The rule id that denied, when the verdict is a deny.
+    /// The rule id that denied / the rules a layer-2 check flagged, when applicable.
     pub rule: Option<String>,
     /// Human-readable narrative plus the gate's own reason text.
     pub detail: String,

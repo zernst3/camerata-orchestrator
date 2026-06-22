@@ -2136,12 +2136,72 @@ struct RunView {
     mode: String,
 }
 
-/// One real gate verdict in a run.
+/// One event in a run's development-activity stream. Reused for ALL observability
+/// layers: the `layer` field ("layer-1" gate, "layer-2" check, "tier", "delegate",
+/// "stage"/"fleet", "checks") plus `verdict` drive a distinct label + colour, so a live
+/// dev run reads as a concise activity log. `layer` is `#[serde(default)]` so older /
+/// scripted payloads that omit it deserialize unchanged (they fall back to the gate
+/// layer).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct RunGateEvent {
+    #[serde(default)]
+    layer: String,
     verdict: String,
     rule: Option<String>,
     detail: String,
+}
+
+/// The display label + CSS class for a run-activity event, derived from its `layer` +
+/// `verdict`. PURE so the mapping is unit-testable without rendering. The class is one of
+/// the existing `live-event {variant}` families plus the new layer variants; the label is
+/// a short, human tag (no chain-of-thought).
+fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) {
+    match layer {
+        // Layer-1 deny-before-execute gate: allow / deny (the bounce-back).
+        "layer-1" => match verdict {
+            "deny" => ("GATE DENY", "live-event deny"),
+            "allow" => ("GATE ALLOW", "live-event allow"),
+            _ => ("GATE", "live-event info"),
+        },
+        // Layer-2 post-task lint/test check + the bounce-and-revise pass.
+        "layer-2" => match verdict {
+            "pass" => ("LAYER-2 PASS", "live-event allow"),
+            "fail" => ("LAYER-2 FAIL", "live-event deny"),
+            "revise" => ("REVISE", "live-event revise"),
+            // legacy scripted "bounce" verdict.
+            "bounce" => ("REVISE", "live-event revise"),
+            _ => ("LAYER-2", "live-event info"),
+        },
+        // Delegation dispatch / return (+ INCOMPLETE escalation).
+        "delegate" => match verdict {
+            "dispatch" => ("DELEGATE", "live-event delegate"),
+            "incomplete" => ("DELEGATE INCOMPLETE", "live-event deny"),
+            _ => ("DELEGATE RETURN", "live-event delegate"),
+        },
+        // Model/tier routing per spawned agent.
+        "tier" => ("TIER", "live-event tier"),
+        // cargo build/test verification.
+        "checks" => match verdict {
+            "allow" => ("CHECKS PASS", "live-event allow"),
+            "deny" => ("CHECKS FAIL", "live-event deny"),
+            _ => ("CHECKS", "live-event info"),
+        },
+        // Stage / fleet lifecycle + setup.
+        "stage" => match verdict {
+            "fail" => ("STAGE", "live-event deny"),
+            _ => ("STAGE", "live-event info"),
+        },
+        "setup" => ("SETUP", "live-event info"),
+        // Default (incl. "fleet" lifecycle, empty/legacy): fall back to the verdict.
+        _ => match verdict {
+            "deny" | "error" => (
+                if verdict == "error" { "ERROR" } else { "DENY" },
+                "live-event deny",
+            ),
+            "allow" => ("ALLOW", "live-event allow"),
+            _ => ("INFO", "live-event info"),
+        },
+    }
 }
 
 /// The outcome of attempting to start a governed run. The no-code-first gate (Pillar 2)
@@ -9839,15 +9899,14 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 span { class: "live-run-status {status_cls}", "{status_label}" }
             }
             p { class: "panel-sub", "{sub}" }
+            p { class: "panel-sub live-events-caption",
+                "Development activity — gate decisions, layer-2 checks, tier/delegation, and stage transitions as they happen."
+            }
             div { class: "live-events",
                 for ev in run.events.iter() {
                     {
-                        let vcls = match ev.verdict.as_str() {
-                            "deny" => "live-event deny",
-                            "allow" => "live-event allow",
-                            _ => "live-event info",
-                        };
-                        let vlabel = ev.verdict.to_uppercase();
+                        // Distinct label + colour per observability layer/verdict.
+                        let (vlabel, vcls) = live_event_style(&ev.layer, &ev.verdict);
                         rsx! {
                             div { class: "{vcls}",
                                 div { class: "live-event-head",
@@ -11129,8 +11188,8 @@ fn DocsView() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        det_tool_label, dev_run_body, estimate_audit_cost, is_enforced_floor, FindingView,
-        JobStateView, TierMapView,
+        det_tool_label, dev_run_body, estimate_audit_cost, is_enforced_floor, live_event_style,
+        FindingView, JobStateView, RunGateEvent, TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -11192,6 +11251,50 @@ mod tests {
         // Default (skip_layer2 = false): body is exactly today's — just tier_map, no flag.
         assert_eq!(body.as_object().unwrap().len(), 1);
         assert!(body.get("skip_layer2").is_none());
+    }
+
+    /// The run-activity event view parses the new `layer` field (and tolerates its
+    /// absence on legacy / scripted payloads via `#[serde(default)]`).
+    #[test]
+    fn run_gate_event_parses_layer_and_defaults_when_absent() {
+        // New-shape: carries a layer.
+        let with_layer: RunGateEvent = serde_json::from_str(
+            r#"{"layer":"layer-2","verdict":"fail","rule":"RUST-FMT","detail":"stage 1/2 failed layer-2: RUST-FMT."}"#,
+        )
+        .unwrap();
+        assert_eq!(with_layer.layer, "layer-2");
+        assert_eq!(with_layer.verdict, "fail");
+        assert_eq!(with_layer.rule.as_deref(), Some("RUST-FMT"));
+
+        // Legacy/scripted shape: no layer → defaults to empty (falls back to gate layer).
+        let no_layer: RunGateEvent =
+            serde_json::from_str(r#"{"verdict":"deny","rule":"GOV-1","detail":"x"}"#).unwrap();
+        assert_eq!(no_layer.layer, "");
+        assert_eq!(no_layer.verdict, "deny");
+    }
+
+    /// The per-layer/verdict styling gives each observability kind a distinct label +
+    /// class so the activity log reads clearly. Asserts the load-bearing mappings.
+    #[test]
+    fn live_event_style_labels_each_layer_distinctly() {
+        assert_eq!(live_event_style("layer-1", "deny"), ("GATE DENY", "live-event deny"));
+        assert_eq!(live_event_style("layer-1", "allow"), ("GATE ALLOW", "live-event allow"));
+        assert_eq!(live_event_style("layer-2", "pass"), ("LAYER-2 PASS", "live-event allow"));
+        assert_eq!(live_event_style("layer-2", "fail"), ("LAYER-2 FAIL", "live-event deny"));
+        assert_eq!(live_event_style("layer-2", "revise"), ("REVISE", "live-event revise"));
+        assert_eq!(live_event_style("tier", "info"), ("TIER", "live-event tier"));
+        assert_eq!(
+            live_event_style("delegate", "dispatch"),
+            ("DELEGATE", "live-event delegate")
+        );
+        assert_eq!(
+            live_event_style("delegate", "incomplete"),
+            ("DELEGATE INCOMPLETE", "live-event deny")
+        );
+        assert_eq!(live_event_style("checks", "allow"), ("CHECKS PASS", "live-event allow"));
+        // Legacy/empty layer falls back to verdict-based styling.
+        assert_eq!(live_event_style("", "deny"), ("DENY", "live-event deny"));
+        assert_eq!(live_event_style("", "allow"), ("ALLOW", "live-event allow"));
     }
 
     /// The bootstrap toggle adds `skip_layer2: true` to the body ONLY when on, and never

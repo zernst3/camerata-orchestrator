@@ -237,6 +237,48 @@ pub async fn run_po_demo() -> anyhow::Result<()> {
                     }),
                 );
             }
+            BuildEvent::AgentTier {
+                index,
+                role,
+                model,
+                is_lead,
+            } => {
+                println!(
+                    "    stage {}: {} -> {}{}",
+                    index + 1,
+                    role,
+                    model,
+                    if is_lead { " (lead/orchestrator)" } else { "" },
+                );
+            }
+            BuildEvent::Layer2Result {
+                index,
+                total,
+                passed,
+                violated_rules,
+            } => {
+                println!(
+                    "    stage {}/{} layer-2: {}{}",
+                    index + 1,
+                    total,
+                    if passed { "passed" } else { "FAILED" },
+                    if violated_rules.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", violated_rules.join(", "))
+                    },
+                );
+            }
+            BuildEvent::ReviseIteration {
+                index,
+                violated_rules,
+            } => {
+                println!(
+                    "    stage {}: bounce-and-revise [{}]",
+                    index + 1,
+                    violated_rules.join(", "),
+                );
+            }
             BuildEvent::StageFinished {
                 index,
                 total,

@@ -251,6 +251,43 @@ pub enum BuildEvent {
         /// The task-kind label for this stage.
         kind: String,
     },
+    /// The tier/model a stage's spawned agent runs on, and whether it is the
+    /// lead/orchestrator (the strongest tier that may delegate). Emitted right after
+    /// [`BuildEvent::StageStarted`] so the activity log shows the routing per agent.
+    AgentTier {
+        /// Zero-based index of this stage.
+        index: usize,
+        /// The role name for this stage.
+        role: String,
+        /// The concrete model id this stage's agent runs on.
+        model: String,
+        /// Whether this stage is the lead/orchestrator (delegate-capable).
+        is_lead: bool,
+    },
+    /// The layer-2 (post-task lint/test) check RESULT for a stage: whether it passed
+    /// clean and, if not, the rule ids it left violated. Emitted per stage from the
+    /// finished stage report data — observability over what the check decided; it does
+    /// not change the bounce behaviour.
+    Layer2Result {
+        /// Zero-based index of this stage.
+        index: usize,
+        /// Total number of stages in this fleet.
+        total: usize,
+        /// Whether the stage ended with NO residual layer-2 violations.
+        passed: bool,
+        /// The violated rule ids (empty when `passed`).
+        violated_rules: Vec<String>,
+    },
+    /// A bounce-and-revise iteration occurred for a stage: the stage was dirty after
+    /// layer 2 and the violated rules were sent back to the agent to revise. Emitted
+    /// per dirty stage (the coordinator caps the loop; this records that a revise pass
+    /// ran). Observability only — the loop guard / cap is unchanged.
+    ReviseIteration {
+        /// Zero-based index of this stage.
+        index: usize,
+        /// The rule ids that were cited back to the agent on the initial bounce.
+        violated_rules: Vec<String>,
+    },
     /// A fleet stage has finished.
     StageFinished {
         /// Zero-based index of this stage.
@@ -443,6 +480,9 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
         .collect();
 
     // ── Build the stage list ─────────────────────────────────────────────────
+    // Single-model path: every agent runs on the one operator-wide `model` (or the
+    // CLI default when `None`); no agent is the lead/orchestrator (no delegation).
+    let model_label = model.unwrap_or("default (CLI)").to_string();
     let mut stages: Vec<FleetStage> = Vec::with_capacity(total);
     for (i, task) in plan.tasks.iter().enumerate() {
         on_event(BuildEvent::StageStarted {
@@ -450,6 +490,12 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
             total,
             role: roles[i].name.clone(),
             kind: task.kind.label().to_string(),
+        });
+        on_event(BuildEvent::AgentTier {
+            index: i,
+            role: roles[i].name.clone(),
+            model: model_label.clone(),
+            is_lead: false,
         });
         let stage_task = stage_task_for(task, &lib_path_display, i == 0);
         stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
@@ -464,21 +510,8 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
-    // ── Emit per-stage finished events ───────────────────────────────────────
-    let mut all_agents_ran = true;
-    for (i, stage) in report.stages.iter().enumerate() {
-        let r = &stage.report;
-        if r.initial_outcome.session_id.is_empty() {
-            all_agents_ran = false;
-        }
-        on_event(BuildEvent::StageFinished {
-            index: i,
-            total,
-            clean: r.final_violations.is_empty(),
-            bounced: r.bounced,
-            session_id: r.initial_outcome.session_id.clone(),
-        });
-    }
+    // ── Emit per-stage layer-2 / revise / finished events ────────────────────
+    let all_agents_ran = emit_stage_reports(&report, total, on_event);
 
     // ── Check what the gate actually wrote ───────────────────────────────────
     let produced = std::fs::read_to_string(&lib_path).unwrap_or_default();
@@ -512,6 +545,52 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
         produced_path: lib_path,
         produced_bytes: produced.len(),
     })
+}
+
+/// Emit the per-stage layer-2 result, bounce-and-revise, and finished events from a
+/// completed [`camerata_core::FleetReport`], and report whether every stage ran an
+/// agent. Shared by the single-model and tiered build paths so they surface identical
+/// observability. PURE w.r.t. the gate: derived entirely from the already-decided
+/// report — it records what the check/coordinator decided, changing nothing.
+fn emit_stage_reports(
+    report: &camerata_core::FleetReport,
+    total: usize,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+) -> bool {
+    let mut all_agents_ran = true;
+    for (i, stage) in report.stages.iter().enumerate() {
+        let r = &stage.report;
+        if r.initial_outcome.session_id.is_empty() {
+            all_agents_ran = false;
+        }
+
+        // A bounce-and-revise pass ran iff the stage bounced; cite the rules that
+        // were sent back (the initial violations the revise pass was asked to fix).
+        if r.bounced {
+            on_event(BuildEvent::ReviseIteration {
+                index: i,
+                violated_rules: r.initial_violations.iter().map(|x| x.0.clone()).collect(),
+            });
+        }
+
+        // The layer-2 result: clean == no residual violations after all passes.
+        let passed = r.final_violations.is_empty();
+        on_event(BuildEvent::Layer2Result {
+            index: i,
+            total,
+            passed,
+            violated_rules: r.final_violations.iter().map(|x| x.0.clone()).collect(),
+        });
+
+        on_event(BuildEvent::StageFinished {
+            index: i,
+            total,
+            clean: passed,
+            bounced: r.bounced,
+            session_id: r.initial_outcome.session_id.clone(),
+        });
+    }
+    all_agents_ran
 }
 
 // ─── build_from_plan_with_tier_map ───────────────────────────────────────────
@@ -644,6 +723,14 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
             role: roles[i].name.clone(),
             kind: task.kind.label().to_string(),
         });
+        // Surface the tier/model routing for this agent: the per-stage model resolved
+        // from the tier map, and whether it is the lead/orchestrator (delegate-capable).
+        on_event(BuildEvent::AgentTier {
+            index: i,
+            role: roles[i].name.clone(),
+            model: per_stage_models[i].clone(),
+            is_lead: Some(i) == lead_idx,
+        });
         let mut stage_task = stage_task_for(task, &lib_path_display, i == 0);
         // Tell the lead it can delegate (and how escalation works).
         if Some(i) == lead_idx {
@@ -661,21 +748,8 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
-    // ── Emit per-stage finished events ───────────────────────────────────────
-    let mut all_agents_ran = true;
-    for (i, stage) in report.stages.iter().enumerate() {
-        let r = &stage.report;
-        if r.initial_outcome.session_id.is_empty() {
-            all_agents_ran = false;
-        }
-        on_event(BuildEvent::StageFinished {
-            index: i,
-            total,
-            clean: r.final_violations.is_empty(),
-            bounced: r.bounced,
-            session_id: r.initial_outcome.session_id.clone(),
-        });
-    }
+    // ── Emit per-stage layer-2 / revise / finished events ────────────────────
+    let all_agents_ran = emit_stage_reports(&report, total, on_event);
 
     // ── Check what the gate actually wrote ───────────────────────────────────
     let produced = std::fs::read_to_string(&lib_path).unwrap_or_default();
@@ -788,6 +862,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── emit_stage_reports (BuildEvent mapping from a finished report) ────────
+
+    /// `emit_stage_reports` derives, per stage, a `ReviseIteration` iff the stage
+    /// bounced, a `Layer2Result` (passed/violated rules), and a `StageFinished`. This
+    /// is the observability mapping; it reads an already-decided report and changes
+    /// nothing about the gate. Built with synthetic reports — no I/O, no tokens.
+    #[test]
+    fn emit_stage_reports_maps_layer2_revise_and_finished() {
+        use camerata_core::{AgentOutcome, FleetReport, RunReport, RuleId, StageReport};
+        use std::sync::Mutex;
+
+        fn outcome(session: &str) -> AgentOutcome {
+            AgentOutcome {
+                session_id: session.to_string(),
+                result: "ok".to_string(),
+                cost_usd: Some(0.0),
+                denials: vec![],
+            }
+        }
+
+        // Stage 0: clean on first pass (no bounce). Stage 1: bounced, resolved clean.
+        // Stage 2: bounced, still dirty (residual RUST-CLIPPY).
+        let report = FleetReport {
+            stages: vec![
+                StageReport {
+                    role_name: "Implementer-1".to_string(),
+                    report: RunReport {
+                        initial_outcome: outcome("s0"),
+                        initial_violations: vec![],
+                        revised_outcome: None,
+                        final_violations: vec![],
+                        bounced: false,
+                    },
+                },
+                StageReport {
+                    role_name: "Implementer-2".to_string(),
+                    report: RunReport {
+                        initial_outcome: outcome("s1"),
+                        initial_violations: vec![RuleId("RUST-FMT".to_string())],
+                        revised_outcome: Some(outcome("s1")),
+                        final_violations: vec![],
+                        bounced: true,
+                    },
+                },
+                StageReport {
+                    role_name: "Implementer-3".to_string(),
+                    report: RunReport {
+                        initial_outcome: outcome(""), // empty session => agent did not run
+                        initial_violations: vec![RuleId("RUST-CLIPPY".to_string())],
+                        revised_outcome: Some(outcome("")),
+                        final_violations: vec![RuleId("RUST-CLIPPY".to_string())],
+                        bounced: true,
+                    },
+                },
+            ],
+        };
+
+        let events: Mutex<Vec<BuildEvent>> = Mutex::new(vec![]);
+        let all_ran = emit_stage_reports(&report, 3, &|e| events.lock().unwrap().push(e));
+
+        // Stage 2's empty session id means not every agent ran.
+        assert!(!all_ran);
+
+        let events = events.into_inner().unwrap();
+
+        // Stage 0 (clean): no ReviseIteration, a passed Layer2Result, a clean StageFinished.
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            BuildEvent::ReviseIteration { index: 0, .. }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BuildEvent::Layer2Result { index: 0, passed: true, .. }
+        )));
+
+        // Stage 1 (bounced, resolved): a ReviseIteration citing RUST-FMT, then passed.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BuildEvent::ReviseIteration { index: 1, violated_rules } if violated_rules == &vec!["RUST-FMT".to_string()]
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BuildEvent::Layer2Result { index: 1, passed: true, .. }
+        )));
+
+        // Stage 2 (bounced, residual): a ReviseIteration, then a FAILED Layer2Result
+        // carrying the residual rule id, and a non-clean StageFinished.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BuildEvent::Layer2Result { index: 2, passed: false, violated_rules, .. } if violated_rules == &vec!["RUST-CLIPPY".to_string()]
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BuildEvent::StageFinished { index: 2, clean: false, bounced: true, .. }
+        )));
+    }
+
     // ── stage_task_for ────────────────────────────────────────────────────────
 
     #[test]
@@ -871,6 +1042,28 @@ mod tests {
 
         let e5 = BuildEvent::Verifying;
         let _ = format!("{:?}", e5.clone());
+
+        let e6 = BuildEvent::AgentTier {
+            index: 0,
+            role: "Lead-1".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            is_lead: true,
+        };
+        let _ = format!("{:?}", e6.clone());
+
+        let e7 = BuildEvent::Layer2Result {
+            index: 1,
+            total: 2,
+            passed: false,
+            violated_rules: vec!["RUST-FMT".to_string()],
+        };
+        let _ = format!("{:?}", e7.clone());
+
+        let e8 = BuildEvent::ReviseIteration {
+            index: 1,
+            violated_rules: vec!["RUST-FMT".to_string()],
+        };
+        let _ = format!("{:?}", e8.clone());
     }
 
     #[test]

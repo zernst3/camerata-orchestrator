@@ -42,13 +42,128 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod delegate;
 use delegate::OrchestratorConfig;
 
 /// Env var the orchestrator points at the per-session rules JSON file.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
+
+/// Optional env override for the structured gate-decision JSONL sink path. When set,
+/// every gate decision is appended (one JSON object per line) to this file. When unset,
+/// the sink path is derived from [`RULES_FILE_ENV`] (a `gate-events.jsonl` sibling of
+/// the per-session rules file), so the orchestrator that wrote the rules file always
+/// knows where to tail decisions from. This is the OBSERVABILITY channel — it records
+/// what the gate decided; it never changes the decision.
+pub const GATE_EVENTS_FILE_ENV: &str = "CAMERATA_GATE_EVENTS_FILE";
+
+/// One structured gate-decision record, appended as a single JSONL line to the sink.
+///
+/// Recording-only: this mirrors what [`Gateway::gated_write`] already decided, so the
+/// server can fold REAL gate decisions out of the subprocess into the run's event
+/// stream. It carries no logic; serializing it cannot change a verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateDecisionRecord {
+    /// The kind of record: "gate" (a gated_write decision), "delegate-dispatch"
+    /// (the orchestrator delegated a subtask), or "delegate-return" (the delegate
+    /// child returned). Defaults to "gate" for back-compat when absent.
+    #[serde(default = "default_gate_kind")]
+    pub kind: String,
+    /// "allow" or "deny" — straight from the gate's decision.
+    pub verdict: String,
+    /// The target path the agent attempted to write (or the delegate tier, for
+    /// delegate records).
+    pub target: String,
+    /// The rule id (or structural guard tag, e.g. "JAIL") that denied, when denied.
+    pub rule: Option<String>,
+    /// Human-readable reason (the gate's own message), concise.
+    pub reason: String,
+    /// Unix-epoch milliseconds when the decision was recorded.
+    pub ts_ms: u128,
+}
+
+fn default_gate_kind() -> String {
+    "gate".to_string()
+}
+
+/// Resolve the structured gate-decision sink path: [`GATE_EVENTS_FILE_ENV`] if set,
+/// else a `gate-events.jsonl` sibling of the [`RULES_FILE_ENV`] file. Returns `None`
+/// when neither is configured (e.g. standalone/test runs) — then no sink is written and
+/// only the stderr line carries the trace.
+pub fn gate_events_sink_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(GATE_EVENTS_FILE_ENV) {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    let rules = std::env::var_os(RULES_FILE_ENV)?;
+    let rules_path = std::path::PathBuf::from(rules);
+    let dir = rules_path.parent()?;
+    Some(dir.join("gate-events.jsonl"))
+}
+
+/// Build a [`GateDecisionRecord`] from a gate outcome. PURE: the verdict/rule/reason are
+/// derived from the same `decision` string [`Gateway::gated_write`] returns, so this is
+/// a faithful recording with zero decision logic of its own. Separated out so it is
+/// unit-testable without a filesystem or clock (`ts_ms` is injected).
+pub fn build_gate_record(target: &str, decision: &str, ts_ms: u128) -> GateDecisionRecord {
+    // The decision string shape is one of:
+    //   "ALLOWED: wrote N bytes to <path>"
+    //   "ALLOWED but IO error on <path>: <e>"
+    //   "DENIED [<rule>] path=<path>"
+    //   "DENIED [JAIL: ...] path=<path>"
+    if let Some(rest) = decision.strip_prefix("DENIED [") {
+        // rest = "<rule>] path=<path>"  (rule may itself contain ']' for JAIL? no —
+        // JAIL tag is "JAIL: outside the worktree"; the first ']' closes the bracket)
+        let (rule, _after) = rest.split_once(']').unwrap_or((rest, ""));
+        GateDecisionRecord {
+            kind: default_gate_kind(),
+            verdict: "deny".to_string(),
+            target: target.to_string(),
+            rule: Some(rule.to_string()),
+            reason: decision.to_string(),
+            ts_ms,
+        }
+    } else {
+        GateDecisionRecord {
+            kind: default_gate_kind(),
+            verdict: "allow".to_string(),
+            target: target.to_string(),
+            rule: None,
+            reason: decision.to_string(),
+            ts_ms,
+        }
+    }
+}
+
+/// Current Unix-epoch milliseconds (best-effort; `0` if the clock is before the epoch).
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Append a gate-decision record to the structured JSONL sink (best-effort).
+///
+/// Observability only: a write failure is ignored (the authoritative trace is the
+/// stderr line). Never affects the gate's return value or any decision.
+fn append_gate_record(record: &GateDecisionRecord) {
+    let Some(path) = gate_events_sink_path() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(record) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
 
 /// Env var the orchestrator points at the worktree the agent is jailed to. When set,
 /// `gated_write` refuses any write whose resolved target is outside this root, in CODE,
@@ -266,6 +381,13 @@ impl Gateway {
         let micros = t0.elapsed().as_micros();
         let line = format!("gated_write gate_decision={micros}us -> {decision}\n");
         eprint!("[gateway] {line}");
+
+        // Structured gate-decision sink (observability only): append a faithful record
+        // of THIS decision so the server can fold real gate decisions out of the
+        // subprocess into the run's event stream. Records what was decided above; it
+        // does not — and cannot — change the decision.
+        append_gate_record(&build_gate_record(&path, &decision, now_ms()));
+
         // Best-effort decision log next to the per-session rules file. The dir
         // may not exist in every environment; ignore failures (the stderr line
         // is the authoritative trace).
@@ -312,10 +434,41 @@ impl Gateway {
             subtask.len()
         );
 
-        match delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier).await {
-            Ok(output) => output,
-            Err(e) => e.to_string(),
-        }
+        // Observability: record the dispatch (subtask → tier) into the structured sink
+        // so the run's activity log shows the delegation. Recording only; the spawn
+        // gate (orchestrator-mode + depth) is decided above, unchanged.
+        append_gate_record(&GateDecisionRecord {
+            kind: "delegate-dispatch".to_string(),
+            verdict: "dispatch".to_string(),
+            target: tier.clone(),
+            rule: None,
+            reason: format!("Delegated a subtask to the {tier} tier."),
+            ts_ms: now_ms(),
+        });
+
+        let result = delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier)
+            .await
+            .map(|output| output)
+            .unwrap_or_else(|e| e.to_string());
+
+        // Observability: record the return. A child that could not finish above its
+        // tier signals with a leading `INCOMPLETE:` (per the delegate framing); surface
+        // that as the verdict so the log shows the escalation honestly.
+        let incomplete = result.contains("INCOMPLETE:");
+        append_gate_record(&GateDecisionRecord {
+            kind: "delegate-return".to_string(),
+            verdict: if incomplete { "incomplete" } else { "returned" }.to_string(),
+            target: tier.clone(),
+            rule: None,
+            reason: if incomplete {
+                format!("Delegate ({tier}) returned INCOMPLETE — escalating.")
+            } else {
+                format!("Delegate ({tier}) returned its result.")
+            },
+            ts_ms: now_ms(),
+        });
+
+        result
     }
 }
 
@@ -351,6 +504,82 @@ async fn main() -> anyhow::Result<()> {
     let service = Gateway::with_rules(subset).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod gate_sink_tests {
+    use super::{build_gate_record, gate_events_sink_path, GateDecisionRecord};
+
+    #[test]
+    fn build_record_classifies_allow() {
+        let r = build_gate_record(
+            "crates/api/src/members_repo.rs",
+            "ALLOWED: wrote 42 bytes to crates/api/src/members_repo.rs",
+            123,
+        );
+        assert_eq!(r.verdict, "allow");
+        assert!(r.rule.is_none());
+        assert_eq!(r.target, "crates/api/src/members_repo.rs");
+        assert_eq!(r.ts_ms, 123);
+        assert!(r.reason.contains("ALLOWED"));
+    }
+
+    #[test]
+    fn build_record_classifies_deny_with_rule() {
+        let r = build_gate_record(
+            "crates/api/src/export_config.rs",
+            "DENIED [SEC-NO-HARDCODED-SECRETS-1] path=crates/api/src/export_config.rs",
+            7,
+        );
+        assert_eq!(r.verdict, "deny");
+        assert_eq!(r.rule.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
+        assert_eq!(r.target, "crates/api/src/export_config.rs");
+    }
+
+    #[test]
+    fn build_record_classifies_jail_deny() {
+        let r = build_gate_record(
+            "/etc/cron.d/payload",
+            "DENIED [JAIL: outside the worktree] path=/etc/cron.d/payload",
+            0,
+        );
+        assert_eq!(r.verdict, "deny");
+        assert_eq!(r.rule.as_deref(), Some("JAIL: outside the worktree"));
+    }
+
+    #[test]
+    fn record_round_trips_through_jsonl() {
+        let r = build_gate_record("a/b.rs", "DENIED [GOV-1] path=a/b.rs", 9);
+        let line = serde_json::to_string(&r).unwrap();
+        let back: GateDecisionRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.verdict, "deny");
+        assert_eq!(back.rule.as_deref(), Some("GOV-1"));
+        assert_eq!(back.target, "a/b.rs");
+        assert_eq!(back.ts_ms, 9);
+    }
+
+    // Serialize the env-mutating test so it is order-independent within the binary.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn sink_path_prefers_explicit_env_then_derives_from_rules_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Explicit override wins.
+        std::env::set_var(super::GATE_EVENTS_FILE_ENV, "/tmp/explicit-sink.jsonl");
+        assert_eq!(
+            gate_events_sink_path(),
+            Some(std::path::PathBuf::from("/tmp/explicit-sink.jsonl"))
+        );
+        std::env::remove_var(super::GATE_EVENTS_FILE_ENV);
+
+        // Otherwise it derives a gate-events.jsonl sibling of the rules file.
+        std::env::set_var(super::RULES_FILE_ENV, "/tmp/session-1/rules.json");
+        assert_eq!(
+            gate_events_sink_path(),
+            Some(std::path::PathBuf::from("/tmp/session-1/gate-events.jsonl"))
+        );
+        std::env::remove_var(super::RULES_FILE_ENV);
+    }
 }
 
 #[cfg(test)]
