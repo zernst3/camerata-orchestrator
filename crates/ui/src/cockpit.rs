@@ -2250,6 +2250,12 @@ fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) 
             "incomplete" => ("DELEGATE INCOMPLETE", "live-event deny"),
             _ => ("DELEGATE RETURN", "live-event delegate"),
         },
+        // Phase 3b: the agent raised a structured clarifying question; the run paused
+        // ("pause") or resumed on the answer ("info").
+        "clarification" => match verdict {
+            "pause" => ("WAITING ON YOU", "live-event revise"),
+            _ => ("CLARIFICATION", "live-event info"),
+        },
         // Model/tier routing per spawned agent.
         "tier" => ("TIER", "live-event tier"),
         // cargo build/test verification.
@@ -2692,6 +2698,9 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
         "planned" => ("PLANNED", "neutral"),
         "executing" => ("EXECUTING", "active"),
         "gating" => ("GATING", "active"),
+        // Phase 3b: the gated agent raised a clarifying question; the run is parked
+        // waiting on a human answer (it resumes when answered).
+        "awaiting_clarification" => ("WAITING ON YOU", "warn"),
         "awaiting_qa" => ("AWAITING QA", "warn"),
         _ => ("RUNNING", "active"),
     }
@@ -10541,6 +10550,15 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 }
             }
             p { class: "panel-sub", "{sub}" }
+
+            // Phase 3b: when the gated agent raised a clarifying question, the run is
+            // PARKED here waiting on a human answer. Surface the open question inline
+            // (reusing the 3a ClarifyQuestion); answering it triggers the server-side
+            // resume and the run continues.
+            if run.status == "awaiting_clarification" {
+                RunClarificationPrompt { story_id: run.story_id.clone(), uow_refresh }
+            }
+
             p { class: "panel-sub live-events-caption",
                 "Development activity — gate decisions, layer-2 checks, tier/delegation, and stage transitions as they happen."
             }
@@ -10580,6 +10598,47 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
             // action. Camerata never auto-signs-off; this is the human gate.
             if run.done {
                 RunProvenancePanel { run_id: run.id.clone(), uow_refresh }
+            }
+        }
+    }
+}
+
+/// Phase 3b: the inline "this run is waiting on you" prompt shown in [`LiveRunPanel`] when
+/// a run is parked at `AwaitingClarification`. Fetches the story's OPEN clarifications and
+/// renders each with the reused 3a [`ClarifyQuestion`]; answering one posts to the answer
+/// endpoint (which triggers the server-side resume) and bumps `uow_refresh` so the panel
+/// re-polls and the run picks back up.
+#[component]
+fn RunClarificationPrompt(story_id: String, uow_refresh: Signal<u32>) -> Element {
+    let mut local_refresh = use_signal(|| 0u32);
+    let sid = story_id.clone();
+    let open = use_resource(move || {
+        let sid = sid.clone();
+        let _dep = local_refresh();
+        async move { fetch_open_clarifications_for_story(&sid).await }
+    });
+    let open = open.read().clone().unwrap_or_default();
+
+    rsx! {
+        div { class: "run-awaiting-clarify",
+            p { class: "run-awaiting-clarify-h",
+                "This run is waiting on you — the gated agent raised a question it can't decide itself."
+            }
+            if open.is_empty() {
+                p { class: "needs-empty", "Loading the question…" }
+            } else {
+                for clar in open.iter() {
+                    ClarifyQuestion {
+                        key: "{clar.id}",
+                        clar: clar.clone(),
+                        on_answered: move |_| {
+                            // Re-fetch this prompt (the answered question drops off) and bump
+                            // the UoW refresh so the run panel re-polls and shows the resume.
+                            local_refresh += 1;
+                            uow_refresh += 1;
+                        },
+                    }
+                }
             }
         }
     }

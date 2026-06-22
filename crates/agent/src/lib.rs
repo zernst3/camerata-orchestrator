@@ -60,6 +60,15 @@ pub const GATED_WRITE_TOOL: &str = "mcp__camerata__gated_write";
 /// the orchestrator role. Delegate children NEVER get it (depth-1 guarantee).
 pub const DELEGATE_TOOL: &str = "mcp__camerata__delegate";
 
+/// The fully-qualified MCP tool name for raising a structured clarifying question
+/// (Phase 3b). Same `camerata` server key, the `ask_clarification` tool. It is a
+/// READ-CLASS tool: it records a question to the per-session clarify-request sink and
+/// does NOT write to the repo, spawn, or escalate — so granting it creates NO new write
+/// path and leaves the deny-before-write gate fully intact. It is added to
+/// `--allowedTools` ONLY for drivers that opt in (e.g. the investigation agent) via
+/// [`ClaudeCliDriver::with_clarification`]; the disallowed-builtins denylist is unchanged.
+pub const ASK_CLARIFICATION_TOOL: &str = "mcp__camerata__ask_clarification";
+
 /// Read-only built-ins an agent always needs (they cannot mutate the worktree,
 /// so they are safe to allow alongside the governed write path).
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "LS"];
@@ -131,6 +140,12 @@ pub struct ClaudeCliDriver {
     /// stage sets this; every other agent (and every delegate child) leaves it
     /// `false`, so they cannot delegate. The default is `false`.
     pub orchestrator: bool,
+    /// Whether this agent may raise structured clarifying questions (Phase 3b): when
+    /// `true`, the READ-CLASS [`ASK_CLARIFICATION_TOOL`] is added to `--allowedTools`.
+    /// Default `false`. Granting it adds NO write path (the tool records a question, it
+    /// does not write to the repo), so the deny-before-write gate is unchanged; the
+    /// disallowed-builtins denylist (`Task`/`Write`/`Bash`/…) is unchanged either way.
+    pub clarification: bool,
 }
 
 impl ClaudeCliDriver {
@@ -145,6 +160,7 @@ impl ClaudeCliDriver {
             model: None,
             resume_session_id: None,
             orchestrator: false,
+            clarification: false,
         }
     }
 
@@ -153,6 +169,16 @@ impl ClaudeCliDriver {
     /// lead/strongest stage; delegate children must never set this.
     pub fn as_orchestrator(mut self, orchestrator: bool) -> Self {
         self.orchestrator = orchestrator;
+        self
+    }
+
+    /// Allow this agent to raise structured clarifying questions (Phase 3b): adds the
+    /// READ-CLASS [`ASK_CLARIFICATION_TOOL`] to `--allowedTools`. Builder form. Used by
+    /// the investigation runner. This does NOT loosen the gate: `ask_clarification`
+    /// records a question (no repo write, no spawn), and every write/exec/spawn built-in
+    /// stays on the disallowed denylist.
+    pub fn with_clarification(mut self, clarification: bool) -> Self {
+        self.clarification = clarification;
         self
     }
 
@@ -182,17 +208,22 @@ impl ClaudeCliDriver {
     /// testable — does not spawn anything. The returned vec is everything after
     /// the `claude` program name.
     pub fn build_args(&self, role: &Role, task: &str) -> Vec<String> {
+        // Per-role allowedTools: the governed write tool + read-only builtins, PLUS the
+        // governed `delegate` tool when (and only when) this driver is the orchestrator.
+        // The READ-CLASS `ask_clarification` tool is appended when this driver opts in
+        // (Phase 3b); it adds no write path, so the gate posture is unchanged.
+        let mut allowed = allowed_tools_for_role_with_mode(role, self.orchestrator);
+        if self.clarification {
+            allowed.push(ASK_CLARIFICATION_TOOL.to_string());
+        }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
             task.to_string(),
             "--strict-mcp-config".to_string(),
             "--mcp-config".to_string(),
             self.mcp_config_path.clone(),
-            // Per-role allowedTools: the governed write tool + read-only builtins,
-            // PLUS the governed `delegate` tool when (and only when) this driver
-            // is the orchestrator. Delegate children leave `orchestrator = false`.
             "--allowedTools".to_string(),
-            allowed_tools_for_role_with_mode(role, self.orchestrator).join(" "),
+            allowed.join(" "),
             "--disallowedTools".to_string(),
             self.disallowed_builtins.join(" "),
             "--dangerously-skip-permissions".to_string(),
@@ -382,6 +413,69 @@ mod tests {
                 "{tool} must never be on the allowlist"
             );
         }
+    }
+
+    #[test]
+    fn ask_clarification_absent_by_default_present_only_when_opted_in() {
+        // Default driver: the clarification tool is NOT offered.
+        let normal = ClaudeCliDriver::new("/tmp/mcp.json");
+        let normal_args = normal.build_args(&role(), "task");
+        let normal_allowed = {
+            let i = normal_args
+                .iter()
+                .position(|a| a == "--allowedTools")
+                .unwrap();
+            normal_args[i + 1].clone()
+        };
+        assert!(
+            !normal_allowed.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+            "ask_clarification must be absent unless opted in"
+        );
+
+        // Opted-in driver (the investigation agent): the tool is offered.
+        let clarifier = ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true);
+        let args = clarifier.build_args(&role(), "task");
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        assert!(
+            allowed.split(' ').any(|t| t == ASK_CLARIFICATION_TOOL),
+            "clarification driver must offer ask_clarification"
+        );
+    }
+
+    #[test]
+    fn ask_clarification_does_not_weaken_the_gate() {
+        // THE GATE NEVER WEAKENS: enabling ask_clarification must leave the write gate
+        // intact — gated_write is still the only write tool, and every write/exec/spawn
+        // built-in (esp. Task) stays on the disallowed denylist and off the allowlist.
+        let clarifier = ClaudeCliDriver::new("/tmp/mcp.json").with_clarification(true);
+        let args = clarifier.build_args(&role(), "task");
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        let disallowed = {
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        // The only write path is still the governed write tool.
+        assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
+        // Every escape tool stays denied and absent from the allowlist, unchanged.
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(
+                disallowed.split(' ').any(|t| t == tool),
+                "{tool} must stay on the denylist even with clarification on"
+            );
+            assert!(
+                !allowed.split(' ').any(|t| t == tool),
+                "{tool} must never be on the allowlist even with clarification on"
+            );
+        }
+        // ask_clarification is NOT a write tool: it is not gated_write, delegate, or any
+        // built-in writer.
+        assert_ne!(ASK_CLARIFICATION_TOOL, GATED_WRITE_TOOL);
     }
 
     #[test]

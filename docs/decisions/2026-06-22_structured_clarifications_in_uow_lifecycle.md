@@ -62,11 +62,51 @@ auto-saved so the user can leave and resume at any pause point.
 - Tests: structured round-trip, multi-select, free-text back-compat, the persistence/resume
   guarantee, serde-default loading legacy JSON, summary string.
 
-**Phase 3b — PENDING (the hard part).** Gated dev/investigation agent-emit + the pause/resume
-channel: a mid-write dev/investigation agent RAISING a structured question, the run PAUSING
-(persist) and SURFACING it, then RESUMING (feed the answer back / re-spawn with it in context) on
-answer. The structured model + store + UI from 3a are reused as-is; 3b only adds the agent→run
-channel. The gate is unchanged — asking a question is not a write.
+**Phase 3b — INVESTIGATION DONE; dev mid-write DEFERRED.** Shipped on
+`feat/clarify-3b-gated`. The agent→run channel + pause/resume mechanism, wired into the
+INVESTIGATION phase. The 3a structured model + store + UI are reused AS-IS; 3b adds only the
+channel. **The gate is unchanged** — asking a question is a READ-class action, not a write.
+
+What landed:
+- **`ask_clarification` MCP tool** (`crates/gateway/src/main.rs`): alongside `gated_write`, a
+  READ-CLASS tool. The agent calls it with a structured question
+  `{question, options:[{label,description}], multi_select, allow_free_text}`. The gateway RECORDS
+  it (like it records gate decisions) to a per-session `clarify-requests.jsonl` sink (a sibling of
+  the rules file, OUTSIDE the worktree jail) and returns a "STOP and end your turn" instruction.
+  It writes NO repo file, spawns nothing, escalates nothing → **no new write path**.
+- **Driver opt-in** (`crates/agent/src/lib.rs`): `ASK_CLARIFICATION_TOOL` +
+  `ClaudeCliDriver::with_clarification(true)` appends the tool to `--allowedTools`. The
+  disallowed-builtins denylist (`Task`/`Write`/`Bash`/…) and the gated-write-only write path are
+  **byte-for-byte unchanged**; tests assert this.
+- **Pause = checkpoint + auto-save** (`investigation_run.rs`): after the investigation agent
+  returns, the server reads the sink (`read_first_clarify_request`). If a question was raised it
+  posts it into the 3a `ClarificationStore` (auto-saved), persists a `ClarifyResumeContext`
+  (`clarify_resume.rs`, disk-backed flush-on-mutate like the 3a store), records a `clarification/
+  pause` run event, and parks the run at the new `RunStatus::AwaitingClarification` (NOT done).
+  No blocking long-poll: the subprocess already exited at the question (its last act).
+- **Resume = re-spawn** (`investigation_run.rs` + the answer endpoint in `lib.rs`): answering the
+  3a clarification consumes the resume context (once — no double-resume) and re-spawns the SAME
+  gated agent (same `governed_role` + `prepare_session`, gate intact) with the original task + the
+  asked question + the answer appended (`investigation_resume_prompt`).
+- **Surfacing** (`cockpit.rs`): the parked run shows a "WAITING ON YOU" badge + a
+  `clarification`-layer activity event in `LiveRunPanel`, plus an inline `RunClarificationPrompt`
+  (reusing the 3a `ClarifyQuestion`) so the question is answered in place; the cross-story
+  `NeedsYouQueue` already lists it.
+- **Tests** (token-free): the gateway tool records a structured question to the sink and writes
+  nothing else; the run pauses → persists → survives a reload → resumes (resume prompt carries the
+  Q+A); the gate posture is unchanged with clarification on (allow/disallow lists asserted via the
+  `prepare_session` driver, the same pattern as the fleet/update-branch runs).
+
+**Deferred — dev-phase mid-write resume.** The `ask_clarification` tool and the
+`with_clarification` opt-in are phase-agnostic (any gated agent CAN raise a question), but wiring
+the pause/resume into `live_fleet::execute_live_run{,_tiered}` is deferred. Why: the dev fleet
+spawns one agent PER plan task and orchestrates a stage sequence with a partial-write worktree and
+a layer-2 bounce loop. Pausing one stage means parking the whole fleet pipeline mid-sequence and
+resuming THAT stage's agent (the `--resume <session_id>` primitive exists on the driver, but the
+fleet doesn't yet capture/persist per-stage session ids or the coordinator's position). That is a
+separate, substantial piece of fleet-orchestration plumbing; it does NOT require any gate change.
+Investigation was wired first because it is single-agent, read-oriented, and decision-shaped — the
+natural fit per the spec.
 
 ## Sequence
 worktrees (Phase 1) → PR lifecycle (Phase 2) → structured clarifications (Phase 3). Sequential
