@@ -6335,24 +6335,28 @@ fn default_draft() -> String {
 
 impl ProposedRuleView {
     /// True when this rule should be pre-checked on first view of the proposed-rules
-    /// table. Prefers the explicit `is_auto_recommended` field (set by the pw/cockpit-ui
-    /// server wave); falls back to `recommended` for older server payloads.
+    /// table.
     ///
-    /// Only `grounded` and `verified` rules are auto-recommended because those are the
-    /// two rungs of the provenance ladder that have been reviewed against a real source.
-    /// `draft` and `needs_recheck` appear LISTED but unchecked so the architect must
-    /// explicitly opt them in.
+    /// The SERVER is authoritative for this value. It gates on three conditions:
+    /// stack-relevance (the rule's domain matches the scanned repo) + provenance
+    /// (`grounded` or `verified`) + `!opt_in_only`. `opt_in_only` rules (e.g.
+    /// CICD-CODEQL-SECURITY-SCAN-1, CICD-SEMGREP-SECURITY-SCAN-1) are NEVER
+    /// pre-checked even when they are grounded and stack-relevant — they appear in
+    /// the list so the architect can deliberately opt in, but the server sends
+    /// `is_auto_recommended: false` for them and the UI must honour that flag
+    /// without re-deriving it from `recommended` or `verification`.
+    ///
+    /// `draft` and `needs_recheck` rules appear LISTED but unchecked so the
+    /// architect must explicitly opt them in.
     fn effective_auto_recommended(&self) -> bool {
-        // If the server sent an explicit `is_auto_recommended` flag, honour it.
-        // Otherwise derive from `verification`: grounded/verified → recommended.
-        if self.is_auto_recommended {
-            return true;
-        }
-        // Back-compat: use `recommended` only when the rule is also grounded/verified.
-        // A `recommended: true` on a `draft` rule was previously possible; we now
-        // treat those as "available (not auto-recommended)" to match the new UX contract.
-        self.recommended
-            && matches!(self.verification.as_str(), "grounded" | "verified")
+        // The server encodes the full gate (stack-relevance + grounded/verified +
+        // !opt_in_only) into `is_auto_recommended`. Use it directly — do NOT
+        // fall back to `recommended` or re-derive from `verification`. A fallback
+        // that re-derives from `recommended && grounded/verified` would incorrectly
+        // pre-check opt_in_only rules (which are grounded + recommended but must
+        // never be pre-selected). The server is always co-versioned with the UI in
+        // this codebase, so there is no version-skew risk.
+        self.is_auto_recommended
     }
 }
 
@@ -12765,6 +12769,15 @@ mod tests {
     // ── pw/cockpit-ui: Feature 1 — effective_auto_recommended ─────────────────
     // Tests for the `ProposedRuleView::effective_auto_recommended()` helper which
     // is the single truth-gate for pre-checking a proposed rule during onboarding.
+    //
+    // The server is now AUTHORITATIVE: `is_auto_recommended` encodes the full gate
+    // (stack-relevance + grounded/verified + !opt_in_only). The UI returns it
+    // directly without re-deriving from `recommended` or `verification`.
+    //
+    // Regression guard for the opt_in_only fallback bug: CodeQL/Semgrep rules are
+    // grounded + recommended (= true) but carry is_auto_recommended: false from the
+    // server. The old fallback `recommended && grounded/verified` would have
+    // overridden that and pre-checked them; the new impl must NOT.
 
     use super::{FeatureFlagMap, ProposedRuleView};
 
@@ -12790,48 +12803,60 @@ mod tests {
         }
     }
 
-    /// If the server sets `is_auto_recommended = true`, the rule is pre-checked
-    /// regardless of the verification level.
+    /// Server sends `is_auto_recommended: true` → rule is pre-checked.
     #[test]
-    fn effective_auto_recommended_server_flag_wins() {
+    fn effective_auto_recommended_server_true_pre_checks() {
         let r = make_proposed_rule(false, "draft", true);
-        assert!(r.effective_auto_recommended(), "server flag should override draft");
+        assert!(r.effective_auto_recommended(), "server flag true must pre-check");
     }
 
-    /// Backward-compat path: when `is_auto_recommended` is false (old server),
-    /// the method falls back to `recommended && (grounded | verified)`.
+    /// Server sends `is_auto_recommended: false` → rule is NOT pre-checked,
+    /// even when `recommended` is true and verification is "grounded".
+    /// This is the exact CodeQL/Semgrep opt_in_only regression guard:
+    /// those rules are grounded + recommended but the server sets
+    /// is_auto_recommended: false (because opt_in_only = true on the Rule).
+    /// The UI must honour the server's explicit false and NOT fall back to
+    /// `recommended && grounded` — that fallback was the root cause of the bug.
     #[test]
-    fn effective_auto_recommended_fallback_grounded() {
+    fn effective_auto_recommended_server_false_not_pre_checked_even_if_recommended_and_grounded() {
+        // Simulates CICD-CODEQL-SECURITY-SCAN-1 / CICD-SEMGREP-SECURITY-SCAN-1:
+        // grounded, stack-relevant (recommended=true), but opt_in_only → server sends false.
         let r = make_proposed_rule(true, "grounded", false);
-        assert!(r.effective_auto_recommended(), "grounded + recommended should be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "server false must not be overridden by recommended+grounded (opt_in_only regression guard)"
+        );
     }
 
+    /// Same regression guard for `verified` provenance level.
     #[test]
-    fn effective_auto_recommended_fallback_verified() {
+    fn effective_auto_recommended_server_false_not_pre_checked_even_if_recommended_and_verified() {
         let r = make_proposed_rule(true, "verified", false);
-        assert!(r.effective_auto_recommended(), "verified + recommended should be pre-checked");
+        assert!(
+            !r.effective_auto_recommended(),
+            "server false must not be overridden by recommended+verified"
+        );
     }
 
-    /// Draft rules that are recommended but not yet grounded should NOT be
-    /// pre-checked in backward-compat mode (old server).
+    /// Draft rules with server false are not pre-checked.
     #[test]
-    fn effective_auto_recommended_fallback_draft_not_pre_checked() {
+    fn effective_auto_recommended_server_false_draft_not_pre_checked() {
         let r = make_proposed_rule(true, "draft", false);
-        assert!(!r.effective_auto_recommended(), "draft rules should not be pre-checked");
+        assert!(!r.effective_auto_recommended(), "draft rules with server false must not be pre-checked");
     }
 
-    /// `needs_recheck` is not pre-checked in the backward-compat path.
+    /// `needs_recheck` with server false is not pre-checked.
     #[test]
-    fn effective_auto_recommended_fallback_needs_recheck_not_pre_checked() {
+    fn effective_auto_recommended_server_false_needs_recheck_not_pre_checked() {
         let r = make_proposed_rule(true, "needs_recheck", false);
-        assert!(!r.effective_auto_recommended(), "needs_recheck rules should not be pre-checked");
+        assert!(!r.effective_auto_recommended(), "needs_recheck with server false must not be pre-checked");
     }
 
-    /// Not recommended at all: must not be pre-checked even if grounded.
+    /// Not recommended at all with server false: not pre-checked.
     #[test]
-    fn effective_auto_recommended_fallback_grounded_not_recommended() {
+    fn effective_auto_recommended_server_false_not_recommended_not_pre_checked() {
         let r = make_proposed_rule(false, "grounded", false);
-        assert!(!r.effective_auto_recommended(), "grounded-but-not-recommended must not be pre-checked");
+        assert!(!r.effective_auto_recommended(), "grounded-but-not-recommended with server false must not be pre-checked");
     }
 
     // ── pw/cockpit-ui: Feature 5 — FeatureFlagMap deserialization ─────────────

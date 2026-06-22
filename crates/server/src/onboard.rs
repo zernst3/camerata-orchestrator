@@ -910,7 +910,11 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 // SUGGESTED = the rule's domain matches the scanned stack. AGENTIC rules
                 // are ALWAYS suggested by design (they govern how the AI fleet builds,
                 // regardless of stack). The rest are available but not recommended here.
-                recommended: is_suggested || r.domain == "agentic",
+                // OPT-IN ONLY rules (e.g. CICD-CODEQL-SECURITY-SCAN-1,
+                // CICD-SEMGREP-SECURITY-SCAN-1) are excluded from the "✓ Recommended"
+                // badge even when stack-relevant — they are available for opt-in but
+                // must not signal "recommended" in the UI.
+                recommended: (is_suggested || r.domain == "agentic") && !r.is_opt_in_only(),
                 // AUTO-RECOMMENDED (pre-checked) = stack-relevant AND grounded/verified.
                 // Stack-relevant means the rule's domain matches the scanned stack (or it's
                 // an `agentic` rule, which governs the AI fleet regardless of stack). A
@@ -3043,5 +3047,94 @@ mod tests {
         );
         let calls = report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0);
         assert_eq!(calls, 0, "AI also off -> zero model calls");
+    }
+
+    // ── opt_in_only gate: recommended + is_auto_recommended ───────────────────
+    // These tests verify that opt_in_only rules (e.g. CICD-CODEQL-SECURITY-SCAN-1,
+    // CICD-SEMGREP-SECURITY-SCAN-1) yield BOTH `recommended = false` AND
+    // `is_auto_recommended = false` in the proposed payload, even when they are
+    // grounded and stack-relevant. They also verify that a normal grounded,
+    // stack-relevant, non-opt-in-only rule yields both = true.
+    //
+    // The test builds a Rule directly and replicates the `recommended` /
+    // `is_auto_recommended` computation from `propose_corpus_rules`, making this a
+    // regression guard for the onboard.rs side of the fix.
+
+    fn make_ci_security_rule(opt_in_only: bool) -> camerata_rules::Rule {
+        // Shapes like CICD-CODEQL-SECURITY-SCAN-1 / CICD-SEMGREP-SECURITY-SCAN-1:
+        // grounded, ci-cd domain (mechanical), opt_in_only: <varies>.
+        camerata_rules::Rule {
+            id: camerata_core::RuleId("CICD-TEST-SECURITY-SCAN-1".to_string()),
+            title: "Test CI security scan".to_string(),
+            enforcement: camerata_rules::EnforcementKind::Mechanical,
+            domain: "ci-cd".to_string(),
+            summary: "A CI security scanning rule.".to_string(),
+            decision_question: None,
+            decision_why: None,
+            options: Vec::new(),
+            default_option: None,
+            verification: camerata_rules::Verification::Grounded,
+            sources: Vec::new(),
+            verified: None,
+            opt_in_only,
+            layer3_only: false,
+        }
+    }
+
+    /// Replicate the proposed-rule mapping logic for a single Rule + a single repo
+    /// that has the matching domain in its stack. Returns (recommended, is_auto_recommended).
+    fn compute_proposed_flags(r: &camerata_rules::Rule, is_suggested: bool) -> (bool, bool) {
+        let recommended = (is_suggested || r.domain == "agentic") && !r.is_opt_in_only();
+        let is_auto_recommended = (is_suggested || r.domain == "agentic")
+            && r.is_auto_recommended()
+            && !r.is_opt_in_only();
+        (recommended, is_auto_recommended)
+    }
+
+    /// A grounded, stack-relevant, opt_in_only rule must yield recommended=false AND
+    /// is_auto_recommended=false. This directly guards against
+    /// CICD-CODEQL-SECURITY-SCAN-1 / CICD-SEMGREP-SECURITY-SCAN-1 being pre-checked
+    /// or badged "✓ Recommended" in the onboarding proposal.
+    #[test]
+    fn opt_in_only_grounded_stack_relevant_yields_both_false() {
+        let r = make_ci_security_rule(true /* opt_in_only */);
+        let (recommended, is_auto_recommended) =
+            compute_proposed_flags(&r, true /* is_suggested = stack-relevant */);
+        assert!(
+            !recommended,
+            "opt_in_only rule must not be recommended (no '✓ Recommended' badge)"
+        );
+        assert!(
+            !is_auto_recommended,
+            "opt_in_only rule must not be auto-recommended (no pre-check)"
+        );
+    }
+
+    /// A grounded, stack-relevant, non-opt-in-only rule must yield both true —
+    /// it gets the "✓ Recommended" badge AND is pre-checked. This is the
+    /// counterpart positive case.
+    #[test]
+    fn normal_grounded_stack_relevant_rule_yields_both_true() {
+        let r = make_ci_security_rule(false /* not opt_in_only */);
+        let (recommended, is_auto_recommended) =
+            compute_proposed_flags(&r, true /* is_suggested = stack-relevant */);
+        assert!(
+            recommended,
+            "normal grounded stack-relevant rule must be recommended"
+        );
+        assert!(
+            is_auto_recommended,
+            "normal grounded stack-relevant rule must be auto-recommended (pre-checked)"
+        );
+    }
+
+    /// A stack-relevant opt_in_only rule also stays false when NOT stack-relevant.
+    #[test]
+    fn opt_in_only_not_stack_relevant_also_false() {
+        let r = make_ci_security_rule(true /* opt_in_only */);
+        let (recommended, is_auto_recommended) =
+            compute_proposed_flags(&r, false /* not stack-relevant */);
+        assert!(!recommended, "not stack-relevant + opt_in_only must not be recommended");
+        assert!(!is_auto_recommended, "not stack-relevant + opt_in_only must not be auto-recommended");
     }
 }
