@@ -5506,6 +5506,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_uow_path_decodes_slash_and_hash_in_story_id() {
+        // GitHub UoW ids are `owner/repo#num` — the `/` and `#` must survive routing.
+        // The UI percent-encodes the id into one path segment; axum's Path extractor
+        // decodes it. Proves the dev-status (and every per-UoW path endpoint) works for
+        // a GitHub-sourced id, not just a slash-free demo id.
+        let state = AppState::new(std::sync::Arc::new(
+            camerata_worktracker::InMemoryStoryStore::new(),
+        ));
+        let app = router(state.clone());
+        let encoded = "owner%2Frepo%23123"; // owner/repo#123
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{encoded}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"in_progress"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "encoded story id must route to the dev-status handler (not 404)"
+        );
+        // The status must have landed on the DECODED id, proving axum decoded %2F + %23.
+        assert_eq!(
+            state.uow.get_or_create("owner/repo#123").dev_status,
+            crate::uow::DevStatus::InProgress
+        );
+    }
+
+    #[tokio::test]
     async fn stories_endpoint_returns_the_seeded_spine() {
         let app = router(AppState::seeded());
         let resp = app

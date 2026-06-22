@@ -2181,10 +2181,29 @@ fn dev_run_body(tier_map: &TierMapView) -> serde_json::Value {
     })
 }
 
+/// Percent-encode a value for use as a single URL PATH SEGMENT.
+///
+/// UoW / story ids are `owner/repo#num`. Used raw in a path, the `/` breaks
+/// single-segment routing and the `#` is even dropped by the client as a URL
+/// fragment (so the server never sees it). Encode everything outside the RFC 3986
+/// unreserved set; axum's `Path` extractor percent-decodes it back on the server.
+fn enc_seg(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 async fn start_dev_run(story_id: &str, tier_map: &TierMapView) -> StartRunOutcome {
     let body = dev_run_body(tier_map);
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, story_id))
+        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, enc_seg(story_id)))
         .json(&body)
         .send()
         .await
@@ -2222,7 +2241,7 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> Option<String> 
         .post(format!(
             "{}/api/uow/{}/begin-investigation",
             crate::BFF_URL,
-            story_id
+            enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "model": model }))
         .send()
@@ -2432,7 +2451,7 @@ struct UowView {
 
 /// Fetch the UoW for a single story (get-or-create semantics).
 async fn fetch_uow(story_id: &str) -> Option<UowView> {
-    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, story_id))
+    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
         .await
         .ok()?
         .json::<UowView>()
@@ -2447,7 +2466,7 @@ async fn fetch_uow(story_id: &str) -> Option<UowView> {
 /// status" toast even when the server succeeded.)
 async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<()> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/status", crate::BFF_URL, story_id))
+        .post(format!("{}/api/uow/{}/status", crate::BFF_URL, enc_seg(story_id)))
         .json(&serde_json::json!({ "status": status.wire_str() }))
         .send()
         .await
@@ -2468,7 +2487,7 @@ enum TransitionOutcome {
 /// POST a lifecycle transition (`begin-investigation` / `approve-decisions`) and map the
 /// response: 2xx → the updated UoW, 409 → the block reason, anything else → Failed.
 async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome {
-    let url = format!("{}/api/uow/{}/{}", crate::BFF_URL, story_id, action);
+    let url = format!("{}/api/uow/{}/{}", crate::BFF_URL, enc_seg(story_id), action);
     let resp = match reqwest::Client::new().post(url).send().await {
         Ok(r) => r,
         Err(_) => return TransitionOutcome::Failed,
