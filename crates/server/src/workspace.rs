@@ -1106,6 +1106,34 @@ async fn open_pr(
     body: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    open_pr_with_base(repo, head, None, title, body, token)
+        .await
+        .map(|p| p.url)
+}
+
+/// The result of opening (or discovering) a PR: its number AND its html_url. The PR
+/// lifecycle stores the number on the UoW so it can be re-resolved later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedPr {
+    /// The PR number (`#N`).
+    pub number: u64,
+    /// The PR's html_url.
+    pub url: String,
+}
+
+/// Open a PR for `head` into a CHOSEN `base` branch (the console's target/base picker),
+/// returning the PR number + url. `None` for `base` falls back to the repo's default
+/// branch. Tolerant of a pre-existing PR for the head (state=all so a merged/closed one
+/// is also discovered + returned). This is the number-carrying variant used by the PR
+/// lifecycle; the plain [`open_pr`] keeps returning just the url for `ship`/governance.
+pub async fn open_pr_with_base(
+    repo: &str,
+    head: &str,
+    base: Option<&str>,
+    title: &str,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<OpenedPr> {
     use camerata_worktracker::{HttpTransport, ReqwestTransport};
 
     let (owner, _name) = repo
@@ -1114,14 +1142,19 @@ async fn open_pr(
     let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
     let api = "https://api.github.com";
 
-    let meta = transport.get(&format!("{api}/repos/{repo}")).await?;
-    if !(200..300).contains(&meta.status) {
-        anyhow::bail!("GET repo {repo}: HTTP {} {}", meta.status, meta.body);
-    }
-    let base = serde_json::from_str::<serde_json::Value>(&meta.body)?["default_branch"]
-        .as_str()
-        .unwrap_or("main")
-        .to_string();
+    let base = match base.filter(|b| !b.trim().is_empty()) {
+        Some(b) => b.to_string(),
+        None => {
+            let meta = transport.get(&format!("{api}/repos/{repo}")).await?;
+            if !(200..300).contains(&meta.status) {
+                anyhow::bail!("GET repo {repo}: HTTP {} {}", meta.status, meta.body);
+            }
+            serde_json::from_str::<serde_json::Value>(&meta.body)?["default_branch"]
+                .as_str()
+                .unwrap_or("main")
+                .to_string()
+        }
+    };
 
     let pr_body = serde_json::json!({
         "title": title,
@@ -1134,18 +1167,25 @@ async fn open_pr(
         .await?;
     if (200..300).contains(&pr.status) {
         let v: serde_json::Value = serde_json::from_str(&pr.body)?;
-        return Ok(v["html_url"].as_str().unwrap_or_default().to_string());
+        return Ok(OpenedPr {
+            number: v["number"].as_u64().unwrap_or_default(),
+            url: v["html_url"].as_str().unwrap_or_default().to_string(),
+        });
     }
-    // A PR for this head may already exist — find and return it.
+    // A PR for this head may already exist — find and return it (state=all so a
+    // merged/closed PR is also surfaced, not just an open one).
     if pr.status == 422 {
         let list = transport
             .get(&format!(
-                "{api}/repos/{repo}/pulls?head={owner}:{head}&state=open"
+                "{api}/repos/{repo}/pulls?head={owner}:{head}&state=all"
             ))
             .await?;
         if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str(&list.body) {
             if let Some(first) = arr.first() {
-                return Ok(first["html_url"].as_str().unwrap_or_default().to_string());
+                return Ok(OpenedPr {
+                    number: first["number"].as_u64().unwrap_or_default(),
+                    url: first["html_url"].as_str().unwrap_or_default().to_string(),
+                });
             }
         }
     }

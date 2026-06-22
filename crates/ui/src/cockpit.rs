@@ -2402,6 +2402,162 @@ async fn start_update_branch_run(
     }
 }
 
+// ── Per-UoW PR lifecycle (Decision 2) ──────────────────────────────────────────
+
+/// A pull request's state as the BFF returns it (`GET /api/uow/:id/pr` → `pr`).
+#[derive(Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PrInfoView {
+    #[serde(default)]
+    number: u64,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    head_branch: String,
+    #[serde(default)]
+    base_branch: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    mergeable: Option<bool>,
+}
+
+/// One PR comment (issue or review), normalized.
+#[derive(Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PrCommentView {
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    review: bool,
+}
+
+/// A PR head commit's CI summary.
+#[derive(Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PrChecksView {
+    #[serde(default)]
+    passed: usize,
+    #[serde(default)]
+    failed: usize,
+    #[serde(default)]
+    pending: usize,
+    #[serde(default)]
+    failing: Vec<String>,
+}
+
+/// The full `GET /api/uow/:id/pr` payload (graceful: `ok=false` + `pr=null` when no PR).
+#[derive(Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+struct PrInfoResult {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    pr: Option<PrInfoView>,
+    #[serde(default)]
+    comments: Vec<PrCommentView>,
+    #[serde(default)]
+    checks: Option<PrChecksView>,
+    #[serde(default)]
+    message: String,
+}
+
+/// Pull the PR info for a UoW (state + comments + checks). Always returns a value: the
+/// server degrades to `ok=false` rather than erroring, so a network failure maps to the
+/// same "no PR" empty payload.
+async fn fetch_uow_pr(story_id: &str) -> PrInfoResult {
+    let resp = reqwest::get(format!("{}/api/uow/{}/pr", crate::BFF_URL, enc_seg(story_id))).await;
+    match resp {
+        Ok(r) => r.json::<PrInfoResult>().await.unwrap_or_default(),
+        Err(_) => PrInfoResult::default(),
+    }
+}
+
+/// The outcome of opening a PR: the stored number + url, or a reason to toast.
+enum OpenPrOutcome {
+    Opened(u64, String),
+    Blocked(String),
+    Failed,
+}
+
+/// Push the UoW branch + open a PR into `base_branch` (empty → server default branch).
+async fn open_uow_pr(story_id: &str, base_branch: &str) -> OpenPrOutcome {
+    let resp = match reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/pr/open", crate::BFF_URL, enc_seg(story_id)))
+        .json(&serde_json::json!({ "base_branch": base_branch }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return OpenPrOutcome::Failed,
+    };
+    if resp.status().as_u16() == 400 {
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("error").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "The open-PR request was rejected.".to_string());
+        return OpenPrOutcome::Blocked(reason);
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return OpenPrOutcome::Failed;
+    };
+    match v.get("pr_number").and_then(|n| n.as_u64()) {
+        Some(n) => OpenPrOutcome::Opened(
+            n,
+            v.get("pr_url").and_then(|u| u.as_str()).unwrap_or_default().to_string(),
+        ),
+        None => OpenPrOutcome::Failed,
+    }
+}
+
+/// Post a comment on the UoW's PR. Returns the created comment url on success.
+async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/pr/comment", crate::BFF_URL, enc_seg(story_id)))
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v = resp.json::<serde_json::Value>().await.ok()?;
+    v.get("url").and_then(|u| u.as_str()).map(String::from)
+}
+
+/// Start the gated "resolve PR feedback" run for a UoW. Mirrors `start_update_branch_run`.
+async fn start_pr_resolve_run(story_id: &str, model: &str) -> StartRunOutcome {
+    let resp = match reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/pr/resolve", crate::BFF_URL, enc_seg(story_id)))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return StartRunOutcome::Failed,
+    };
+    if resp.status().as_u16() == 400 {
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("error").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "The resolve request was rejected.".to_string());
+        return StartRunOutcome::Blocked(reason);
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return StartRunOutcome::Failed;
+    };
+    match v.get("run_id").and_then(|r| r.as_str()) {
+        Some(id) => StartRunOutcome::Started(id.to_string()),
+        None => StartRunOutcome::Failed,
+    }
+}
+
 /// Fetch the current state of a run.
 async fn fetch_run(run_id: &str) -> Option<RunView> {
     reqwest::get(format!("{}/api/runs/{}", crate::BFF_URL, run_id))
@@ -4905,6 +5061,22 @@ fn UowDevControls(uow: UowListEntry) -> Element {
             // because it operates on this UoW's working branch.
             UowUpdateBranchControl {
                 story_id: uow_key.clone(),
+                uow_refresh,
+                models: run_models_snap.clone(),
+            }
+
+            // ── PR lifecycle (Decision 2): open / pull / resolve / comment ────
+            // Gated on the UoW having a branch (read from the same keyed UoW fetch the
+            // lifecycle strip uses). The resolve action is gated EXACTLY like the dev run.
+            UowPrControl {
+                story_id: uow_key.clone(),
+                has_branch: uow_for_stage
+                    .read()
+                    .clone()
+                    .flatten()
+                    .and_then(|u| u.branch)
+                    .map(|b| !b.trim().is_empty())
+                    .unwrap_or(false),
                 uow_refresh,
                 models: run_models_snap.clone(),
             }
@@ -10214,6 +10386,304 @@ fn UowUpdateBranchControl(
             } else {
                 p { class: "section-hint",
                     "No branches available — the repo must be cloned locally (set its path in the Rules view)."
+                }
+            }
+        }
+    }
+}
+
+/// The per-UoW PR lifecycle panel (Decision 2). Gated on the UoW having a branch.
+///
+/// - **Push & open PR** with a target/base-branch picker (populated from the same
+///   `/branches` endpoint the update-branch picker uses). Shows the stored PR number +
+///   link once known.
+/// - **Pull PR info** → renders the PR state + CI checks (pass/fail/pending + failing
+///   names) + comments.
+/// - **Resolve with agent** → fires the GATED resolve run; its activity surfaces via the
+///   reused `AgentActivity` (the gate is preserved end to end, same as the dev run).
+/// - **Add comment** → posts a comment on the PR.
+///
+/// `has_branch` gates the whole panel: a UoW with no branch yet has nothing to PR.
+#[component]
+fn UowPrControl(
+    story_id: String,
+    has_branch: bool,
+    mut uow_refresh: Signal<u32>,
+    models: Option<AuditModelsResp>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // Per-action owned clones of the story id: each onclick closure moves its own copy
+    // (a `String` is not `Copy`, so the captures can't share one binding).
+    let sid_open = story_id.clone();
+    let sid_pull = story_id.clone();
+    let sid_resolve = story_id.clone();
+    let sid_comment = story_id.clone();
+
+    // The base-branch picker reuses the mergeable-branches endpoint (local + origin).
+    let branches_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow_branches(&sid).await }
+        })
+    };
+    let branches = branches_res.read().clone().unwrap_or_default();
+
+    // The selected base branch for opening the PR (empty → server default branch).
+    let mut base_branch = use_signal(String::new);
+    // The pulled PR info (None until "Pull PR info" runs).
+    let mut pr_info = use_signal(|| Option::<PrInfoResult>::None);
+    // Busy flags + the resolve run's own active-run signal.
+    let mut opening = use_signal(|| false);
+    let mut pulling = use_signal(|| false);
+    let mut resolving = use_signal(|| false);
+    let active_run = use_signal(|| Option::<RunView>::None);
+    // The PR comment composer.
+    let mut pr_comment = use_signal(String::new);
+    let mut commenting = use_signal(|| false);
+    // The model for the gated resolve agent (default = project strongest, editable).
+    let resolve_model = use_signal(String::new);
+
+    if !has_branch {
+        return rsx! {
+            div { class: "uow-step-control uow-pr-panel",
+                p { class: "uow-step-h", "Pull request" }
+                p { class: "section-hint",
+                    "This UoW has no branch yet — start development first, then open a PR for its branch."
+                }
+            }
+        };
+    }
+
+    rsx! {
+        div { class: "uow-step-control uow-pr-panel",
+            p { class: "uow-step-h", "Pull request" }
+            p { class: "section-hint",
+                "Push this UoW's branch and open a PR, pull its state / CI / comments, resolve feedback with a gated agent, or comment."
+            }
+
+            // ── The stored PR (number + link), once known ──────────────────────
+            {
+                let info = pr_info.read().clone();
+                match info.as_ref().and_then(|r| r.pr.clone()) {
+                    Some(pr) => rsx! {
+                        div { class: "uow-pr-head",
+                            span { class: "uow-pr-num", "PR #{pr.number}" }
+                            span { class: "uow-pr-state", "{pr.state}" }
+                            span { class: "section-hint", "{pr.base_branch} ← {pr.head_branch}" }
+                            if !pr.url.is_empty() {
+                                a { class: "wi-detail-link", href: "{pr.url}", target: "_blank", "Open PR ↗" }
+                            }
+                        }
+                    },
+                    None => rsx! {},
+                }
+            }
+
+            // ── Push & open PR (with a base-branch picker) ─────────────────────
+            div { class: "run-control-row",
+                select {
+                    class: "uow-branch-select",
+                    value: "{base_branch}",
+                    onchange: move |e| base_branch.set(e.value()),
+                    option { value: "", selected: base_branch().is_empty(), "Default branch" }
+                    if !branches.local.is_empty() {
+                        optgroup { label: "Local",
+                            for b in branches.local.iter() {
+                                option { key: "base-local:{b}", value: "{b}", "{b}" }
+                            }
+                        }
+                    }
+                    if !branches.origin.is_empty() {
+                        optgroup { label: "Origin",
+                            for b in branches.origin.iter() {
+                                option { key: "base-origin:{b}", value: "{b}", "{b}" }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "btn-run",
+                    disabled: opening(),
+                    onclick: move |_| {
+                        let sid = sid_open.clone();
+                        let base = base_branch();
+                        opening.set(true);
+                        spawn(async move {
+                            match open_uow_pr(&sid, &base).await {
+                                OpenPrOutcome::Opened(n, url) => {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        format!("Opened PR #{n}: {url}"),
+                                    );
+                                    uow_refresh += 1;
+                                    // Pull fresh info so the head + link render immediately.
+                                    if let Some(r) = Some(fetch_uow_pr(&sid).await) {
+                                        pr_info.set(Some(r));
+                                    }
+                                }
+                                OpenPrOutcome::Blocked(reason) => crate::toast::push_toast(
+                                    toasts, crate::toast::ToastKind::Warning, reason,
+                                ),
+                                OpenPrOutcome::Failed => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not open the PR.".to_string(),
+                                ),
+                            }
+                            opening.set(false);
+                        });
+                    },
+                    if opening() { "Opening…" } else { "Push & open PR" }
+                }
+                button {
+                    class: "btn-secondary",
+                    disabled: pulling(),
+                    onclick: move |_| {
+                        let sid = sid_pull.clone();
+                        pulling.set(true);
+                        spawn(async move {
+                            let r = fetch_uow_pr(&sid).await;
+                            pr_info.set(Some(r));
+                            pulling.set(false);
+                        });
+                    },
+                    if pulling() { "Pulling…" } else { "Pull PR info" }
+                }
+            }
+
+            // ── PR state + CI checks + comments ────────────────────────────────
+            {
+                let info = pr_info.read().clone();
+                match info {
+                    None => rsx! {},
+                    Some(r) if r.pr.is_none() => rsx! {
+                        p { class: "section-hint",
+                            if r.message.is_empty() { "No PR for this UoW yet." } else { "{r.message}" }
+                        }
+                    },
+                    Some(r) => {
+                        let checks = r.checks.clone().unwrap_or_default();
+                        let no_checks = checks.passed == 0 && checks.failed == 0 && checks.pending == 0;
+                        rsx! {
+                            div { class: "uow-pr-checks",
+                                if no_checks {
+                                    span { class: "section-hint", "No CI checks reported." }
+                                } else {
+                                    span { class: "uow-pr-check pass", "✓ {checks.passed} passed" }
+                                    span { class: "uow-pr-check fail", "✗ {checks.failed} failed" }
+                                    span { class: "uow-pr-check pending", "● {checks.pending} pending" }
+                                    if !checks.failing.is_empty() {
+                                        span { class: "section-hint", "Failing: {checks.failing.join(\", \")}" }
+                                    }
+                                }
+                            }
+                            div { class: "uow-pr-comments",
+                                if r.comments.is_empty() {
+                                    p { class: "section-hint", "No comments." }
+                                } else {
+                                    for (i, c) in r.comments.iter().enumerate() {
+                                        div { key: "pr-c-{i}", class: "wi-comment",
+                                            span { class: "wi-comment-author",
+                                                "{c.author}"
+                                                if c.review { span { class: "section-hint", " · review" } }
+                                            }
+                                            span { class: "wi-comment-date", "{c.created_at}" }
+                                            p { class: "wi-comment-body", "{c.body}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Resolve PR feedback with a gated agent ─────────────────────────
+            div { class: "run-control-row",
+                ModelSelect { models: models.clone(), selected: resolve_model }
+                button {
+                    class: "btn-run",
+                    disabled: resolving(),
+                    onclick: move |_| {
+                        let sid = sid_resolve.clone();
+                        let md = resolve_model();
+                        resolving.set(true);
+                        spawn(async move {
+                            match start_pr_resolve_run(&sid, &md).await {
+                                StartRunOutcome::Started(rid) => {
+                                    poll_run_to_done(rid, active_run, uow_refresh).await;
+                                }
+                                StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                    toasts, crate::toast::ToastKind::Warning, reason,
+                                ),
+                                StartRunOutcome::Failed => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not start the PR-resolve run.".to_string(),
+                                ),
+                            }
+                            resolving.set(false);
+                        });
+                    },
+                    if resolving() { "Resolving…" } else { "▶ Resolve with agent (gated)" }
+                }
+            }
+            p { class: "section-hint",
+                "Feeds open review comments + failing check names to ONE governed agent (same gate as the dev run) to fix, commit, and push."
+            }
+            // The gated resolve run's live activity, when running.
+            {
+                let rid = match active_run() {
+                    Some(ref r) => r.id.clone(),
+                    None => String::new(),
+                };
+                rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+            }
+
+            // ── Add a comment to the PR ────────────────────────────────────────
+            div { class: "uow-comment",
+                p { class: "clarify-h", "Add comment to PR" }
+                textarea {
+                    class: "clarify-q",
+                    value: "{pr_comment}",
+                    rows: "3",
+                    placeholder: "Write a comment to post on the pull request…",
+                    oninput: move |e| pr_comment.set(e.value()),
+                }
+                button {
+                    class: "btn-run",
+                    disabled: commenting(),
+                    onclick: move |_| {
+                        let sid = sid_comment.clone();
+                        let body = pr_comment();
+                        if body.trim().is_empty() {
+                            return;
+                        }
+                        commenting.set(true);
+                        spawn(async move {
+                            match comment_on_uow_pr(&sid, &body).await {
+                                Some(_url) => {
+                                    pr_comment.set(String::new());
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        "Comment posted to the PR.".to_string(),
+                                    );
+                                }
+                                None => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not post the PR comment.".to_string(),
+                                ),
+                            }
+                            commenting.set(false);
+                        });
+                    },
+                    if commenting() { "Posting…" } else { "Post PR comment" }
                 }
             }
         }

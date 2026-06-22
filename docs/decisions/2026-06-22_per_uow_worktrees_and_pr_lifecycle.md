@@ -85,8 +85,40 @@ head-branch discovery via `pulls?head={owner}:{branch}`):
   layer-1/2 as the dev run; resolving feedback is still code-writing — gate unchanged).
 - **Add a comment** — post a PR/issue comment from the console.
 
-> Phase 2 (Decision 2) is NOT yet implemented — this doc records the Phase 1 worktree
-> foundation only.
+### Phase 2 implementation note (2026-06-22)
+
+Phase 2 (Decision 2) is now IMPLEMENTED. The PR lifecycle runs per-UoW in each UoW's own
+worktree (the Phase 1 seam, `resolve_uow_worktree`).
+
+- **Data model** (`uow.rs`): `UnitOfWork` carries `pr_number: Option<u64>` + `pr_url:
+  Option<String>` (default `None`, persisted in `uow.json`); set via `UowStore::set_pr`
+  (flush-on-set, mirroring `set_branch`).
+- **GitHub PR read/write** (`crates/server/src/pr.rs`, parse/fetch split so the logic is
+  fixture-testable without network): `parse_pr`/`get_pr` (state open/closed/merged — merged
+  promoted out of closed — url, head branch+sha, base, title, mergeable); `find_pr_by_head`
+  (GET `pulls?head={owner}:{branch}&state=all`, so a merged/closed PR or one opened directly
+  in GitHub is found); `parse_pr_comments`/`list_pr_comments` (BOTH issue + review comment
+  endpoints, normalized {author, body, created_at, review}); `parse_pr_checks`/`pr_checks`
+  (modern `commits/{sha}/check-runs` + legacy `commits/{sha}/status`, summarized to
+  {passed, failed, pending, failing names}); `post_pr_comment` (reuses
+  `github_issues::comment_on_issue`).
+- **Discovery + store** (`resolve_pr_for_uow`, idempotent): stored `pr_number` ALWAYS wins;
+  else head-branch search backfills AND STORES it on the UoW (the "works even if the PR was
+  made directly in GitHub" requirement). Precedence is a pure `pr_resolution_plan` (unit-tested).
+- **Endpoints** (per-UoW, enc_seg'd story_id): `POST /api/uow/:id/pr/open { base_branch }`
+  (resolve worktree → push → `open_pr_with_base` → store number+url); `GET /api/uow/:id/pr`
+  (resolve → state + comments + checks; graceful empty payload, never an error);
+  `POST /api/uow/:id/pr/comment { body }`; `POST /api/uow/:id/pr/resolve` (a GATED run).
+- **Resolve run** (`crates/server/src/pr_resolve_run.rs`): mirrors `execute_update_branch_run`
+  — feeds open review comments + failing check names to ONE governed agent
+  (`governed_role("PrFeedbackResolver")`, `Task` disallowed, jailed to the UoW worktree via
+  `prepare_session(.., Some(dir))`, layer-2 bounce), then the SERVER commits + pushes. Token-
+  free / live-mode-off fails honestly (never a faked fix). The gate is unchanged.
+- **UI** (`crates/ui/src/cockpit.rs`, `UowPrControl`, keyed per UoW, gated on the UoW having
+  a branch): base-branch picker + "Push & open PR" (shows the stored PR number + link),
+  "Pull PR info" (state + CI pass/fail/pending + failing names + comments), "Resolve with
+  agent (gated)" (drives the gated run via the reused `AgentActivity`), and a PR comment
+  composer.
 
 ### Data model
 - Add `pr_number: Option<u64>` (+ maybe `pr_url`) to the UoW; persisted (flush-on-set like `branch`).

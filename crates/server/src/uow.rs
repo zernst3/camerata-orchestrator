@@ -223,6 +223,17 @@ pub struct UnitOfWork {
     /// also settable via the `/api/uow/:id/branch` endpoint.
     #[serde(default)]
     pub branch: Option<String>,
+    /// The GitHub pull-request number for this UoW's branch, once a PR exists (issue:
+    /// per-UoW PR lifecycle, Decision 2). Set when the console opens a PR, OR backfilled
+    /// by discovery (`resolve_pr_for_uow`) when a PR was opened directly in GitHub. The
+    /// STORED number always wins over a head-branch search; discovery only backfills it.
+    /// `None` until a PR exists. Defaults to `None` so a legacy `uow.json` loads unchanged.
+    #[serde(default)]
+    pub pr_number: Option<u64>,
+    /// The GitHub `html_url` of this UoW's PR, stored alongside `pr_number` so the console
+    /// can render a link without re-fetching. `None` until a PR exists. Defaults to `None`.
+    #[serde(default)]
+    pub pr_url: Option<String>,
     /// The dev-side status, orthogonal to the tracker story status.
     #[serde(default)]
     pub dev_status: DevStatus,
@@ -784,6 +795,25 @@ impl UowStore {
                 ..Default::default()
             });
         uow.branch = branch;
+        uow.updated = Self::now_rfc3339();
+        drop(map);
+        self.flush();
+    }
+
+    /// Set (or clear) the PR number + url for a story's UoW, creating it if needed,
+    /// flushing to disk (mirrors [`Self::set_branch`]). Used both when the console opens
+    /// a PR and when discovery backfills a PR opened directly in GitHub. Passing `None`
+    /// for both clears the stored PR (e.g. after a closed PR is reconciled away).
+    pub fn set_pr(&self, story_id: &str, pr_number: Option<u64>, pr_url: Option<String>) {
+        let mut map = self.mem.lock().expect("uow mutex poisoned");
+        let uow = map
+            .entry(story_id.to_string())
+            .or_insert_with(|| UnitOfWork {
+                story_id: story_id.to_string(),
+                ..Default::default()
+            });
+        uow.pr_number = pr_number;
+        uow.pr_url = pr_url;
         uow.updated = Self::now_rfc3339();
         drop(map);
         self.flush();
@@ -1359,6 +1389,44 @@ mod tests {
         // Clearing the branch.
         store.set_branch("S-99", None);
         assert!(store.get_or_create("S-99").branch.is_none());
+    }
+
+    #[test]
+    fn set_pr_defaults_none_then_persists_and_flushes_across_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("uow.json");
+
+        // Default UoW has no PR.
+        {
+            let store = UowStore::at(path.clone());
+            let uow = store.get_or_create("o/r#7");
+            assert_eq!(uow.pr_number, None);
+            assert_eq!(uow.pr_url, None);
+            // Set the PR; flush-on-set writes it to disk.
+            store.set_pr("o/r#7", Some(42), Some("https://github.com/o/r/pull/42".to_string()));
+            let after = store.get_or_create("o/r#7");
+            assert_eq!(after.pr_number, Some(42));
+            assert_eq!(after.pr_url.as_deref(), Some("https://github.com/o/r/pull/42"));
+        }
+
+        // A fresh store reading the same file rehydrates the PR fields (persisted).
+        {
+            let reloaded = UowStore::at(path.clone());
+            let uow = reloaded.get_or_create("o/r#7");
+            assert_eq!(uow.pr_number, Some(42), "pr_number must survive a reload");
+            assert_eq!(
+                uow.pr_url.as_deref(),
+                Some("https://github.com/o/r/pull/42"),
+                "pr_url must survive a reload"
+            );
+            // Clearing both fields persists too.
+            reloaded.set_pr("o/r#7", None, None);
+            assert_eq!(reloaded.get_or_create("o/r#7").pr_number, None);
+        }
+        {
+            let reloaded2 = UowStore::at(path);
+            assert_eq!(reloaded2.get_or_create("o/r#7").pr_number, None);
+        }
     }
 
     #[test]

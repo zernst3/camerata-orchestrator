@@ -33,6 +33,8 @@ pub mod live_fleet;
 pub mod llm;
 pub mod notify;
 pub mod onboard;
+pub mod pr;
+pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
@@ -366,6 +368,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
         .route("/api/uow/:story_id/branches", post(uow_list_branches))
         .route("/api/uow/:story_id/update-branch", post(uow_update_branch))
+        // ── Per-UoW PR lifecycle (Decision 2) ─────────────────────────────────
+        .route("/api/uow/:story_id/pr/open", post(uow_pr_open))
+        .route("/api/uow/:story_id/pr", get(uow_pr_get))
+        .route("/api/uow/:story_id/pr/comment", post(uow_pr_comment))
+        .route("/api/uow/:story_id/pr/resolve", post(uow_pr_resolve))
         .route(
             "/api/uow/:story_id/begin-investigation",
             post(uow_begin_investigation),
@@ -5446,6 +5453,272 @@ async fn uow_update_branch(
         });
     }
 
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
+}
+
+// ── Per-UoW PR lifecycle (Decision 2) ──────────────────────────────────────────
+
+/// Request body for `POST /api/uow/:story_id/pr/open`.
+#[derive(serde::Deserialize)]
+struct PrOpenReq {
+    /// The target/base branch to open the PR INTO (the console's base-branch picker).
+    /// Empty / omitted falls back to the repo's default branch.
+    #[serde(default)]
+    base_branch: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/pr/open` body `{ base_branch }` → push the UoW branch and
+/// open a PR into the chosen base, STORING the PR number + url on the UoW.
+///
+/// Resolves the UoW WORKTREE (Phase 1 seam), pushes the branch, then opens the PR. If a
+/// PR for this head already exists (incl. one opened directly in GitHub), `open_pr_with_base`
+/// discovers + returns it and we store that. 4xx when: no token; the UoW has no branch; the
+/// repo can't be derived; or the repo isn't a local clone.
+async fn uow_pr_open(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<PrOpenReq>,
+) -> Response {
+    let bad = |msg: String| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+    };
+    let Some(token) = github_token() else {
+        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
+    };
+    let uow = state.uow.get_or_create(&story_id);
+    let Some(branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
+        return bad(
+            "this UoW has no branch yet — start development first so there is a branch to open a PR for"
+                .to_string(),
+        );
+    };
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+    };
+    let override_path = state.settings.repo_path(&repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(dir) = crate::workspace::resolve_uow_worktree(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &repo,
+        &branch,
+    )
+    .await
+    else {
+        return bad(
+            "repo not resolved locally — set its path in the Rules view (and start development \
+             so the repo is cloned) before opening a PR"
+                .to_string(),
+        );
+    };
+
+    // Push the UoW branch from its worktree.
+    if let Err(e) = crate::workspace::push_branch(&dir, &repo, &branch, &token).await {
+        return bad(format!("could not push `{branch}`: {e}"));
+    }
+    // Open (or discover) the PR into the chosen base.
+    let title = uow
+        .work_item
+        .as_deref()
+        .map(|w| format!("{w}: {story_id}"))
+        .unwrap_or_else(|| format!("Camerata: {story_id}"));
+    let body = format!("Opened by Camerata for story `{story_id}`.");
+    let base = req.base_branch.as_deref();
+    match crate::workspace::open_pr_with_base(&repo, &branch, base, &title, &body, &token).await {
+        Ok(opened) => {
+            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state.uow.append_history(
+                &story_id,
+                "pr_open",
+                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+            );
+            Json(serde_json::json!({
+                "ok": true,
+                "pr_number": opened.number,
+                "pr_url": opened.url,
+            }))
+            .into_response()
+        }
+        Err(e) => bad(format!("could not open the PR: {e}")),
+    }
+}
+
+/// `GET /api/uow/:story_id/pr` → the console "Pull PR info": resolve the PR for the UoW
+/// (stored number → else head-branch search + STORE), then return its state + comments +
+/// CI checks.
+///
+/// Graceful: with no token, no derivable repo, or no PR for the UoW, returns a clear empty
+/// payload `{ ok: false, pr: null, ... }` — never an error — so the console renders "No PR
+/// yet" instead of breaking. (Asking for PR data is a read, not a gated write.)
+async fn uow_pr_get(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let empty = |msg: &str| {
+        serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg })
+    };
+    let Some(token) = github_token() else {
+        return Json(empty("Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info."));
+    };
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return Json(empty("Could not derive owner/repo from the story id."));
+    };
+    let uow = state.uow.get_or_create(&story_id);
+    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    else {
+        return Json(empty("No PR for this UoW yet."));
+    };
+    let comments = crate::pr::list_pr_comments(&repo, info.number, &token)
+        .await
+        .unwrap_or_default();
+    let checks = crate::pr::pr_checks(&repo, &info.head_sha, &token)
+        .await
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "ok": true,
+        "pr": info,
+        "comments": comments,
+        "checks": checks,
+    }))
+}
+
+/// Request body for `POST /api/uow/:story_id/pr/comment`.
+#[derive(serde::Deserialize)]
+struct PrCommentReq {
+    body: String,
+}
+
+/// `POST /api/uow/:story_id/pr/comment` body `{ body }` → post a comment on the UoW's PR.
+/// Resolves the PR (stored → else head-search + store), then posts. 4xx on no token /
+/// empty body / no PR / no repo.
+async fn uow_pr_comment(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<PrCommentReq>,
+) -> Response {
+    let bad = |msg: String| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+    };
+    let Some(token) = github_token() else {
+        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to comment".to_string());
+    };
+    if req.body.trim().is_empty() {
+        return bad("comment body must not be empty".to_string());
+    }
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+    };
+    let uow = state.uow.get_or_create(&story_id);
+    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    else {
+        return bad("no PR for this UoW yet — open one first".to_string());
+    };
+    match crate::pr::post_pr_comment(&repo, info.number, &req.body, &token).await {
+        Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })).into_response(),
+        Err(e) => bad(format!("could not post the comment: {e}")),
+    }
+}
+
+/// `POST /api/uow/:story_id/pr/resolve` → a GATED run (mirrors `update-branch`) that feeds
+/// the PR feedback (open review comments + failing check names) to ONE governed agent to
+/// fix, commit, and optionally push, IN THE UoW WORKTREE. Returns `{ run_id }`.
+///
+/// The gate is universal + unchanged: same governed role, `Task` disallowed, gated writes
+/// only, layer-2 bounce. Reading the PR feedback here is a read; FIXING it goes through the
+/// gate. 4xx when: no token; no branch; no derivable repo; the repo isn't a local clone; or
+/// no PR exists for the UoW.
+#[derive(serde::Deserialize)]
+struct PrResolveReq {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+async fn uow_pr_resolve(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<PrResolveReq>,
+) -> Response {
+    let bad = |msg: String| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+    };
+    let Some(token) = github_token() else {
+        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string());
+    };
+    let uow = state.uow.get_or_create(&story_id);
+    let Some(target_branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
+        return bad("this UoW has no branch yet — nothing to resolve".to_string());
+    };
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+    };
+    // Resolve the PR (stored → else head-search + store) so we have the feedback to feed.
+    let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
+    else {
+        return bad("no PR for this UoW yet — open one first".to_string());
+    };
+    // Gather the feedback: open REVIEW comments (actionable code feedback) + failing checks.
+    let review_comments: Vec<String> = crate::pr::list_pr_comments(&repo, info.number, &token)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.review && !c.body.trim().is_empty())
+        .map(|c| c.body)
+        .collect();
+    let failing_checks = crate::pr::pr_checks(&repo, &info.head_sha, &token)
+        .await
+        .map(|c| c.failing)
+        .unwrap_or_default();
+
+    let override_path = state.settings.repo_path(&repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(dir) = crate::workspace::resolve_uow_worktree(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &repo,
+        &target_branch,
+    )
+    .await
+    else {
+        return bad(
+            "repo not resolved locally — set its path in the Rules view (and start development \
+             so the repo is cloned) before resolving PR feedback"
+                .to_string(),
+        );
+    };
+
+    let model = req.model.filter(|m| !m.trim().is_empty()).unwrap_or_else(|| {
+        state
+            .projects
+            .active()
+            .map(|p| p.tier_map.strongest)
+            .unwrap_or_else(crate::model_tier::default_strongest_model)
+    });
+
+    let run_id = state.runs.create(&story_id, "pr-resolve");
+    {
+        let runs = state.runs.clone();
+        let uow_store = state.uow.clone();
+        let rid = run_id.clone();
+        let sid = story_id.clone();
+        let pr_number = info.number;
+        tokio::spawn(async move {
+            crate::pr_resolve_run::execute_pr_resolve_run(
+                runs,
+                uow_store,
+                rid,
+                sid,
+                repo,
+                dir,
+                target_branch,
+                pr_number,
+                review_comments,
+                failing_checks,
+                Some(token),
+                model,
+            )
+            .await;
+        });
+    }
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
 
