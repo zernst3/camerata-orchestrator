@@ -878,8 +878,14 @@ pub async fn propose_corpus_rules(repo_domains: &[(String, Vec<String>)]) -> Vec
                 // (e.g. Go/Ruby/Python rules on a TS/Node repo); and a draft/needs_recheck
                 // rule is never pre-checked even when stack-relevant. Without the stack gate,
                 // every grounded rule in the whole corpus was auto-recommended on every repo.
+                //
+                // OPT-IN ONLY rules (e.g. the CI-security Semgrep/CodeQL rules) are NEVER
+                // pre-checked, even when grounded and stack-relevant — they still appear in the
+                // proposal so the architect can deliberately opt in. `!r.is_opt_in_only()` is the
+                // gate that enforces this.
                 is_auto_recommended: (is_suggested || r.domain == "agentic")
-                    && r.is_auto_recommended(),
+                    && r.is_auto_recommended()
+                    && !r.is_opt_in_only(),
             }
         })
         .collect::<Vec<_>>();

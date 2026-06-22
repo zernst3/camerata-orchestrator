@@ -313,6 +313,19 @@ struct RuleToml {
     /// architect MUST choose an alternative at onboarding.
     #[serde(default)]
     default: bool,
+    /// Whether this rule is OPT-IN ONLY: a grounded rule that must NEVER be
+    /// auto-recommended / pre-checked in the onboarding proposal, even when it is
+    /// `grounded`/`verified` and stack-relevant. It still appears in the proposal
+    /// list so the architect can deliberately opt in; it is just never pre-ticked.
+    /// Absent → `false`.
+    #[serde(default)]
+    opt_in_only: bool,
+    /// Whether this rule is LAYER-3 ONLY: a CI-tier rule that must never run at
+    /// layer-2 or at scan time (too heavy / not locally runnable — e.g. CodeQL's
+    /// whole-program DB build). Carried now; consumed by the runners + the
+    /// scan-time preview (Part B). Absent → `false`.
+    #[serde(default)]
+    layer3_only: bool,
     /// The alternatives the architect chooses among (`[[option]]` blocks).
     #[serde(default, rename = "option")]
     options: Vec<OptionToml>,
@@ -405,6 +418,31 @@ pub struct Rule {
     /// (`[verified]` TOML table). Carries who/when + the source/linter versions
     /// verified against, used by the staleness pass to detect drift.
     pub verified: Option<VerifiedProvenance>,
+    /// Whether this rule is OPT-IN ONLY: never auto-recommended / pre-checked,
+    /// even when grounded and stack-relevant. The architect must opt in manually.
+    /// See [`Rule::is_opt_in_only`]. Defaults to `false`.
+    pub opt_in_only: bool,
+    /// Whether this rule is LAYER-3 ONLY: a CI-tier rule that must never run at
+    /// layer-2 or at scan time (too heavy / not locally runnable). Carried for the
+    /// runners + scan-time preview. See [`Rule::is_layer3_only`]. Defaults to `false`.
+    pub layer3_only: bool,
+}
+
+impl Rule {
+    /// Whether this rule is OPT-IN ONLY — a grounded rule that must NEVER be
+    /// auto-recommended / pre-checked in the onboarding proposal. It is still
+    /// listed (so the architect can opt in), just never pre-ticked. The propose
+    /// logic in the server gates auto-recommend on `!is_opt_in_only()`.
+    pub fn is_opt_in_only(&self) -> bool {
+        self.opt_in_only
+    }
+
+    /// Whether this rule is LAYER-3 ONLY — a CI-tier rule that must never run at
+    /// layer-2 or at scan time. Consumed by the runners + the scan-time preview
+    /// (Part B); carried here so the metadata is available.
+    pub fn is_layer3_only(&self) -> bool {
+        self.layer3_only
+    }
 }
 
 impl Rule {
@@ -708,6 +746,8 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         verification: raw.verification,
         sources: raw.sources,
         verified: raw.verified,
+        opt_in_only: raw.opt_in_only,
+        layer3_only: raw.layer3_only,
     })
 }
 
@@ -940,6 +980,8 @@ mod tests {
             verification: Verification::Draft,
             sources: Vec::new(),
             verified: None,
+            opt_in_only: false,
+            layer3_only: false,
         }
     }
 
@@ -989,6 +1031,8 @@ mod tests {
             verification: raw.verification,
             sources: raw.sources,
             verified: raw.verified,
+            opt_in_only: raw.opt_in_only,
+            layer3_only: raw.layer3_only,
         }
     }
 
@@ -1775,5 +1819,104 @@ mod tests {
             !r.is_auto_recommended(),
             "needs_recheck rule must NOT be auto-recommended (stale verification)"
         );
+    }
+
+    // ── opt_in_only / layer3_only flags ──────────────────────────────────────
+
+    #[test]
+    fn opt_in_only_and_layer3_only_default_false() {
+        // A rule TOML that omits both flags loads them as false.
+        let src = r#"
+            id = "RULE-NO-FLAGS-1"
+            title = "A rule without the CI-tier flags"
+            enforcement = "mechanical"
+            domain = "ci-cd"
+        "#;
+        let rule = parse_rule(src);
+        assert!(!rule.is_opt_in_only(), "opt_in_only defaults to false");
+        assert!(!rule.is_layer3_only(), "layer3_only defaults to false");
+    }
+
+    #[test]
+    fn opt_in_only_and_layer3_only_parse_when_set() {
+        let src = r#"
+            id = "RULE-FLAGS-1"
+            title = "A rule that sets both CI-tier flags"
+            enforcement = "mechanical"
+            domain = "ci-cd"
+            opt_in_only = true
+            layer3_only = true
+        "#;
+        let rule = parse_rule(src);
+        assert!(rule.is_opt_in_only(), "opt_in_only = true parses");
+        assert!(rule.is_layer3_only(), "layer3_only = true parses");
+    }
+
+    #[test]
+    fn opt_in_only_rule_is_not_auto_recommended_even_when_grounded() {
+        // is_auto_recommended() on the Rule reflects only grounding (the server
+        // propose logic ANDs in `!is_opt_in_only()`), but the corpus contract is
+        // that an opt_in_only rule, though grounded, must never be pre-checked.
+        // We assert the gate the server uses: grounded AND !opt_in_only.
+        let mut r = make_rule("R-OPTIN-1", "ci-cd", EnforcementKind::Mechanical);
+        r.verification = Verification::Grounded;
+        r.opt_in_only = true;
+        assert!(
+            r.is_grounded(),
+            "the rule is grounded (so it would otherwise be pre-checked)"
+        );
+        let auto_recommended = r.is_auto_recommended() && !r.is_opt_in_only();
+        assert!(
+            !auto_recommended,
+            "an opt_in_only rule must never be auto-recommended even when grounded"
+        );
+    }
+
+    // ── New corpus rules: CI security (Semgrep / CodeQL) ──────────────────────
+
+    #[tokio::test]
+    async fn corpus_loads_ci_security_rules_with_flags() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+
+        // Semgrep: opt_in_only, mechanical, two options, no default.
+        if let Some(rule) = set.get_by_id("CICD-SEMGREP-SECURITY-SCAN-1") {
+            assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+            assert_eq!(rule.domain, "ci-cd");
+            assert!(rule.is_opt_in_only(), "Semgrep rule is opt_in_only");
+            assert!(!rule.is_layer3_only(), "Semgrep CE runs at scan + layer-2");
+            assert!(rule.is_grounded(), "Semgrep rule is grounded");
+            assert!(!rule.has_default(), "no default → forces a tier choice");
+            assert_eq!(rule.options.len(), 2, "two tier options");
+            assert!(rule
+                .options
+                .iter()
+                .any(|o| o.id == "semgrep-community-edition"));
+            assert!(rule
+                .options
+                .iter()
+                .any(|o| o.id == "semgrep-appsec-platform-pro"));
+            // The opt_in_only rule, though grounded, must never be auto-recommended.
+            assert!(
+                !(rule.is_auto_recommended() && !rule.is_opt_in_only()),
+                "Semgrep rule must never be pre-checked"
+            );
+        }
+
+        // CodeQL: opt_in_only + layer3_only, mechanical, two options, no default.
+        if let Some(rule) = set.get_by_id("CICD-CODEQL-SECURITY-SCAN-1") {
+            assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+            assert_eq!(rule.domain, "ci-cd");
+            assert!(rule.is_opt_in_only(), "CodeQL rule is opt_in_only");
+            assert!(rule.is_layer3_only(), "CodeQL is layer-3 only (heavy DB build)");
+            assert!(rule.is_grounded(), "CodeQL rule is grounded");
+            assert!(!rule.has_default(), "no default → forces a tier choice");
+            assert_eq!(rule.options.len(), 2, "two tier options");
+            assert!(rule.options.iter().any(|o| o.id == "codeql-public-free"));
+            assert!(rule.options.iter().any(|o| o.id == "codeql-ghas-paid"));
+        }
     }
 }

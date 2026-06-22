@@ -1,0 +1,50 @@
+id = "CICD-SEMGREP-SECURITY-SCAN-1"
+title = "Run the Semgrep security suite (CI + scan preview)"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "mechanical"
+# No adopted default: selecting this rule forces a conscious tier choice between
+# the free Community Edition and the paid AppSec Platform / Pro tier.
+default = false
+# Opt-in only: a DevOps engineer wires this; it must never be auto-recommended /
+# pre-checked at onboarding even though it is grounded against a real tool.
+opt_in_only = true
+# Semgrep CE is lightweight (single-file, no whole-program build) so it runs at
+# the scan preview and at layer-2 as well as in CI — NOT layer3-only.
+layer3_only = false
+verification = "grounded"
+
+[[sources]]
+url = "https://semgrep.dev/"
+title = "Semgrep — fast, customizable static analysis"
+linter = "semgrep"
+
+[[sources]]
+url = "https://semgrep.dev/docs/getting-started/"
+title = "Semgrep Community Edition (CLI, LGPL-2.1) — getting started"
+linter = "semgrep"
+
+[[sources]]
+url = "https://semgrep.dev/pricing/"
+title = "Semgrep pricing — Community vs. Team/Enterprise (AppSec Platform / Pro)"
+
+[[sources]]
+url = "https://semgrep.dev/docs/semgrep-pro-vs-oss"
+title = "Semgrep Pro vs. open source — cross-file analysis and Pro rules"
+
+[decision]
+question = "Which Semgrep tier does the project run for its static security scan: the free open-source Community Edition CLI, or the paid AppSec Platform / Pro with cross-file analysis and the Pro rule set?"
+why = "Semgrep is a mature, deterministic static-analysis engine. Camerata composes it as a deterministic check source and enforces its findings at the gate and in the agent loop, rather than re-implementing the analysis. The tier choice is a real cost/coverage trade: Community Edition is free and runs anywhere (including the scan preview), while the Pro platform adds cross-file taint tracking and a much larger curated rule set behind a per-seat license. Picking forces the project to own that trade explicitly instead of silently defaulting to one."
+
+[[option]]
+id = "semgrep-community-edition"
+label = "Semgrep Community Edition (free, LGPL-2.1 OSS CLI)"
+directive = "Wire the free Semgrep Community Edition CLI into CI and make it available to the local scan preview. CE is licensed LGPL-2.1, runs on ANY repository including private/closed-source ones at no cost, and analyzes a single file at a time (no whole-program build), which keeps it fast enough to run at scan time, at layer-2, and in CI. Install the CLI (`pip install semgrep` or the official container/binary), pin a version, and run it against a Camerata-supplied config — typically `--config p/ci` or the curated community rule packs (the registry ships roughly 3,000 community rules across languages). Emit SARIF (`--sarif --output results.sarif`) so the findings fold into Camerata triage with stable rule ids, and fail the CI job on findings at or above the chosen severity. Because CE is single-file, prefer it for the in-loop / scan-preview path where speed matters; treat its findings as deterministic preview findings until the CI story wires the gate. Keep the rule selection and severity threshold pinned in the repo so the gate does not drift."
+why = "Community Edition is free, OSS, and lightweight enough to run at the scan preview and in CI on any repo (public or private) without a license. Single-file analysis trades cross-file taint tracking for speed, which is the right trade for the in-loop and preview paths."
+
+[[option]]
+id = "semgrep-appsec-platform-pro"
+label = "Semgrep AppSec Platform / Pro (paid: cross-file analysis + Pro rules)"
+directive = "Adopt the paid Semgrep AppSec Platform (Team/Enterprise) and wire its CI integration plus the managed platform. The Pro engine adds cross-file (inter-procedural) and cross-function taint analysis that Community Edition does not perform, plus the curated Pro rule set (on the order of 20,000 rules) and platform features (findings management, triage history, policy, dependency/secrets scanning depending on plan). Authenticate CI with a platform token (`SEMGREP_APP_TOKEN`) and run `semgrep ci`, which pulls the org's configured rules and policy from the platform. Cost is per-contributor/seat under a paid license, and the cross-file engine and platform are a CI / platform-tier capability — not something to run at the local scan preview or in the agent loop. Use this tier when the project needs cross-file taint coverage and centralized findings governance; keep the policy and rule configuration owned in the platform with the CI job pinned to it."
+why = "The paid Pro tier buys cross-file taint analysis and the much larger Pro rule set plus centralized findings governance, at a per-seat cost. It is a CI/platform-tier capability, heavier and licensed, so it belongs in CI rather than the scan preview or the in-loop path."

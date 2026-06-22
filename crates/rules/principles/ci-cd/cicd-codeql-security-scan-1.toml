@@ -1,0 +1,50 @@
+id = "CICD-CODEQL-SECURITY-SCAN-1"
+title = "Run the CodeQL security suite in CI (layer-3 only)"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "mechanical"
+# No adopted default: selecting this rule forces a conscious tier choice between
+# the free public-repo path and paid GitHub Advanced Security for private repos.
+default = false
+# Opt-in only: a DevOps engineer wires this; it must never be auto-recommended /
+# pre-checked at onboarding even though it is grounded against a real tool.
+opt_in_only = true
+# CodeQL builds a whole-program database and is far too heavy to run at scan time
+# or in the agent loop. It is CI / layer-3 ONLY.
+layer3_only = true
+verification = "grounded"
+
+[[sources]]
+url = "https://codeql.github.com/"
+title = "CodeQL — semantic code analysis engine"
+linter = "codeql"
+
+[[sources]]
+url = "https://docs.github.com/en/code-security/code-scanning/introduction-to-code-scanning/about-code-scanning-with-codeql"
+title = "GitHub docs — About code scanning with CodeQL"
+linter = "codeql"
+
+[[sources]]
+url = "https://docs.github.com/en/get-started/learning-about-github/about-github-advanced-security"
+title = "GitHub docs — About GitHub Advanced Security (GHAS, per-active-committer)"
+
+[[sources]]
+url = "https://github.com/github/codeql-cli-binaries/blob/main/LICENSE.md"
+title = "CodeQL CLI license — free for analysis of public/open-source repos only"
+
+[decision]
+question = "How does the project run the CodeQL security suite in CI: on a public/open-source repository where CodeQL is free, or via paid GitHub Advanced Security for a private/closed-source repository?"
+why = "CodeQL is a mature semantic-analysis engine that builds a whole-program database and runs curated security queries over it. Camerata composes it as a deterministic check source and enforces its findings at the CI gate, rather than re-implementing whole-program analysis. The licensing is the decision: CodeQL is free ONLY on public/open-source repositories; running it on private code requires GitHub Advanced Security, which is paid per active committer. Either way the whole-program database build is heavy, so CodeQL is a CI / layer-3 capability only — it must never run at the local scan preview or in the agent loop. Picking the tier forces the project to own the licensing and the placement explicitly."
+
+[[option]]
+id = "codeql-public-free"
+label = "CodeQL on a public/open-source repo (free)"
+directive = "Enable CodeQL code scanning in CI for a PUBLIC / open-source repository, where it is free. IMPORTANT LIMITATIONS that the wiring must respect: (1) The free entitlement applies ONLY to public/open-source repositories — running CodeQL against a private or closed-source repo requires GitHub Advanced Security (a paid, per-active-committer license; see the paid option). (2) CodeQL builds a whole-program database (it must extract/compile the codebase before querying), which is expensive in time and memory — so it runs in CI / layer-3 ONLY and must NEVER be run at the local scan preview or inside the agent loop. Wire it via the GitHub-hosted `github/codeql-action` (`init` → `autobuild` or an explicit build → `analyze`) in a `code-scanning` workflow, or run the `codeql` CLI to build the database and analyze it, pinning the query suite (e.g. `security-extended`). Findings surface as SARIF in code scanning; fail the gate on findings at or above the chosen severity. Treat CodeQL strictly as a CI gate source — its results are authoritative at the gate, never a scan-time preview."
+why = "CodeQL is free on public/open-source repos, but only there: private code needs paid GHAS. Its whole-program database build is too heavy for scan-time or in-loop use, so it is a CI / layer-3 capability only. Pinning the query suite in the repo keeps the gate from drifting."
+
+[[option]]
+id = "codeql-ghas-paid"
+label = "CodeQL via GitHub Advanced Security for a private repo (paid, per-committer)"
+directive = "For a PRIVATE / closed-source repository, run CodeQL through GitHub Advanced Security (GHAS), which is required to use CodeQL code scanning on non-public code. GHAS is a PAID add-on licensed per ACTIVE COMMITTER (a unique committer counts once across the org regardless of how many repos they touch), so wiring this commits the project to that recurring per-seat cost. Enable GHAS / code security on the repo or org, then wire the same `github/codeql-action` workflow (`init` → build → `analyze`) or the `codeql` CLI with a pinned query suite (e.g. `security-extended`). As with the public path, CodeQL builds a heavy whole-program database, so it remains a CI / layer-3 ONLY capability — never run it at the scan preview or in the agent loop. Findings surface as SARIF in code scanning and fail the gate at or above the chosen severity. Keep the query-suite and severity threshold pinned in the repo so the gate is authoritative and does not drift."
+why = "Private/closed-source repos cannot use CodeQL for free; GitHub Advanced Security is required and is billed per active committer. The whole-program database build keeps CodeQL at CI / layer-3 only, never at scan or in-loop. Pinning the query suite in the repo keeps the gate authoritative."
