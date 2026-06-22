@@ -2067,6 +2067,18 @@ html, body {
 .rule-modal-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 700; color: var(--accent-ink); }
 .rule-modal-close { border: none; background: transparent; font-size: 16px; color: var(--ink-soft); cursor: pointer; padding: 2px 6px; }
 .rule-modal-close:hover { color: var(--ink); }
+/* Work-item detail modal: a prominent top-right close button (the inline ✕ read as too
+   subtle next to the title), and a focus-outline reset for chorale's inline-styled pager
+   buttons so clicking a page doesn't leave the webview's native focus chrome on them. */
+.wi-detail-modal { position: relative; }
+.wi-detail-modal .rule-modal-close {
+  position: absolute; top: 12px; right: 14px; z-index: 1;
+  font-size: 20px; line-height: 1; padding: 6px 11px; border-radius: 8px;
+  background: var(--paper); color: var(--ink-soft);
+}
+.wi-detail-modal .rule-modal-close:hover { background: var(--accent-wash); color: var(--ink); }
+.wi-detail-modal .wi-detail-head { padding-right: 44px; }
+.chorale-root button:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 .rule-modal-title-row {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
   margin: 8px 0 12px;

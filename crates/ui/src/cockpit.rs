@@ -2574,6 +2574,14 @@ struct WorkItem {
     labels: Vec<String>,
 }
 
+/// App-lifetime cache of the last work-item pull, keyed by project id (so switching
+/// projects never shows stale items). A `GlobalSignal` persists for the lifetime of the
+/// process, so navigating away from Governed Development and back does NOT require a
+/// re-pull — the pull is held in memory until Camerata closes or the user pulls again.
+/// Manual pull only; there is no auto-poll.
+static PULLED_WORK_ITEMS: GlobalSignal<Option<(String, Vec<WorkItem>)>> =
+    Signal::global(|| None);
+
 /// The `POST /api/workitems/pull` envelope.
 #[derive(Clone, PartialEq, serde::Deserialize, Default)]
 struct PullWorkItemsResult {
@@ -3631,8 +3639,6 @@ fn IssueManagementPanel(
     let provider_res = use_resource(fetch_provider);
     let active_proj = use_resource(fetch_active_project);
 
-    // The pulled work items (manual, no cache). None = not pulled yet.
-    let mut items = use_signal(|| Option::<Vec<WorkItem>>::None);
     let mut pulling = use_signal(|| false);
     // The work item whose detail is open (by stable id), if any.
     let mut detail_id = use_signal(|| Option::<String>::None);
@@ -3651,7 +3657,14 @@ fn IssueManagementPanel(
         None => ("conn-warn", "● connecting…".to_string()),
     };
 
-    let item_list = items.read().clone();
+    // The pulled work items come from an APP-LIFETIME cache (survives navigating away and
+    // back), keyed by project id so a project switch never shows stale items. None = not
+    // pulled yet for the active project.
+    let proj_id = proj.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+    let item_list: Option<Vec<WorkItem>> = match PULLED_WORK_ITEMS.read().clone() {
+        Some((pid, list)) if !proj_id.is_empty() && pid == proj_id => Some(list),
+        _ => None,
+    };
     // Resolve the open detail item against the current pull.
     let open_item = match (&item_list, detail_id()) {
         (Some(list), Some(id)) => list.iter().find(|it| it.id == id).cloned(),
@@ -3683,15 +3696,19 @@ fn IssueManagementPanel(
                 button {
                     class: "btn-run",
                     disabled: pulling(),
-                    onclick: move |_| {
-                        pulling.set(true);
-                        spawn(async move {
-                            let pulled = pull_work_items().await.unwrap_or_default();
-                            items.set(Some(pulled));
-                            detail_id.set(None);
-                            pull_seq += 1;
-                            pulling.set(false);
-                        });
+                    onclick: {
+                        let proj_id = proj_id.clone();
+                        move |_| {
+                            let proj_id = proj_id.clone();
+                            pulling.set(true);
+                            spawn(async move {
+                                let pulled = pull_work_items().await.unwrap_or_default();
+                                *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                detail_id.set(None);
+                                pull_seq += 1;
+                                pulling.set(false);
+                            });
+                        }
                     },
                     if pulling() { "Pulling…" } else { "Pull work items" }
                 }
