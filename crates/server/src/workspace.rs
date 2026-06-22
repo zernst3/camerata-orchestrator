@@ -606,6 +606,164 @@ pub fn parse_branch_list(current: &str, raw: &str) -> BranchList {
     }
 }
 
+// ── Update-branch support (AI-assisted merge of a source branch into the UoW branch) ──
+
+/// The set of branches a UoW can merge FROM, split by where they live. The
+/// "Update branch" picker is populated from this: `local` are branches already in
+/// the working copy, `origin` are remote-tracking branches (the `origin/` prefix
+/// stripped). Both are empty for a repo that isn't cloned — a graceful, token-less
+/// fallback so the UI can render an empty picker instead of erroring.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MergeSourceBranches {
+    /// Local branch names (`git branch --format=%(refname:short)`).
+    pub local: Vec<String>,
+    /// Remote-tracking branch names under `origin/`, with the `origin/` prefix
+    /// stripped (so a UI picker shows `main`, not `origin/main`). `origin/HEAD`
+    /// is filtered out — it is a symbolic ref, not a mergeable branch.
+    pub origin: Vec<String>,
+}
+
+/// Parse `git branch -r` raw output into the origin-tracking branch names, stripping
+/// the `origin/` prefix and dropping the `origin/HEAD -> …` symbolic ref. Only
+/// `origin/*` refs are kept (other remotes are ignored — Camerata's clones use a
+/// single `origin`). Exported so tests can drive the parser without a real git process.
+pub fn parse_origin_branches(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        // Drop the symbolic `origin/HEAD -> origin/main` line.
+        .filter(|l| !l.contains("->"))
+        .filter_map(|l| l.strip_prefix("origin/"))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// List the branches a UoW can merge from in the working copy at `dir`: local
+/// branches and `origin/*` remote-tracking branches (prefix stripped). Reads only
+/// what is already in the clone (no network) — `clone_or_pull` refreshes the remote
+/// view. Returns empty lists when `dir` is not a git checkout (graceful, token-less).
+pub async fn list_merge_sources(dir: &Path) -> MergeSourceBranches {
+    if !is_git_repo(dir) {
+        return MergeSourceBranches::default();
+    }
+    let local = git(Some(dir), &["branch", "--format=%(refname:short)"])
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let origin = git(Some(dir), &["branch", "-r"])
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_origin_branches(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    MergeSourceBranches { local, origin }
+}
+
+/// The outcome of attempting a `git merge <source>` into the current branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The merge completed cleanly (fast-forward or an auto-created merge commit). No
+    /// agent is needed. Carries git's stdout summary.
+    Clean(String),
+    /// The merge left conflicts in the working tree. The repo is mid-merge; a gated
+    /// agent must resolve the markers and the server then completes the commit. Carries
+    /// the list of conflicted paths (from `git diff --name-only --diff-filter=U`).
+    Conflicts(Vec<String>),
+}
+
+/// Whether the working tree at `dir` is mid-merge (a `MERGE_HEAD` exists). Used to
+/// decide between completing the merge commit and reporting a clean fast-forward.
+pub async fn is_merge_in_progress(dir: &Path) -> bool {
+    git(Some(dir), &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The paths with unresolved merge conflicts in the working tree at `dir`.
+pub async fn conflicted_paths(dir: &Path) -> Vec<String> {
+    git(Some(dir), &["diff", "--name-only", "--diff-filter=U"])
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Run `git merge <source>` in the working copy at `dir` (already on the target branch).
+///
+/// `--no-edit` is passed so a clean merge auto-commits with the default message instead
+/// of opening an editor (which would hang headless). A clean result returns
+/// [`MergeOutcome::Clean`]; a conflict returns [`MergeOutcome::Conflicts`] with the
+/// conflicted paths (the repo is left mid-merge for the agent to resolve). A merge that
+/// fails for a NON-conflict reason (e.g. unknown ref) is an `Err`, NOT a false conflict.
+pub async fn merge_source(dir: &Path, source: &str) -> anyhow::Result<MergeOutcome> {
+    let out = git(Some(dir), &["merge", "--no-edit", source]).await?;
+    if out.status.success() {
+        return Ok(MergeOutcome::Clean(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ));
+    }
+    // A merge can fail for two distinct reasons: real conflicts (recoverable — the agent
+    // resolves them) or a hard error (unknown ref, not a repo, dirty tree). Distinguish
+    // them by whether the tree is now mid-merge with conflicted paths.
+    let conflicts = conflicted_paths(dir).await;
+    if !conflicts.is_empty() {
+        return Ok(MergeOutcome::Conflicts(conflicts));
+    }
+    // No conflicted paths but the merge failed → a hard error. Surface git's stderr.
+    anyhow::bail!("git merge {source}: {}", stderr_of(&out));
+}
+
+/// Abort an in-progress merge, restoring the working tree to the pre-merge state.
+/// Best-effort: used on the fail-closed path so a merge that can't be completed never
+/// leaves a half-merged tree behind.
+pub async fn merge_abort(dir: &Path) -> anyhow::Result<()> {
+    let out = git(Some(dir), &["merge", "--abort"]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git merge --abort: {}", stderr_of(&out));
+}
+
+/// Complete an in-progress merge by committing the (now resolved + staged) tree.
+/// `--no-edit` keeps git's default merge message. Returns the commit stdout. Errors if
+/// there are still unresolved conflicts (git refuses to commit), which the caller treats
+/// as a failed resolution.
+pub async fn commit_merge(dir: &Path) -> anyhow::Result<String> {
+    let out = git(Some(dir), &["commit", "--no-edit"]).await?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    anyhow::bail!("git commit (merge): {}", stderr_of(&out));
+}
+
+/// Fetch a single `branch` from origin into the local `origin/<branch>` tracking ref,
+/// using an authenticated transient URL (token never lands in `.git/config`). Used by
+/// the update-branch flow when the merge source is an origin branch, so the local
+/// `origin/<branch>` ref is current before the merge. No fast-forward of any local branch.
+pub async fn fetch_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> anyhow::Result<()> {
+    let out = git(Some(dir), &["fetch", &authed_url(repo, token), branch]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git fetch {branch}: {}", stderr_of(&out));
+}
+
 /// Stage all changes with `git add -A` then commit with `message`. Returns the
 /// commit output (or a "nothing to commit" notice if the tree was already clean).
 pub async fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
@@ -1053,5 +1211,97 @@ mod tests {
         let sync = AheadBehind::default();
         let s = build_status_detail("local-branch", false, &sync);
         assert_eq!(s, "on local-branch");
+    }
+
+    // ── Update-branch: origin-branch parsing (no real git) ──────────────────
+
+    #[test]
+    fn parse_origin_branches_strips_prefix_and_drops_head() {
+        let raw = "  origin/HEAD -> origin/main\n  origin/main\n  origin/feature/foo\n";
+        let got = parse_origin_branches(raw);
+        assert_eq!(got, vec!["main", "feature/foo"]);
+    }
+
+    #[test]
+    fn parse_origin_branches_ignores_other_remotes_and_blanks() {
+        // Only origin/* refs are kept; an upstream/* ref (other remote) is dropped.
+        let raw = "origin/main\n\nupstream/main\norigin/dev\n";
+        let got = parse_origin_branches(raw);
+        assert_eq!(got, vec!["main", "dev"]);
+    }
+
+    #[test]
+    fn parse_origin_branches_empty_input_is_empty() {
+        assert!(parse_origin_branches("").is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_merge_sources_empty_for_non_repo() {
+        // Token-less / no-clone → empty lists (graceful), never an error.
+        let dir = std::env::temp_dir().join(format!("cam-upd-nonrepo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let got = list_merge_sources(&dir).await;
+        assert!(got.local.is_empty());
+        assert!(got.origin.is_empty());
+    }
+
+    // ── Update-branch: real git round-trip for clean + conflict paths ───────
+
+    #[tokio::test]
+    async fn merge_source_clean_then_conflict_path_selection() {
+        let base = std::env::temp_dir().join(format!("cam-upd-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let g = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        g(&base, &["init", "-q", "-b", "main"]);
+        g(&base, &["config", "user.email", "t@example.com"]);
+        g(&base, &["config", "user.name", "Test"]);
+        std::fs::write(base.join("f.txt"), "base\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "init"]);
+
+        // ── Clean merge: a source branch that touches a DIFFERENT file. ──
+        g(&base, &["checkout", "-q", "-b", "clean-src"]);
+        std::fs::write(base.join("other.txt"), "new\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "add other"]);
+        g(&base, &["checkout", "-q", "main"]);
+        let outcome = merge_source(&base, "clean-src").await.unwrap();
+        assert!(matches!(outcome, MergeOutcome::Clean(_)), "clean merge");
+        assert!(!is_merge_in_progress(&base).await);
+
+        // ── Conflicting merge: both branches change the SAME line of f.txt. ──
+        std::fs::write(base.join("f.txt"), "main-change\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "main edits f"]);
+        g(&base, &["checkout", "-q", "-b", "conflict-src", "HEAD~2"]);
+        std::fs::write(base.join("f.txt"), "branch-change\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "branch edits f"]);
+        g(&base, &["checkout", "-q", "main"]);
+        let outcome = merge_source(&base, "conflict-src").await.unwrap();
+        match outcome {
+            MergeOutcome::Conflicts(paths) => {
+                assert!(paths.contains(&"f.txt".to_string()), "f.txt conflicted: {paths:?}");
+            }
+            MergeOutcome::Clean(_) => panic!("expected a conflict"),
+        }
+        assert!(is_merge_in_progress(&base).await, "mid-merge after conflict");
+
+        // ── Fail-closed: abort restores a clean (non-merging) tree. ──
+        merge_abort(&base).await.unwrap();
+        assert!(!is_merge_in_progress(&base).await, "abort cleared the merge");
+
+        // ── Hard error (unknown ref) is an Err, not a false conflict. ──
+        let err = merge_source(&base, "no-such-branch").await;
+        assert!(err.is_err(), "unknown ref errors");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

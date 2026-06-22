@@ -47,6 +47,7 @@ pub mod suppression;
 pub mod terminal;
 pub mod transcript;
 pub mod uow;
+pub mod update_branch_run;
 pub mod workitems;
 pub mod workspace;
 
@@ -358,6 +359,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/history", post(uow_append_history))
         // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
+        .route("/api/uow/:story_id/branches", post(uow_list_branches))
+        .route("/api/uow/:story_id/update-branch", post(uow_update_branch))
         .route(
             "/api/uow/:story_id/begin-investigation",
             post(uow_begin_investigation),
@@ -4875,6 +4878,157 @@ async fn uow_begin_investigation(
         tokio::spawn(async move {
             crate::investigation_run::execute_investigation_run(
                 runs, uow, rid, sid, title, desc, model,
+            )
+            .await;
+        });
+    }
+
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
+}
+
+/// Derive `owner/repo` from a UoW story id (`owner/repo#num`). The UoW story id is the
+/// GitHub-sourced id WITHOUT the `github:` prefix (see [`UowView`]); the repo is the part
+/// before the last `#`. Returns `None` when the id has no `#` or the repo part is not a
+/// valid `owner/repo`.
+fn repo_from_story_id(story_id: &str) -> Option<String> {
+    let (repo, _num) = story_id.rsplit_once('#')?;
+    if camerata_worktracker::RepoCoord::parse(repo).is_some() {
+        Some(repo.to_string())
+    } else {
+        None
+    }
+}
+
+/// `POST /api/uow/:story_id/branches` → `{ "local": [...], "origin": [...] }`.
+///
+/// Lists the branches this UoW can merge FROM, populating the "Update branch" picker.
+/// Resolves the repo (from the story id) and its local clone dir; `local` are the
+/// working copy's branches, `origin` are the `origin/*` remote-tracking branches (prefix
+/// stripped). Token-less / no-clone / unresolvable repo → empty lists (graceful, never an
+/// error) so the UI renders an empty picker rather than breaking.
+async fn uow_list_branches(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<crate::workspace::MergeSourceBranches> {
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return Json(crate::workspace::MergeSourceBranches::default());
+    };
+    let override_path = state.settings.repo_path(&repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(dir) = crate::workspace::resolve_repo_dir(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &repo,
+    ) else {
+        return Json(crate::workspace::MergeSourceBranches::default());
+    };
+    Json(crate::workspace::list_merge_sources(&dir).await)
+}
+
+/// Request body for `POST /api/uow/:story_id/update-branch`.
+#[derive(serde::Deserialize)]
+struct UpdateBranchReq {
+    /// The branch to merge INTO the UoW branch.
+    source_branch: String,
+    /// Where the source lives: `"local"` or `"origin"`.
+    source: String,
+    /// Optional model id for the conflict-resolution agent; defaults to the active
+    /// project's strongest tier.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/update-branch` body `{ source_branch, source }` → `{ run_id }`.
+///
+/// Merges `source_branch` (local/origin) INTO the UoW's working branch in its local
+/// clone — the GitHub "Update branch" pattern, AI-assisted. A clean merge commits; a
+/// conflict spawns ONE gated agent to resolve it (see [`crate::update_branch_run`]). The
+/// run is pollable via `GET /api/runs/:id`.
+///
+/// 4xx (no run created) when: the source is malformed; the UoW has no branch yet
+/// (nothing to update); the repo can't be derived from the story id; or the repo isn't
+/// resolved to a local clone.
+async fn uow_update_branch(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UpdateBranchReq>,
+) -> Response {
+    let bad = |msg: String| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response()
+    };
+
+    let Some(source_kind) = crate::update_branch_run::MergeSourceKind::from_wire(&req.source) else {
+        return bad(format!("`source` must be `local` or `origin`, got `{}`", req.source));
+    };
+    if req.source_branch.trim().is_empty() {
+        return bad("`source_branch` must not be empty".to_string());
+    }
+
+    // The UoW must have a working branch to update.
+    let uow = state.uow.get_or_create(&story_id);
+    let Some(target_branch) = uow.branch.filter(|b| !b.trim().is_empty()) else {
+        return bad(
+            "this UoW has no branch yet — start development first so there is a branch to update"
+                .to_string(),
+        );
+    };
+
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return bad(format!(
+            "could not derive owner/repo from story id `{story_id}`"
+        ));
+    };
+    let override_path = state.settings.repo_path(&repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(dir) = crate::workspace::resolve_repo_dir(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &repo,
+    ) else {
+        return bad(
+            "repo not resolved locally — set its path in the Rules view before updating the branch"
+                .to_string(),
+        );
+    };
+
+    // Resolve the conflict-resolution agent's model: the caller's choice, else the active
+    // project's strongest tier.
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| {
+            state
+                .projects
+                .active()
+                .map(|p| p.tier_map.strongest)
+                .unwrap_or_else(crate::model_tier::default_strongest_model)
+        });
+
+    let run_id = state.runs.create(&story_id, "update-branch");
+    {
+        let runs = state.runs.clone();
+        let uow_store = state.uow.clone();
+        let rid = run_id.clone();
+        let sid = story_id.clone();
+        let token = github_token();
+        let src = req.source_branch.clone();
+        tokio::spawn(async move {
+            crate::update_branch_run::execute_update_branch_run(
+                runs,
+                uow_store,
+                rid,
+                sid,
+                repo,
+                dir,
+                target_branch,
+                src,
+                source_kind,
+                token,
+                model,
             )
             .await;
         });

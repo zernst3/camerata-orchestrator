@@ -2269,6 +2269,79 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> Option<String> 
         .map(String::from)
 }
 
+/// The branches a UoW can merge FROM (`POST /api/uow/:story_id/branches`), split by
+/// where they live. Populates the "Update branch" picker.
+#[derive(Clone, Default, PartialEq, serde::Deserialize)]
+struct MergeSourceBranchesView {
+    #[serde(default)]
+    local: Vec<String>,
+    #[serde(default)]
+    origin: Vec<String>,
+}
+
+/// Fetch the mergeable branches for a UoW. Empty lists on any failure / no clone.
+async fn fetch_uow_branches(story_id: &str) -> MergeSourceBranchesView {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/branches",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .send()
+        .await;
+    match resp {
+        Ok(r) => r
+            .json::<MergeSourceBranchesView>()
+            .await
+            .unwrap_or_default(),
+        Err(_) => MergeSourceBranchesView::default(),
+    }
+}
+
+/// Start an AI-assisted update-branch run for a UoW: merge `source_branch` (from
+/// `source` = "local"/"origin") INTO the UoW's branch. Returns the run id to poll, or
+/// a `Blocked` reason (server 4xx, e.g. no branch yet) surfaced as a toast.
+async fn start_update_branch_run(
+    story_id: &str,
+    source_branch: &str,
+    source: &str,
+    model: &str,
+) -> StartRunOutcome {
+    let resp = match reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/update-branch",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({
+            "source_branch": source_branch,
+            "source": source,
+            "model": model,
+        }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return StartRunOutcome::Failed,
+    };
+    if resp.status().as_u16() == 400 {
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("error").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "The update-branch request was rejected.".to_string());
+        return StartRunOutcome::Blocked(reason);
+    }
+    let Ok(v) = resp.json::<serde_json::Value>().await else {
+        return StartRunOutcome::Failed;
+    };
+    match v.get("run_id").and_then(|r| r.as_str()) {
+        Some(id) => StartRunOutcome::Started(id.to_string()),
+        None => StartRunOutcome::Failed,
+    }
+}
+
 /// Fetch the current state of a run.
 async fn fetch_run(run_id: &str) -> Option<RunView> {
     reqwest::get(format!("{}/api/runs/{}", crate::BFF_URL, run_id))
@@ -4367,6 +4440,17 @@ fn UowDevControls(uow: UowListEntry) -> Element {
                     None => String::new(),
                 };
                 rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+            }
+
+            // ── AI-assisted "Update branch" (GitHub PR "Update branch", gated) ─
+            // Targets THIS UoW's branch: pick a source branch (local or origin) and
+            // merge it INTO the UoW branch. A clean merge commits; a conflict is
+            // resolved by ONE gated agent (drives its own AgentActivity). Per-UoW
+            // because it operates on this UoW's working branch.
+            UowUpdateBranchControl {
+                story_id: uow_key.clone(),
+                uow_refresh,
+                models: run_models_snap.clone(),
             }
 
             // ── The UoW panel (reused), keyed to this UoW ─────────────────────
@@ -9339,6 +9423,133 @@ async fn poll_run_to_done(
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    }
+}
+
+/// AI-assisted "Update branch" control (the GitHub PR "Update branch" pattern, gated).
+///
+/// Merges a user-selected SOURCE branch (local or origin) INTO this UoW's working
+/// branch. A `<select>` is populated from `POST /api/uow/:story_id/branches`, grouped
+/// into "Local" and "Origin" `<optgroup>`s (origin values carry an `origin:` prefix so
+/// the handler knows the source kind). The "▶ Update branch (AI-assisted)" button POSTs
+/// to `POST /api/uow/:story_id/update-branch`, then drives `AgentActivity` on the
+/// returned run and refreshes the UoW when the run completes.
+///
+/// A clean merge commits server-side; a conflict is resolved by ONE gated agent (the
+/// gate is preserved end to end). A server 4xx (e.g. no branch yet, repo not resolved
+/// locally) raises a toast carrying the server's reason. Owns its OWN active-run signal
+/// so it doesn't collide with the lifecycle run control.
+#[component]
+fn UowUpdateBranchControl(
+    story_id: String,
+    uow_refresh: Signal<u32>,
+    models: Option<AuditModelsResp>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // The mergeable branches, fetched once per UoW (and after a refresh tick).
+    let branches_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow_branches(&sid).await }
+        })
+    };
+    let branches = branches_res.read().clone().unwrap_or_default();
+
+    // The selected source. The select's value carries the source kind: a bare branch
+    // name is local; an `origin:`-prefixed value is an origin branch.
+    let mut selected = use_signal(String::new);
+    // The conflict-resolution agent's model (default = project strongest, editable).
+    let model = use_signal(String::new);
+    // Its own active run + busy flag (independent of the lifecycle run control).
+    let active_run = use_signal(|| Option::<RunView>::None);
+    let mut updating = use_signal(|| false);
+
+    let has_branches = !branches.local.is_empty() || !branches.origin.is_empty();
+
+    rsx! {
+        div { class: "uow-step-control uow-update-branch",
+            p { class: "uow-step-h", "Update branch (AI-assisted)" }
+            p { class: "section-hint",
+                "Merge a branch INTO this UoW's branch (GitHub's \"Update branch\"). A clean merge commits; conflicts are resolved by a gated agent."
+            }
+            if has_branches {
+                div { class: "run-control-row",
+                    select {
+                        class: "uow-branch-select",
+                        value: "{selected}",
+                        onchange: move |e| selected.set(e.value()),
+                        option { value: "", disabled: true, selected: selected().is_empty(), "Choose a branch…" }
+                        if !branches.local.is_empty() {
+                            optgroup { label: "Local",
+                                for b in branches.local.iter() {
+                                    option { key: "local:{b}", value: "{b}", "{b}" }
+                                }
+                            }
+                        }
+                        if !branches.origin.is_empty() {
+                            optgroup { label: "Origin",
+                                for b in branches.origin.iter() {
+                                    option { key: "origin:{b}", value: "origin:{b}", "{b}" }
+                                }
+                            }
+                        }
+                    }
+                    ModelSelect { models: models.clone(), selected: model }
+                    button {
+                        class: "btn-run",
+                        disabled: updating() || selected().is_empty(),
+                        onclick: move |_| {
+                            let raw = selected();
+                            if raw.is_empty() {
+                                return;
+                            }
+                            // Decode the source kind from the option value's prefix.
+                            let (source, branch) = match raw.strip_prefix("origin:") {
+                                Some(b) => ("origin".to_string(), b.to_string()),
+                                None => ("local".to_string(), raw.clone()),
+                            };
+                            let sid = story_id.clone();
+                            let md = model();
+                            updating.set(true);
+                            spawn(async move {
+                                match start_update_branch_run(&sid, &branch, &source, &md).await {
+                                    StartRunOutcome::Started(rid) => {
+                                        poll_run_to_done(rid, active_run, uow_refresh).await;
+                                    }
+                                    StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        reason,
+                                    ),
+                                    StartRunOutcome::Failed => crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not start the update-branch run.".to_string(),
+                                    ),
+                                }
+                                updating.set(false);
+                            });
+                        },
+                        if updating() { "Updating…" } else { "▶ Update branch (AI-assisted)" }
+                    }
+                }
+                // The gated run's live activity (conflict-resolution agent), when running.
+                {
+                    let rid = match active_run() {
+                        Some(ref r) => r.id.clone(),
+                        None => String::new(),
+                    };
+                    rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+                }
+            } else {
+                p { class: "section-hint",
+                    "No branches available — the repo must be cloned locally (set its path in the Rules view)."
+                }
+            }
+        }
     }
 }
 
