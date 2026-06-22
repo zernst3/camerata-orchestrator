@@ -46,6 +46,31 @@ risk — the starred (★) ones change model behavior or have untested runtime p
       (Rule·enforced green / AI·advisory yellow) + **scope** (Repo-local green / Cross-repo
       yellow / Process gray) badges render as distinct colors, not all gray.
 
+## ★ CI security rules + scan-time deterministic preview (NEW — needs QA)
+
+Built 2026-06-22 (Semgrep/CodeQL CI rules + the scan runs deterministic CI rules as a preview).
+No GitHub issue filed for this yet — banked here as a QA item.
+
+- [ ] **The two CI/CD rules exist + are opt-in only.** `CICD-SEMGREP-SECURITY-SCAN-1` and
+      `CICD-CODEQL-SECURITY-SCAN-1` appear in the CI/CD domain but are **never auto-recommended**
+      (never pre-checked at onboarding), even on a relevant stack.
+- [ ] **Mandatory tier choice (no default).** Selecting either forces a tier pick (free vs paid) —
+      amber "must choose" until you pick. The **CodeQL free option spells out its limitations**
+      (public-repo only; private → GHAS paid; heavy → CI/layer-3 only).
+- [ ] **★ Scan-time deterministic PREVIEW.** Select a deterministic CI rule (e.g. a clippy/ruff/
+      eslint rule, or Semgrep CE) whose tool is NOT yet wired into the repo, run the onboarding
+      scan, and confirm it **still produces findings** (Camerata runs the tool with a supplied
+      config). Findings are labeled **"preview — not enforced until wired"**, distinct from the
+      authoritative gate.
+- [ ] **CodeQL does NOT run at scan or layer-2.** Selecting the CodeQL rule produces a CI story
+      only — no scan preview, no in-loop bounce (too heavy / licensed).
+- [ ] **Mechanical rules stay OUT of the AI review.** Confirm token usage doesn't rise from these
+      rules — they run as deterministic tools, not via the LLM scan.
+- [ ] **Preview ≠ gate.** A rule that previewed at scan is still NOT enforced at layer-2/3 until
+      the CI story wires it into the repo (then the repo is the pinned source of truth).
+- [ ] **Graceful when a tool is missing.** If the local tool can't run, the scan notes
+      "couldn't preview X — enforces once wired" rather than a false clean.
+
 ## Known v1 limits (by design — not bugs)
 
 - Jobs are in-memory (don't survive an app restart — correct, since the work can't either).
