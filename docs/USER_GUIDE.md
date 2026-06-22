@@ -336,12 +336,18 @@ Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
 | **Integration gate** | the assembled tree (cross-agent) | API contract between two agents agrees |
 | **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
 
-**Layer 2 is cross-language and polyglot.** It is no longer Rust-only: for each worktree it runs the
-checks for **every language present in the repo** (Rust, JavaScript/TypeScript, Python, Go), using the
-**repo's own lockfile-pinned toolchain** — the same tool versions the repo's CI uses, installed from
-the repo's lockfile, never baked into Camerata. It is **fail-closed**: if a toolchain is missing, a
-check isn't defined, or dep install fails, the task is treated as **not verified** (an error), never as
-a clean pass. So code is genuinely pre-linted at dev time across every language in the repo.
+**Layer 2 is cross-language and polyglot — across four supported languages.** It is no longer
+Rust-only: for each worktree it runs the checks for every **supported** language present — **Rust,
+JavaScript/TypeScript, Python, and Go** — using the **repo's own lockfile-pinned toolchain** (the
+same tool versions the repo's CI uses, installed from the repo's lockfile, never baked into
+Camerata). It is **fail-closed**: if a toolchain is missing, a check isn't defined, or dep install
+fails, the task is treated as **not verified** (an error), never a clean pass. So code is pre-linted
+at dev time across those four languages.
+
+> The corpus also ships **Ruby, Java, and C#** rules, but those languages **do not have a layer-2
+> runner yet** — their rules ride as agent directives and CI (layer 3) until a runner is added. A
+> worktree whose only language is Ruby/Java/C# currently gets no layer-2 check (it falls back to a
+> logged no-op). Adding a runner is a clean follow-up on the same `CheckRunner` seam.
 
 Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo** (contracts),
 **process** (workflow conventions). The agent has no `git`, so Camerata is the sole committer.

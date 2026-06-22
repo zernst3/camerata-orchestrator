@@ -413,14 +413,20 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
    violated, ONE bounce-and-revise pass runs. The runner is now polyglot:
    `crates/checks/src/multilang.rs` implements `JsCheckRunner`, `PythonCheckRunner`,
    `GoCheckRunner`, and the existing `RustCheckRunner` (`crates/checks/src/lib.rs`). The
-   `runner_for_worktree(worktree)` function detects EVERY language present in the worktree
-   (recursively, via `detect_languages`), constructs a `PolyglotCheckRunner` that runs one
-   sub-runner per detected `(language, dir)` project, unions their violations, and is
-   **fail-closed**: if any sub-runner cannot run (missing toolchain, no lint/test script, install
+   `runner_for_worktree(worktree)` function detects every **supported** language present in the
+   worktree — Rust, JS/TS, Python, Go (recursively, via `detect_languages`) — constructs a
+   `PolyglotCheckRunner` that runs one sub-runner per detected `(language, dir)` project, unions
+   their violations, and is **fail-closed**: if any sub-runner cannot run (missing toolchain, no
+   lint/test script, install
    failure), the composite returns `Err` — it never reports clean for a half-verified tree. Each
    runner uses the REPO's own lockfile-pinned toolchain, so layer-2 == the repo's CI toolchain.
    Unknown worktrees degrade to `NoopChecks` with a logged warning; this is the one explicit
    exception, not the fail-closed path (there is no toolchain to be missing for an unrecognised tree).
+   **Coverage caveat:** only Rust/JS-TS/Python/Go have runners. The corpus also ships Ruby, Java,
+   and C# rules, but those have **no layer-2 runner yet** — a worktree whose only manifest is a
+   `Gemfile`/`pom.xml`|`build.gradle`/`.csproj` is "unrecognised" by `detect_languages` and hits the
+   `NoopChecks` path (no layer-2 enforcement); those rules ride as agent directives + CI until a
+   runner is added on the same `CheckRunner` seam.
 
    Layer-2 is **fast and in-loop** (runs against the agent's draft, before commit). Layer-3 is the
    authoritative backstop. This is intentional redundancy: client-side validation (layer-2) catches
