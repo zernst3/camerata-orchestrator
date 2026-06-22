@@ -2078,6 +2078,10 @@ html, body {
 }
 .wi-detail-modal .rule-modal-close:hover { background: var(--accent-wash); color: var(--ink); }
 .wi-detail-modal .wi-detail-head { padding-right: 44px; }
+/* Strip the system webview's native button chrome (beveled/gray) that showed through on
+   chorale's inline-styled pager buttons after interaction — appearance isn't set inline,
+   so this stylesheet rule wins and lets chorale's own border/bg render consistently. */
+.chorale-root button { -webkit-appearance: none; appearance: none; }
 .chorale-root button:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 .rule-modal-title-row {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;

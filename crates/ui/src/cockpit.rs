@@ -2488,17 +2488,19 @@ async fn fetch_uow(story_id: &str) -> Option<UowView> {
         .ok()
 }
 
-/// POST a new dev-status for a story's UoW.
-async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<UowView> {
-    reqwest::Client::new()
+/// POST a new dev-status for a story's UoW. Returns `Some(())` on a 2xx. The server
+/// responds with the full `UnitOfWork` (not the UI's `UowView`), so we DO NOT try to
+/// deserialize the body — the caller just bumps the refresh tick and re-fetches the UoW.
+/// (Deserializing into `UowView` here was the bug behind a false "Could not update dev
+/// status" toast even when the server succeeded.)
+async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<()> {
+    let resp = reqwest::Client::new()
         .post(format!("{}/api/uow/{}/status", crate::BFF_URL, story_id))
         .json(&serde_json::json!({ "status": status.wire_str() }))
         .send()
         .await
-        .ok()?
-        .json::<UowView>()
-        .await
-        .ok()
+        .ok()?;
+    resp.status().is_success().then_some(())
 }
 
 /// The outcome of a lifecycle transition POST. `Ok` carries the updated UoW; `Blocked`
@@ -3957,8 +3959,9 @@ fn UowDevControls(uow: UowListEntry) -> Element {
         }
     }
 
-    // Comment-to-issue composer.
+    // Comment-to-issue composer (+ a lightweight @-mention insert).
     let mut comment_body = use_signal(String::new);
+    let mut mention_handle = use_signal(String::new);
     let mut commenting = use_signal(|| false);
     // Pull-latest state.
     let mut refreshing = use_signal(|| false);
@@ -4082,13 +4085,40 @@ fn UowDevControls(uow: UowListEntry) -> Element {
                 LiveRunPanel { run: r, uow_refresh }
             }
 
-            // ── Clarify back-and-forth (reused), keyed to this UoW ────────────
-            ClarifySection { story_id: uow.id.clone() }
-
-            // ── Add comment to the source issue ───────────────────────────────
+            // ── Add comment to the source issue (with @-mention) ──────────────
+            // This replaces the old "Ask the team" clarify panel: a comment with an
+            // @-mention IS how you loop a teammate in. The mention insert is GitHub-shaped
+            // (a literal @handle the tracker resolves); a per-provider user picker that
+            // fetches assignable members is the future wrapper for Jira/ADO.
             div { class: "uow-comment",
                 p { class: "clarify-h", "Add comment to issue" }
-                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter." }
+                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter. Mention a teammate to loop them in (GitHub resolves @handle)." }
+                div { class: "uow-mention-row",
+                    input {
+                        class: "uow-mention-input",
+                        value: "{mention_handle}",
+                        placeholder: "mention @handle…",
+                        oninput: move |e| mention_handle.set(e.value()),
+                    }
+                    button {
+                        class: "btn-edit-sm",
+                        onclick: move |_| {
+                            let raw = mention_handle();
+                            let h = raw.trim().trim_start_matches('@').trim();
+                            if h.is_empty() { return; }
+                            let mut body = comment_body();
+                            if !body.is_empty() && !body.ends_with(' ') && !body.ends_with('\n') {
+                                body.push(' ');
+                            }
+                            body.push('@');
+                            body.push_str(h);
+                            body.push(' ');
+                            comment_body.set(body);
+                            mention_handle.set(String::new());
+                        },
+                        "Mention"
+                    }
+                }
                 textarea {
                     class: "clarify-q",
                     value: "{comment_body}",
