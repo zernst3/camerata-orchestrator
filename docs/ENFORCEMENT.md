@@ -89,20 +89,33 @@ coordinator re-runs the agent with the violated rule ids appended to the task,
 then re-checks. A rule still violated after the revise pass becomes a residual
 in `RunReport::final_violations`; escalation is the caller's policy.
 
-This lane runs real subprocesses against the worktree and maps their output to
-rule ids:
+This lane is **cross-language and polyglot**. `crates/checks/src/multilang.rs`'s
+`runner_for_worktree` recursively detects every language present in a worktree (by
+manifest file: `Cargo.toml`, `package.json`, `go.mod`, `pyproject.toml` / `requirements.txt`)
+and builds a `PolyglotCheckRunner` that runs each project's native toolchain. Each runner
+fails closed (toolchain missing, no lint/test script, install failure all propagate as
+`Err` — never a false clean). The composite fails closed too: a half-verified polyglot
+tree is not a verified one.
 
-| Rule ID | Mechanism |
-|---|---|
-| `RUST-FMT` | `cargo fmt --check` — unformatted files → violation. |
-| `RUST-CLIPPY` | `cargo clippy` — warnings/errors → violation. |
+Per-language runners and their mapped rule ids:
+
+| Rule ID | Language | Mechanism |
+|---|---|---|
+| `RUST-FMT` | Rust | `cargo fmt --check` — unformatted files → violation. |
+| `RUST-CLIPPY` | Rust | `cargo clippy` — warnings/errors → violation. |
+| `RUST-TEST` | Rust | `cargo test` — failing tests → violation. |
+| `LAYER2-JS-CHECKS-1` | JavaScript / TypeScript | lockfile-pinned install + `npm run lint` + `npm run test`. |
+| `LAYER2-PY-CHECKS-1` | Python | isolated `.camerata-venv` + `ruff check .` + `pytest`. |
+| `LAYER2-GO-CHECKS-1` | Go | `gofmt -l` (non-empty stdout = violation) + `go vet ./...` + `go test ./...`. |
 
 The coordinator is model-free: it makes ZERO model calls itself (every model
 interaction goes through the injected `AgentDriver`), which keeps the brain
 deterministic and unit-testable with a fake driver. The `RustCheckRunner`
 aggregates fmt + clippy + test (cheapest-first) and deduplicates so the
 bounce-back message is clean. Verified by the `coordinator_real_check.rs` and
-`fmt_real_subprocess.rs` integration tests.
+`fmt_real_subprocess.rs` integration tests; the polyglot runners are tested in
+`crates/checks/src/multilang.rs` (unit tests, fake binary injection, and real Go
+toolchain tests that self-skip when Go is absent).
 
 ### Lane 3 — Prose context (agent judgment via `AGENTS.md`)
 
@@ -128,16 +141,16 @@ The per-session rule-subset is selected from the corpus by
 requested domains), then delivered as data to the gateway via
 `CAMERATA_RULES_FILE`. In the live `Backend` role that subset is **71 rules**.
 
-**Of those 71, six gate rules have executable layer-1 enforcement, plus three
-have layer-2 enforcement. All six layer-1 rules ride along in every live/fleet
-subset** (via `enforced_gate_rules()`, derived from the registry, so a newly added
-arm is applied everywhere with no edit):
+**Of those 71, six gate rules have executable layer-1 enforcement, plus six
+have layer-2 enforcement (three Rust + one JS/TS + one Python + one Go). All six
+layer-1 rules ride along in every live/fleet subset** (via `enforced_gate_rules()`,
+derived from the registry, so a newly added arm is applied everywhere with no edit):
 
 | Lane | Enforced rule ids | Status |
 |---|---|---|
 | Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers; `SEC-NO-SECRET-FILES-1` denies writing a secret-bearing file by name (a real `.env`, a private-key file, a keystore). |
 | Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
-| Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST` | Enforced via `cargo fmt`/`cargo clippy`/`cargo test` in the coordinator's bounce-and-revise. |
+| Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST`; `LAYER2-JS-CHECKS-1`; `LAYER2-PY-CHECKS-1`; `LAYER2-GO-CHECKS-1` | Cross-language polyglot runners (`crates/checks/src/multilang.rs`): Rust via `cargo fmt`/`cargo clippy`/`cargo test`; JS/TS via lockfile-pinned npm; Python via ruff + pytest in an isolated venv; Go via gofmt/vet/test. The runner is selected per worktree language, fail-closed, repo-pinned. |
 | Layer-3 (cross-agent, **planned**) | `INTEGRATION-*` family | NOT built. The integration gate that checks any invariant spanning AGENTS on the assembled tree before the branch ships: contract conformance (API contracts are one example), wiring completeness (events/config/DI/migrations with no dangling ends), convention coherence (casing, naming, dates, money), and cross-cutting policy (e.g. every UI-gated action maps to a guarded endpoint). Both tiers above are per-agent and cannot see between agents. See ADR `cross_agent_integration_gate`. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 

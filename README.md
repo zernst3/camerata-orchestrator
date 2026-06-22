@@ -41,8 +41,9 @@ that fixes a finding belongs to a later phase (see the gate section). What is so
 is the onboarding pipeline itself: scan, calibrate, triage, and emit stories.
 
 Onboarding's design principle is that it **emits stories and never does the development
-work itself**: a "resolve now" finding and a "wire mechanical rules into CI" task each
-become a GitHub issue that the development layer would pick up. Walked screen by screen in
+work itself**: a "resolve now" finding and up to two CI-wiring tasks (one for mechanical
+rules mapping to off-the-shelf linters, one for architectural rules requiring custom
+checkers) each become a GitHub issue that the development layer would pick up. Walked screen by screen in
 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md); the under-the-hood mechanics are in
 [`docs/TECHNICAL.md`](docs/TECHNICAL.md).
 

@@ -30,9 +30,12 @@ Camerata answers that with two layers that make zero model calls:
   call (write a file, run a command, call an external API) routes through a Rust MCP
   server that allows or denies it BEFORE it executes. A violation a prompt-only setup
   would silently permit is rejected at the boundary.
-- **Layer 2, post-task structural checks.** After an agent task completes, `cargo fmt`,
-  `cargo clippy`, and `cargo test` run out-of-process; any failure bounces the work
-  back for revision. Binary pass/fail, not "the model thinks this looks right."
+- **Layer 2, post-task structural checks.** After an agent task completes, the
+  coordinator runs the worktree's language-appropriate toolchain out-of-process
+  (Rust: `cargo fmt`, `cargo clippy`, `cargo test`; JavaScript/TypeScript: lockfile-pinned
+  `npm run lint` / `npm run test`; Python: `ruff` + `pytest` inside an isolated venv;
+  Go: `gofmt`, `go vet`, `go test`). Any failure bounces the work back for revision.
+  Binary pass/fail, not "the model thinks this looks right."
 
 The combination is what makes generated code stay coherent under an agent rather
 than drifting into inconsistency: the gate is the deterministic floor the
