@@ -412,21 +412,28 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
    (`crates/core/src/lib.rs`), run by the `Coordinator` after the agent finishes. If a rule is
    violated, ONE bounce-and-revise pass runs. The runner is now polyglot:
    `crates/checks/src/multilang.rs` implements `JsCheckRunner`, `PythonCheckRunner`,
-   `GoCheckRunner`, and the existing `RustCheckRunner` (`crates/checks/src/lib.rs`). The
+   `GoCheckRunner`, `RubyCheckRunner`, `JavaCheckRunner`, `CSharpCheckRunner`, and the existing
+   `RustCheckRunner` (`crates/checks/src/lib.rs`). The
    `runner_for_worktree(worktree)` function detects every **supported** language present in the
-   worktree — Rust, JS/TS, Python, Go (recursively, via `detect_languages`) — constructs a
+   worktree — Rust, JS/TS, Python, Go, Ruby, Java, C# (recursively, via `detect_languages`) —
+   constructs a
    `PolyglotCheckRunner` that runs one sub-runner per detected `(language, dir)` project, unions
    their violations, and is **fail-closed**: if any sub-runner cannot run (missing toolchain, no
    lint/test script, install
    failure), the composite returns `Err` — it never reports clean for a half-verified tree. Each
-   runner uses the REPO's own lockfile-pinned toolchain, so layer-2 == the repo's CI toolchain.
+   runner uses the REPO's own pinned toolchain, so layer-2 == the repo's CI toolchain.
    Unknown worktrees degrade to `NoopChecks` with a logged warning; this is the one explicit
    exception, not the fail-closed path (there is no toolchain to be missing for an unrecognised tree).
-   **Coverage caveat:** only Rust/JS-TS/Python/Go have runners. The corpus also ships Ruby, Java,
-   and C# rules, but those have **no layer-2 runner yet** — a worktree whose only manifest is a
-   `Gemfile`/`pom.xml`|`build.gradle`/`.csproj` is "unrecognised" by `detect_languages` and hits the
-   `NoopChecks` path (no layer-2 enforcement); those rules ride as agent directives + CI until a
-   runner is added on the same `CheckRunner` seam.
+   **Coverage:** all SEVEN languages the corpus ships rules for now have a layer-2 runner. The new
+   three pin and run, respectively: `RubyCheckRunner` (manifest `Gemfile`) → `bundle install` +
+   `bundle exec rubocop` + `bundle exec rspec`/`rake test`, pinned by `Gemfile.lock`;
+   `JavaCheckRunner` (manifest `pom.xml` for Maven, `build.gradle`/`build.gradle.kts` for Gradle) →
+   `./mvnw -q verify` / `./gradlew check`, preferring the repo's wrapper for pinning and falling
+   back to global `mvn`/`gradle`; `CSharpCheckRunner` (manifest `*.csproj`/`*.sln`) →
+   `dotnet format --verify-no-changes` + `dotnet build` + `dotnet test`, SDK pinned by `global.json`.
+   Each maps a failure to a coarse `LAYER2-<LANG>-CHECKS-1` rule and fails closed when its toolchain
+   is missing or no check is defined. See
+   `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 
    Layer-2 is **fast and in-loop** (runs against the agent's draft, before commit). Layer-3 is the
    authoritative backstop. This is intentional redundancy: client-side validation (layer-2) catches
