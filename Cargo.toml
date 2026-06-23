@@ -51,3 +51,7 @@ async-trait = "0.1"
 # (Decision: 2026-06-22_dogfood_disk_safety). Deliberately a workspace dep so server,
 # checks, and agent can all share the same version without version skew.
 fs2 = "0.4"
+# Gitignore-aware directory walker (ripgrep's ignore crate). Used by the brownfield
+# local-scan path to skip gitignored files (feature: scan-hygiene). A workspace dep so
+# the version is pinned in one place; only server consumes it today.
+ignore = "0.4"

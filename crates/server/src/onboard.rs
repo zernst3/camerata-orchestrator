@@ -1368,21 +1368,114 @@ pub struct ExtractedRepo {
 }
 
 /// Read a repo's auditable files from its LOCAL working tree — the local-first scan source.
-/// Onboarding (scan + audit) reads the code that's on disk; GitHub is never consulted for
-/// code (only later, at development time, for clone/fetch/push). Applies the same filters
-/// the scan has always used: noise pruning, code-extension filter, per-file size cap, and HARD_CAP_FILES
-/// safety net, but walks the directory on disk. Paths are relative to the repo root,
-/// forward-slashed. Noise directories (.git / node_modules / target / …) are pruned DURING
-/// descent so we never recurse into them. Synchronous (blocking IO) — call via spawn_blocking.
+///
+/// When the directory is a git repo (`.git` exists) the walk is
+/// [`ignore`](https://docs.rs/ignore)-powered: `.gitignore`, `.git/info/exclude`, and the
+/// user's global gitignore are all honoured. A file that is gitignored is skipped; a file
+/// that is committed but unignored (e.g. a tracked `.env`) is still scanned — which is
+/// exactly correct. The noise denylist (`is_noise_path`) is applied on top as belt-and-
+/// suspenders for any project that has not gitignored its build artefacts yet.
+///
+/// When the directory is NOT a git repo, the function falls back to the original iterative
+/// DFS noise-denylist walk (same behaviour as before `ignore` was added) so that the
+/// non-repo case is never broken.
+///
+/// Paths are relative to the repo root, forward-slashed. Synchronous (blocking IO) —
+/// call via `tokio::task::spawn_blocking`.
 pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<ExtractedRepo> {
-    if !root.join(".git").exists() {
-        anyhow::bail!("{} is not a local git clone", root.display());
-    }
     let extra_dirs = extra_exclude_dirs();
+    if root.join(".git").exists() {
+        read_local_repo_files_gitignore(root, &extra_dirs)
+    } else {
+        read_local_repo_files_noise_denylist(root, &extra_dirs)
+    }
+}
+
+/// Gitignore-aware walk (used when `.git` exists). Delegates to the `ignore` crate so
+/// `.gitignore`, `.git/info/exclude`, and the user's global gitignore are all respected.
+/// The noise denylist is applied afterward as a belt-and-suspenders guard.
+fn read_local_repo_files_gitignore(
+    root: &std::path::Path,
+    extra_dirs: &[String],
+) -> anyhow::Result<ExtractedRepo> {
     let mut files = Vec::new();
     let mut excluded_noise = 0usize;
     let mut truncated = false;
-    // Iterative DFS so a deep tree can't blow the stack.
+
+    // hidden(false): we want to scan dotfiles like .env and .camerata/ — the `ignore`
+    // crate would otherwise skip them by default.
+    let walker = ignore::WalkBuilder::new(root)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .ignore(true)
+        .hidden(false)
+        .build();
+
+    for result in walker {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let p = entry.path();
+        // Skip the root dir itself and any non-file entries (dirs, symlinks, etc.).
+        let ft = match entry.file_type() {
+            Some(ft) => ft,
+            None => continue,
+        };
+        if !ft.is_file() {
+            continue;
+        }
+        let Ok(rel) = p.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel.is_empty() {
+            continue;
+        }
+        // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
+        // build artefacts are not yet gitignored, or repos where target/ was committed).
+        let noise = is_noise_path(&rel, extra_dirs);
+        let code = has_code_ext(&rel);
+        if noise && code {
+            excluded_noise += 1;
+        }
+        if noise || !code {
+            continue;
+        }
+        if entry
+            .metadata()
+            .map(|m| m.len() as usize)
+            .unwrap_or(usize::MAX)
+            > MAX_FILE_BYTES
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(p) else {
+            continue; // skip non-UTF-8 / unreadable
+        };
+        files.push((rel, content));
+        if files.len() >= HARD_CAP_FILES {
+            truncated = true;
+            break;
+        }
+    }
+    Ok(ExtractedRepo {
+        files,
+        truncated,
+        excluded_noise,
+    })
+}
+
+/// Noise-denylist walk (fallback for non-git directories). Iterative DFS so a deep tree
+/// can't blow the stack. Mirrors the original `read_local_repo_files` body exactly.
+fn read_local_repo_files_noise_denylist(
+    root: &std::path::Path,
+    extra_dirs: &[String],
+) -> anyhow::Result<ExtractedRepo> {
+    let mut files = Vec::new();
+    let mut excluded_noise = 0usize;
+    let mut truncated = false;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -1402,7 +1495,7 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
             if ft.is_dir() {
                 // Prune noise dirs (don't descend) — is_noise_path matches any segment, so a
                 // noise dir name prunes the whole subtree before we read a single file in it.
-                if !is_noise_path(&rel, &extra_dirs) {
+                if !is_noise_path(&rel, extra_dirs) {
                     stack.push(p);
                 }
                 continue;
@@ -1410,7 +1503,7 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
             if !ft.is_file() {
                 continue; // skip symlinks / fifos / etc.
             }
-            let noise = is_noise_path(&rel, &extra_dirs);
+            let noise = is_noise_path(&rel, extra_dirs);
             let code = has_code_ext(&rel);
             if noise && code {
                 excluded_noise += 1;
@@ -1444,6 +1537,113 @@ pub fn read_local_repo_files(root: &std::path::Path) -> anyhow::Result<Extracted
         truncated,
         excluded_noise,
     })
+}
+
+// ── Self-reference suppression ────────────────────────────────────────────────
+
+/// True when a file is a governance or corpus artifact that Camerata itself emits or
+/// ships. Self-referential suppression (Feature: scan-hygiene) applies ONLY to these
+/// files — never to ordinary application code.
+///
+/// Conditions (any one is sufficient):
+/// - `content` carries the `<!-- Generated by Camerata` header that Camerata writes into
+///   every AGENTS.md and CONVENTIONS.md it emits.
+/// - The path is under `.camerata/` (project-level governance config).
+/// - The path contains a `principles/` segment AND ends with `.toml` (a rule corpus TOML).
+///
+/// `crates/gateway/src/lib.rs` (the detector source) is intentionally outside this
+/// predicate — it is application source handled by repo-level scan exclusion or
+/// `camerata:allow`, not by this mechanism.
+pub fn is_governance_or_corpus_artifact(path: &str, content: &str) -> bool {
+    if content.contains("<!-- Generated by Camerata") {
+        return true;
+    }
+    // Path is under .camerata/ (project-level governance config).
+    if path.starts_with(".camerata/") || path.contains("/.camerata/") {
+        return true;
+    }
+    // Corpus TOML: a .toml file under a `principles/` path segment.
+    if path.ends_with(".toml") && path.split('/').any(|s| s == "principles") {
+        return true;
+    }
+    false
+}
+
+/// True when `snippet` is contained as a normalised substring of any corpus
+/// descriptive text string. Normalisation: trim + lowercase on both sides.
+///
+/// An empty snippet never matches — zero-length substrings are vacuously contained
+/// everywhere and would suppress every finding in a governance file.
+pub fn is_self_referential_snippet(snippet: &str, corpus_texts: &[String]) -> bool {
+    let needle = snippet.trim().to_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    corpus_texts
+        .iter()
+        .any(|text| text.to_lowercase().contains(&needle))
+}
+
+/// Collect all descriptive text from a loaded rule set: title, summary, decision_why,
+/// and each option's directive and why. Used to cross-reference scan snippets against
+/// rule descriptions for self-referential suppression.
+pub fn corpus_texts_from_ruleset(set: &camerata_rules::RuleSet) -> Vec<String> {
+    let mut texts = Vec::new();
+    for rule in set.iter() {
+        texts.push(rule.title.clone());
+        texts.push(rule.summary.clone());
+        if let Some(why) = &rule.decision_why {
+            texts.push(why.clone());
+        }
+        for opt in &rule.options {
+            texts.push(opt.directive.clone());
+            texts.push(opt.why.clone());
+        }
+    }
+    texts
+}
+
+/// Mark findings in governance/corpus files as `suppressed-self-reference` when the
+/// matched snippet is corpus description text rather than a real violation.
+///
+/// Both conditions must hold:
+/// 1. The file is a governance/corpus artifact (`is_governance_or_corpus_artifact`).
+/// 2. The matched snippet appears in the corpus descriptive text (`is_self_referential_snippet`).
+///
+/// Outside governance files, findings are NEVER touched — a real `verify=False` in
+/// production code stays `active` even though some rule description contains that string.
+///
+/// A real secret pasted into CONVENTIONS.md that is NOT in any rule description also
+/// stays `active` (condition 2 fails).
+///
+/// Only findings already marked `active` are touched; inline/baseline suppressions are
+/// already classified and must not be downgraded.
+pub fn suppress_self_referential(
+    findings: &mut Vec<Finding>,
+    files: &[(String, String)],
+    corpus_texts: &[String],
+) {
+    // Build a quick path→content lookup to check the Generated-by marker per file.
+    let content_map: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+
+    for f in findings.iter_mut() {
+        // Only touch active findings — inline/baseline suppressions are already set.
+        if f.status != "active" {
+            continue;
+        }
+        let content = content_map.get(f.path.as_str()).copied().unwrap_or("");
+        if is_governance_or_corpus_artifact(&f.path, content)
+            && is_self_referential_snippet(&f.snippet, corpus_texts)
+        {
+            f.status = "suppressed-self-reference".to_string();
+            f.detail.push_str(
+                " (self-referential: matches a rule's own description; not a real finding)",
+            );
+        }
+    }
 }
 
 /// Scan a SET of repos end to end: download and audit each whole repo, then
@@ -3524,5 +3724,288 @@ mod tests {
         let f2: Finding = serde_json::from_str(legacy).unwrap();
         assert!(!f2.in_test);
         assert!(!f2.needs_review);
+    }
+
+    // ── Gitignore-aware walk tests (Feature: scan-hygiene) ────────────────
+
+    /// Helper: run `git init` in `dir` and return the path as a string.
+    fn git_init(dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git init failed");
+        assert!(status.success(), "git init must succeed");
+    }
+
+    #[test]
+    fn gitignore_walk_skips_gitignored_file() {
+        // A secrets.env listed in .gitignore must NOT appear in the extracted files.
+        // Note: the file is untracked but gitignored — the `ignore` crate respects the
+        // .gitignore file regardless of git-index state.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        // Write .gitignore so secrets.env is gitignored.
+        std::fs::write(root.join(".gitignore"), "secrets.env\n")
+            .expect("write .gitignore");
+        // Write the secret file — gitignored, so should NOT appear in output.
+        // Split token across concat!() so the scanner (if it were run) can't see the literal.
+        let secret_content = concat!("TOKEN=", "ghp_00000000000000000000000000000000000000\n");
+        std::fs::write(root.join("secrets.env"), secret_content)
+            .expect("write secrets.env");
+        // Write a normal source file that SHOULD appear.
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
+            .expect("write main.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("secrets.env")),
+            "gitignored secrets.env must not appear in scan: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("main.rs")),
+            "src/main.rs must appear in scan: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn gitignore_walk_scans_tracked_env() {
+        // A .env file that is NOT in .gitignore (committed/tracked) must still be scanned.
+        // `.env` has extension `env` which is in CODE_EXTS, so has_code_ext passes.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        // No .gitignore (or .gitignore that does not mention .env) → .env is NOT ignored.
+        std::fs::write(root.join(".gitignore"), "# nothing here\n")
+            .expect("write empty .gitignore");
+        // Write a .env with detectable content. Split so the scanner doesn't fire on the test.
+        let env_content = concat!("DATABASE_URL=postgres://user:", "hunter2@localhost/db\n");
+        std::fs::write(root.join(".env"), env_content).expect("write .env");
+        // A clean Rust file so there are multiple files.
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n")
+            .expect("write lib.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        // The .env is NOT in .gitignore → must be scanned.
+        assert!(
+            paths.iter().any(|p| *p == ".env"),
+            "tracked .env must be scanned when not gitignored: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn non_git_dir_falls_back_to_noise_denylist() {
+        // A directory without .git must not error; it should fall back to the
+        // noise-denylist walk and prune standard noise dirs like node_modules/.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        // No git init → no .git directory.
+
+        // Write a file inside node_modules (noise dir — must be pruned).
+        let nm = root.join("node_modules");
+        std::fs::create_dir_all(&nm).expect("mkdir node_modules");
+        std::fs::write(nm.join("foo.ts"), "export const x = 1;\n")
+            .expect("write node_modules/foo.ts");
+        // Write a clean source file (must be included).
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n")
+            .expect("write main.rs");
+
+        let extracted = read_local_repo_files(root).expect("non-git fallback ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("node_modules")),
+            "node_modules must be pruned by noise denylist: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("main.rs")),
+            "src/main.rs must be included: {paths:?}"
+        );
+    }
+
+    // ── Self-reference suppression tests (Feature: scan-hygiene) ─────────
+
+    #[test]
+    fn governance_artifact_detected_by_header() {
+        let content =
+            "<!-- Generated by Camerata. Edit the rule selection, not this file. -->\n\n# AGENTS.md\n";
+        assert!(
+            is_governance_or_corpus_artifact("AGENTS.md", content),
+            "AGENTS.md with Generated-by header must be detected"
+        );
+        assert!(
+            is_governance_or_corpus_artifact("CONVENTIONS.md", content),
+            "CONVENTIONS.md with Generated-by header must be detected"
+        );
+    }
+
+    #[test]
+    fn governance_artifact_detected_by_camerata_dir() {
+        assert!(
+            is_governance_or_corpus_artifact(".camerata/baseline.json", "{}"),
+            ".camerata/ prefix must be detected"
+        );
+        assert!(
+            is_governance_or_corpus_artifact("project/.camerata/rules.json", "{}"),
+            "nested /.camerata/ segment must be detected"
+        );
+    }
+
+    #[test]
+    fn governance_artifact_detected_by_principles_toml() {
+        assert!(
+            is_governance_or_corpus_artifact(
+                "crates/rules/principles/rust/foo.toml",
+                "[package]\n"
+            ),
+            "principles/ segment + .toml extension must be detected"
+        );
+        assert!(
+            is_governance_or_corpus_artifact("principles/api-layer/bar.toml", "..."),
+            "top-level principles/ must be detected"
+        );
+        // A .toml that is NOT under any principles/ segment is NOT a corpus artifact.
+        assert!(
+            !is_governance_or_corpus_artifact("Cargo.toml", "[package]\nname = \"x\"\n"),
+            "Cargo.toml at root is not a corpus artifact"
+        );
+    }
+
+    #[test]
+    fn ordinary_source_file_not_a_governance_artifact() {
+        assert!(
+            !is_governance_or_corpus_artifact("src/main.rs", "fn main() {}"),
+            "ordinary Rust source must not be a governance artifact"
+        );
+        assert!(
+            !is_governance_or_corpus_artifact("app/config.py", "SECRET_KEY = 'abc'"),
+            "ordinary Python source must not be a governance artifact"
+        );
+    }
+
+    #[test]
+    fn self_referential_snippet_matched() {
+        let texts = vec!["verify=False disables TLS certificate validation".to_string()];
+        assert!(
+            is_self_referential_snippet("verify=False", &texts),
+            "exact substring must match"
+        );
+        assert!(
+            is_self_referential_snippet("  verify=False  ", &texts),
+            "whitespace-padded snippet must match after trim"
+        );
+    }
+
+    #[test]
+    fn self_referential_snippet_no_match() {
+        let texts = vec!["verify=False disables TLS".to_string()];
+        // A real credential is not in any rule description.
+        assert!(
+            !is_self_referential_snippet("ghp_actual_secret_here", &texts),
+            "non-corpus string must not match"
+        );
+        // Empty snippet must never match, regardless of corpus.
+        assert!(
+            !is_self_referential_snippet("", &texts),
+            "empty snippet must never match"
+        );
+        assert!(
+            !is_self_referential_snippet("   ", &texts),
+            "whitespace-only snippet must never match"
+        );
+    }
+
+    #[test]
+    fn suppress_self_referential_marks_governance_corpus_findings() {
+        // A CONVENTIONS.md with a Generated-by header. One finding matches the rule
+        // description (suppress it); one finding is a real credential (keep it active).
+        let conventions_content = concat!(
+            "<!-- Generated by Camerata. Edit the rule selection, not this file. -->\n\n",
+            "## SEC-NO-DISABLED-TLS-1\n\n",
+            "Do not set verify=False in TLS configuration.\n",
+            "\nAnd here is a planted real credential: ghp_",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+        );
+        let files = vec![("CONVENTIONS.md".to_string(), conventions_content.to_string())];
+        // The corpus describes "verify=False" in a rule summary.
+        let corpus_texts =
+            vec!["Do not set verify=False in TLS configuration.".to_string()];
+
+        let mut findings = vec![
+            Finding {
+                repo: "me/repo".to_string(),
+                path: "CONVENTIONS.md".to_string(),
+                line: 4,
+                rule_id: "SEC-NO-DISABLED-TLS-1".to_string(),
+                severity: "high".to_string(),
+                snippet: "Do not set verify=False in TLS configuration.".to_string(),
+                detail: "TLS verification disabled".to_string(),
+                ..Finding::default()
+            },
+            Finding {
+                repo: "me/repo".to_string(),
+                path: "CONVENTIONS.md".to_string(),
+                line: 6,
+                rule_id: "SEC-NO-VENDOR-TOKEN-1".to_string(),
+                severity: "critical".to_string(),
+                // Split the token so the scan can't fire on this test file itself.
+                snippet: concat!("ghp_", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    .to_string(),
+                detail: "Vendor token detected".to_string(),
+                ..Finding::default()
+            },
+        ];
+        suppress_self_referential(&mut findings, &files, &corpus_texts);
+        // The rule-description finding must become suppressed-self-reference.
+        assert_eq!(
+            findings[0].status, "suppressed-self-reference",
+            "rule-description snippet must be suppressed: {:?}",
+            findings[0]
+        );
+        assert!(
+            findings[0].detail.contains("self-referential"),
+            "suppressed detail must mention self-referential"
+        );
+        // The real credential must stay active.
+        assert_eq!(
+            findings[1].status, "active",
+            "real credential must stay active: {:?}",
+            findings[1]
+        );
+    }
+
+    #[test]
+    fn suppress_self_referential_never_touches_ordinary_files() {
+        // Even if the snippet matches corpus text, an ordinary source file must never
+        // be suppressed — only governance/corpus artifacts are in scope.
+        let files = vec![(
+            "app/config.py".to_string(),
+            "verify=False  # disable TLS\n".to_string(),
+        )];
+        let corpus_texts = vec!["verify=False disables TLS".to_string()];
+        let mut findings = vec![Finding {
+            repo: "me/repo".to_string(),
+            path: "app/config.py".to_string(),
+            line: 1,
+            rule_id: "SEC-NO-DISABLED-TLS-1".to_string(),
+            severity: "high".to_string(),
+            snippet: "verify=False  # disable TLS".to_string(),
+            detail: "TLS verification disabled".to_string(),
+            ..Finding::default()
+        }];
+        suppress_self_referential(&mut findings, &files, &corpus_texts);
+        assert_eq!(
+            findings[0].status, "active",
+            "ordinary file finding must stay active even if snippet matches corpus"
+        );
     }
 }
