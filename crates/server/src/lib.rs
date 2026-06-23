@@ -295,6 +295,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/tier-map", post(set_tier_map))
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
+        // Stall-detection thresholds: per-project idle timeout config.
+        .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
@@ -1887,6 +1889,33 @@ async fn set_step_model(
         return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
     }
     match state.projects.set_step_model(&id, step, model) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/stall-thresholds`.
+#[derive(serde::Deserialize)]
+struct SetStallThresholdsReq {
+    watched_secs: u64,
+    routine_secs: u64,
+}
+
+/// `POST /api/projects/:id/stall-thresholds` — update the per-project stall-detection
+/// thresholds. Both values must be positive; a zero value is rejected.
+async fn set_stall_thresholds_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetStallThresholdsReq>,
+) -> Json<serde_json::Value> {
+    if req.watched_secs == 0 || req.routine_secs == 0 {
+        return Json(serde_json::json!({ "ok": false, "message": "thresholds must be > 0" }));
+    }
+    let thresholds = crate::project::StallThresholds {
+        watched_secs: req.watched_secs,
+        routine_secs: req.routine_secs,
+    };
+    match state.projects.set_stall_thresholds(&id, thresholds) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }

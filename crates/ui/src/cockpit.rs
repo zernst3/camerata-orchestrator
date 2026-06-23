@@ -83,6 +83,10 @@ struct ProjectView {
     /// the shipped default model per slot when the field is absent (back-compat).
     #[serde(default)]
     step_models: StepModelsView,
+    /// Per-project stall-detection thresholds. `#[serde(default)]` so older payloads
+    /// that omit the field get the server's built-in defaults.
+    #[serde(default)]
+    stall_thresholds: StallThresholdsView,
 }
 
 /// UI mirror of `camerata_server::project::StepModels`. One model-id slot per NON-FLEET AI
@@ -122,6 +126,25 @@ impl Default for StepModelsView {
             escalation: default_step_model_str(),
             clarification: default_step_model_str(),
         }
+    }
+}
+
+/// UI mirror of `camerata_server::project::StallThresholds`. Two u64 slots.
+/// Serde defaults match the server's defaults (120s watched, 600s routine).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct StallThresholdsView {
+    #[serde(default = "default_watched_secs")]
+    watched_secs: u64,
+    #[serde(default = "default_routine_secs")]
+    routine_secs: u64,
+}
+
+fn default_watched_secs() -> u64 { 120 }
+fn default_routine_secs() -> u64 { 600 }
+
+impl Default for StallThresholdsView {
+    fn default() -> Self {
+        Self { watched_secs: default_watched_secs(), routine_secs: default_routine_secs() }
     }
 }
 
@@ -332,6 +355,18 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
             id
         ))
         .json(&serde_json::json!({ "max_iterations": max_iterations }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Set the stall-detection thresholds for a project.
+/// Uses the `POST /api/projects/:id/stall-thresholds` endpoint.
+async fn set_project_stall_thresholds(id: &str, watched_secs: u64, routine_secs: u64) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/stall-thresholds", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "watched_secs": watched_secs, "routine_secs": routine_secs }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1893,6 +1928,76 @@ fn StepModelRow(
     }
 }
 
+/// Stall-threshold editor: two numeric inputs (watched/interactive seconds and
+/// routine/autonomous seconds). Saves to `POST /api/projects/:id/stall-thresholds`
+/// via an explicit "Save thresholds" button (batch-save pattern like `TierMapEditor`).
+#[component]
+fn StallThresholdsEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    let mut watched = use_signal(|| project.stall_thresholds.watched_secs);
+    let mut routine = use_signal(|| project.stall_thresholds.routine_secs);
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "tier-map-editor stall-thresholds-editor",
+            p { class: "tier-map-heading", "Stall thresholds" }
+            p { class: "section-hint tier-map-hint",
+                "How long a run may be idle before Camerata flags it as stalled. \
+                 Watched (interactive) runs are expected to respond faster; \
+                 Routine (autonomous) runs have a longer grace period."
+            }
+            div { class: "tier-map-rows",
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label", "Watched (interactive) seconds" }
+                    input {
+                        class: "tier-map-input addressee-input",
+                        r#type: "number",
+                        min: "1",
+                        value: "{watched}",
+                        oninput: move |e| {
+                            if let Ok(v) = e.value().parse::<u64>() {
+                                if v > 0 { watched.set(v); }
+                            }
+                        },
+                    }
+                }
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label", "Routine (autonomous) seconds" }
+                    input {
+                        class: "tier-map-input addressee-input",
+                        r#type: "number",
+                        min: "1",
+                        value: "{routine}",
+                        oninput: move |e| {
+                            if let Ok(v) = e.value().parse::<u64>() {
+                                if v > 0 { routine.set(v); }
+                            }
+                        },
+                    }
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let (pid, w, r) = (pid.clone(), watched(), routine());
+                    saving.set(true);
+                    spawn(async move {
+                        if set_project_stall_thresholds(&pid, w, r).await {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Stall thresholds saved.");
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save stall thresholds.");
+                        }
+                        saving.set(false);
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save thresholds" }
+            }
+        }
+    }
+}
+
 #[component]
 fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -2288,6 +2393,10 @@ fn RulesView() -> Element {
                         p { class: "section-label settings-label", "SETTINGS: Step models" }
                         StepModelsEditor { project: p_owned.clone() }
 
+                        // ── SETTINGS: Stall thresholds ────────────────────────────
+                        p { class: "section-label settings-label", "SETTINGS: Stall thresholds" }
+                        StallThresholdsEditor { project: p_owned.clone() }
+
                         // ── SETTINGS: Commit / PR gate settings (#65) ──────────────
                         // The `VcsGateSettings` component owns the `process-rule-config`
                         // surface: bypass mode + per-rule on/off toggles. It talks
@@ -2372,6 +2481,21 @@ struct RunView {
     done: bool,
     #[serde(default)]
     mode: String,
+    /// Milliseconds since last recorded run activity (0 when idle tracking unavailable).
+    #[serde(default)]
+    idle_ms: u128,
+    /// True when the run has been idle longer than `stall_threshold_ms`.
+    #[serde(default)]
+    stalled: bool,
+    /// The active stall threshold in milliseconds.
+    #[serde(default)]
+    stall_threshold_ms: u128,
+    /// Whether the run's policy on stall is to alert or auto-cancel.
+    #[serde(default)]
+    stall_policy: String,
+    /// Human-readable failure reason for a `failed` run (e.g. after auto-cancel on stall).
+    #[serde(default)]
+    failure_reason: Option<String>,
 }
 
 /// One event in a run's development-activity stream. Reused for ALL observability
@@ -2435,6 +2559,8 @@ fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) 
             "fail" => ("STAGE", "live-event deny"),
             _ => ("STAGE", "live-event info"),
         },
+        // Stall-detection synthetic event: the run has been idle longer than the threshold.
+        "stall" => ("STALL", "live-event stall"),
         "setup" => ("SETUP", "live-event info"),
         // Default (incl. "fleet" lifecycle, empty/legacy): fall back to the verdict.
         _ => match verdict {
@@ -2446,6 +2572,33 @@ fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) 
             _ => ("INFO", "live-event info"),
         },
     }
+}
+
+/// Format an idle duration from milliseconds into a human-readable string.
+/// e.g. 90_000 → "1m 30s", 5_000 → "5s", 65_000 → "1m 5s".
+fn format_idle(idle_ms: u128) -> String {
+    let total_secs = idle_ms / 1000;
+    if total_secs < 60 {
+        format!("{total_secs}s")
+    } else {
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        if secs == 0 {
+            format!("{mins}m")
+        } else {
+            format!("{mins}m {secs}s")
+        }
+    }
+}
+
+/// True when a run is in a non-terminal, cancellable state.
+fn run_is_cancellable(status: &str, done: bool) -> bool {
+    !done && !matches!(status, "failed" | "cancelled")
+}
+
+/// True when a stall warning banner should be shown for a run.
+fn run_stall_banner_visible(stalled: bool, done: bool) -> bool {
+    stalled && !done
 }
 
 /// The outcome of attempting to start a governed run. The no-code-first gate (Pillar 2)
@@ -2844,6 +2997,27 @@ async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> {
         .ok()
 }
 
+/// Send a cancel request for a dev run. Fire-and-forget: 204 = success; any other
+/// status or a network error is treated as benign (the run may already be done).
+async fn cancel_run(run_id: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/runs/{}/cancel", crate::BFF_URL, run_id))
+        .send()
+        .await
+        .map(|r| r.status() == reqwest::StatusCode::NO_CONTENT)
+        .unwrap_or(false)
+}
+
+/// Send a cancel request for an audit job. Fire-and-forget; 204 = success.
+async fn cancel_audit_job(job_id: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/onboard/audit/job/{}/cancel", crate::BFF_URL, job_id))
+        .send()
+        .await
+        .map(|r| r.status() == reqwest::StatusCode::NO_CONTENT)
+        .unwrap_or(false)
+}
+
 /// Sign off a run (issue #21). The architect's explicit gate after reviewing the
 /// provenance; persists on the story's UoW. Returns the updated UoW on success.
 async fn sign_off_run(run_id: &str, by: &str, note: Option<&str>) -> Option<UowView> {
@@ -2868,6 +3042,8 @@ fn run_status_badge(status: &str) -> (&'static str, &'static str) {
         // waiting on a human answer (it resumes when answered).
         "awaiting_clarification" => ("WAITING ON YOU", "warn"),
         "awaiting_qa" => ("AWAITING QA", "warn"),
+        "failed" => ("FAILED", "error"),
+        "cancelled" => ("CANCELLED", "neutral"),
         _ => ("RUNNING", "active"),
     }
 }
@@ -4957,7 +5133,12 @@ fn ProjectSettingsGear() -> Element {
 
                         // ── Per-step models ───────────────────────────────────────
                         div { class: "proj-settings-section",
-                            StepModelsEditor { project: p }
+                            StepModelsEditor { project: p.clone() }
+                        }
+
+                        // ── Stall thresholds ──────────────────────────────────────
+                        div { class: "proj-settings-section",
+                            StallThresholdsEditor { project: p }
                         }
                     }
                 }
@@ -7315,6 +7496,19 @@ struct JobStateView {
     batch_id: Option<String>,
 }
 
+/// Full envelope for `GET /api/onboard/audit/job/:id` — the server wraps
+/// `JobState` under a `job:` key alongside stall/cancel metadata.
+#[derive(Clone, serde::Deserialize, Default)]
+struct JobStatusEnvelope {
+    job: JobStateView,
+    /// Milliseconds since last job progress update. `None` if no activity recorded yet.
+    #[serde(default)]
+    idle_ms: Option<u128>,
+    /// True if a cancel has been requested for this job.
+    #[serde(default)]
+    cancel_requested: bool,
+}
+
 /// Mode 3: START an async audit job, returning its id (the request returns immediately).
 /// `deep` forwards the opt-in deep compliance & security tier (#55); the server
 /// runs the three lenses after the standard audit completes and attaches the result
@@ -7369,7 +7563,7 @@ fn recommend_scan_mode(report: &ScanReportView) -> String {
 }
 
 /// Poll an async audit job for progress + incremental findings + the final report.
-async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
+async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
     reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
         crate::BFF_URL,
@@ -7377,7 +7571,7 @@ async fn audit_job_poll(job_id: &str) -> Option<JobStateView> {
     ))
     .await
     .ok()?
-    .json::<Option<JobStateView>>()
+    .json::<Option<JobStatusEnvelope>>()
     .await
     .ok()
     .flatten()
@@ -7397,6 +7591,7 @@ async fn poll_job(
     // "Deterministic scan" component above the AI agent-activity drawer. `None` clears it.
     mut det_progress: Signal<Option<DetProgressView>>,
     mut active_audit_job: Signal<Option<String>>,
+    mut scan_idle_ms: Signal<Option<u128>>,
 ) {
     let mut misses = 0u32;
     loop {
@@ -7404,15 +7599,16 @@ async fn poll_job(
         match audit_job_poll(&jid).await {
             Some(js) => {
                 misses = 0;
-                job_progress.set(Some((js.done, js.total, js.findings.len())));
+                scan_idle_ms.set(js.idle_ms);
+                job_progress.set(Some((js.job.done, js.job.total, js.job.findings.len())));
                 // Surface the deterministic progress whenever any tool has registered, so the
                 // component appears the moment the floor starts (not only once findings land).
-                if js.deterministic.total > 0 {
-                    det_progress.set(Some(js.deterministic.clone()));
+                if js.job.deterministic.total > 0 {
+                    det_progress.set(Some(js.job.deterministic.clone()));
                 }
-                match js.status.as_str() {
+                match js.job.status.as_str() {
                     "done" => {
-                        audit.set(js.report);
+                        audit.set(js.job.report);
                         auditing.set(false);
                         job_progress.set(None);
                         det_progress.set(None);
@@ -7420,6 +7616,13 @@ async fn poll_job(
                         break;
                     }
                     "failed" => {
+                        auditing.set(false);
+                        job_progress.set(None);
+                        det_progress.set(None);
+                        active_audit_job.set(None);
+                        break;
+                    }
+                    "cancelled" => {
                         auditing.set(false);
                         job_progress.set(None);
                         det_progress.set(None);
@@ -9938,10 +10141,11 @@ fn ScanResults(report: ScanReportView) -> Element {
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let active_audit_job = use_context::<Signal<Option<String>>>();
+    let scan_idle_ms = use_signal(|| Option::<u128>::None);
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
-            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job).await;
+            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms).await;
         }
     });
     // Selected-rule count, set by ProposedRulesTable and read here for the cost estimate
@@ -10463,7 +10667,7 @@ fn ScanResults(report: ScanReportView) -> Element {
                                         return;
                                     };
                                     active_audit_job.set(Some(jid.clone()));
-                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job).await;
+                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms).await;
                                 });
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
@@ -10759,6 +10963,34 @@ fn ScanResults(report: ScanReportView) -> Element {
                     div { class: "audit-thinking",
                         crate::bombe::BombeSpinner { title: "Camerata is auditing\u{2026}".to_string() }
                         span { class: "audit-thinking-label", "Camerata is auditing your code\u{2026}" }
+                        button {
+                            class: "btn-stop",
+                            onclick: move |_| {
+                                let jid = active_audit_job().unwrap_or_default();
+                                spawn(async move { cancel_audit_job(&jid).await; });
+                            },
+                            "\u{25a0} Stop scan"
+                        }
+                    }
+                }
+                // Scan stall warning: shown when the job has been idle above the threshold.
+                // The server sends idle_ms; we show a warning if it's over 2 minutes (120s).
+                if let Some(idle) = scan_idle_ms() {
+                    if idle > 120_000 && auditing() {
+                        div { class: "run-stall-warning scan-stall-warning",
+                            div { class: "run-stall-warning-head",
+                                span { class: "run-stall-icon", "\u{26a0}" }
+                                span { class: "run-stall-title", "No progress for {format_idle(idle)} — scan may be stalled" }
+                                button {
+                                    class: "btn-stop btn-stop-stall",
+                                    onclick: move |_| {
+                                        let jid = active_audit_job().unwrap_or_default();
+                                        spawn(async move { cancel_audit_job(&jid).await; });
+                                    },
+                                    "\u{25a0} Stop scan"
+                                }
+                            }
+                        }
                     }
                 }
                 // Deterministic-scan PROGRESS — rendered ABOVE the AI agent-activity drawer.
@@ -11043,20 +11275,22 @@ fn ScanResults(report: ScanReportView) -> Element {
 /// The live governed run: the real gate verdicts from the BFF run engine, streamed
 /// in as the run walks to completion.
 #[component]
-#[component]
 fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
     let (status_label, status_cls) = run_status_badge(&run.status);
     let live = run.mode == "live";
-    let mode_label = if live {
-        "live fleet"
-    } else {
-        "scripted · token-free"
-    };
+    let mode_label = if live { "live fleet" } else { "scripted · token-free" };
     let sub = if live {
         "A real governed fleet (claude -p) under the gate. Stage and bounce events are reported as they happen."
     } else {
         "Token-free run: the agent is scripted, but the gate doing the deciding is the live one. Real deny/allow verdicts."
     };
+    let run_id = run.id.clone();
+    let cancellable = run_is_cancellable(&run.status, run.done);
+    let show_stall = run_stall_banner_visible(run.stalled, run.done);
+    let idle_label = format_idle(run.idle_ms);
+    let failure_reason = run.failure_reason.clone().unwrap_or_default();
+    let _toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
     rsx! {
         div { class: "live-run",
             div { class: "live-run-head",
@@ -11066,13 +11300,64 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 if !run.done {
                     crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
                 }
+                // Stop button: always available while the run is in a running/non-terminal state.
+                if cancellable {
+                    button {
+                        class: "btn-stop",
+                        onclick: move |_| {
+                            let rid = run_id.clone();
+                            spawn(async move {
+                                cancel_run(&rid).await;
+                                // The poll loop will pick up the cancelled state on the next tick.
+                            });
+                        },
+                        "\u{25a0} Stop"
+                    }
+                }
             }
             p { class: "panel-sub", "{sub}" }
 
-            // Phase 3b: when the gated agent raised a clarifying question, the run is
-            // PARKED here waiting on a human answer. Surface the open question inline
-            // (reusing the 3a ClarifyQuestion); answering it triggers the server-side
-            // resume and the run continues.
+            // Terminal states: failed and cancelled.
+            if run.status == "failed" {
+                div { class: "run-terminal-failed",
+                    span { class: "run-terminal-label", "Run failed" }
+                    if !failure_reason.is_empty() {
+                        span { class: "run-terminal-reason", ": {failure_reason}" }
+                    }
+                }
+            }
+            if run.status == "cancelled" {
+                div { class: "run-terminal-cancelled",
+                    span { class: "run-terminal-label", "Cancelled" }
+                }
+            }
+
+            // Stall warning: shown when the run has been idle longer than the threshold
+            // but has NOT yet failed or been cancelled. Amber / warning treatment.
+            if show_stall {
+                div { class: "run-stall-warning",
+                    div { class: "run-stall-warning-head",
+                        span { class: "run-stall-icon", "\u{26a0}" }
+                        span { class: "run-stall-title", "No progress for {idle_label} — possible stall" }
+                        // Prominent Stop button inside the warning banner for quick action.
+                        if cancellable {
+                            button {
+                                class: "btn-stop btn-stop-stall",
+                                onclick: {
+                                    let rid = run.id.clone();
+                                    move |_| {
+                                        let rid = rid.clone();
+                                        spawn(async move { cancel_run(&rid).await; });
+                                    }
+                                },
+                                "\u{25a0} Stop run"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Phase 3b: awaiting clarification.
             if run.status == "awaiting_clarification" {
                 RunClarificationPrompt { story_id: run.story_id.clone(), uow_refresh }
             }
@@ -11083,7 +11368,6 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
             div { class: "live-events",
                 for ev in run.events.iter() {
                     {
-                        // Distinct label + colour per observability layer/verdict.
                         let (vlabel, vcls) = live_event_style(&ev.layer, &ev.verdict);
                         rsx! {
                             div { class: "{vcls}",
@@ -11110,10 +11394,6 @@ fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 }
             }
 
-            // ── Provenance + sign-off (issue #21): the write-back floor ──────────
-            // Once the run reaches its terminal stage, show the provenance summary
-            // (rules in force, deny/allow tallies, bounces) and the EXPLICIT sign-off
-            // action. Camerata never auto-signs-off; this is the human gate.
             if run.done {
                 RunProvenancePanel { run_id: run.id.clone(), uow_refresh }
             }
@@ -12712,8 +12992,10 @@ fn DocsView() -> Element {
 #[cfg(test)]
 mod tests {
     use super::{
-        det_tool_label, dev_run_body, estimate_audit_cost, is_enforced_floor, live_event_style,
-        FindingView, JobStateView, RunGateEvent, TierMapView,
+        det_tool_label, dev_run_body, estimate_audit_cost, format_idle, is_enforced_floor,
+        live_event_style, run_is_cancellable, run_stall_banner_visible, run_status_badge,
+        FindingView, JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView,
+        TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -13755,5 +14037,130 @@ mod tests {
         )
         .unwrap();
         assert_eq!(authority_label(&ai), "advisory");
+    }
+
+    /// Pure: idle duration formatting from milliseconds.
+    #[test]
+    fn format_idle_formats_durations() {
+        assert_eq!(format_idle(0), "0s");
+        assert_eq!(format_idle(5_000), "5s");
+        assert_eq!(format_idle(59_000), "59s");
+        assert_eq!(format_idle(60_000), "1m");
+        assert_eq!(format_idle(65_000), "1m 5s");
+        assert_eq!(format_idle(90_000), "1m 30s");
+        assert_eq!(format_idle(3_600_000), "60m");
+    }
+
+    /// Pure: cancellable-state predicate.
+    #[test]
+    fn run_is_cancellable_predicate() {
+        // Running states are cancellable.
+        assert!(run_is_cancellable("executing", false));
+        assert!(run_is_cancellable("gating", false));
+        assert!(run_is_cancellable("awaiting_clarification", false));
+        // Terminal states are not cancellable.
+        assert!(!run_is_cancellable("failed", true));
+        assert!(!run_is_cancellable("cancelled", true));
+        // done=true always non-cancellable.
+        assert!(!run_is_cancellable("executing", true));
+        // failed/cancelled with done=false are also non-cancellable (status check).
+        assert!(!run_is_cancellable("failed", false));
+        assert!(!run_is_cancellable("cancelled", false));
+    }
+
+    /// Pure: stall banner visibility predicate.
+    #[test]
+    fn run_stall_banner_visible_predicate() {
+        assert!(run_stall_banner_visible(true, false));
+        assert!(!run_stall_banner_visible(false, false));
+        assert!(!run_stall_banner_visible(true, true));
+        assert!(!run_stall_banner_visible(false, true));
+    }
+
+    /// `live_event_style` maps the "stall" family to the amber/warning treatment.
+    #[test]
+    fn live_event_style_stall_family() {
+        let (label, cls) = live_event_style("stall", "");
+        assert_eq!(label, "STALL");
+        assert_eq!(cls, "live-event stall");
+    }
+
+    /// `RunView` deserializes with back-compat defaults when stall fields are absent.
+    #[test]
+    fn run_view_back_compat_defaults() {
+        let json = r#"{"id":"r1","story_id":"s1","status":"executing","events":[],"done":false,"mode":"scripted"}"#;
+        let rv: RunView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.idle_ms, 0);
+        assert!(!rv.stalled);
+        assert_eq!(rv.stall_threshold_ms, 0);
+        assert!(rv.failure_reason.is_none());
+    }
+
+    /// `RunView` deserializes with stall fields when present (new server shape).
+    #[test]
+    fn run_view_parses_stall_fields() {
+        let json = r#"{
+            "id":"r2","story_id":"s1","status":"executing","events":[],"done":false,"mode":"live",
+            "idle_ms":95000,"stalled":true,"stall_threshold_ms":120000,
+            "stall_policy":"alert","failure_reason":null
+        }"#;
+        let rv: RunView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.idle_ms, 95_000);
+        assert!(rv.stalled);
+        assert_eq!(rv.stall_threshold_ms, 120_000);
+        assert_eq!(rv.stall_policy, "alert");
+        assert!(rv.failure_reason.is_none());
+    }
+
+    /// `RunView` captures `failure_reason` for failed runs.
+    #[test]
+    fn run_view_parses_failure_reason() {
+        let json = r#"{
+            "id":"r3","story_id":"s1","status":"failed","events":[],"done":true,"mode":"live",
+            "idle_ms":0,"stalled":false,"stall_threshold_ms":120000,
+            "stall_policy":"cancel","failure_reason":"Stall timeout exceeded"
+        }"#;
+        let rv: RunView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.status, "failed");
+        assert_eq!(rv.failure_reason.as_deref(), Some("Stall timeout exceeded"));
+    }
+
+    /// `run_status_badge` maps `failed` and `cancelled` to their correct badge variants.
+    #[test]
+    fn run_status_badge_terminal_states() {
+        let (label, cls) = run_status_badge("failed");
+        assert_eq!(label, "FAILED");
+        assert_eq!(cls, "error");
+        let (label, cls) = run_status_badge("cancelled");
+        assert_eq!(label, "CANCELLED");
+        assert_eq!(cls, "neutral");
+    }
+
+    /// `StallThresholdsView` deserializes and defaults correctly.
+    #[test]
+    fn stall_thresholds_view_defaults() {
+        // With both fields present.
+        let s: StallThresholdsView = serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
+        assert_eq!(s.watched_secs, 60);
+        assert_eq!(s.routine_secs, 300);
+        // Back-compat: no fields → defaults.
+        let d: StallThresholdsView = serde_json::from_str("{}").unwrap();
+        assert_eq!(d.watched_secs, 120);
+        assert_eq!(d.routine_secs, 600);
+    }
+
+    /// `JobStatusEnvelope` parses the wrapped job shape.
+    #[test]
+    fn job_status_envelope_parses_wrapped_job() {
+        let json = r#"{
+            "job": {"status": "running", "done": 2, "total": 10, "findings": [], "deterministic": {"tools":[],"done":0,"total":0}},
+            "idle_ms": 5000,
+            "cancel_requested": false
+        }"#;
+        let env: JobStatusEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(env.job.status, "running");
+        assert_eq!(env.job.done, 2);
+        assert_eq!(env.idle_ms, Some(5000));
+        assert!(!env.cancel_requested);
     }
 }
