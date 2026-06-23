@@ -101,19 +101,60 @@ filesystem.
   arms. Each entry is `(id, description, arm: RuleArmFn)` where `RuleArmFn` is
   `fn(path: &str, content: &str) -> Result<(), String>`.
 
-The gate currently enforces six rules (all arms in `RULE_REGISTRY`):
+The gate currently enforces eleven rules across `RULE_REGISTRY`. The
+**deterministic security floor** — the seven `SEC-*`/`ARCH-*` content and path
+rules — is the conceptual backbone for the enforcement tables in §5a:
 
 | Rule ID | Keys off | What it denies |
 |---|---|---|
 | `GOV-1` | path | Writes whose path contains the substring `"forbidden"`. |
 | `SEC-NO-PATH-ESCAPE-1` | path | Writes with a `..` traversal segment or a `.git`/`.ssh` directory component (segment-split, not substring). |
 | `SEC-NO-SECRET-FILES-1` | path (filename) | Writing a real `.env`, private-key files (`.pem`/`.key`/`.p12`/`.pfx`/`id_rsa`/etc.), or keystores. |
-| `SEC-NO-HARDCODED-SECRETS-1` | content | Content with a hardcoded credential literal: GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`github_pat_`), Slack tokens (`xox[baprs]-`), AWS keys (`AKIA`), OpenAI/Stripe `sk-` keys, Google API keys (`AIza`), PEM private-key headers, or a long opaque literal assigned to a secret-named identifier. Uses a `OnceLock<Regex>` compiled once. |
-| `SEC-NO-RAW-SQL-CONCAT-1` | content | Content building SQL via string concatenation or format interpolation; requires DML keyword + confirming SQL clause + interpolation marker to fire. |
+| `SEC-NO-HARDCODED-SECRETS-1` | content | Hardcoded credential literal: GitHub tokens (`ghp_`/`gho_`/`ghu_`/`ghs_`/`github_pat_`), Slack tokens (`xox[baprs]-`), AWS keys (`AKIA`), OpenAI/Stripe `sk-` keys, Google API keys (`AIza`), PEM private-key headers, or a long opaque literal assigned to a secret-named identifier. Uses a `OnceLock<Regex>` compiled once. |
+| `SEC-NO-RAW-SQL-CONCAT-1` | content | SQL built via string concatenation or format interpolation; requires DML keyword + confirming SQL clause + interpolation marker to fire. |
 | `ARCH-NO-SECRETS-IN-URL-1` | content | A URL carrying a secret in its query string (`api_key`/`token`/`secret`/`password`/`access_token`). |
+| `SEC-NO-PRIVATE-KEY-1` | content | PEM private-key block header (RSA, EC, DSA, OPENSSH, PGP, PKCS#8). |
+| `SEC-NO-VENDOR-TOKEN-1` | content | High-precision vendor credential token shapes: AWS `AKIA`/`ASIA`, GitHub `gh*_`, Slack `xox*-`, Stripe `sk_live_`, Google `AIza*`, Anthropic `sk-ant-`. |
+| `SEC-NO-SECRET-FILE-1` | path | Writing a path whose name marks it as secret-bearing (`.pem`, `.p12`, `.pfx`, `.key`, `.jks`, `.keystore`, `id_rsa`/`dsa`/`ecdsa`/`ed25519`, real `.env` files). Companion to `SEC-NO-SECRET-FILES-1` for the brownfield audit. |
+| `SEC-NO-DISABLED-TLS-1` | content | Content that disables TLS verification (`verify=False`, `rejectUnauthorized:false`, `InsecureSkipVerify:true`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `CURLOPT_SSL_VERIFYPEER false/0`). |
+| `SEC-NO-CAMERATA-CONFIG-1` | path | Any `gated_write` target whose path contains a `.camerata` segment (split on `/` and `\`). Protects the SSOT manifest and all operator config from agent edits. See §3 SSOT manifest. |
 
-The full registry is derived from `RULE_REGISTRY` by `enforced_gate_rules()`,
-so adding an arm automatically propagates it everywhere (live demo, fleet, CI).
+The **deterministic floor** is the seven `SEC-*`/`ARCH-*` content and path rules:
+`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1`,
+`SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`, `SEC-NO-SECRET-FILE-1`,
+`SEC-NO-DISABLED-TLS-1`. The path-escape and GOV-1 rules are write-time structural
+gates (not content scanners) and are NOT included in the brownfield audit floor;
+`SEC-NO-CAMERATA-CONFIG-1` is a manifest-protection rule, described separately.
+
+See `docs/decisions/2026-06-22_floor_rules_and_test_scope_gate.md` for the full
+expansion history and rationale.
+
+### Test-scope-aware gate (`TestScopePolicy`)
+
+Each gate rule declares a `TestScopePolicy` (defined in `crates/gateway/src/lib.rs`):
+
+- **`Waive`** — the rule does not apply in test scope. Used for
+  `SEC-NO-RAW-SQL-CONCAT-1` (test migrations write raw SQL legitimately) and
+  `SEC-NO-DISABLED-TLS-1` (test infrastructure may connect to local TLS proxies
+  without proper certs). At the gate, Waive means the arm returns `Ok(())` —
+  the write is allowed.
+- **`Downgrade`** — the rule fires in test scope. At the gate, Downgrade still
+  returns `Err(...)` — the write is DENIED. The brownfield audit (scan layer)
+  additionally down-ranks the finding to `low` severity and adds a test-path
+  note; but at the GATE the deny is unconditional. Default for unknown rules
+  (conservative).
+
+`test_scope_policy(rule_id)` is the single source of truth. The test-scope
+primitives — `is_test_or_fixture_path`, `test_scope_line_ranges`, `is_in_test_scope`,
+`TEST_PATH_NOTE`, `TEST_PATH_SEVERITY` — live in `crates/gateway/src/lib.rs` as `pub`
+items and are re-exported for use by `crates/server/src/onboard.rs`.
+
+**Cross-layer contract.** The Waive/Downgrade distinction means:
+
+| Layer | Waive | Downgrade |
+|---|---|---|
+| Gate (layer-1) | Allow (arm returns `Ok`) | DENY (arm returns `Err`) |
+| Scan (brownfield audit) | Finding dropped entirely | Finding kept, severity lowered to `low`, `in_test=true` |
 
 ### How the gate is wired to agents
 
@@ -130,14 +171,21 @@ which routes every byte through `evaluate_call` before touching disk. The `Task`
 tool (subagent spawning) is explicitly denied to prevent a child agent regaining
 `Write`/`Bash`.
 
-Gate evaluation is a pure, in-memory pass over the role's rule subset: a path
-check (`GOV-1`) is a substring test; the content rules are pre-compiled regexes
+Gate evaluation is a pure, in-memory pass over the role's rule subset: path
+checks are segment tests; the content rules are pre-compiled regexes
 (`OnceLock<Regex>`). Even over a multi-domain subset of dozens of rule ids the
 cost is dominated by the few content regexes, not the iteration. The `claude -p`
 round-trip is model inference, orders of magnitude larger; the gate adds no
 perceptible latency. (The specific microbenchmark figures previously quoted here
 were point-in-time and are not reproduced from code — treat the relative
 ordering, not absolute numbers, as the durable claim.)
+
+### Honesty caveat: no human-visible audit log yet
+
+The gate denies and bounces the call back to the agent. There is **no
+human-visible enforcement catch-ledger** in the current build (Phase 2, tracked
+in GitHub issue #69). Do not assume "audit trails" exist for denied writes; the
+gate enforces silently from the operator's perspective until that feature ships.
 
 ### Fail-closed behavior
 
@@ -152,6 +200,130 @@ silent allow path for an unregistered session.
 Layer-2 is the deterministic gate that runs on the agent's OUTPUT after a task
 finishes, in the coordinator's bounce-and-revise loop. It is **cross-language,
 polyglot, repo-pinned, and fail-closed** — no longer Rust-only-hardcoded.
+
+### The SSOT manifest (`.camerata/checks.toml`)
+
+`.camerata/checks.toml` is the **single source of truth** for custom deterministic
+gate checks. Both Layer 2 and Layer 3 derive from this file; drift between them is
+structurally impossible. See
+`docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
+
+**Manifest schema:**
+
+```toml
+[[check]]
+id       = "ARCH-API-LAYERING-1"          # rule id; violation id on nonzero exit
+name     = "API layering"                  # human-readable label
+command  = "scripts/check_layering.sh"     # shell command; cwd = repo root
+severity = "high"                          # "high" | "medium" | "low" (all severities block)
+in_loop  = true                            # true = Layer 2 + Layer 3; false = CI-only (Layer 3)
+
+# Optional pinning fields (see §3 "Tool-version pinning" below)
+tool     = "dependency-cruiser"
+version  = "6.3.0"
+install  = "npm install -g dependency-cruiser@6.3.0"
+```
+
+All five core fields are **required** (no serde defaults). A missing field is a
+parse error, not a silent mis-configuration. A missing manifest is NEVER fatal —
+it logs a warning and yields zero custom checks; built-in runners (fmt/clippy/test)
+are unaffected.
+
+**`in_loop` vs `ci-only`:**
+
+| `in_loop` | Runs at | Use when |
+|---|---|---|
+| `true` | Layer 2 AND Layer 3 | Check is fast (< 30 s), needs no external secrets or services; the agent gets early feedback. |
+| `false` | Layer 3 (CI) only | Check needs secrets, external services, or a long runtime that would stall the agent loop. |
+
+**Parity guarantee — structural, not conventional.** Both the Layer-2
+`ManifestCheckRunner` and the Layer-3 CI workflow generator in
+`crates/server/src/workflow_gen.rs` call the SAME shared functions:
+
+- `layer2_commands(stack, manifest)` — exact commands Layer 2 runs: built-in
+  stack commands + `in_loop = true` manifest entries.
+- `all_ci_commands(stack, manifest)` — superset Layer 3 runs: built-in stack
+  commands + ALL manifest entries (in_loop + ci-only).
+
+`layer2_commands ⊆ all_ci_commands` holds by construction (same built-ins, same
+in_loop entries, plus ci-only extras). A unit test in `workflow_gen.rs` asserts
+this parity for all stack variants.
+
+**Composition.** The manifest runner is ADDITIVE on top of the built-in language
+runners:
+
+```
+CombinedCheckRunner
+  ├── PolyglotCheckRunner (language runners — Rust/JS/Go/Python/Ruby/Java/C#)
+  └── ManifestCheckRunner (in_loop checks from .camerata/checks.toml)
+```
+
+`runner_for_worktree` in `crates/checks/src/multilang.rs` returns a
+`CombinedCheckRunner`. The manifest runner runs AFTER the language runner. Both
+run on every bounce pass — the agent gets the full picture in one bounce-back.
+
+**Gate-edit hard-guard.** The manifest defines what Layer 2 enforces; an agent
+that could edit `.camerata/checks.toml` could silently disable its own gates.
+`SEC-NO-CAMERATA-CONFIG-1` (§2) denies any `gated_write` targeting a `.camerata`
+path segment. Only operator commits (human, not agent) can change the manifest.
+
+### Tool-version pinning
+
+**The problem.** The manifest SSOT eliminates rule-definition drift. But an
+external linter at the wrong version (e.g. `dependency-cruiser` 5.x vs 6.x, or
+Semgrep 1.x vs 1.y) can return DIFFERENT results on the same ruleset — producing
+"green at Layer 2, red at Layer 3" even with a stable rule definition. The SSOT
+breaks at the tool-version boundary.
+
+**The fix.** Three optional fields on `ManifestCheck` (all `#[serde(default)]` for
+back-compat with existing manifests):
+
+| Field | Type | Semantics |
+|---|---|---|
+| `tool` | `Option<String>` | Tool/binary name (`"dependency-cruiser"`, `"semgrep"`). Required when `version` is set. |
+| `version` | `Option<String>` | EXACT pinned version string (`"6.3.0"`). No ranges, no carets — determinism requires an exact match. |
+| `install` | `Option<String>` | Exact install command (`"npm install -g dependency-cruiser@6.3.0"`). Explicit because install mechanisms span pip/npm/cargo/go; guessing is fragile. |
+
+**Layer 3 installs; Layer 2 verifies.** For a pinned check the generated CI
+workflow emits a dedicated install step IMMEDIATELY before the check's run step:
+
+```yaml
+- name: "install dependency-cruiser (6.3.0)"  # pinned install for ARCH-API-LAYERING-1
+  run: npm install -g dependency-cruiser@6.3.0
+
+- name: "dependency-cruiser layering (ARCH-API-LAYERING-1)"
+  run: depcruise --config .dependency-cruiser.cjs src
+```
+
+`all_ci_commands` and `layer2_commands` both interleave install entries
+immediately before their check entries in the returned list. The parity invariant
+(`layer2_commands ⊆ all_ci_commands`) is preserved: in_loop install+check pairs
+appear in both; ci-only install+check pairs appear only in `all_ci_commands`.
+
+**Layer 2 checks the version before running the command.**
+`check_tool_version(tool, pinned)` in `crates/checks/src/manifest_runner.rs` runs
+`<tool> --version` and compares the output using the pure function
+`version_matches(output, pinned)`.
+
+`version_matches` enforces word-boundary semantics: the character immediately
+before/after the match must NOT be a digit or dot (the boundary chars of a version
+token). This ensures `"6.3.0"` does NOT match inside `"16.3.0"` (left boundary is
+digit `1`) but DOES match in `"v6.3.0"` (boundary is `v`) and `"tool 6.3.0\n"`
+(boundary is whitespace). Comparison is byte-exact; no semver range semantics.
+
+**On mismatch or tool absent: hard violation, not a warning.** A version mismatch
+is reported as a violation under the check's `id` — not a warning. Rationale: a
+warning would still allow the agent loop to complete "green" on the wrong version,
+reproducing the exact failure mode being fixed. The check command is NOT run on
+mismatch (its output would be untrustworthy). The violation message always includes
+the `install` command so the operator knows exactly how to resolve it.
+
+**Layer 2 does NOT install tools.** Installing tools in the agent dev loop is too
+heavy and side-effectful. This division — Layer 2 verifies the version, Layer 3
+installs it — is the deliberate design. The repo's `rust-toolchain` / `go.mod`
+already pin the repo's toolchain; version-pinning in the manifest closes the
+"SSOT is only as deterministic as its least-pinned external dependency" gap for
+user-registered linters.
 
 ### The Rust runner (`crates/checks/src/lib.rs`)
 
@@ -296,6 +468,57 @@ per-run skip of ONLY layer 2:
 See `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md` and
 `docs/decisions/2026-06-22_uow_button_styling_and_bootstrap_bypass.md`.
 
+### Disk safety (cross-cutting)
+
+Three mitigations prevent Camerata's own multi-UoW dev work from filling the disk.
+See `docs/decisions/2026-06-22_dogfood_disk_safety.md`.
+
+**1. Single shared `CARGO_TARGET_DIR`.** Without a shared target, each UoW worktree
+writes its own `target/` (~5 GiB per worktree). The fix: set `CARGO_TARGET_DIR` to
+`<clone>/.camerata-shared-target` — a sibling of `.camerata-worktrees/` inside the
+shared clone, per-repo (different repos cannot share a cargo target). This collapses
+N worktrees to one target directory, cutting N×5 GiB down to ~5 GiB.
+
+Helper functions in `crates/server/src/workspace.rs`:
+- `shared_target_dir(clone: &Path) -> PathBuf` — `<clone>/.camerata-shared-target`.
+- `ensure_shared_target_dir(clone)` — creates it (best-effort).
+- `derive_shared_target_dir(worktree)` — encodes the canonical layout
+  (`<clone>/.camerata-worktrees/<branch-seg>` → `<clone>`), falls back to `None`
+  for out-of-band worktrees.
+
+`CARGO_TARGET_DIR` is injected at four call sites: `run_fmt_check`, `run_clippy`,
+`run_test` (in `crates/checks/src/subprocess.rs`) and `ClaudeCliDriver::build_command`
+/ `GenericCliDriver::build_command` (in `crates/agent/`).
+
+Concurrency tradeoff: Cargo file-locks `target/` during a build, so concurrent
+builds on the same repo serialize at the lock. Correctness over parallelism.
+
+**2. Hard disk preflight guard.** In `crates/server/src/workspace.rs`:
+- `available_disk_bytes(path) -> Option<u64>` — one `fs2::available_space`
+  (statvfs) call.
+- `ensure_disk_headroom(path, min_bytes) -> anyhow::Result<()>` — returns `Ok` when
+  space is sufficient OR when the query fails (fail-open for cross-platform safety);
+  returns a descriptive error when below the threshold.
+- `disk_headroom_threshold_bytes() -> u64` — reads
+  `CAMERATA_MIN_DISK_HEADROOM_GB` env var; defaults to 10 GiB
+  (`MIN_DISK_HEADROOM_BYTES = 10 * 1024 * 1024 * 1024`).
+
+Call sites: top of `ensure_uow_worktree` (refuses to create another worktree when
+disk is low) and top of each `CheckRunner::check` (refuses to start a cargo build).
+One `statvfs` syscall; no shell-out to `df`.
+
+**3. Terminal-state worktree teardown + startup sweep.**
+
+- **On sign-off teardown** — already in place (calls `remove_uow_worktree` at
+  `lib.rs`). No change.
+- **Startup sweep (extended):** Pass 1 — Terminal-state sweep: for every UoW in
+  `SignedOff` state that has a branch, call `remove_uow_worktree` (reclaims
+  worktrees that leaked through crashes between sign-off and the on-sign-off
+  teardown). Conservative: only `SignedOff` UoWs (the sole terminal stage as of
+  this decision). Pass 2 — `git worktree prune` across all repo clones (unchanged).
+  Both passes are best-effort + non-fatal; the preflight guard (Decision 2) is the
+  hard backstop.
+
 ---
 
 ## 4. Agent runtime
@@ -427,7 +650,7 @@ treat the selection RULE, not a fixed number, as the durable claim.
 
 ### Deterministic gate rules vs. LLM-semantic rules
 
-The six rules in `RULE_REGISTRY` (`crates/gateway/src/lib.rs`) have executable
+The eleven rules in `RULE_REGISTRY` (`crates/gateway/src/lib.rs`) have executable
 layer-1 enforcement. All other corpus rule ids are carried in the subset,
 delivered to the agent as context, but have no `apply_rule` arm and no
 `CheckRunner` mapping today. They are honest no-ops: the gate is permissive about
@@ -481,15 +704,19 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
 
 1. **MCP gate (layer-1) — pre-execution, deny-before-write.** A hardwired set of rule-ids in
    `crates/gateway/src/lib.rs` (`RULE_REGISTRY`). Membership criterion: decidable from one file's
-   path or content with a regex, no build needed. The six current gate rules are:
-   `GOV-1`, `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
-   `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1`.
+   path or content with a regex, no build needed. The current gate rules are eleven entries — the
+   full list is in §2. The **deterministic security floor** is the seven `SEC-*`/`ARCH-*` content
+   and path rules (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
+   `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`,
+   `SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`), each with a `TestScopePolicy` (Waive or
+   Downgrade — see §2). The path-escape, GOV-1, and `SEC-NO-CAMERATA-CONFIG-1` rules are
+   write-time structural guards, not the floor proper.
 
-   **The gate is a deployment point, not a rule type.** Proof: 5 of these 6 rule-ids are NOT in the
-   corpus at all — they are gate-internal primitives. Only `ARCH-NO-SECRETS-IN-URL-1` is also a
-   corpus rule (tagged `structured`). The gate enforces a rule by its id string; a corpus rule with
-   the same id gets layer-1 enforcement automatically. Adding a gate arm is one `check_*` fn +
-   one `RuleEntry` in `RULE_REGISTRY`; it propagates everywhere via `enforced_gate_rules()`.
+   **The gate is a deployment point, not a rule type.** Most gate rule-ids are NOT in the corpus
+   at all — they are gate-internal primitives. Only `ARCH-NO-SECRETS-IN-URL-1` is also a corpus
+   rule (tagged `structured`). The gate enforces a rule by its id string; a corpus rule with the
+   same id gets layer-1 enforcement automatically. Adding a gate arm is one `check_*` fn + one
+   `RuleEntry` in `RULE_REGISTRY`; it propagates everywhere via `enforced_gate_rules()`.
 
    The verified runtime default subset is `["GOV-1"]` unless configured. `evaluate_call` is
    fail-closed: unknown session → deny; unknown rule id → permissive no-op (not a false deny).
@@ -538,6 +765,27 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
 
 5. **Human review — the backstop for prose and structured, and the only path to `verified`.**
    See the verification ladder below.
+
+### Layer-coverage matrix
+
+This table is the canonical summary of which enforcement tier covers which rule kind at
+which point. It is the conceptual backbone of the entire enforcement model.
+
+| Rule tier | Layer 1 gate | Layer 2 in-loop checks | Layer 3 CI | Scan |
+|---|---|---|---|---|
+| **Deterministic floor** (the 7 SEC/ARCH content+path rules) | YES — regex/path arms, each with `TestScopePolicy` (Waive/Downgrade) | No — `ManifestCheckRunner` does not re-run these | No dedicated job emitted | YES — deterministic preview (floor `audit_content`) + AI review |
+| **Mechanical** (maps to an off-the-shelf linter) | Some content rules only | YES — built-in language runners + manifest `in_loop` checks | YES — generated from the SSOT manifest (`all_ci_commands`) | YES — deterministic preview when the linter is provisioned + AI review |
+| **Architectural** (deterministic, needs a bespoke checker, no off-the-shelf linter) | No (needs AST) | No by default; YES once a custom checker is registered as an `in_loop` entry in `.camerata/checks.toml` | YES once the team builds the checker (manifest-generated via `all_ci_commands`) | AI review only — excluded from deterministic preview (see §6) |
+| **Prose / structured** (advisory or binary-human-reviewable) | No | No | No | AI review |
+
+Key corollaries:
+- The floor NEVER runs at Layer 2 or Layer 3 (it lives in the gate and the scan, not the
+  runner). A floor rule in a role's subset is enforced at write time; the SSOT manifest
+  is separate.
+- `layer2_commands ⊆ all_ci_commands` is a structural guarantee (shared functions in
+  `workflow_gen.rs`), not a convention.
+- `opt_in_only` rules (CodeQL, Semgrep) appear in the scan-proposal list but are
+  NEVER auto-recommended or pre-checked regardless of verification status (see §5).
 
 ### The verification ladder
 
@@ -599,13 +847,37 @@ rule arms (via `camerata_gateway::lookup_arm`) over every file in the repo, so
 "what the gate would deny on a new write" and "what's already wrong in your repo"
 are the same check. The content rules are pure functions over file content;
 path-based write-time rules (`GOV-1`, `SEC-NO-PATH-ESCAPE-1`) are not applicable
-to existing content and are excluded. The audit rules are:
-`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
-`ARCH-NO-SECRETS-IN-URL-1`.
+to existing content and are excluded. The full audit rules in `AUDIT_RULES` are
+the seven floor rules: `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
+`ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`,
+`SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`.
 
 Line numbers are resolved via `content_match_lines(rule_id, content)` which
 returns 1-based line numbers of all regex matches (scanning the whole file at
 once so multi-line constructs are caught).
+
+**Line-scope test detection.** Classification is **per-finding-by-line**, not
+per-file. For Rust files `test_scope_line_ranges(path, content)` (in
+`crates/gateway/src/lib.rs`) scans for `#[cfg(test)]`, `#[test]`, and
+`#[tokio::test]` attributes and returns the brace-delimited line ranges they
+cover. A production secret on line 12 in a file that also contains a
+`#[cfg(test)]` block stays Critical; a finding whose line number falls inside a
+test scope gets `in_test=true` and is downgraded to `low` severity (Downgrade
+policy) or dropped entirely (Waive policy) — per `test_scope_policy(rule_id)` in
+`crates/gateway/src/lib.rs`. The test-scope primitives are in `camerata-gateway`
+(the single source of truth); `onboard.rs` imports them via
+`camerata_gateway::*`.
+
+**`in_test` and `needs_review` flags on `Finding`.** Both are `#[serde(default)]`
+(back-compat). `in_test=true` is set when the finding's line is inside test scope;
+the UI renders a distinct "Test" badge (yellow) for these. `needs_review=true` is
+set by the calibration pass for low-confidence findings; the UI renders "Needs
+review" (orange). Old serialized findings deserialize with both flags as `false`.
+
+**Coverage notes.** `run_scan_tools` returns `(Vec<Finding>, Vec<CoverageNote>)`.
+Tool-missing and unrouted notes become `CoverageNote { tool, message }` entries on
+`ScanReport.coverage_notes` — a separate UI section, NOT findings rows. This
+separates scan-coverage information from actual violations.
 
 `Finding` and `ProposedRule` are the output shapes. Both the deterministic and AI
 audit tiers emit the same shapes so the cockpit table renders them uniformly.
@@ -713,67 +985,128 @@ entry to the committed baseline (the per-finding suppress endpoint). The file is
 version-controlled and auditable; future scans read it from the default branch
 (`fetch_baseline`) and classify against it.
 
-### Mechanical rules are re-tiered OUT of the code scan
+### Mechanical and architectural rules in the scan
 
-`split_scannable_rules` (`lib.rs`, both audit handlers) drops `EnforcementKind::Mechanical`
-rules from the AI code-only audit. Mechanical rules are enforced in CI from build/runtime/DB
-context (query-plan inspection, migration/index audit, AST lint) — e.g. `SQL-DB-INDEX-2`,
-whose `qualifies` defines it as an `EXPLAIN`/`pg_stat_statements` check on a live DB. Judging
-those from a static code digest yields only weak, low-confidence findings, so the scan skips
-them and they ride `.camerata/ci-checks.json` instead. The excluded ids are surfaced on
-`ScanReport.excluded_mechanical_rules` (shown in the scan header). The corpus is the source of
-each rule's tier; rules absent from the corpus (custom) default to scannable. The mechanical
-rules dropped here are NOT discarded — they feed the scan-time deterministic preview below,
-which runs their own tools instead of the LLM.
+**Mechanical rules** are re-tiered OUT of the AI code-only audit.
+`split_scannable_rules` (`lib.rs`, both audit handlers) drops
+`EnforcementKind::Mechanical` rules from the AI pass. Mechanical rules are
+enforced in CI from build/runtime/DB context (query-plan inspection,
+migration/index audit, AST lint) — e.g. `SQL-DB-INDEX-2`, whose `qualifies`
+defines it as an `EXPLAIN`/`pg_stat_statements` check on a live DB. Judging those
+from a static code digest yields only weak, low-confidence findings, so the scan
+skips them and they ride the deterministic preview instead (below). The excluded
+ids are surfaced on `ScanReport.excluded_mechanical_rules` (shown in the scan
+header).
+
+**Architectural rules** are excluded from the deterministic preview entirely.
+`group_by_tool` checks `rule.enforcement == EnforcementKind::Mechanical`
+exclusively; architectural rules are skipped — no ungrouped entry, no coverage
+note. Architectural rules remain covered by the AI review (advisory). This is the
+correct split: architectural rules need a bespoke checker; the preview pass can
+only drive off-the-shelf linters.
+
+**`opt_in_only` rules** (`CICD-CODEQL-SECURITY-SCAN-1`,
+`CICD-SEMGREP-SECURITY-SCAN-1`) are NEVER auto-recommended or pre-checked in the
+onboarding proposed-rules table, even when grounded, stack-relevant, and selected.
+The server gate in `propose_corpus_rules` (`onboard.rs`) emits
+`is_auto_recommended: false` for them; the UI honours this directly (no
+re-derivation). See `docs/decisions/2026-06-22_opt_in_only_not_prechecked_fix.md`.
 
 ### Scan-time deterministic preview (`crates/server/src/scan_tools.rs`)
 
-Mechanical rules stay out of the AI review (above), but Camerata still gives the architect a
-deterministic read on them at scan time: for EACH selected mechanical rule that is scan-runnable
-(mechanical AND NOT `layer3_only`), `run_scan_tools` runs the rule's OWN tool itself with a
-Camerata-supplied config and folds the results into triage as **preview findings** — even when
-the rule is not yet wired into the repo. This is decoupled from the gate: the **repo** is the
-source of truth for the GATE (layer-2/3, authoritative, repo-pinned, no drift); the **scan is an
-advisory preview**, so it does not need to be repo-sourced. A preview uses Camerata's installed
-tool version, which may differ from what the repo eventually pins — preview is indicative, the
-gate is authoritative.
+Mechanical rules stay out of the AI review (above), but Camerata still gives the
+architect a deterministic read on them at scan time: for EACH selected mechanical
+rule that is scan-runnable (mechanical AND NOT `layer3_only`), `run_scan_tools`
+runs the rule's OWN tool itself with a Camerata-supplied config and folds the
+results into triage as **preview findings** — even when the rule is not yet wired
+into the repo. This is decoupled from the gate: the **repo** is the source of
+truth for the GATE (layer-2/3, authoritative, repo-pinned, no drift); the **scan
+is an advisory preview**, so it does not need to be repo-sourced. A preview uses
+Camerata's installed tool version, which may differ from what the repo eventually
+pins — preview is indicative, the gate is authoritative.
 
 Mechanism:
-1. **linter → tool.** `tool_for_rule` / `tool_for_linter` derive the rule's tool from its corpus
-   `linter` source: `clippy: …`/`clippy::…` → clippy; `Ruff: …`/bare `RUF…`/`S…` codes → ruff;
-   `semgrep` → semgrep; an eslint-family id → eslint. The `ScanTool` enum has those four
-   variants.
-2. **group + run once per tool.** `group_by_tool` groups the selected rules by tool (and collects
-   ungrouped rules with no driveable tool); `run_scan_tools` runs each tool ONCE with a
-   Camerata-supplied selector (`selector_for_linter`): clippy `-W clippy::<lint>`, ruff
-   `--select <codes>`, eslint `--no-eslintrc --rule … --format sarif`, semgrep
-   `--sarif --config p/ci`.
-3. **parse.** SARIF preferred where the tool emits it (`parse_sarif` — semgrep native, eslint via
-   `@microsoft/eslint-formatter-sarif`), per-tool JSON otherwise (`parse_ruff_json` for ruff
-   `--output-format json`, `parse_clippy_json` for clippy `--message-format=json` NDJSON), all
-   into the existing `Finding` shape (file / line / rule-id / message / severity). clippy / ruff /
-   eslint / semgrep are driven end-to-end.
+1. **linter → tool.** `tool_for_rule` / `tool_for_linter` derive the rule's tool
+   from its corpus `linter` source: `clippy: …`/`clippy::…` → clippy; `Ruff:
+   …`/bare `RUF…`/`S…` codes → ruff; `semgrep` → semgrep; an eslint-family id →
+   eslint. The `ScanTool` enum has those four variants. Only `Mechanical` rules
+   enter this path; Architectural are excluded before it.
+2. **group + run once per tool.** `group_by_tool` groups the selected rules by
+   tool (and collects ungrouped rules with no driveable tool); `run_scan_tools`
+   runs each tool ONCE with a Camerata-supplied selector: clippy
+   `-W clippy::<lint>`, ruff `--select <codes>`, eslint with the bundled config,
+   semgrep `--sarif --config <bundled-rules>`.
+3. **parse.** SARIF preferred where the tool emits it (`parse_sarif` — semgrep
+   native, eslint via `@microsoft/eslint-formatter-sarif`), per-tool JSON
+   otherwise (`parse_ruff_json`, `parse_clippy_json`), all into the existing
+   `Finding` shape. clippy / ruff / eslint / semgrep are driven end-to-end.
 
-The `Finding` shape gained two `#[serde(default)]` back-compatible fields: `preview: bool` and
-`preview_tool: Option<String>`. A preview finding is **deterministic but advisory** — a stable
-tool rule-id (so triage treats it like the deterministic floor and it stays OUT of the LLM
-review, saving tokens), but NOT enforcement: its `status` is `suppressed-baseline` (never reads
-as an enforced gate hit) and its detail carries "NOT enforced until wired into CI." The CI story
-still has to wire the rule for the gate to block on it.
+**Auto-provisioning (semgrep and eslint).** `crates/server/src/tool_provisioning.rs`
+auto-provisions semgrep and eslint into `<dirs::data_dir()>/camerata/tooling/` on
+first scan use:
 
-**Graceful, never a false clean.** A missing tool, unparseable output, or a mechanical rule whose
-linter Camerata doesn't drive end-to-end (golangci-lint, rubocop, Checkstyle, Roslyn, etc.)
-yields a benign NOTE finding (`note_finding`, "Could not preview X — enforces once wired"), itself
-a `preview` finding so it surfaces in the preview lane, never an empty (clean) result. **CodeQL
-and the paid cloud tiers never preview** — they are `layer3_only`; `split_scannable_rules` filters
-them before the pass and `group_by_tool` defends against them too.
+- **semgrep** — requires `python3` on PATH; creates a venv
+  (`<tooling>/semgrep-venv/`), installs via pip. Health probe: `semgrep
+  --version` exit 0. Idempotent (probe short-circuits on subsequent calls).
+- **eslint** — requires `npm` on PATH; creates `<tooling>/eslint/` with a minimal
+  `package.json`; installs `eslint @typescript-eslint/parser
+  @microsoft/eslint-formatter-sarif`; copies the bundled config.
+
+The **semgrep ruleset is bundled offline** at
+`crates/server/assets/semgrep-rules/security.yml` (10 rules covering hardcoded
+secrets, eval/exec injection, SQL concatenation, weak hashes, path traversal,
+`subprocess(shell=True)`, unsafe `yaml.load`). The scan invokes
+`semgrep --sarif --config <bundled-rules>` — no network call to `semgrep.dev`.
+The **eslint config** is bundled at
+`crates/server/assets/eslint/camerata.config.mjs` (ESLint v9 flat config; enables
+corpus-cited rules, configures `@typescript-eslint/parser` for TS files).
+
+**Fail-soft when `python3` / `node` is absent.** Provisioning returns
+`Result<PathBuf, ProvisionError>` — never panics. `run_one_tool` maps `Err` to an
+`anyhow::Error` which `run_scan_tools` catches and converts to a `CoverageNote`
+(not a findings row); the scan continues with other tools unaffected. Ruff and
+Clippy are not provisioned (ruff is a common static binary; clippy ships with the
+Rust toolchain).
+
+The `Finding` shape has two `#[serde(default)]` back-compatible fields: `preview:
+bool` and `preview_tool: Option<String>`. A preview finding is **deterministic but
+advisory** — a stable tool rule-id (kept out of the LLM review, saving tokens),
+but NOT enforcement: its `status` is `suppressed-baseline` (never reads as an
+enforced gate hit) and its detail carries "NOT enforced until wired into CI." The
+CI story still has to wire the rule for the gate to block on it.
+
+**Graceful, never a false clean.** A missing tool or unparseable output yields a
+`CoverageNote` ("Could not preview X — enforces once wired"), NOT a finding row.
+**CodeQL and paid cloud tiers never preview** — they are `layer3_only`;
+`split_scannable_rules` filters them before the pass and `group_by_tool` defends
+against them too.
+
+**Floor / semgrep dedup.** Both the deterministic floor (`audit_content`) and
+semgrep run over the same repo. Two of the ten bundled semgrep rules
+(`camerata.security.hardcoded-secret`, `camerata.security.sql-string-concat-*`)
+overlap the floor. `dedup_preview_against_floor` (`lib.rs`) in
+`merge_scan_preview` does a presentation-time dedup:
+
+- For each semgrep finding whose rule maps to a floor rule (via
+  `semgrep_floor_category`), look for an existing floor finding at the EXACT
+  `(repo, path, line, floor_rule_id)`. If found: append the semgrep rule id to
+  `also_matches` on the floor finding and DROP the semgrep copy. If not found
+  (different line, net-new coverage): keep the semgrep finding.
+- The floor rule id is canonical (`SEC-*` ids drive `eval.rs` scoring and gate
+  enforcement). Non-overlapping semgrep rules pass through unconditionally.
+- Both rulesets remain intact (neither is stripped). The dedup is
+  presentation-only; CI still runs both detectors.
+- Dedup uses exact `usize ==` line equality. Adjacent lines with the same pattern
+  are NOT merged (a false-kept row is cheaper than a silently-dropped real
+  finding). See `docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md`.
 
 **Wiring.** `run_scan_tools` is invoked at both audit entry points via a shared
-`merge_scan_preview` helper (`lib.rs`): `onboard_audit` (sync) and `onboard_audit_start` (async
-job; the preview merges into the report the job stores, which `onboard_audit_job` serves). The
-triage table's **Authority** column has a third tier — `preview` ("Preview · not enforced until
-wired"), distinct from the green "Rule · enforced" floor badge and the blue "AI · advisory"
-badge — filterable, with `preview` + `preview_tool` added to the CSV export. See
+`merge_scan_preview` helper (`lib.rs`): `onboard_audit` (sync) and
+`onboard_audit_start` (async job; the preview merges into the report the job
+stores, which `onboard_audit_job` serves). The triage table's **Authority** column
+has a third tier — `preview` ("Preview · not enforced until wired"), distinct from
+the green "Rule · enforced" floor badge and the blue "AI · advisory" badge —
+filterable, with `preview` + `preview_tool` added to the CSV export. See
 `docs/decisions/2026-06-22_ci_scan_preview_partB.md`.
 
 ### Scan-type selector and deterministic progress
@@ -819,15 +1152,34 @@ pickup. The "wire mechanical rules into CI" step likewise files a GitHub issue
 through the governed pipeline (the ingest) is Pillar 2. (The old `onboard_fix` endpoint and the
 "Fix the audited items" panel — which launched runs from onboarding — were removed.)
 
+**CI-wiring is split by enforcement tier (two separate GitHub issues).** The onboarding
+triage UI has two separate "Wire CI rules" buttons — one for mechanical rules, one for
+architectural rules. `onboard_ci_rules` (`lib.rs`) files the story with the tier in the
+title and body:
+
+- **Mechanical story** — "Wire mechanical (off-the-shelf linter) rules into CI — {repo}".
+  Names the linter for each rule. One-sprint implementable; no bespoke checker needed.
+- **Architectural story** — "Wire architectural (custom-checker) rules into CI — {repo}".
+  Explicit that each rule requires a bespoke checker (script, custom Semgrep rule, AST
+  pass, etc.) designed before implementation. Includes a worked example
+  (`dependency-cruiser` for API layering).
+
+Both story bodies open with a shared preamble teaching the SSOT manifest model
+(`.camerata/checks.toml`, the `[[check]]` schema including version-pinning fields, gate
+protection, and how to regenerate the CI workflow). The stories are self-sufficient
+implementation guides: a developer or agent picking them up has the complete SSOT model
+in the issue body.
+
+See `docs/decisions/2026-06-21_ci_story_tier_split.md` and
+`docs/decisions/2026-06-23_ci_gate_story_howto_enrichment.md`.
+
 **CI-wiring targets the repo's canonical check command (serves both layers).** Layer 2
 (Camerata's in-loop post-task check during a governed run) and layer 3 (the repo's own CI on
 every PR) run the SAME checks — the repo's lint/test commands — differing only in where/when. So
-the wiring stories `onboard_ci_rules` files (both the mechanical and architectural story bodies
-plus the shared preamble) instruct wiring each check into the repo's **canonical check command**
+the wiring stories instruct wiring each check into the repo's **canonical check command**
 (the lint/test command layer 2 runs) **and** the CI workflow. One wiring covers both: layer 2
 picks it up automatically (it runs the repo's lint/test), layer 3 runs the same command on every
-PR (catching non-Camerata changes too). The prior wording was CI-only, which on a repo with no
-pre-existing lint script could produce a CI-only step layer 2 never invokes. See
+PR (catching non-Camerata changes too). See
 `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
 
 ---
@@ -1281,6 +1633,144 @@ A verification step re-runs `git diff --diff-filter=U` AFTER the agent finishes,
 claims success without resolving is caught. The control lives in `UowDevControls` (`cockpit.rs`).
 See `docs/decisions/2026-06-22_uow_ai_update_branch.md`.
 
+### Per-UoW git worktrees and the PR lifecycle
+
+**Concurrency problem.** The dev run and update-branch operate on the UoW's local
+clone via `resolve_repo_dir`, which returns one shared clone dir per repo. Two UoWs
+on the SAME repo both trying to check out their branch there causes git to refuse
+("branch already checked out") or clobber. Different repos are already safe.
+
+**Solution: per-UoW git worktrees.** Each UoW operates in its own git worktree
+off the repo's shared `.git`, keyed by the UoW's branch:
+
+```
+<workspace_root>/<owner>/<repo>/
+  .git/
+  .camerata-worktrees/
+    camerata__story-7/        ← UoW A worktree
+    camerata__story-8/        ← UoW B worktree
+  .camerata-shared-target/    ← single shared Cargo target dir (see §3 disk safety)
+```
+
+`resolve_uow_worktree(override, workspace_root, repo, branch)` in `workspace.rs`
+is create-on-first-use, reuse-if-present, and canonicalized (so a freshly-added
+worktree's path identity-matches `git worktree list` across the macOS
+`/var`→`/private/var` symlink). Cleanup: `remove_uow_worktree` on sign-off
+(best-effort); `prune_worktrees` across all known clones on server startup.
+
+Only the clone-touching UoW paths use worktrees. The plan-scaffolding greenfield
+dev run (`execute_live_run*`) scaffolds into a throwaway
+`temp_dir/camerata-live-<pid>-<run_id>` directory and needs no git worktree.
+Read-only paths (`uow_list_branches`, scan, `git_*` workspace endpoints, the
+governance-branch `onboard_apply`) operate on the shared clone as before — refs
+are shared across worktrees off the same `.git`.
+
+**PR lifecycle per UoW.** `UnitOfWork` carries `pr_number: Option<u64>` and
+`pr_url: Option<String>` (both `#[serde(default)]`, persisted to `uow.json` via
+`UowStore::set_pr`). The PR runs in the UoW's own worktree. Endpoints:
+
+- `POST /api/uow/:id/pr/open { base_branch }` — resolve worktree → push →
+  `open_pr_with_base` → store number+url.
+- `GET /api/uow/:id/pr` — resolve PR state + comments + CI check status; graceful
+  empty payload on error, never an error response.
+- `POST /api/uow/:id/pr/comment { body }`.
+- `POST /api/uow/:id/pr/resolve` — a GATED run (governed agent resolves open
+  review comments + failing check names; server commits + pushes; same gate
+  machinery as the dev run).
+
+PR discovery is idempotent via `resolve_pr_for_uow`: stored `pr_number` always
+wins; else head-branch search (`GET pulls?head={owner}:{branch}&state=all`)
+backfills AND stores the number, so PRs opened directly in GitHub are found. The
+logic is encapsulated in `pr_resolution_plan` (unit-testable, no network). GitHub
+PR read/write lives in `crates/server/src/pr.rs`.
+
+See `docs/decisions/2026-06-22_per_uow_worktrees_and_pr_lifecycle.md`.
+
+### Brownfield in-place dev run vs. greenfield scaffold
+
+`start_governed_run` (`lib.rs`) dispatches on `is_brownfield(worktree: Option<&Path>)`:
+
+- **Brownfield** (worktree `Some`): `execute_dev_implement_run` in
+  `crates/server/src/dev_implement_run.rs` — implements the story by editing the
+  existing repo in the UoW's git worktree. One governed agent; layer-2 bounce;
+  server commits and optionally pushes.
+- **Greenfield** (worktree `None`): `execute_live_run` / `execute_live_run_tiered`
+  — scaffolds a new app from a plan in a throwaway temp dir. Unchanged.
+
+`implement_prompt` builds the agent's task from the story title + description +
+every APPROVED `DecisionRecord` (Pending and Rejected are excluded). The agent is
+explicitly forbidden from committing or pushing; the server does both.
+
+Gate for the brownfield run: `camerata_fleet::governed_role("BrownfieldImplementer")` +
+`camerata_agent::prepare_session(..., Some(worktree_path))` — identical machinery
+as `pr_resolve_run` and `update_branch_run`. `gated_write` is the only write path;
+`Task`/`Write`/`Bash`/`Edit`/`MultiEdit`/`NotebookEdit` are disallowed.
+
+See `docs/decisions/2026-06-22_brownfield_dev_run.md`.
+
+### Structured clarifications (auto-saved + resumable)
+
+The `ClarificationStore` (in `crates/server/src/clarify.rs`) is now disk-backed
+(`clarifications.json`, flush-on-mutate) so pause points survive restarts.
+
+**Structured question model.** `Clarification` carries `options:
+Vec<ClarifyOption{label, description}>`, `multi_select: bool`, `allow_free_text:
+bool` (default `true`). The answer captures selected labels + optional free-text.
+A pure free-text question = empty options + `allow_free_text`. Back-compat:
+existing free-text serializations deserialize unchanged.
+
+**`ask_clarification` MCP tool.** Alongside `gated_write`, the gateway exposes a
+read-class `ask_clarification` tool (in `crates/gateway/src/main.rs`). The agent
+calls it with a structured question `{question, options, multi_select,
+allow_free_text}`. The gateway records it to a per-session `clarify-requests.jsonl`
+sink (outside the worktree jail) and returns a "STOP and end your turn" instruction.
+It writes NO repo file, spawns nothing — **no new write path**.
+
+**Pause + resume (investigation phase).** After the investigation agent returns,
+the server reads the sink (`read_first_clarify_request`). If a question was raised:
+posts it into the `ClarificationStore` (auto-saved), persists a
+`ClarifyResumeContext` (`clarify_resume.rs`, disk-backed), records a
+`clarification/pause` run event, and parks the run at
+`RunStatus::AwaitingClarification`. Answering the 3a clarification consumes the
+resume context (once — no double-resume) and re-spawns the same gated agent with
+the original task + asked question + answer appended
+(`investigation_resume_prompt`). Gate is unchanged — asking a question is a
+read-class action, not a write.
+
+**Deferred: dev-phase mid-write resume.** Wiring pause/resume into the live fleet
+(`execute_live_run*`) requires capturing per-stage session ids and the
+coordinator's position. That is separate fleet-orchestration plumbing, not yet
+done.
+
+See `docs/decisions/2026-06-22_structured_clarifications_in_uow_lifecycle.md`.
+
+### Per-project per-step model config (`StepModels`)
+
+Every non-fleet AI step (audit, calibration, research chat, story authoring,
+decomposition, escalation, clarification) has a dedicated model slot in
+`StepModels`, stored ON the `Project` (`#[serde(default)]`, back-compat). Default
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-4-6`) for every slot.
+
+`StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
+`Decomposition`, `Escalation`, `Clarification`.
+
+**No runtime env fallback once a project exists.** The project's per-step value is
+authoritative; call sites resolve it via `step_model(state, step)` or
+`step_model_or(state, step, requested)` (the UI-picked steps — audit, calibration,
+chat — honour an explicit per-run override, then fall back to the project value).
+`Llm`'s internal env-default is never reached for a non-fleet step when a project
+is active.
+
+**Per-project isolation.** `set_step_model` mutates exactly the named project (the
+`update` closure borrows that one project's `&mut`). A change to project A cannot
+touch project B; the isolation test asserts this.
+
+**API.** `POST /api/projects/:id/step-models { "step": "audit", "model": "<id>" }`.
+Patch semantics; one step per call. The fleet tier map (`TierMap`) is a separate
+axis (fleet-driven governed runs) and is not touched.
+
+See `docs/decisions/2026-06-22_per_project_step_models.md`.
+
 ---
 
 ## 11. Cockpit UI
@@ -1365,6 +1855,60 @@ selector** checkboxes live on the Onboard tab's audit UI (§6), not here.
 
 `NewAuthoredUowButton` in the left nav creates a blank draft UoW and opens `StoryAuthoringPanel`
 (the AI story-authoring surface, §10) in place of `UowDevControls` until the draft is published.
+
+### N-level generic issue grouping in `WorkItemTable`
+
+`WorkItemTable` (in `cockpit.rs`) renders GitHub issues grouped by their hierarchy.
+The grouping is generic: for each issue, an `ancestor_path` is computed from the
+GitHub issue tree (parent issue → grandparent → …). Each ancestor depth level gets
+its own **Chorale grouping column** in the table. GitHub enforces an 8-level
+ceiling on sub-issue nesting, so at most 8 grouping columns appear.
+
+**Group headers are the parent issue's own title** — NOT a synthetic label like
+"Epic" or "Theme". This is a deliberate choice: the label would be Camerata's
+guess at the issue's organizational meaning; the actual title is what the team put
+there and is always more accurate.
+
+See `docs/decisions/2026-06-22_issues_table_grouping_and_chat_context.md`.
+
+### Token usage meter
+
+A compact, persistent `UsageMeter` component is pinned to the right of the cockpit
+nav row. It polls `GET /api/usage` every ~4 s and displays cumulative
+`<tokens> tok · $<cost> · <calls> calls`. Click to expand a by-model breakdown.
+When `rate_limited`, it shows a distinct amber pulsing "Rate-limited — retrying"
+badge instead of the normal readout.
+
+`GET /api/usage` returns:
+`{ input_tokens, output_tokens, cache_read, cache_creation, total_cost_usd, calls,
+by_model:[{model,tokens,cost,calls}], rate_limited, last_rate_limit }`.
+
+The ledger (`usage_ledger::UsageLedger` in `crates/server/src/`) is a process/session-global
+`Arc` in `AppState`. `Llm::complete` and `Llm::complete_streaming` record every
+successful response and run the rate-limit detector on every failure — one
+chokepoint, so the ledger sees all call paths. It accumulates across ALL model
+calls (audit, calibration, chat, story authoring, decomposition, escalation,
+clarification).
+
+**Provider-agnostic cost fallback:**
+1. `cost_usd` present (Anthropic CLI) → add verbatim.
+2. Tokens present + model in `MODELS` (Gemini shape) → derive from list pricing.
+3. Unknown model → accumulate tokens at $0 (never a panic).
+
+`note_failure` sets `rate_limited=true`; any successful `record(...)` clears it.
+This is **observability only** — no gate change, no model-selection change.
+
+See `docs/decisions/2026-06-22_token_usage_meter.md`.
+
+### Chat — project-grounded context
+
+The `ChatBubble` component retains context across the session (conversation
+history is held in component state). When a project is active and issues are
+pulled, the chat assistant is grounded on both: the active project's rule
+selections and any issues currently loaded in the Governed Development tab are
+included in the chat system prompt. The assistant can answer questions about which
+rules apply to the open project and what the pulled issues say without the
+architect re-pasting context.
 
 ### Chorale tables
 
@@ -1477,3 +2021,29 @@ adapters implement it per tracker.
 6. **The UI never calls backend crates in-process.** All cockpit data flows
    through the embedded BFF over localhost HTTP. This is the seam that makes the
    same server cloud-hostable.
+7. **The gate never weakens.** There is no runtime path that reduces the
+   floor's seven `SEC-*`/`ARCH-*` rules. The bootstrap bypass (`skip_layer2`)
+   skips only the post-task layer-2 lint/test bounce; layer-1 is NEVER bypassed.
+8. **Test-scope exceptions resolve definitively at the gate.** `TestScopePolicy`
+   resolves at write time: `Waive` → allow; `Downgrade` → deny. At the scan layer,
+   `Downgrade` findings are kept but down-ranked to `low`/`in_test=true`; `Waive`
+   findings are dropped. No ambiguity carries through.
+9. **`layer2_commands ⊆ all_ci_commands` parity is structural.** Both the
+   Layer-2 runner and the Layer-3 CI workflow generator in `workflow_gen.rs` call
+   the same shared functions. The subset invariant cannot drift by convention; it
+   is enforced by construction and confirmed by a unit test.
+10. **The SSOT manifest is gate-protected.** `SEC-NO-CAMERATA-CONFIG-1` in
+    `RULE_REGISTRY` blocks any agent `gated_write` to a `.camerata` path. Only
+    operator commits (human) can change what gates run.
+11. **Version-pinning drift is a hard violation, not a warning.** A tool version
+    mismatch at Layer 2 (`check_tool_version` / `version_matches`) stops the check
+    and reports a violation. A warning would let the loop go green on the wrong
+    version; a violation surfaces the drift immediately.
+12. **The disk preflight guard is the hard backstop.** `ensure_disk_headroom`
+    runs before every worktree creation and every `CheckRunner::check`. The hygiene
+    sweeps (teardown on sign-off, startup sweep) are best-effort; the preflight
+    guard is the non-optional safety net.
+13. **No human-visible gate enforcement log yet.** The gate denies and bounces
+    silently from the operator's perspective. A human-visible catch-ledger is
+    Phase 2 (issue #69). Do not rely on audit trails for denied writes in the
+    current build.
