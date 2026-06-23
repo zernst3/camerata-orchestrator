@@ -6,7 +6,7 @@
 //! - WRITE-ONLY: no read / query path here. The ledger is for external SQL analytics only.
 //! - FAIL-SOFT: every async capture fn catches errors and logs; never propagates.
 //! - PURE extraction fns (unit-tested): `extract_run_catches`, `revised_after`.
-//! - CONTENT-HASH-NOT-RAW: only FNV-1a hex digests of offending content are stored.
+//! - CONTENT-HASH-NOT-RAW: only SHA-256 hex digests of offending content are stored.
 //!   Raw content never enters the ledger.
 //!
 //! Three capture points:
@@ -87,7 +87,7 @@ pub fn revised_after(deny_seq: usize, target: &str, events: &[GateEvent]) -> boo
 /// - `verdict`: `"deny"` (gate) or `"bounce"` (layer-2)
 /// - `rule_id`: from `event.rule`
 /// - `path`: extracted from `event.detail` (best-effort, `None` if not parseable)
-/// - `content_hash`: from `event.content_hash` (already a FNV-1a hex from the gateway)
+/// - `content_hash`: from `event.content_hash` (already a SHA-256 hex from the gateway)
 /// - `run_id`, `story_id`: from the supplied run metadata
 /// - `revised_after`: computed via `revised_after()`
 /// - `ts_ms`: current epoch-ms (best-effort; pure function receives it as a parameter
@@ -184,7 +184,7 @@ pub async fn capture_run_finalization(
 /// Capture enforcement catches for ACTIVE floor findings after a scan completes.
 ///
 /// Each active (non-suppressed) finding from the deterministic floor audit becomes
-/// one `floor`/`catch` record. The finding snippet is hashed (FNV-1a hex) — the
+/// one `floor`/`catch` record. The finding snippet is hashed (SHA-256 hex) — the
 /// raw snippet is never stored.
 ///
 /// Best-effort / fail-soft: errors are logged and swallowed.

@@ -38,3 +38,4 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 regex = "1"
+sha2 = { workspace = true }

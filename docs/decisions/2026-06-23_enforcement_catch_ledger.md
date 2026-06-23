@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS enforcement_catches (
     repo            TEXT,
     path            TEXT,
     line            INTEGER,
-    content_hash    TEXT,   -- FNV-1a hex; NEVER raw content
+    content_hash    TEXT,   -- SHA-256 hex; NEVER raw content
     run_id          TEXT,
     story_id        TEXT,
     revised_after   INTEGER -- nullable bool: 0=no 1=yes
@@ -44,10 +44,13 @@ CREATE INDEX idx_enforcement_catches_rule_id  ON enforcement_catches(rule_id);
 
 ### 3. Content hash, not raw content
 
-`content_hash` stores the FNV-1a 64-bit hex of the offending content (snippet or
-denied write content). The raw string is never inserted. This matches the
-existing `suppression::fnv1a` / `scan_cache::content_fingerprint` conventions and
-is safe for a public repo where the offending content may itself be a secret.
+`content_hash` stores the **SHA-256** hex of the offending content (snippet or
+denied write content). The raw string is never inserted. SHA-256 (preimage-resistant,
+not a fast fingerprint like `suppression::fnv1a`) is deliberate: the ledger is meant to
+be **portable** — shared as proof the gate works — and the hashed slice may itself be a
+secret, so a recoverable hash would defeat the purpose. The gateway (deny content) and
+the floor scan (snippet) use the same SHA-256 helper, so identical content hashes
+identically across layers.
 
 ### 4. Capture at terminal points, not inline hooks
 
@@ -69,7 +72,7 @@ which writes one `floor`/`catch` record for each `active` floor finding
 
 **Point 3 — Gateway DENY observability** (`crates/gateway/src/main.rs`):
 The existing `GateDecisionRecord` JSONL sink gains `content_hash: Option<String>`,
-set to the FNV-1a hex of the denied write's content on DENY records only. This
+set to the SHA-256 hex of the denied write's content on DENY records only. This
 field flows through the server-side mirror `GateDecisionRecord` into `GateEvent`,
 so Point 1 captures it automatically at run finalization without any separate
 read of the denied content.
@@ -146,7 +149,7 @@ ORDER BY catches DESC;
 - `crates/persistence/src/enforcement_catch.rs` (new) — model, trait, SqliteStore impl, tests
 - `crates/persistence/src/lib.rs` — re-exports
 - `crates/persistence/src/store.rs` — call `migrate_enforcement()` on open
-- `crates/gateway/src/main.rs` — `content_hash` on `GateDecisionRecord`, `fnv1a_hex`, updated `build_gate_record`
+- `crates/gateway/src/main.rs` — `content_hash` on `GateDecisionRecord`, `sha256_hex`, updated `build_gate_record`
 - `crates/server/src/run.rs` — `content_hash` field on `GateEvent`
 - `crates/server/src/live_fleet.rs` — mirror `content_hash` on server `GateDecisionRecord`, carry through `gate_record_to_event`
 - `crates/server/src/enforcement_ledger.rs` (new) — `EnforcementLedger`, capture fns, pure extraction helpers, tests

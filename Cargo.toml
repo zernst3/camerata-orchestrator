@@ -55,3 +55,7 @@ fs2 = "0.4"
 # local-scan path to skip gitignored files (feature: scan-hygiene). A workspace dep so
 # the version is pinned in one place; only server consumes it today.
 ignore = "0.4"
+# SHA-256 for the enforcement-catch-ledger content_hash. Preimage-resistant so the
+# ledger stays safe to share/port as proof (a hashed code slice that MIGHT contain a
+# secret cannot be brute-forced back). Workspace dep so gateway + persistence agree.
+sha2 = "0.10"

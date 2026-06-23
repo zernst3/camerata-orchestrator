@@ -89,7 +89,7 @@ pub struct GateDecisionRecord {
     pub reason: String,
     /// Unix-epoch milliseconds when the decision was recorded.
     pub ts_ms: u128,
-    /// FNV-1a hex hash of the denied content (NEVER the raw content — public repo).
+    /// SHA-256 hex hash of the denied content (NEVER the raw content — public repo).
     /// Set only for DENY records where content is available; `None` for allow records
     /// and delegation records. Observability-only; cannot affect any gate verdict.
     #[serde(default)]
@@ -193,19 +193,18 @@ pub fn clarify_requests_sink_path() -> Option<std::path::PathBuf> {
     Some(dir.join("clarify-requests.jsonl"))
 }
 
-/// FNV-1a 64-bit hash of `s`, returned as a 16-char hex string. Stable across
-/// machines and Rust versions (unlike `DefaultHasher`). Matches the algorithm in
-/// `camerata_persistence::content_hash` and `server::suppression::fnv1a`.
+/// SHA-256 hash of `s`, returned as a 64-char lowercase hex string. Matches
+/// `camerata_persistence::content_hash` so a given offending slice hashes identically
+/// whether the gate (deny) or the floor scan records it.
 ///
-/// Used ONLY to hash the content of denied writes before recording them. The raw
-/// content is never stored in the observability record (public repo safety).
-fn fnv1a_hex(s: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{:016x}", h)
+/// Used ONLY to hash the content of denied writes before recording them. The raw content
+/// is never stored in the observability record. SHA-256 (preimage-resistant, not a fast
+/// fingerprint) is deliberate: the enforcement ledger is portable proof, and a denied
+/// slice MIGHT contain a secret — a recoverable hash would defeat the point.
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(s.as_bytes());
+    format!("{digest:x}")
 }
 
 /// Build a [`GateDecisionRecord`] from a gate outcome. PURE: the verdict/rule/reason are
@@ -213,7 +212,7 @@ fn fnv1a_hex(s: &str) -> String {
 /// a faithful recording with zero decision logic of its own. Separated out so it is
 /// unit-testable without a filesystem or clock (`ts_ms` is injected).
 ///
-/// `content` is the write content: it is hashed (FNV-1a hex) and stored as
+/// `content` is the write content: it is hashed (SHA-256 hex) and stored as
 /// `content_hash` on DENY records. The raw content is NEVER stored.
 pub fn build_gate_record(
     target: &str,
@@ -237,7 +236,7 @@ pub fn build_gate_record(
             rule: Some(rule.to_string()),
             reason: decision.to_string(),
             ts_ms,
-            content_hash: Some(fnv1a_hex(content)),
+            content_hash: Some(sha256_hex(content)),
         }
     } else {
         GateDecisionRecord {
@@ -520,7 +519,7 @@ impl Gateway {
         // of THIS decision so the server can fold real gate decisions out of the
         // subprocess into the run's event stream. Records what was decided above; it
         // does not — and cannot — change the decision.
-        // content_hash is the FNV-1a hex of the denied write's content on DENY records
+        // content_hash is the SHA-256 hex of the denied write's content on DENY records
         // (raw content is NEVER stored — public repo).
         append_gate_record(&build_gate_record(&path, &decision, now_ms(), &content));
 
@@ -723,10 +722,10 @@ mod gate_sink_tests {
         assert_eq!(r.verdict, "deny");
         assert_eq!(r.rule.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
         assert_eq!(r.target, "crates/api/src/export_config.rs");
-        // Deny records carry a content_hash (FNV-1a hex, NOT the raw content).
+        // Deny records carry a content_hash (SHA-256 hex, NOT the raw content).
         assert!(r.content_hash.is_some());
         let hash = r.content_hash.as_deref().unwrap();
-        assert_eq!(hash.len(), 16, "FNV-1a hex is 16 chars");
+        assert_eq!(hash.len(), 64, "SHA-256 hex is 64 chars");
         assert!(!hash.contains("secret"), "hash must not contain raw content");
     }
 

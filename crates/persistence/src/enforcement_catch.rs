@@ -15,7 +15,7 @@
 //! - ORCH-NEW-PATH-TESTS-1: unit tests included in this file
 //! - FAIL-SOFT: callers must never propagate errors from this module; they log-and-swallow
 //! - WRITE-ONLY: no read / query path exists in app code; external SQL only
-//! - CONTENT-HASH-NOT-RAW: store a FNV-1a hex hash of offending content, never the raw
+//! - CONTENT-HASH-NOT-RAW: store a SHA-256 hex hash of offending content, never the raw
 //!   string (public repo; the offending content may itself be a secret)
 
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS enforcement_catches (
     repo            TEXT,
     path            TEXT,
     line            INTEGER,
-    content_hash    TEXT,              -- FNV-1a hex of offending content; NEVER the raw string
+    content_hash    TEXT,              -- SHA-256 hex of offending content; NEVER the raw string
     run_id          TEXT,
     story_id        TEXT,
     revised_after   INTEGER            -- nullable bool: 0=no, 1=yes (agent revised after deny)
@@ -79,7 +79,7 @@ pub struct EnforcementCatch {
     pub path: Option<String>,
     /// 1-based line number, if applicable.
     pub line: Option<i64>,
-    /// FNV-1a hex digest of the offending content (NEVER the raw string). None when
+    /// SHA-256 hex digest of the offending content (NEVER the raw string). None when
     /// no content is available (e.g. a path-based rule or delegation deny).
     pub content_hash: Option<String>,
     /// The run id this catch is associated with, if applicable.
@@ -207,23 +207,21 @@ impl EnforcementCatchLedger for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
-// Content hashing (FNV-1a hex; matches suppression.rs)
+// Content hashing (SHA-256 hex — preimage-resistant; ledger is portable proof)
 // ---------------------------------------------------------------------------
 
-/// Compute a stable FNV-1a 64-bit hash of `content`, returned as a 16-char hex string.
+/// Compute the SHA-256 hash of `content`, returned as a 64-char lowercase hex string.
 ///
-/// This is the ONLY hashing function used in this crate: it is stable across machines
-/// and Rust versions (unlike `DefaultHasher`), dependency-free, and fast for the small
-/// content slices we hash here. It matches the algorithm in `server::suppression::fnv1a`.
+/// SHA-256 (not a fast non-crypto fingerprint) is deliberate: the ledger is meant to be
+/// PORTABLE — shared as proof the gate works — and the hashed slice is offending code that
+/// MIGHT contain a secret. A preimage-resistant hash means the shared ledger never lets a
+/// hashed secret be brute-forced back. Stable across machines and Rust versions.
 ///
 /// Callers MUST pass the offending content to this; they MUST NOT store the raw content.
 pub fn content_hash(content: &str) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in content.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{:016x}", h)
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    format!("{digest:x}")
 }
 
 // ---------------------------------------------------------------------------
@@ -388,8 +386,13 @@ mod tests {
         assert_eq!(content_hash("hello"), content_hash("hello"));
         // Different inputs → different outputs.
         assert_ne!(content_hash("hello"), content_hash("world"));
-        // 16 hex chars (64-bit FNV-1a).
-        assert_eq!(content_hash("test").len(), 16);
+        // 64 hex chars (SHA-256).
+        assert_eq!(content_hash("test").len(), 64);
+        // Known SHA-256 vector for "test" — proves it's real SHA-256, not a fingerprint.
+        assert_eq!(
+            content_hash("test"),
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        );
     }
 
     // ── raw content is NEVER stored (write-only design verification) ─────────
