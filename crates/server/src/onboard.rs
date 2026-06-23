@@ -3011,12 +3011,14 @@ mod tests {
             ".camerata/rules.json in files_written"
         );
 
-        // The CI workflow must be emitted for mechanical rules.
+        // The CI workflow must be emitted for mechanical rules (camerata-gates.yml is the
+        // SSOT-generated workflow; camerata-governance.yml was the old placeholder, replaced
+        // by the arm/emit SSOT reconciliation — see docs/decisions/2026-06-23_ssot_emit_reconciliation.md).
         assert!(
             result
                 .files_written
                 .iter()
-                .any(|f| f.ends_with("camerata-governance.yml")),
+                .any(|f| f.ends_with("camerata-gates.yml")),
             "CI workflow must be emitted for mechanical rules"
         );
 

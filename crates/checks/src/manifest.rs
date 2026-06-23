@@ -77,7 +77,7 @@
 //! checks", degrading gracefully while logging a warning. The built-in runners are
 //! completely unaffected.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 // ─── schema ──────────────────────────────────────────────────────────────────
@@ -90,7 +90,12 @@ use std::path::Path;
 /// silently running wrong commands. The tool-pinning fields (`tool`, `version`,
 /// `install`) are optional with `#[serde(default)]` for full back-compat with
 /// manifests written before version pinning was introduced.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// `Serialize` is derived so the arm/emit path can build a `CheckManifest`
+/// from applied mechanical rules and serialize it to TOML, guaranteeing the
+/// emitted `.camerata/checks.toml` is structurally identical to what
+/// `load_manifest` expects (round-trip fidelity).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestCheck {
     /// Stable rule id. Should match a rule in the Camerata corpus where the
     /// check enforces a named rule (e.g. `"ARCH-API-LAYERING-1"`). Used as the
@@ -167,7 +172,11 @@ pub struct ManifestCheck {
 /// A flat list of [`ManifestCheck`] entries under the `check` key (TOML
 /// array-of-tables: `[[check]]`). An empty `checks` list is valid — it means
 /// no custom checks are configured.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+///
+/// `Serialize` is derived so the arm/emit path can construct a `CheckManifest`
+/// from applied rules and `toml::to_string` it directly, guaranteeing
+/// the emitted file round-trips through `load_manifest` without drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CheckManifest {
     /// All declared checks, in declaration order.
     #[serde(default, rename = "check")]
