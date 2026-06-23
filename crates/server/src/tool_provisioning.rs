@@ -325,6 +325,286 @@ pub async fn ensure_eslint(tooling: &Path) -> Result<PathBuf, ProvisionError> {
     Ok(bin)
 }
 
+// ─── osv-scanner ─────────────────────────────────────────────────────────────
+//
+// osv-scanner is Google's multi-ecosystem dependency-vulnerability scanner.  It
+// reads lockfiles (Cargo.lock, package-lock.json, go.sum, poetry.lock, etc.) and
+// queries the OSV database for known CVEs / GHSAs / RUSTSECs — one binary covers
+// every ecosystem Camerata's users write in.
+//
+// Provisioning resolution chain (fail-soft at every step — see module-level doc):
+//   (a) `osv-scanner` already on PATH → use it (cheapest, zero disk).
+//   (b) Cached provisioned binary at `<tooling_dir>/osv-scanner/osv-scanner[.exe]`
+//       that responds to `--version` → use it.
+//   (c) Attempt to download the pinned prebuilt GitHub release binary for the
+//       detected OS/arch (darwin/linux × amd64/arm64) via reqwest.
+//   (d) If download is unavailable/unsupported, try `go install` with the pinned
+//       module path if a Go toolchain is present.
+//   (e) None of the above → return `ProvisionError::InstallFailed` so the caller
+//       emits a `CoverageNote` and the scan continues without dep-audit.
+
+/// Pinned osv-scanner version.  Bump when a meaningful new ecosystem or advisory
+/// feed is added upstream.  The prebuilt binaries are downloaded from the GitHub
+/// releases page at this tag.
+pub const OSV_SCANNER_VERSION: &str = "v1.9.2";
+
+/// The download base URL for osv-scanner prebuilt release binaries.  The full
+/// asset URL is constructed as `{BASE}/{VERSION}/{ASSET_NAME}`.
+const OSV_RELEASE_BASE: &str =
+    "https://github.com/google/osv-scanner/releases/download";
+
+/// Path to the Camerata-managed osv-scanner directory:
+/// `<tooling_dir>/osv-scanner/`.
+pub fn osv_scanner_dir(tooling: &Path) -> PathBuf {
+    tooling.join("osv-scanner")
+}
+
+/// Path to the cached osv-scanner binary inside the Camerata-managed directory.
+pub fn osv_scanner_bin(dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let bin = dir.join("osv-scanner.exe");
+    #[cfg(not(windows))]
+    let bin = dir.join("osv-scanner");
+    bin
+}
+
+/// Probe whether the osv-scanner binary at `bin` is already provisioned and
+/// responds to `--version` with exit 0.  A `false` return triggers a fresh
+/// provision attempt.
+pub async fn osv_scanner_is_provisioned(bin: &Path) -> bool {
+    if !bin.exists() {
+        return false;
+    }
+    match tokio::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Detect the current OS / architecture label used in osv-scanner release asset
+/// names (e.g. `linux_amd64`, `darwin_arm64`).  Returns `None` when running on
+/// an unsupported combination (Windows / 32-bit / exotic arch) so the caller
+/// can fall through to the `go install` step.
+fn osv_release_asset() -> Option<String> {
+    // osv-scanner release asset naming convention (as of v1.7+):
+    //   osv-scanner_{os}_{arch}            (Linux / macOS)
+    //   osv-scanner_windows_{arch}.exe     (Windows)
+    // We target the most common developer platforms; CI images are typically
+    // linux_amd64.  Unsupported combinations fall through to `go install`.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return Some("osv-scanner_linux_amd64".to_string());
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return Some("osv-scanner_linux_arm64".to_string());
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return Some("osv-scanner_darwin_amd64".to_string());
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return Some("osv-scanner_darwin_arm64".to_string());
+    // Windows / 32-bit / everything else: unsupported for auto-download.
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Attempt to download the pinned osv-scanner prebuilt binary from GitHub
+/// releases into `dest`.  Returns `Ok(())` on success or an error describing
+/// why the download failed (network unavailable, unsupported platform, etc.).
+async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
+    let asset = osv_release_asset().ok_or_else(|| ProvisionError::InstallFailed {
+        tool: "osv-scanner",
+        detail: "unsupported OS/arch for prebuilt binary download; \
+                 try `go install github.com/google/osv-scanner/cmd/osv-scanner@v1.9.2`"
+            .to_string(),
+    })?;
+
+    let url = format!(
+        "{base}/{version}/{asset}",
+        base = OSV_RELEASE_BASE,
+        version = OSV_SCANNER_VERSION,
+        asset = asset,
+    );
+
+    // reqwest is already a dependency (it fetches repo tarballs).  Use rustls
+    // (no system openssl dependency) for the binary download.
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!("could not build HTTP client: {e}"),
+        })?;
+
+    let resp = client.get(&url).send().await.map_err(|e| {
+        ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!("download failed (network unavailable?): {e}"),
+        }
+    })?;
+
+    if !resp.status().is_success() {
+        return Err(ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!(
+                "download returned HTTP {} for {url}",
+                resp.status().as_u16()
+            ),
+        });
+    }
+
+    let bytes = resp.bytes().await.map_err(|e| ProvisionError::InstallFailed {
+        tool: "osv-scanner",
+        detail: format!("failed to read download body: {e}"),
+    })?;
+
+    // Write the binary to the destination path.
+    tokio::fs::write(dest, &bytes).await?;
+
+    // Mark executable on Unix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)).await?;
+    }
+
+    Ok(())
+}
+
+/// Attempt to provision osv-scanner via `go install` with the pinned version.
+/// Only tried when a `go` toolchain is available (checked before calling) and
+/// the prebuilt-binary download did not succeed.  Returns the path to the
+/// installed binary on success.
+async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
+    // `go env GOPATH` gives us the GOPATH so we can locate the installed binary.
+    let gopath_out = tokio::process::Command::new("go")
+        .args(["env", "GOPATH"])
+        .output()
+        .await?;
+    let gopath = String::from_utf8_lossy(&gopath_out.stdout)
+        .trim()
+        .to_string();
+    if gopath.is_empty() {
+        return Err(ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: "`go env GOPATH` returned an empty path".to_string(),
+        });
+    }
+    let bin_dir = std::path::PathBuf::from(&gopath).join("bin");
+    #[cfg(windows)]
+    let bin = bin_dir.join("osv-scanner.exe");
+    #[cfg(not(windows))]
+    let bin = bin_dir.join("osv-scanner");
+
+    let pkg = format!(
+        "github.com/google/osv-scanner/cmd/osv-scanner@{ver}",
+        ver = OSV_SCANNER_VERSION
+    );
+    let install_out = tokio::process::Command::new("go")
+        .args(["install", &pkg])
+        .output()
+        .await?;
+    if !install_out.status.success() {
+        return Err(ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!(
+                "`go install {pkg}` failed: {}",
+                String::from_utf8_lossy(&install_out.stderr)
+            ),
+        });
+    }
+
+    if !bin.exists() {
+        return Err(ProvisionError::InstallFailed {
+            tool: "osv-scanner",
+            detail: format!(
+                "`go install` succeeded but binary not found at: {}",
+                bin.display()
+            ),
+        });
+    }
+    Ok(bin)
+}
+
+/// Ensure osv-scanner is available, returning a `PathBuf` to the binary.
+///
+/// # Resolution chain
+///
+/// 1. If `osv-scanner` is already on PATH and responds to `--version`, use it.
+/// 2. If the cached provisioned binary at `<tooling_dir>/osv-scanner/osv-scanner`
+///    already exists and responds to `--version`, use it.
+/// 3. Attempt to download the pinned prebuilt release binary for this OS/arch
+///    from the osv-scanner GitHub releases page.
+/// 4. Fall back to `go install github.com/google/osv-scanner/cmd/osv-scanner@<pin>`
+///    if a Go toolchain (`go`) is available.
+/// 5. If none of the above succeeds, return `Err(ProvisionError::InstallFailed)`
+///    so the caller emits a `CoverageNote` and the scan continues without dep-audit.
+///
+/// The function is idempotent: a passing health probe short-circuits every step.
+pub async fn ensure_osv_scanner(tooling: &Path) -> Result<PathBuf, ProvisionError> {
+    // Step (a): already on PATH?
+    if interpreter_available("osv-scanner").await {
+        // Resolve the actual binary path from PATH so the caller has a concrete
+        // `PathBuf`.  `which` is a crate we don't depend on; use the tokio
+        // process approach — run it and if it exits 0 we know it's on PATH.
+        // We return a sentinal PATH-relative string as a PathBuf here because the
+        // scan invocation uses `tokio::process::Command::new(bin_str)` which
+        // accepts PATH-resident names when the path has no separator.
+        return Ok(PathBuf::from("osv-scanner"));
+    }
+
+    // Step (b): already provisioned in our managed dir?
+    let dir = osv_scanner_dir(tooling);
+    let bin = osv_scanner_bin(&dir);
+    if osv_scanner_is_provisioned(&bin).await {
+        return Ok(bin);
+    }
+
+    // Neither probe passed — attempt provisioning.
+    tokio::fs::create_dir_all(&dir).await?;
+
+    // Step (c): download prebuilt binary from GitHub releases.
+    match download_osv_scanner(&bin).await {
+        Ok(()) => {
+            // Final health probe after download.
+            if osv_scanner_is_provisioned(&bin).await {
+                return Ok(bin);
+            }
+            // Downloaded but the binary doesn't execute (wrong arch / partial write).
+            // Fall through to go install.
+        }
+        Err(e) => {
+            // Log the download failure reason but don't surface it yet — the go
+            // install path may still succeed.  If go install also fails we will
+            // return the go-install error (more actionable for the user).
+            let _ = e; // intentionally dropped; go-install error wins
+        }
+    }
+
+    // Step (d): go install fallback.
+    if interpreter_available("go").await {
+        let go_bin = go_install_osv_scanner().await.map_err(|e| {
+            ProvisionError::InstallFailed {
+                tool: "osv-scanner",
+                detail: format!(
+                    "prebuilt download failed and `go install` also failed: {e}"
+                ),
+            }
+        })?;
+        return Ok(go_bin);
+    }
+
+    // Step (e): nothing worked.
+    Err(ProvisionError::InstallFailed {
+        tool: "osv-scanner",
+        detail: format!(
+            "could not provision osv-scanner {OSV_SCANNER_VERSION}: \
+             prebuilt download failed and no Go toolchain is available. \
+             Install manually: `go install github.com/google/osv-scanner/cmd/osv-scanner@{OSV_SCANNER_VERSION}`"
+        ),
+    })
+}
+
 // ─── shared helper ───────────────────────────────────────────────────────────
 
 /// Returns `true` when `program` can be found and executed on PATH (by running
@@ -555,5 +835,115 @@ mod tests {
             "bundled eslint config not found at: {}",
             src.display()
         );
+    }
+
+    // ── osv-scanner path helpers ──────────────────────────────────────────────
+
+    #[test]
+    fn osv_scanner_dir_is_under_tooling() {
+        let tmp = TempDir::new().unwrap();
+        let tooling = tmp.path().to_path_buf();
+        let dir = osv_scanner_dir(&tooling);
+        assert!(dir.starts_with(&tooling), "osv-scanner dir must be inside tooling: {dir:?}");
+    }
+
+    #[test]
+    fn osv_scanner_bin_is_inside_dir() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("osv-scanner");
+        let bin = osv_scanner_bin(&dir);
+        assert!(bin.starts_with(&dir), "osv-scanner bin must be inside its dir: {bin:?}");
+        let name = bin.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("osv-scanner"), "binary name must start with osv-scanner: {name}");
+    }
+
+    // ── osv-scanner probe logic ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn missing_osv_scanner_binary_is_not_provisioned() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("osv-scanner");
+        let bin = osv_scanner_bin(&dir);
+        // No binary created: must report not provisioned.
+        assert!(!osv_scanner_is_provisioned(&bin).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stub_osv_scanner_binary_is_provisioned() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("osv-scanner");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let bin = osv_scanner_bin(&dir);
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        assert!(osv_scanner_is_provisioned(&bin).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_osv_scanner_binary_is_not_provisioned() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("osv-scanner");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let bin = osv_scanner_bin(&dir);
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 1\n").await.unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        assert!(!osv_scanner_is_provisioned(&bin).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_osv_scanner_is_idempotent_when_provisioned() {
+        // When the binary is already present + healthy, ensure_osv_scanner must
+        // short-circuit at the cache probe and return the same path twice.
+        let tmp = TempDir::new().unwrap();
+        let tooling = tmp.path().to_path_buf();
+        let dir = osv_scanner_dir(&tooling);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let bin = osv_scanner_bin(&dir);
+        tokio::fs::write(&bin, b"#!/bin/sh\nexit 0\n").await.unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        let r1 = ensure_osv_scanner(&tooling).await;
+        assert!(r1.is_ok(), "first call must succeed: {r1:?}");
+        let r2 = ensure_osv_scanner(&tooling).await;
+        assert!(r2.is_ok(), "second call must succeed: {r2:?}");
+        assert_eq!(r1.unwrap(), r2.unwrap(), "both calls must return the same path");
+    }
+
+    // ── release asset naming ──────────────────────────────────────────────────
+
+    #[test]
+    fn osv_release_asset_is_some_on_common_platforms() {
+        // This test runs on the CI / dev machine — verify the function returns
+        // *something* on a typical developer host (linux/darwin, 64-bit).  It will
+        // legitimately return None on 32-bit / Windows / exotic arch, so we can't
+        // unconditionally assert Some.  The test just documents expected behaviour.
+        let asset = osv_release_asset();
+        // On common platforms (linux amd64/arm64, darwin amd64/arm64) it must be Some.
+        #[cfg(any(
+            all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+            all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64"))
+        ))]
+        assert!(
+            asset.is_some(),
+            "expected a release asset name on this platform (linux/darwin 64-bit)"
+        );
+        // Whatever it returns, it must start with osv-scanner_.
+        if let Some(a) = asset {
+            assert!(
+                a.starts_with("osv-scanner_"),
+                "release asset name must start with osv-scanner_: {a}"
+            );
+        }
     }
 }

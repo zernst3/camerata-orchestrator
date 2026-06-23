@@ -2061,6 +2061,11 @@ pub async fn audit_repos(
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // Coverage notes from the always-on dependency-audit pass (osv-scanner).  These are
+    // floor-level coverage notes, separate from the scan-tools preview notes that land in
+    // `report.coverage_notes` via `merge_scan_preview`.  Both sets are merged into the
+    // final report's `coverage_notes` field after the repo loop.
+    let mut dep_audit_coverage_notes: Vec<CoverageNote> = Vec::new();
     // When the deep tier is on, the WHOLE file set per repo is captured here (the deep lenses
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
@@ -2112,6 +2117,10 @@ pub async fn audit_repos(
             .filter(|r| is_code_auditable_rule(&r.id))
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
+        // `dir_path` is retained for the always-on dep-audit call that runs after
+        // the blocking file-read completes.  The inner `dir` binding is moved into
+        // spawn_blocking below, so we need a separate clone for the async path.
+        let dir_path = dir.clone();
         let dir = dir.clone();
         match tokio::task::spawn_blocking(move || read_local_repo_files(&dir))
             .await
@@ -2151,6 +2160,34 @@ pub async fn audit_repos(
                         jstore.add_findings(jid, floor.clone());
                     }
                     repo_findings = floor;
+                }
+
+                // ── Always-on dependency-vulnerability audit (osv-scanner) ───────────────
+                //
+                // Runs unconditionally (not gated on `run_deterministic` or any rule
+                // selection) as part of the security floor.  "Know your CVE exposure" is
+                // prerequisite-level information for any governance posture.  The call is
+                // fail-soft: if osv-scanner is unavailable (no network, unsupported
+                // platform, no Go toolchain) a CoverageNote is emitted and the scan
+                // continues without dep-audit findings.  See docs/decisions/
+                // 2026-06-23_dependency_audit_onboarding_floor.md.
+                {
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_running(jid, "dep-audit");
+                    }
+                    let (dep_findings, dep_note) =
+                        crate::dep_audit::run_dep_audit(spec, &dir_path).await;
+                    let dep_count = dep_findings.len();
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_done(jid, "dep-audit", dep_count);
+                        if !dep_findings.is_empty() {
+                            jstore.add_findings(jid, dep_findings.clone());
+                        }
+                    }
+                    repo_findings.extend(dep_findings);
+                    if let Some(note) = dep_note {
+                        dep_audit_coverage_notes.push(note);
+                    }
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -2270,6 +2307,10 @@ pub async fn audit_repos(
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
+    // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
+    // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
+    // sets land in `coverage_notes` so the UI sees them in one place.
+    report.coverage_notes.extend(dep_audit_coverage_notes);
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
