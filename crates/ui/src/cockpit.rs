@@ -7760,6 +7760,7 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
             CellValue::Text(match f.status.as_str() {
                 "suppressed-baseline" => "baseline".to_string(),
                 "suppressed-inline" => "waived".to_string(),
+                "suppressed-self-reference" => "self-ref".to_string(),
                 _ => "enforced".to_string(),
             })
         })
@@ -7768,7 +7769,8 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
             BadgeVariantMap::new()
                 .with("enforced", BadgeVariant::new("Enforced", "red"))
                 .with("baseline", BadgeVariant::new("Baseline debt", "gray"))
-                .with("waived", BadgeVariant::new("Waived", "yellow")),
+                .with("waived", BadgeVariant::new("Waived", "yellow"))
+                .with("self-ref", BadgeVariant::new("Self-referential", "gray")),
         ))
         .initial_width(150.0),
         // Second grouping level: the FILE (path only). The findings table groups by

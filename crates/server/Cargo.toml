@@ -52,6 +52,10 @@ toml = "0.8"
 thiserror = { workspace = true }
 # Disk-headroom preflight guard (Decision: 2026-06-22_dogfood_disk_safety).
 fs2 = { workspace = true }
+# Gitignore-aware file walker for the brownfield local scan (Feature: scan-hygiene).
+# Respects .gitignore / .git/info/exclude / global gitignore so committed secrets are
+# still found while truly gitignored build artifacts are skipped.
+ignore = { workspace = true }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }
