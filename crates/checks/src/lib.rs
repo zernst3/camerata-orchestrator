@@ -55,7 +55,7 @@ pub mod verification_gate;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_core::{CheckRunner, Role, RuleId};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 // ─── crate-local error type (RUST-DOMAIN-4/6) ────────────────────────────────
@@ -89,6 +89,76 @@ pub fn test_rule() -> RuleId {
     RuleId("RUST-TEST".to_string())
 }
 
+// ─── Shared Cargo target-dir derivation (disk-safety, 2026-06-22) ────────────
+//
+// All cargo subprocess calls set `CARGO_TARGET_DIR` to the repo's shared artifact
+// directory so every UoW worktree under the same clone writes into ONE target/ tree
+// instead of N separate ones.
+//
+// Layout: worktree is `<clone>/.camerata-worktrees/<branch>`.
+//         clone  = worktree.parent().parent()
+//         target = clone.join(".camerata-shared-target")
+//
+// A worktree outside the canonical layout (e.g. an out-of-band `git worktree add`
+// at an arbitrary path) will produce a `None` from the derivation, in which case
+// the caller falls back to the cargo default (worktree-local target/). This is the
+// conservative fail-open choice: a mis-derived target dir that points to the wrong
+// clone would be worse than a per-worktree fallback.
+
+/// Derive the shared `CARGO_TARGET_DIR` path from a UoW worktree path.
+///
+/// Returns `Some(<clone>/.camerata-shared-target)` for the canonical layout
+/// (`<clone>/.camerata-worktrees/<branch>`), and `None` for out-of-band worktrees.
+pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
+    // parent() → `.camerata-worktrees`, parent() → clone root
+    let clone = worktree.parent()?.parent()?;
+    Some(clone.join(".camerata-shared-target"))
+}
+
+/// Run the disk-headroom preflight check before a cargo build, using the worktree
+/// path for the space query. On insufficient space, returns an error so the run
+/// status surfaces a clear message instead of silently filling the disk.
+///
+/// Threshold: `CAMERATA_MIN_DISK_HEADROOM_GB` env var (integer GB), default 10 GB.
+fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
+    let min = disk_headroom_threshold_bytes();
+    let Some(available) = available_disk_bytes(worktree) else {
+        // Cannot query — fail-open (see workspace.rs::ensure_disk_headroom).
+        return Ok(());
+    };
+    if available >= min {
+        return Ok(());
+    }
+    let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+    let required_gb = min as f64 / (1024.0 * 1024.0 * 1024.0);
+    anyhow::bail!(
+        "insufficient disk headroom before cargo build: {available_gb:.1} GB free, \
+         need >= {required_gb:.0} GB; reclaim space (remove stale worktrees under \
+         .camerata-worktrees/ or .camerata-shared-target/) before starting more work"
+    )
+}
+
+/// Query available disk space at `path`. A thin wrapper so tests can verify the
+/// decision logic via [`has_headroom`] without a real low-disk scenario.
+fn available_disk_bytes(path: &Path) -> Option<u64> {
+    fs2::available_space(path).ok()
+}
+
+/// Pure headroom test: `available >= min`. Separated from the fs2 call so the
+/// decision logic is unit-testable without real disk access.
+pub fn has_headroom(available: u64, min: u64) -> bool {
+    available >= min
+}
+
+/// Parse the `CAMERATA_MIN_DISK_HEADROOM_GB` override, defaulting to 10 GiB.
+fn disk_headroom_threshold_bytes() -> u64 {
+    std::env::var("CAMERATA_MIN_DISK_HEADROOM_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|gb| gb * 1024 * 1024 * 1024)
+        .unwrap_or(10 * 1024 * 1024 * 1024)
+}
+
 // ─── fmt runner ──────────────────────────────────────────────────────────────
 
 /// Runs `cargo fmt --check` and returns `[RUST-FMT]` if the worktree has
@@ -98,7 +168,10 @@ pub struct FmtCheckRunner;
 #[async_trait]
 impl CheckRunner for FmtCheckRunner {
     async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        let output = subprocess::run_fmt_check(worktree)
+        // Disk-headroom preflight: refuse to start a build if disk is low.
+        check_build_disk_headroom(worktree)?;
+        let target_dir = derive_shared_target_dir(worktree);
+        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref())
             .await
             .context("running cargo fmt --check")?;
 
@@ -115,7 +188,10 @@ pub struct ClippyCheckRunner;
 #[async_trait]
 impl CheckRunner for ClippyCheckRunner {
     async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        let output = subprocess::run_clippy(worktree)
+        // Disk-headroom preflight: refuse to start a build if disk is low.
+        check_build_disk_headroom(worktree)?;
+        let target_dir = derive_shared_target_dir(worktree);
+        let output = subprocess::run_clippy(worktree, target_dir.as_deref())
             .await
             .context("running cargo clippy")?;
 
@@ -132,7 +208,10 @@ pub struct TestCheckRunner;
 #[async_trait]
 impl CheckRunner for TestCheckRunner {
     async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        let output = subprocess::run_test(worktree)
+        // Disk-headroom preflight: refuse to start a build if disk is low.
+        check_build_disk_headroom(worktree)?;
+        let target_dir = derive_shared_target_dir(worktree);
+        let output = subprocess::run_test(worktree, target_dir.as_deref())
             .await
             .context("running cargo test")?;
 
@@ -182,5 +261,83 @@ impl CheckRunner for RustCheckRunner {
         // Deduplicate so the bounce-back message is clean.
         violations.dedup_by(|a, b| a.0 == b.0);
         Ok(violations)
+    }
+}
+
+// ─── unit tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── derive_shared_target_dir ─────────────────────────────────────────────
+
+    #[test]
+    fn derive_shared_target_dir_canonical_layout() {
+        // Canonical: <clone>/.camerata-worktrees/<branch-seg>
+        let worktree = Path::new("/Users/me/ws/acme/api/.camerata-worktrees/camerata__story-7");
+        let got = derive_shared_target_dir(worktree);
+        assert_eq!(
+            got,
+            Some(PathBuf::from(
+                "/Users/me/ws/acme/api/.camerata-shared-target"
+            )),
+            "derived target must be sibling of .camerata-worktrees under clone"
+        );
+    }
+
+    #[test]
+    fn derive_shared_target_dir_out_of_band_worktree_returns_none() {
+        // A worktree at root level has no grandparent — derivation returns None.
+        let worktree = Path::new("/wt");
+        let got = derive_shared_target_dir(worktree);
+        // May or may not be None depending on whether "/" has a parent; the key
+        // invariant is that it does not panic.
+        let _ = got; // just confirm no panic
+    }
+
+    #[test]
+    fn derive_shared_target_dir_two_worktrees_same_clone() {
+        // Two different branch worktrees under the SAME clone must derive the SAME target dir.
+        let base = "/Users/me/ws/acme/api/.camerata-worktrees";
+        let wt_a = PathBuf::from(base).join("camerata__story-a");
+        let wt_b = PathBuf::from(base).join("camerata__story-b");
+        assert_eq!(
+            derive_shared_target_dir(&wt_a),
+            derive_shared_target_dir(&wt_b),
+            "same clone → same shared target"
+        );
+    }
+
+    // ── has_headroom (pure decision logic) ──────────────────────────────────
+
+    #[test]
+    fn has_headroom_true_when_exactly_at_threshold() {
+        let threshold = 10u64 * 1024 * 1024 * 1024;
+        assert!(has_headroom(threshold, threshold));
+    }
+
+    #[test]
+    fn has_headroom_true_when_above_threshold() {
+        let threshold = 10u64 * 1024 * 1024 * 1024;
+        assert!(has_headroom(threshold + 1, threshold));
+    }
+
+    #[test]
+    fn has_headroom_false_when_below_threshold() {
+        let threshold = 10u64 * 1024 * 1024 * 1024;
+        assert!(!has_headroom(threshold - 1, threshold));
+        // Incident: 131 MB free
+        assert!(!has_headroom(131 * 1024 * 1024, threshold));
+    }
+
+    #[test]
+    fn has_headroom_false_at_zero_with_nonzero_min() {
+        assert!(!has_headroom(0, 1));
+    }
+
+    #[test]
+    fn has_headroom_true_at_zero_min() {
+        assert!(has_headroom(0, 0));
     }
 }

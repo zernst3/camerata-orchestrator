@@ -468,14 +468,54 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
 
     // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
-    // records from every known repo clone. A crashed/killed run can leave a worktree dir
-    // gone but still registered; `git worktree prune` reconciles. Best-effort + non-blocking.
+    // records from every known repo clone AND remove worktrees for UoWs that are already
+    // in a terminal state (SignedOff). Two cleanup passes, both best-effort + non-blocking:
+    //
+    //   Pass 1 — Terminal-state sweep (disk-safety, 2026-06-22): for every SignedOff UoW
+    //   that still has a branch, remove its worktree. This reclaims leaked worktrees from
+    //   crashes/kills that happened BETWEEN sign-off and the on-sign-off teardown, and from
+    //   sessions that pre-dated the per-stage teardown feature. Conservative: only removes
+    //   worktrees for UoWs explicitly in SignedOff state; branches are left intact (they may
+    //   still back a PR). Note: with the current lifecycle (SignedOff is the only terminal
+    //   stage), this is sufficient. If future stages add Abandoned/Failed variants, extend
+    //   the filter here.
+    //
+    //   Pass 2 — Admin-record prune (Decision 1 original): `git worktree prune` drops admin
+    //   records for worktrees whose directories were removed out-of-band (e.g. by the sweep
+    //   above, or by the user manually). Always runs even when pass 1 is skipped.
     {
         let projects = state.projects.clone();
         let settings = state.settings.clone();
+        let uow_store = state.uow.clone();
         tokio::spawn(async move {
             let workspace_root = settings.workspace_root();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            // Pass 1: remove worktrees for terminal-state (SignedOff) UoWs.
+            for uow in uow_store.list() {
+                if uow.stage != crate::lifecycle::UowStage::SignedOff {
+                    continue;
+                }
+                let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) else {
+                    continue;
+                };
+                let Some(repo) = repo_from_story_id(&uow.story_id) else {
+                    continue;
+                };
+                let override_path = settings.repo_path(&repo);
+                let Some(clone) = crate::workspace::resolve_repo_dir(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    &repo,
+                ) else {
+                    continue;
+                };
+                // Best-effort: errors (no clone, no worktree) are silently ignored — the
+                // worktree simply wasn't there; the prune pass handles the admin records.
+                crate::workspace::remove_uow_worktree(&clone, branch).await;
+            }
+
+            // Pass 2: prune stale admin records across all known repos.
             for project in projects.list() {
                 for repo in &project.repos {
                     if !seen.insert(repo.clone()) {

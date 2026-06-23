@@ -477,6 +477,11 @@ pub async fn ensure_uow_worktree(clone: &Path, branch: &str) -> anyhow::Result<P
         );
     }
 
+    // 0. Disk-headroom preflight guard (dogfood disk-safety, 2026-06-22): refuse to create
+    //    another worktree when the disk is running low. Each worktree + shared target can consume
+    //    significant space; this guard is the backstop that prevents filling the disk.
+    ensure_disk_headroom(clone, disk_headroom_threshold_bytes())?;
+
     // 1. If the branch is already checked out anywhere, reuse that worktree (collision-safe,
     //    idempotent). This is the "already checked out elsewhere" graceful path.
     if let Some(existing) = worktree_for_branch(clone, branch).await {
@@ -584,6 +589,129 @@ pub async fn prune_worktrees(clone: &Path) {
         return;
     }
     let _ = git(Some(clone), &["worktree", "prune"]).await;
+}
+
+// ── Shared Cargo target dir (dogfood disk-safety, 2026-06-22) ────────────────
+//
+// PROBLEM: Without a shared target, each UoW worktree's `cargo build / test / clippy`
+// builds its OWN `target/` directory (~5 GB for this workspace). With several concurrent
+// UoWs that multiplied to 115 GB across worktrees on the incident machine, filling the
+// disk to 131 MB free and corrupting builds.
+//
+// SOLUTION: All of a repo's UoW worktrees share ONE `target/` directory: the
+// `.camerata-shared-target/` sibling to `.camerata-worktrees/`, nested inside the shared
+// clone. Per-repo (not global) because different repos cannot share a cargo target.
+//
+// CONCURRENCY TRADEOFF: Cargo file-locks `target/` during a build, so concurrent builds
+// on the same repo SERIALIZE at the lock rather than running in parallel. This is the
+// accepted tradeoff: correctness (no interleaved artifacts) over parallelism. Camerata's
+// serial-by-default UoW execution means this rarely matters in practice; even when it
+// does, waiting is far better than filling the disk.
+//
+// LOCATION: `<clone>/.camerata-shared-target` is outside every worktree root, so it
+// never appears in any worktree's `git status`. It lives inside the clone directory
+// (which Camerata manages), so it is cleaned up with the clone and never in the user's
+// own repo. Do NOT add it to the user's `.gitignore` — it lives outside all worktree
+// roots and is invisible to git.
+
+/// Path of the shared Cargo target directory for a repo's clone.
+///
+/// All of a clone's UoW worktrees set `CARGO_TARGET_DIR` to this path so every
+/// `cargo fmt / clippy / test` invocation writes into one shared artifact store
+/// rather than a separate `target/` per worktree.
+///
+/// The directory is `<clone>/.camerata-shared-target` — a SIBLING of `.camerata-worktrees/`
+/// inside the shared clone but OUTSIDE every individual worktree, so it is invisible to
+/// `git status` in any worktree and never pollutes the user's repo.
+pub fn shared_target_dir(clone: &Path) -> PathBuf {
+    clone.join(".camerata-shared-target")
+}
+
+/// Ensure the shared Cargo target directory exists for `clone`, creating it if needed.
+/// Best-effort: if creation fails the caller continues without the shared target (cargo
+/// falls back to the default `<worktree>/target/` in that case).
+pub async fn ensure_shared_target_dir(clone: &Path) -> PathBuf {
+    let dir = shared_target_dir(clone);
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    dir
+}
+
+// ── Disk-headroom preflight guard (dogfood disk-safety, 2026-06-22) ──────────
+//
+// A hard disk preflight guard that fires BEFORE creating a new worktree AND before
+// starting a cargo build. This is the absolute backstop: even if the shared-target
+// optimization fails (e.g. CARGO_TARGET_DIR not threaded correctly), the guard catches
+// the disk running low before we make it worse.
+//
+// Threshold: 10 GB by default. Override with `CAMERATA_MIN_DISK_HEADROOM_GB` (integer).
+// On failure the error message names the free / required amounts and suggests remediation
+// (remove stale worktrees / shared target) so it surfaces actionably in the UI.
+
+/// Minimum free disk bytes required before a worktree or build is allowed to proceed.
+/// Default: 10 GiB. Override at runtime via `CAMERATA_MIN_DISK_HEADROOM_GB`.
+pub const MIN_DISK_HEADROOM_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Parse a GB value string into bytes, falling back to `default_bytes` on invalid input.
+/// Exported for unit-tests — tests drive this pure function directly rather than
+/// manipulating `CAMERATA_MIN_DISK_HEADROOM_GB` in a shared test process environment
+/// (where parallel tests would race on the same env var).
+pub fn parse_disk_headroom_gb(raw: Option<&str>, default_bytes: u64) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|gb| gb * 1024 * 1024 * 1024)
+        .unwrap_or(default_bytes)
+}
+
+/// Read the effective disk-headroom threshold in bytes: `CAMERATA_MIN_DISK_HEADROOM_GB`
+/// env var (integer GiB) if set and valid, otherwise [`MIN_DISK_HEADROOM_BYTES`] (10 GiB).
+pub fn disk_headroom_threshold_bytes() -> u64 {
+    let raw = std::env::var("CAMERATA_MIN_DISK_HEADROOM_GB").ok();
+    parse_disk_headroom_gb(raw.as_deref(), MIN_DISK_HEADROOM_BYTES)
+}
+
+/// Pure headroom test — separated from the real `fs2` call so the decision logic
+/// can be unit-tested without disk access.
+///
+/// Returns `true` when `available >= min` (headroom is sufficient).
+pub fn has_headroom(available: u64, min: u64) -> bool {
+    available >= min
+}
+
+/// Query the available disk space at `path` using a single `statvfs` syscall.
+///
+/// Returns `None` when the path does not exist or the OS call fails (e.g. on
+/// an unsupported platform). The caller should fail-open on `None` (let the
+/// operation proceed) to avoid spurious blocks on platforms where the query
+/// is unavailable.
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    // fs2::available_space is a single statvfs call — negligible overhead.
+    fs2::available_space(path).ok()
+}
+
+/// Assert there is at least `min_bytes` of free disk space at `path`.
+///
+/// Returns `Ok(())` when headroom is sufficient (or the query cannot be made —
+/// fail-open for cross-platform safety). Returns a descriptive [`anyhow::Error`]
+/// when free space is confirmed below the threshold so the error surfaces in the
+/// run status / UI rather than silently filling the disk.
+///
+/// Call this at the start of [`ensure_uow_worktree`] and before cargo build steps
+/// in the check runner. The check is cheap (one `statvfs` syscall).
+pub fn ensure_disk_headroom(path: &Path, min_bytes: u64) -> anyhow::Result<()> {
+    let Some(available) = available_disk_bytes(path) else {
+        // Cannot query — fail-open: better to attempt the operation than to
+        // block it spuriously on a platform where statvfs is unavailable.
+        return Ok(());
+    };
+    if has_headroom(available, min_bytes) {
+        return Ok(());
+    }
+    let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+    let required_gb = min_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    anyhow::bail!(
+        "insufficient disk headroom: {available_gb:.1} GB free, need >= {required_gb:.0} GB; \
+         reclaim space (remove stale worktrees under .camerata-worktrees/ or \
+         .camerata-shared-target/) before starting more work"
+    )
 }
 
 // ── Local git controls (issue #37) ───────────────────────────────────────────
@@ -1759,5 +1887,118 @@ mod tests {
         assert!(none.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Disk-safety unit tests (2026-06-22) ─────────────────────────────────
+
+    /// `shared_target_dir` is a sibling of `.camerata-worktrees/` under the clone.
+    #[test]
+    fn shared_target_dir_is_sibling_of_worktrees_root() {
+        let clone = Path::new("/Users/me/ws/acme/api");
+        let target = shared_target_dir(clone);
+        // Must live INSIDE the clone directory.
+        assert!(target.starts_with(clone), "shared target under clone");
+        // Must be `.camerata-shared-target`, NOT inside `.camerata-worktrees/`.
+        assert_eq!(
+            target.file_name().and_then(|n| n.to_str()),
+            Some(".camerata-shared-target"),
+            "correct dir name"
+        );
+        // Confirm it is a DIRECT child (one level), not nested inside worktrees.
+        assert_eq!(
+            target,
+            clone.join(".camerata-shared-target"),
+            "exact expected path"
+        );
+    }
+
+    /// The derivation `worktree.parent().parent()` recovers the clone root for the
+    /// canonical layout `<clone>/.camerata-worktrees/<branch>`.
+    #[test]
+    fn clone_derivation_from_worktree_path() {
+        let clone = Path::new("/Users/me/ws/acme/api");
+        let branch_dir = worktrees_root(clone).join("camerata__story-7");
+        // Derive clone root: parent() → .camerata-worktrees, parent() → clone.
+        let derived_clone = branch_dir.parent().and_then(|p| p.parent());
+        assert_eq!(derived_clone, Some(clone), "clone root correctly recovered");
+
+        // shared_target_dir derived from the worktree path must equal the one from clone.
+        let derived_target = derived_clone.map(shared_target_dir);
+        assert_eq!(derived_target, Some(shared_target_dir(clone)));
+    }
+
+    /// `has_headroom` is a pure decision function: available >= min → true.
+    #[test]
+    fn has_headroom_is_true_when_available_meets_threshold() {
+        assert!(has_headroom(10 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
+        assert!(has_headroom(20 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
+        assert!(has_headroom(u64::MAX, 0));
+    }
+
+    /// `has_headroom` returns false when available < min (the guard must fire).
+    #[test]
+    fn has_headroom_is_false_when_below_threshold() {
+        assert!(!has_headroom(0, 1));
+        assert!(!has_headroom(
+            5 * 1024 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024
+        ));
+        assert!(!has_headroom(131 * 1024 * 1024, 10 * 1024 * 1024 * 1024)); // incident: 131 MB free
+    }
+
+    /// `ensure_disk_headroom` returns `Ok(())` when space is sufficient (simulated via
+    /// a path with real free space and a min of 0).
+    #[test]
+    fn ensure_disk_headroom_passes_at_zero_minimum() {
+        // Any real path with 0 minimum always has headroom.
+        let tmp = std::env::temp_dir();
+        assert!(ensure_disk_headroom(&tmp, 0).is_ok());
+    }
+
+    /// `ensure_disk_headroom` returns `Err` when min exceeds any conceivable free space.
+    #[test]
+    fn ensure_disk_headroom_fails_when_min_exceeds_free_space() {
+        let tmp = std::env::temp_dir();
+        // u64::MAX bytes required — no disk can satisfy this.
+        assert!(ensure_disk_headroom(&tmp, u64::MAX).is_err());
+    }
+
+    /// The error message from `ensure_disk_headroom` names free / required amounts
+    /// and includes actionable remediation text.
+    #[test]
+    fn ensure_disk_headroom_error_is_actionable() {
+        let tmp = std::env::temp_dir();
+        let err = ensure_disk_headroom(&tmp, u64::MAX).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("insufficient disk headroom"), "names problem: {msg}");
+        assert!(msg.contains("GB free"), "states free space: {msg}");
+        assert!(msg.contains("reclaim space"), "gives remediation: {msg}");
+    }
+
+    /// `parse_disk_headroom_gb` returns the default bytes when env var is absent (None).
+    #[test]
+    fn disk_headroom_threshold_falls_back_to_default() {
+        // Tests drive the pure parse function, not the env-reading wrapper, to avoid
+        // races on the shared process environment when tests run in parallel.
+        assert_eq!(
+            parse_disk_headroom_gb(None, MIN_DISK_HEADROOM_BYTES),
+            MIN_DISK_HEADROOM_BYTES
+        );
+    }
+
+    /// `parse_disk_headroom_gb` converts a "5" override to 5 GiB in bytes.
+    #[test]
+    fn disk_headroom_threshold_respects_env_override() {
+        let threshold = parse_disk_headroom_gb(Some("5"), MIN_DISK_HEADROOM_BYTES);
+        assert_eq!(threshold, 5 * 1024 * 1024 * 1024, "5 GB from env var override");
+    }
+
+    /// `parse_disk_headroom_gb` falls back to default on non-numeric input.
+    #[test]
+    fn disk_headroom_threshold_falls_back_on_invalid_input() {
+        assert_eq!(
+            parse_disk_headroom_gb(Some("not-a-number"), MIN_DISK_HEADROOM_BYTES),
+            MIN_DISK_HEADROOM_BYTES
+        );
     }
 }

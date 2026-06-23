@@ -17,3 +17,5 @@ thiserror.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Disk-headroom preflight guard before cargo builds (Decision: 2026-06-22_dogfood_disk_safety).
+fs2 = { workspace = true }

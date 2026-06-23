@@ -47,3 +47,7 @@ anyhow = "1"
 futures = "0.3"
 thiserror = "2"
 async-trait = "0.1"
+# Disk-space query (a single statvfs call) — used by the disk-headroom preflight guard
+# (Decision: 2026-06-22_dogfood_disk_safety). Deliberately a workspace dep so server,
+# checks, and agent can all share the same version without version skew.
+fs2 = "0.4"

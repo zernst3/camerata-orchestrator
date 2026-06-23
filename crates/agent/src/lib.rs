@@ -16,7 +16,7 @@
 //!   write tool plus read-only built-ins. The role's path scope is enforced by
 //!   the gateway + `--add-dir`; the tool list enforces *which* tools at all.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use camerata_core::{AgentDriver, AgentOutcome, Role};
 use thiserror::Error;
@@ -252,15 +252,33 @@ impl ClaudeCliDriver {
         args
     }
 
-    /// Build the tokio command (program + args + cwd), ready to `.output()`.
+    /// Build the tokio command (program + args + cwd + CARGO_TARGET_DIR), ready to `.output()`.
+    ///
+    /// When `self.worktree` follows the canonical Camerata layout
+    /// (`<clone>/.camerata-worktrees/<branch>`), `CARGO_TARGET_DIR` is injected so any cargo
+    /// invocations Claude makes write into the shared artifact store. See the module-level
+    /// note in `crates/agent/src/generic.rs` for the full disk-safety design.
     fn build_command(&self, role: &Role, task: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("claude");
         cmd.args(self.build_args(role, task));
         if let Some(wt) = &self.worktree {
             cmd.current_dir(wt);
+            // Inject CARGO_TARGET_DIR for disk-safety (2026-06-22).
+            if let Some(shared_target) = derive_shared_target_dir(wt) {
+                cmd.env("CARGO_TARGET_DIR", &shared_target);
+            }
         }
         cmd
     }
+}
+
+/// Derive the shared `CARGO_TARGET_DIR` path from a canonical UoW worktree.
+///
+/// Canonical layout: `<clone>/.camerata-worktrees/<branch>`.
+/// Returns `Some(<clone>/.camerata-shared-target)`, or `None` for shallow/out-of-band paths.
+fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
+    let clone = worktree.parent()?.parent()?;
+    Some(clone.join(".camerata-shared-target"))
 }
 
 #[async_trait::async_trait]

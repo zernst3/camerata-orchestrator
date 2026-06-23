@@ -9,6 +9,21 @@
 //! `cargo clippy` follows the same pattern: non-zero exit means lints fired.
 //! `cargo test` follows it too: non-zero exit means a test failed (or the crate
 //! did not compile).
+//!
+//! # CARGO_TARGET_DIR — shared target directory (disk-safety, 2026-06-22)
+//!
+//! All three cargo commands accept an optional `target_dir: Option<&Path>` and, when
+//! Some, set `CARGO_TARGET_DIR` to that path. The caller (the check runners in lib.rs)
+//! derives this path from the worktree location:
+//!
+//! ```text
+//! <clone>/.camerata-shared-target
+//!   └─ (shared by all UoW worktrees under <clone>/.camerata-worktrees/<branch>)
+//! ```
+//!
+//! Cargo file-locks `target/` during a build, so concurrent builds on the same repo
+//! SERIALIZE at the lock — that is the accepted tradeoff (correctness over parallelism).
+//! A comment in `workspace::ensure_uow_worktree` documents this.
 
 use std::path::Path;
 use tokio::process::Command;
@@ -80,12 +95,21 @@ pub struct TestOutput {
 }
 
 /// Run `cargo fmt --check` in `worktree` and return the raw output.
-pub async fn run_fmt_check(worktree: &Path) -> std::io::Result<FmtOutput> {
-    let out = Command::new("cargo")
-        .args(["fmt", "--check"])
-        .current_dir(worktree)
-        .output()
-        .await?;
+///
+/// `target_dir`: when `Some`, `CARGO_TARGET_DIR` is set to that path on the child
+/// process so all worktrees for this repo share ONE artifact store rather than each
+/// building their own `target/` directory. Pass the value from
+/// `camerata_server::workspace::shared_target_dir(&clone)`.
+pub async fn run_fmt_check(
+    worktree: &Path,
+    target_dir: Option<&Path>,
+) -> std::io::Result<FmtOutput> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["fmt", "--check"]).current_dir(worktree);
+    if let Some(td) = target_dir {
+        cmd.env("CARGO_TARGET_DIR", td);
+    }
+    let out = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -98,12 +122,21 @@ pub async fn run_fmt_check(worktree: &Path) -> std::io::Result<FmtOutput> {
 }
 
 /// Run `cargo clippy -- -D warnings` in `worktree` and return the raw output.
-pub async fn run_clippy(worktree: &Path) -> std::io::Result<ClippyOutput> {
-    let out = Command::new("cargo")
-        .args(["clippy", "--", "-D", "warnings"])
-        .current_dir(worktree)
-        .output()
-        .await?;
+///
+/// `target_dir`: when `Some`, sets `CARGO_TARGET_DIR` on the child process so this
+/// invocation shares the repo's single artifact store. See `run_fmt_check` for the
+/// full design note.
+pub async fn run_clippy(
+    worktree: &Path,
+    target_dir: Option<&Path>,
+) -> std::io::Result<ClippyOutput> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["clippy", "--", "-D", "warnings"])
+        .current_dir(worktree);
+    if let Some(td) = target_dir {
+        cmd.env("CARGO_TARGET_DIR", td);
+    }
+    let out = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -121,12 +154,19 @@ pub async fn run_clippy(worktree: &Path) -> std::io::Result<ClippyOutput> {
 /// revision pass rather than discovering them one at a time across several
 /// bounce-backs. A non-zero exit means a test failed or the crate did not
 /// compile; either way the layer-2 gate should bounce the work back.
-pub async fn run_test(worktree: &Path) -> std::io::Result<TestOutput> {
-    let out = Command::new("cargo")
-        .args(["test", "--no-fail-fast"])
-        .current_dir(worktree)
-        .output()
-        .await?;
+///
+/// `target_dir`: when `Some`, sets `CARGO_TARGET_DIR` so builds use the shared
+/// artifact store. See `run_fmt_check` for the full design note.
+pub async fn run_test(
+    worktree: &Path,
+    target_dir: Option<&Path>,
+) -> std::io::Result<TestOutput> {
+    let mut cmd = Command::new("cargo");
+    cmd.args(["test", "--no-fail-fast"]).current_dir(worktree);
+    if let Some(td) = target_dir {
+        cmd.env("CARGO_TARGET_DIR", td);
+    }
+    let out = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
