@@ -149,7 +149,10 @@ fn App() -> Element {
         // Receives the ask-a-finding signal: when any FindingsTable row's "Ask AI"
         // button fires, it writes a FindingContext here and the panel auto-opens
         // in Project mode focused on that finding.
-        chat::ChatBubble { finding: ask_finding() }
+        chat::ChatBubble {
+            finding: ask_finding(),
+            pulled_issues_section: cockpit::pulled_issues_chat_section(),
+        }
         // The in-app terminal: a floating PTY-backed shell panel with tab support.
         // FAB sits to the LEFT of the chat FAB so both are reachable without overlap.
         terminal::TerminalBubble {}

@@ -4837,6 +4837,7 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
                         state: "open".to_string(),
                         url: issue.url,
                         labels: Vec::new(),
+                        parent_number: issue.parent_number,
                     });
                 }
             }

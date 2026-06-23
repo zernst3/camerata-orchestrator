@@ -65,6 +65,12 @@ pub struct WorkItem {
     /// The item's labels (provider label names).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// The parent issue number when this item is a GitHub sub-issue (Epic → child).
+    /// Carried through from [`IssueSummary::parent_number`] on the pull path.
+    /// `None` for top-level issues, standalone issues, and items fetched via the
+    /// single-issue refresh path (which does not carry the parent field).
+    #[serde(default)]
+    pub parent_number: Option<u64>,
 }
 
 impl WorkItem {
@@ -86,6 +92,7 @@ impl WorkItem {
             state: issue.state.clone(),
             url: issue.url.clone(),
             labels: issue.labels.clone(),
+            parent_number: None,
         }
     }
 
@@ -121,6 +128,7 @@ impl WorkItem {
             state: state.to_string(),
             url: ext.url.clone(),
             labels: Vec::new(),
+            parent_number: None,
         })
     }
 }

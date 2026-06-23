@@ -331,6 +331,7 @@ pub(crate) const UNIFIED_NOT_COVERED_PHRASE: &str =
 pub(crate) fn unified_system_prompt(
     rules_catalog: &str,
     uow_section: &str,
+    pulled_issues_section: Option<&str>,
     finding: Option<&FindingContext>,
 ) -> String {
     let not_covered = UNIFIED_NOT_COVERED_PHRASE;
@@ -375,6 +376,21 @@ pub(crate) fn unified_system_prompt(
     );
     p.push_str(uow_section);
     p.push_str("\n");
+
+    // ── Layer 3b: pulled issue spine (optional) ───────────────────────────────
+    // Present when the architect has pulled issues from GitHub this session.
+    // Shows Epic → child structure so the model can answer "what issues are open?",
+    // "what does #42 track?", "what's under the auth Epic?" etc.
+    // Appended after the UoW tail so it doesn't disturb the stable cached prefix.
+    if let Some(sec) = pulled_issues_section {
+        if !sec.trim().is_empty() {
+            p.push_str(
+                "=== LAYER 3b: PULLED ISSUES (open GitHub issues pulled this session) ===\n",
+            );
+            p.push_str(sec);
+            p.push_str("\n");
+        }
+    }
 
     // ── Layer 4: focused finding (optional) ───────────────────────────────────
     if let Some(f) = finding {
@@ -473,6 +489,12 @@ pub struct ChatBubbleProps {
     /// finding.
     #[props(default)]
     pub finding: Option<FindingContext>,
+    /// Pre-rendered issue spine injected by the caller from the app-lifetime
+    /// `PULLED_WORK_ITEMS` cache. When `Some`, this becomes Layer 3b of the
+    /// system prompt. The caller computes the text; `ChatBubble` injects it
+    /// opaquely, keeping the chat module free of WorkItem dependencies.
+    #[props(default)]
+    pub pulled_issues_section: Option<String>,
 }
 
 #[component]
@@ -728,6 +750,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             let catalog_kd2 = catalog_kd.clone();
                             let uow_snaps_kd = uow_snaps.clone();
                             let finding_kd = active_finding.read().clone();
+                            let pis_kd = props.pulled_issues_section.clone();
                             move |e: Event<KeyboardData>| {
                                 if e.key() == Key::Enter && !e.modifiers().shift() {
                                     e.prevent_default();
@@ -740,6 +763,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     let sys = unified_system_prompt(
                                         &catalog_kd2,
                                         &uow_sec,
+                                        pis_kd.as_deref(),
                                         finding_kd.as_ref(),
                                     );
                                     // Snapshot prior turns BEFORE appending the new user message —
@@ -781,6 +805,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 let catalog_btn2 = catalog_btn.clone();
                                 let uow_snaps_btn = uow_snaps.clone();
                                 let finding_btn = active_finding.read().clone();
+                                let pis_btn = props.pulled_issues_section.clone();
                                 move |_| {
                                     let prompt = draft().trim().to_string();
                                     if prompt.is_empty() || sending() {
@@ -791,6 +816,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     let sys = unified_system_prompt(
                                         &catalog_btn2,
                                         &uow_sec,
+                                        pis_btn.as_deref(),
                                         finding_btn.as_ref(),
                                     );
                                     // Snapshot prior turns BEFORE appending the new user message —
@@ -947,7 +973,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_technical_reference_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             prompt.contains("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ==="),
             "Unified prompt missing LAYER 1 header"
@@ -960,7 +986,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_user_guide_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             prompt.contains("=== LAYER 1b: CAMERATA USER GUIDE ==="),
             "Unified prompt missing LAYER 1b header"
@@ -974,7 +1000,7 @@ mod tests {
     #[test]
     fn unified_prompt_includes_rules_catalog_when_present() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
-        let prompt = unified_system_prompt(catalog, "No stories.\n", None);
+        let prompt = unified_system_prompt(catalog, "No stories.\n", None, None);
         assert!(
             prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt missing LAYER 2 header"
@@ -987,7 +1013,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_when_empty() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header when catalog is empty"
@@ -996,7 +1022,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_for_whitespace_only_input() {
-        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None);
+        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None, None);
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header for whitespace-only catalog"
@@ -1005,7 +1031,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_layer3_dev_state_header() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             prompt.contains("=== LAYER 3: LIVE DEVELOPMENT STATE"),
             "Unified prompt missing LAYER 3 header"
@@ -1016,7 +1042,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_not_covered_phrase() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Unified prompt missing the not-covered phrase: {:?}",
@@ -1028,7 +1054,7 @@ mod tests {
     fn unified_prompt_not_covered_phrase_survives_catalog_and_uow() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
         let uow = "- CAM-1: stage=development, gate=no run yet, sign-off=not signed off\n";
-        let prompt = unified_system_prompt(catalog, uow, None);
+        let prompt = unified_system_prompt(catalog, uow, None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Unified prompt missing the not-covered phrase after adding catalog + uow"
@@ -1037,7 +1063,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_not_covered_phrase_marked_critical() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             prompt.contains("CRITICAL"),
             "Unified prompt should mark the not-covered guardrail as CRITICAL"
@@ -1048,7 +1074,7 @@ mod tests {
     /// so the model encounters the constraint before reading grounding data.
     #[test]
     fn unified_prompt_not_covered_phrase_appears_before_first_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         let phrase_pos = prompt
             .find(UNIFIED_NOT_COVERED_PHRASE)
             .expect("UNIFIED_NOT_COVERED_PHRASE not found");
@@ -1071,7 +1097,7 @@ mod tests {
     fn layer3_appears_after_layers_1_and_2() {
         let catalog = "- RULE-1 [security · repo-local]: foo\n";
         let uow = "- CAM-1: stage=development, gate=no run yet\n";
-        let prompt = unified_system_prompt(catalog, uow, None);
+        let prompt = unified_system_prompt(catalog, uow, None, None);
         let layer1_pos = prompt
             .find("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===")
             .expect("LAYER 1 header not found");
@@ -1096,7 +1122,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_includes_focused_finding_section() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", Some(&f));
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f));
         assert!(
             prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with finding missing LAYER 4 header"
@@ -1121,7 +1147,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_without_finding_has_no_layer4() {
-        let prompt = unified_system_prompt("", "No stories.\n", None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt without finding must not include LAYER 4"
@@ -1131,7 +1157,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_empty_finding_has_no_layer4() {
         let empty = FindingContext::default();
-        let prompt = unified_system_prompt("", "No stories.\n", Some(&empty));
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&empty));
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with empty finding must not include LAYER 4"
@@ -1141,7 +1167,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_retains_not_covered_guardrail() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", Some(&f));
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f));
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Finding-scoped prompt must retain the not-covered guardrail"
@@ -1154,7 +1180,7 @@ mod tests {
     fn layer4_appears_after_layer3() {
         let f = make_finding();
         let uow = "- CAM-1: stage=development\n";
-        let prompt = unified_system_prompt("", uow, Some(&f));
+        let prompt = unified_system_prompt("", uow, None, Some(&f));
         let layer3_pos = prompt
             .find("=== LAYER 3: LIVE DEVELOPMENT STATE")
             .expect("LAYER 3 header not found");
@@ -1164,6 +1190,65 @@ mod tests {
         assert!(
             layer3_pos < layer4_pos,
             "LAYER 3 must precede LAYER 4 (found at {layer3_pos} and {layer4_pos})"
+        );
+    }
+
+    // ── Layer 3b: pulled issues section ──────────────────────────────────────
+
+    #[test]
+    fn unified_prompt_layer3b_present_when_pulled_issues_supplied() {
+        let issues = "- #10 [Epic, open]: Auth overhaul\n  - #11 [child, open]: Token refresh\n";
+        let prompt = unified_system_prompt("", "No stories.\n", Some(issues), None);
+        assert!(
+            prompt.contains("=== LAYER 3b: PULLED ISSUES"),
+            "Layer 3b header must appear when pulled_issues_section is Some"
+        );
+        assert!(
+            prompt.contains(issues),
+            "Pulled issues content must appear verbatim"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_layer3b_absent_when_none() {
+        let prompt = unified_system_prompt("", "No stories.\n", None, None);
+        assert!(
+            !prompt.contains("=== LAYER 3b:"),
+            "Layer 3b header must not appear when pulled_issues_section is None"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_layer3b_absent_when_whitespace_only() {
+        let prompt = unified_system_prompt("", "No stories.\n", Some("   \n "), None);
+        assert!(
+            !prompt.contains("=== LAYER 3b:"),
+            "Layer 3b header must not appear for whitespace-only pulled_issues_section"
+        );
+    }
+
+    #[test]
+    fn layer3b_appears_after_layer3_and_before_layer4() {
+        let f = make_finding();
+        let uow = "- CAM-1: stage=development\n";
+        let issues = "- #10 [Epic, open]: Auth\n";
+        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f));
+        let layer3_pos = prompt
+            .find("=== LAYER 3: LIVE DEVELOPMENT STATE")
+            .expect("LAYER 3 not found");
+        let layer3b_pos = prompt
+            .find("=== LAYER 3b: PULLED ISSUES")
+            .expect("LAYER 3b not found");
+        let layer4_pos = prompt
+            .find("=== LAYER 4: FOCUSED FINDING")
+            .expect("LAYER 4 not found");
+        assert!(
+            layer3_pos < layer3b_pos,
+            "LAYER 3 must precede LAYER 3b ({layer3_pos} < {layer3b_pos})"
+        );
+        assert!(
+            layer3b_pos < layer4_pos,
+            "LAYER 3b must precede LAYER 4 ({layer3b_pos} < {layer4_pos})"
         );
     }
 

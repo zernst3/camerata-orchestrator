@@ -32,6 +32,20 @@ pub struct IssueSummary {
     pub body: String,
     /// The human-navigable URL on github.com.
     pub url: String,
+    /// The parent issue number, when this issue is a GitHub sub-issue (child of an
+    /// Epic). `None` for top-level issues and standalone issues. GitHub sets the
+    /// `parent.number` field on sub-issues in the REST list response; this field
+    /// is `#[serde(default)]` so serialized states written before the field existed
+    /// round-trip without error.
+    #[serde(default)]
+    pub parent_number: Option<u64>,
+}
+
+/// The `parent` field GitHub sets on a sub-issue. Only `number` is needed to
+/// record the Epic → child relationship; the full parent body is not read.
+#[derive(Debug, Deserialize)]
+struct RawIssueParent {
+    number: u64,
 }
 
 /// The minimal GitHub issue shape we read from the list endpoint. The issues API
@@ -47,6 +61,10 @@ struct RawIssue {
     /// Present ONLY on pull requests. Its mere presence marks the row as a PR.
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
+    /// GitHub sets this when the issue is a sub-issue of a parent (Epic).
+    /// Shape: `{ "number": 42, "title": "...", ... }` — only `number` is read.
+    #[serde(default)]
+    parent: Option<RawIssueParent>,
 }
 
 /// Parse the GitHub issues-list JSON array into `IssueSummary` rows, dropping any
@@ -63,6 +81,7 @@ pub fn parse_open_issues(json: &str) -> anyhow::Result<Vec<IssueSummary>> {
             title: i.title,
             body: i.body.unwrap_or_default(),
             url: i.html_url,
+            parent_number: i.parent.map(|p| p.number),
         })
         .collect())
 }
@@ -107,6 +126,7 @@ pub fn parse_single_issue(json: &str) -> anyhow::Result<IssueSummary> {
         title: raw.title,
         body: raw.body.unwrap_or_default(),
         url: raw.html_url,
+        parent_number: None, // Single-issue fetches don't carry the parent field.
     })
 }
 
@@ -386,6 +406,56 @@ mod tests {
     #[test]
     fn parse_open_issues_rejects_non_array_json() {
         assert!(parse_open_issues("{\"message\":\"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn parse_open_issues_populates_parent_number_from_parent_field() {
+        // Parent issue (Epic), child issue (sub-issue carrying `parent.number`),
+        // and a pull request (filtered out). Asserts parent linkage survives parse.
+        let json = r#"[
+            {
+                "number": 10,
+                "title": "Epic: auth overhaul",
+                "body": "The parent epic.",
+                "html_url": "https://github.com/o/r/issues/10"
+            },
+            {
+                "number": 11,
+                "title": "Sub-task: token refresh",
+                "body": "Child of the auth epic.",
+                "html_url": "https://github.com/o/r/issues/11",
+                "parent": { "number": 10, "title": "Epic: auth overhaul" }
+            },
+            {
+                "number": 12,
+                "title": "A pull request (not an issue)",
+                "html_url": "https://github.com/o/r/pull/12",
+                "pull_request": { "url": "https://api.github.com/.../pulls/12" }
+            }
+        ]"#;
+        let issues = parse_open_issues(json).expect("parse");
+        assert_eq!(issues.len(), 2, "the PR must be filtered out");
+        // The Epic itself has no parent.
+        assert_eq!(issues[0].number, 10);
+        assert_eq!(issues[0].parent_number, None, "top-level Epic has no parent");
+        // The child carries the parent's number.
+        assert_eq!(issues[1].number, 11);
+        assert_eq!(
+            issues[1].parent_number,
+            Some(10),
+            "sub-issue must carry the parent Epic's number"
+        );
+    }
+
+    #[test]
+    fn parse_open_issues_missing_parent_defaults_to_none() {
+        // Issues without a `parent` field (old GitHub REST response shape) must
+        // still parse cleanly — back-compat guard.
+        let json = r#"[
+            { "number": 5, "title": "Standalone", "html_url": "https://github.com/o/r/issues/5" }
+        ]"#;
+        let issues = parse_open_issues(json).expect("parse");
+        assert_eq!(issues[0].parent_number, None);
     }
 
     #[test]

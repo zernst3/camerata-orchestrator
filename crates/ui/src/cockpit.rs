@@ -3095,6 +3095,138 @@ struct WorkItem {
     url: String,
     #[serde(default)]
     labels: Vec<String>,
+    /// The parent issue number when this item is a GitHub sub-issue (Epic → child).
+    /// `None` for top-level or standalone issues. Populated from the server's
+    /// `IssueSummary::parent_number` on a pull.
+    #[serde(default)]
+    parent_number: Option<u64>,
+}
+
+/// A work item augmented with a grouping key for the Epic → child table.
+///
+/// `parent_label` is derived at table-build time from the full items list:
+///   - Top-level issues that have children (Epics): `"#N: <title>"`
+///   - Child issues (sub-issues): `"#N: <parent_title>"` (label of their parent)
+///   - Standalone issues (no parent, no children): `"Standalone"`
+///
+/// This is a VIEW-layer concern, not stored on the server WorkItem.
+#[derive(Clone, PartialEq, Debug)]
+struct WorkItemRow {
+    work_item: WorkItem,
+    /// The group header text Chorale uses when `set_grouping(vec![ColumnId("parent")])`.
+    parent_label: String,
+}
+
+/// Build the table rows for the work-item table, computing each row's
+/// `parent_label` from the full item list. Pure (no I/O) so it is
+/// unit-testable.
+///
+/// Grouping logic:
+/// - A child issue (has `parent_number = Some(n)`) gets label
+///   `"#n: <parent title>"`. If the parent is not in the list (fetched
+///   on a different page or filtered) the label is `"#n (Epic)"`.
+/// - A parent issue (its number appears in any other item's `parent_number`)
+///   gets label `"#n: <its own title>"` so it sorts with its children in the
+///   same group header.
+/// - A standalone issue (no parent, no children) gets label `"Standalone"`.
+fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
+    use std::collections::HashMap;
+    // Index by number for O(1) parent-title lookups.
+    let by_number: HashMap<u64, &WorkItem> =
+        items.iter().map(|it| (it.number, it)).collect();
+    // Which numbers appear as a parent_number in any item? These are Epics.
+    let parent_numbers: std::collections::HashSet<u64> = items
+        .iter()
+        .filter_map(|it| it.parent_number)
+        .collect();
+
+    items
+        .iter()
+        .map(|it| {
+            let parent_label = if let Some(pn) = it.parent_number {
+                // Child issue: label = parent Epic's title (or fallback).
+                let parent_title = by_number
+                    .get(&pn)
+                    .map(|p| p.title.as_str())
+                    .unwrap_or("(Epic)");
+                format!("#{pn}: {parent_title}")
+            } else if parent_numbers.contains(&it.number) {
+                // This IS a parent (Epic): place it in the group with its label.
+                format!("#{}: {}", it.number, it.title)
+            } else {
+                // Neither parent nor child: standalone.
+                "Standalone".to_string()
+            };
+            WorkItemRow {
+                work_item: it.clone(),
+                parent_label,
+            }
+        })
+        .collect()
+}
+
+/// Render a compact issue-spine section for the chat system prompt (Layer 3b).
+/// Groups by Epic → child so the model understands the hierarchy. Capped at
+/// 200 issues to keep the prompt bounded. Pure (no I/O).
+fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    use std::collections::HashMap;
+    // Index parents.
+    let by_number: HashMap<u64, &WorkItem> =
+        items.iter().map(|it| (it.number, it)).collect();
+    let parent_numbers: std::collections::HashSet<u64> =
+        items.iter().filter_map(|it| it.parent_number).collect();
+
+    let mut s = String::new();
+    s.push_str(&format!("{} open issue(s):\n", items.len().min(200)));
+
+    // Render parents first (Epics), then their children, then standalones.
+    let epics: Vec<&WorkItem> = items
+        .iter()
+        .filter(|it| it.parent_number.is_none() && parent_numbers.contains(&it.number))
+        .collect();
+    let children: Vec<&WorkItem> = items.iter().filter(|it| it.parent_number.is_some()).collect();
+    let standalones: Vec<&WorkItem> = items
+        .iter()
+        .filter(|it| it.parent_number.is_none() && !parent_numbers.contains(&it.number))
+        .collect();
+
+    for epic in &epics {
+        s.push_str(&format!(
+            "- #{} [Epic, {}]: {}\n",
+            epic.number, epic.state, epic.title
+        ));
+        // List this epic's children indented.
+        for child in children.iter().filter(|c| c.parent_number == Some(epic.number)) {
+            s.push_str(&format!(
+                "  - #{} [child, {}]: {}\n",
+                child.number, child.state, child.title
+            ));
+        }
+    }
+    // Children whose parent is NOT in the list.
+    for child in children.iter().filter(|c| {
+        c.parent_number
+            .map(|pn| !by_number.contains_key(&pn))
+            .unwrap_or(false)
+    }) {
+        s.push_str(&format!(
+            "- #{} [child of #{}, {}]: {}\n",
+            child.number,
+            child.parent_number.unwrap_or(0),
+            child.state,
+            child.title
+        ));
+    }
+    for st in standalones.iter().take(200) {
+        s.push_str(&format!(
+            "- #{} [{}]: {}\n",
+            st.number, st.state, st.title
+        ));
+    }
+    s
 }
 
 /// App-lifetime cache of the last work-item pull, keyed by project id (so switching
@@ -3104,6 +3236,22 @@ struct WorkItem {
 /// Manual pull only; there is no auto-poll.
 static PULLED_WORK_ITEMS: GlobalSignal<Option<(String, Vec<WorkItem>)>> =
     Signal::global(|| None);
+
+/// Returns the pre-rendered issue spine for the chat system prompt (Layer 3b), reading
+/// from the app-lifetime `PULLED_WORK_ITEMS` cache. Returns `None` when no pull has
+/// happened this session (the chat caller omits the layer entirely in that case).
+/// Called from `main.rs` to pass the section into `ChatBubble` without exposing the
+/// `PULLED_WORK_ITEMS` signal or `WorkItem` type outside this module.
+pub(crate) fn pulled_issues_chat_section() -> Option<String> {
+    let guard = PULLED_WORK_ITEMS.read();
+    let (_, items) = guard.as_ref()?;
+    let section = render_pulled_issues_for_chat(items);
+    if section.is_empty() {
+        None
+    } else {
+        Some(section)
+    }
+}
 
 /// The `POST /api/workitems/pull` envelope.
 #[derive(Clone, PartialEq, serde::Deserialize, Default)]
@@ -4955,56 +5103,71 @@ fn IssueManagementPanel(
 }
 
 /// Chorale column set for the work-item table: Repo, #, Title, State (badge), Labels.
-fn work_item_columns() -> Vec<ColumnDef<WorkItem>> {
+/// Chorale column set for the work-item table: Parent (grouping), Repo, #, Title,
+/// State (badge), Labels. The `parent` column is the grouping key and has a
+/// minimal initial width since Chorale renders it as a group header, not a data
+/// column.
+fn work_item_columns() -> Vec<ColumnDef<WorkItemRow>> {
     let state_badges = BadgeVariantMap::new()
         .with("open", BadgeVariant::new("OPEN", "green"))
         .with("closed", BadgeVariant::new("CLOSED", "gray"))
         .with_fallback(BadgeVariant::new("Unknown", "gray"));
     vec![
-        ColumnDef::new(ColumnId("repo"), "Repo", |it: &WorkItem| {
-            CellValue::Text(it.repo.clone())
+        ColumnDef::new(ColumnId("parent"), "Epic", |r: &WorkItemRow| {
+            CellValue::Text(r.parent_label.clone())
+        })
+        .initial_width(220.0),
+        ColumnDef::new(ColumnId("repo"), "Repo", |r: &WorkItemRow| {
+            CellValue::Text(r.work_item.repo.clone())
         })
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(180.0),
-        ColumnDef::new(ColumnId("num"), "#", |it: &WorkItem| {
-            CellValue::Text(format!("#{}", it.number))
+        ColumnDef::new(ColumnId("num"), "#", |r: &WorkItemRow| {
+            CellValue::Text(format!("#{}", r.work_item.number))
         })
         .sortable()
         .initial_width(80.0),
-        ColumnDef::new(ColumnId("title"), "Title", |it: &WorkItem| {
-            CellValue::Text(it.title.clone())
+        ColumnDef::new(ColumnId("title"), "Title", |r: &WorkItemRow| {
+            CellValue::Text(r.work_item.title.clone())
         })
         .sortable()
         .filter(FilterKind::Text)
         .initial_width(420.0),
-        ColumnDef::new(ColumnId("state"), "State", |it: &WorkItem| {
-            CellValue::Text(it.state.to_ascii_lowercase())
+        ColumnDef::new(ColumnId("state"), "State", |r: &WorkItemRow| {
+            CellValue::Text(r.work_item.state.to_ascii_lowercase())
         })
         .sortable()
         .render_kind(RenderKind::Badge(state_badges))
         .initial_width(110.0),
-        ColumnDef::new(ColumnId("labels"), "Labels", |it: &WorkItem| {
-            CellValue::Text(labels_summary(&it.labels))
+        ColumnDef::new(ColumnId("labels"), "Labels", |r: &WorkItemRow| {
+            CellValue::Text(labels_summary(&r.work_item.labels))
         })
         .filter(FilterKind::Text)
         .initial_width(240.0),
     ]
 }
 
-/// A provider-agnostic CHORALE table of `WorkItem`s: columns Repo, #, Title, State, Labels.
-/// Clicking a row opens its detail MODAL via `on_open` — the parent (IssueManagementPanel)
-/// hosts the modal, outside this table's subtree. Create/open-UoW lives in that modal, not
-/// per-row, so the table stays a clean read surface.
+/// A provider-agnostic CHORALE table of `WorkItem`s grouped by Epic → child.
+/// Columns: Epic (grouping), Repo, #, Title, State, Labels.
+/// Clicking a row opens its detail MODAL via `on_open` — the parent
+/// (`IssueManagementPanel`) hosts the modal, outside this table's subtree.
 #[component]
 fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element {
-    let rows: Vec<(RowId, WorkItem)> = use_hook({
+    let rows: Vec<(RowId, WorkItemRow)> = use_hook({
         let items = items.clone();
-        move || items.iter().map(|it| (RowId::new(), it.clone())).collect()
+        move || {
+            build_work_item_rows(&items)
+                .into_iter()
+                .map(|r| (RowId::new(), r))
+                .collect()
+        }
     });
     let id_map: std::collections::HashMap<RowId, String> =
-        rows.iter().map(|(r, it)| (*r, it.id.clone())).collect();
+        rows.iter().map(|(r, row)| (*r, row.work_item.id.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), work_item_columns()));
+    // Group by Epic → child, mirroring the custom-rules-by-domain pattern.
+    use_hook(move || handle.set_grouping(vec![ColumnId("parent")]));
     rsx! {
         Table {
             handle,
@@ -12901,9 +13064,9 @@ mod tests {
 
     // ── Governed Development: pure work-item / UoW helpers ─────────────────────
     use super::{
-        active_mention_partial, apply_mention_selection, create_or_open_label, existing_uow_for,
-        filter_mention_candidates, labels_summary, work_item_state_badge, UowListEntry, UowStage,
-        WorkItem,
+        active_mention_partial, apply_mention_selection, build_work_item_rows,
+        create_or_open_label, existing_uow_for, filter_mention_candidates, labels_summary,
+        render_pulled_issues_for_chat, work_item_state_badge, UowListEntry, UowStage, WorkItem,
     };
 
     fn wi(id: &str) -> WorkItem {
@@ -12917,6 +13080,7 @@ mod tests {
             state: "open".to_string(),
             url: String::new(),
             labels: vec![],
+            parent_number: None,
         }
     }
 
@@ -12927,6 +13091,133 @@ mod tests {
         assert_eq!(work_item_state_badge("OPEN"), ("OPEN", "active"));
         assert_eq!(work_item_state_badge("closed"), ("CLOSED", "done"));
         assert_eq!(work_item_state_badge("weird"), ("UNKNOWN", "neutral"));
+    }
+
+    #[test]
+    fn build_work_item_rows_groups_epic_child_and_standalone() {
+        let epic = WorkItem {
+            id: "github:o/r#10".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 10,
+            title: "Epic: auth overhaul".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: None,
+        };
+        let child = WorkItem {
+            id: "github:o/r#11".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 11,
+            title: "Token refresh".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: Some(10),
+        };
+        let standalone = WorkItem {
+            id: "github:o/r#99".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 99,
+            title: "Chore: update deps".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: None,
+        };
+
+        let rows = build_work_item_rows(&[epic, child, standalone]);
+        assert_eq!(rows.len(), 3);
+
+        // Epic gets its own label (it IS a parent).
+        assert_eq!(rows[0].parent_label, "#10: Epic: auth overhaul");
+        assert_eq!(rows[0].work_item.number, 10);
+
+        // Child gets its parent's label.
+        assert_eq!(rows[1].parent_label, "#10: Epic: auth overhaul");
+        assert_eq!(rows[1].work_item.number, 11);
+
+        // Standalone gets "Standalone".
+        assert_eq!(rows[2].parent_label, "Standalone");
+        assert_eq!(rows[2].work_item.number, 99);
+    }
+
+    #[test]
+    fn build_work_item_rows_orphan_child_uses_fallback_label() {
+        // Child whose parent is NOT in the fetched list (e.g. parent is closed).
+        let orphan = WorkItem {
+            id: "github:o/r#20".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 20,
+            title: "Orphan task".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: Some(99), // parent not in the list
+        };
+        let rows = build_work_item_rows(&[orphan]);
+        assert_eq!(rows[0].parent_label, "#99: (Epic)");
+    }
+
+    #[test]
+    fn render_pulled_issues_for_chat_formats_spine() {
+        let epic = WorkItem {
+            id: "github:o/r#10".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 10,
+            title: "Auth overhaul".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: None,
+        };
+        let child = WorkItem {
+            id: "github:o/r#11".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 11,
+            title: "Token refresh".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: Some(10),
+        };
+        let standalone = WorkItem {
+            id: "github:o/r#99".to_string(),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number: 99,
+            title: "Chore: update deps".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number: None,
+        };
+
+        let section = render_pulled_issues_for_chat(&[epic, child, standalone]);
+        // Epics appear first.
+        assert!(section.contains("#10 [Epic,"), "Epic entry present");
+        // Child is indented under its Epic.
+        assert!(section.contains("  - #11 [child,"), "child indented");
+        // Standalone is listed.
+        assert!(section.contains("#99 ["), "standalone listed");
+    }
+
+    #[test]
+    fn render_pulled_issues_for_chat_empty_returns_empty() {
+        assert_eq!(render_pulled_issues_for_chat(&[]), String::new());
     }
 
     #[test]
