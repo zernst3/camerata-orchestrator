@@ -3102,130 +3102,234 @@ struct WorkItem {
     parent_number: Option<u64>,
 }
 
-/// A work item augmented with a grouping key for the Epic → child table.
+/// A work item augmented with N-level hierarchy grouping columns for the Chorale table.
 ///
-/// `parent_label` is derived at table-build time from the full items list:
-///   - Top-level issues that have children (Epics): `"#N: <title>"`
-///   - Child issues (sub-issues): `"#N: <parent_title>"` (label of their parent)
-///   - Standalone issues (no parent, no children): `"Standalone"`
+/// `hierarchy_cols[L]` holds the group label for depth level L (0 = root ancestor).
+/// Chorale's multi-column grouping produces genuinely nested subgroups when
+/// `set_grouping(vec![ColumnId("lvl0"), ColumnId("lvl1"), ...])` is called.
 ///
-/// This is a VIEW-layer concern, not stored on the server WorkItem.
+/// Derivation (see `build_work_item_rows` / `ancestor_path`):
+///   - Level 0 = the root ancestor's label (`"#N: <title>"`), or `"(no parent)"` for
+///     standalone issues.
+///   - Level 1..max_depth = intermediate / direct-parent labels.
+///   - If an item is shallower than the table's max depth, the deepest column repeats
+///     the item's own level-0 label so it renders directly under its parent group
+///     rather than floating in an empty subgroup.
+///
+/// This is a VIEW-layer concern; nothing here is stored on the server `WorkItem`.
 #[derive(Clone, PartialEq, Debug)]
 struct WorkItemRow {
     work_item: WorkItem,
-    /// The group header text Chorale uses when `set_grouping(vec![ColumnId("parent")])`.
-    parent_label: String,
+    /// Per-depth group labels for Chorale: `hierarchy_cols[0]` = root level,
+    /// `hierarchy_cols[1]` = one level down, and so on. Length = `max_depth + 1`
+    /// across the whole table (padded with the item's own deepest label for shallow items).
+    hierarchy_cols: Vec<String>,
 }
 
-/// Build the table rows for the work-item table, computing each row's
-/// `parent_label` from the full item list. Pure (no I/O) so it is
-/// unit-testable.
+/// Walk `parent_number` links within `by_number` and return the chain of ancestor
+/// issue numbers from the **root down to (but not including) `item` itself**.
 ///
-/// Grouping logic:
-/// - A child issue (has `parent_number = Some(n)`) gets label
-///   `"#n: <parent title>"`. If the parent is not in the list (fetched
-///   on a different page or filtered) the label is `"#n (Epic)"`.
-/// - A parent issue (its number appears in any other item's `parent_number`)
-///   gets label `"#n: <its own title>"` so it sorts with its children in the
-///   same group header.
-/// - A standalone issue (no parent, no children) gets label `"Standalone"`.
+/// The walk stops when:
+/// - `parent_number` is `None` (root reached), or
+/// - the parent number is absent from `by_number` (parent not pulled / filtered), or
+/// - 8 hops have been taken (GitHub's native sub-issue depth ceiling).
+///
+/// A visited-number set guards against malformed cycles: if the same number
+/// is seen twice the walk stops immediately, treating the last known node as root.
+///
+/// Returns root-first. An item with no parent returns an empty `Vec`.
+fn ancestor_path(by_number: &std::collections::HashMap<u64, &WorkItem>, item: &WorkItem) -> Vec<u64> {
+    let mut path: Vec<u64> = Vec::with_capacity(8);
+    let mut visited: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    visited.insert(item.number);
+    let mut current = item;
+    // Walk upward; cap at 8 hops (GitHub sub-issue depth ceiling).
+    for _ in 0..8 {
+        let Some(pn) = current.parent_number else { break };
+        if !visited.insert(pn) {
+            // Cycle detected — stop.
+            break;
+        }
+        path.push(pn);
+        let Some(parent) = by_number.get(&pn) else { break };
+        current = parent;
+    }
+    path.reverse(); // root-first
+    path
+}
+
+/// Format a `WorkItem` reference as a group-header label: `"#N: <title>"`.
+fn issue_group_label(item: &WorkItem) -> String {
+    format!("#{}: {}", item.number, item.title)
+}
+
+/// Build the table rows for the work-item table, computing per-depth hierarchy
+/// columns from the full item list. Pure (no I/O) so it is unit-testable.
+///
+/// Grouping uses one Chorale column per depth level (`lvl0`, `lvl1`, …) so that
+/// `set_grouping(vec![ColumnId("lvl0"), ColumnId("lvl1"), …])` produces genuinely
+/// nested subgroups at arbitrary depth (GitHub caps at 8).
+///
+/// Column derivation per item:
+/// - `lvl0` = root ancestor label (`"#N: <title>"`), or `"(no parent)"` if the
+///   item has no ancestor in the pulled set (standalone or orphan).
+/// - `lvl1..lvlK` = intermediate / direct-parent labels.
+/// - Items shallower than `max_depth` repeat their deepest label in the remaining
+///   columns so Chorale places them directly under their parent group.
+///
+/// Also returns the `max_depth` discovered across all items (0 = all standalone).
 fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
     use std::collections::HashMap;
-    // Index by number for O(1) parent-title lookups.
+    // O(1) parent-title lookups.
     let by_number: HashMap<u64, &WorkItem> =
         items.iter().map(|it| (it.number, it)).collect();
-    // Which numbers appear as a parent_number in any item? These are Epics.
-    let parent_numbers: std::collections::HashSet<u64> = items
+
+    // Phase 1: compute each item's ancestor path and its own label.
+    struct ItemMeta<'a> {
+        item: &'a WorkItem,
+        ancestors: Vec<u64>, // root-first ancestor numbers
+    }
+    let metas: Vec<ItemMeta<'_>> = items
         .iter()
-        .filter_map(|it| it.parent_number)
+        .map(|it| ItemMeta {
+            item: it,
+            ancestors: ancestor_path(&by_number, it),
+        })
         .collect();
 
-    items
-        .iter()
-        .map(|it| {
-            let parent_label = if let Some(pn) = it.parent_number {
-                // Child issue: label = parent Epic's title (or fallback).
-                let parent_title = by_number
-                    .get(&pn)
-                    .map(|p| p.title.as_str())
-                    .unwrap_or("(Epic)");
-                format!("#{pn}: {parent_title}")
-            } else if parent_numbers.contains(&it.number) {
-                // This IS a parent (Epic): place it in the group with its label.
-                format!("#{}: {}", it.number, it.title)
+    // Phase 2: determine max depth across all items.
+    // An item at depth D has D ancestors (root has 0, child has 1, grandchild has 2, …).
+    let max_depth = metas.iter().map(|m| m.ancestors.len()).max().unwrap_or(0);
+
+    // Phase 3: build rows — one `hierarchy_cols` Vec per item, length = max_depth + 1.
+    metas
+        .into_iter()
+        .map(|m| {
+            let depth = m.ancestors.len(); // 0 for root / standalone
+            // Assemble hierarchy labels for levels 0..=max_depth.
+            let mut cols: Vec<String> = Vec::with_capacity(max_depth + 1);
+            if depth == 0 {
+                // Standalone or root with no ancestors in the pulled set.
+                // Level 0 = item's own label if it has children, else "(no parent)".
+                let is_parent = items.iter().any(|it| it.parent_number == Some(m.item.number));
+                let root_label = if is_parent || m.item.parent_number.is_some() {
+                    // It is itself a root-level parent, or its parent was not pulled.
+                    issue_group_label(m.item)
+                } else {
+                    "(no parent)".to_string()
+                };
+                // Repeat the same label across all levels so Chorale places it under
+                // the single "(no parent)" group at every depth tier.
+                for _ in 0..=max_depth {
+                    cols.push(root_label.clone());
+                }
             } else {
-                // Neither parent nor child: standalone.
-                "Standalone".to_string()
-            };
-            WorkItemRow {
-                work_item: it.clone(),
-                parent_label,
+                // Build label per ancestor level.
+                for ancestor_num in &m.ancestors {
+                    let label = by_number
+                        .get(ancestor_num)
+                        .copied() // HashMap<u64, &WorkItem>.get() yields Option<&&WorkItem>; copy the inner &.
+                        .map(issue_group_label)
+                        .unwrap_or_else(|| format!("#{ancestor_num}: (not pulled)"));
+                    cols.push(label);
+                }
+                // Remaining levels (item is shallower than max_depth): repeat the
+                // item's own group label so it stays under its real parent group.
+                let own_label = issue_group_label(m.item);
+                while cols.len() <= max_depth {
+                    cols.push(own_label.clone());
+                }
             }
+            WorkItemRow { work_item: m.item.clone(), hierarchy_cols: cols }
         })
         .collect()
 }
 
 /// Render a compact issue-spine section for the chat system prompt (Layer 3b).
-/// Groups by Epic → child so the model understands the hierarchy. Capped at
-/// 200 issues to keep the prompt bounded. Pure (no I/O).
+/// Produces a depth-indented tree (two spaces per level) so the model understands
+/// the full N-level hierarchy. Capped at 200 issues to keep the prompt bounded.
+/// Pure (no I/O).
+///
+/// Rendering order: roots first (recursively with their subtrees), then items
+/// whose parent was not pulled (orphan children), then standalone issues.
+/// Depth indentation: 2 spaces per ancestor level.
 fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
     if items.is_empty() {
         return String::new();
     }
     use std::collections::HashMap;
-    // Index parents.
+
     let by_number: HashMap<u64, &WorkItem> =
         items.iter().map(|it| (it.number, it)).collect();
-    let parent_numbers: std::collections::HashSet<u64> =
-        items.iter().filter_map(|it| it.parent_number).collect();
-
-    let mut s = String::new();
-    s.push_str(&format!("{} open issue(s):\n", items.len().min(200)));
-
-    // Render parents first (Epics), then their children, then standalones.
-    let epics: Vec<&WorkItem> = items
-        .iter()
-        .filter(|it| it.parent_number.is_none() && parent_numbers.contains(&it.number))
-        .collect();
-    let children: Vec<&WorkItem> = items.iter().filter(|it| it.parent_number.is_some()).collect();
-    let standalones: Vec<&WorkItem> = items
-        .iter()
-        .filter(|it| it.parent_number.is_none() && !parent_numbers.contains(&it.number))
-        .collect();
-
-    for epic in &epics {
-        s.push_str(&format!(
-            "- #{} [Epic, {}]: {}\n",
-            epic.number, epic.state, epic.title
-        ));
-        // List this epic's children indented.
-        for child in children.iter().filter(|c| c.parent_number == Some(epic.number)) {
-            s.push_str(&format!(
-                "  - #{} [child, {}]: {}\n",
-                child.number, child.state, child.title
-            ));
+    // Map each parent number to its direct children (sorted for stable output).
+    let mut children_of: HashMap<u64, Vec<&WorkItem>> = HashMap::new();
+    for it in items {
+        if let Some(pn) = it.parent_number {
+            children_of.entry(pn).or_default().push(it);
         }
     }
-    // Children whose parent is NOT in the list.
-    for child in children.iter().filter(|c| {
-        c.parent_number
-            .map(|pn| !by_number.contains_key(&pn))
-            .unwrap_or(false)
-    }) {
-        s.push_str(&format!(
-            "- #{} [child of #{}, {}]: {}\n",
-            child.number,
-            child.parent_number.unwrap_or(0),
-            child.state,
-            child.title
-        ));
+    for v in children_of.values_mut() {
+        v.sort_by_key(|it| it.number);
     }
-    for st in standalones.iter().take(200) {
+
+    let mut s = String::new();
+    s.push_str(&format!("{} issue(s):\n", items.len().min(200)));
+    let mut count = 0usize;
+
+    // Recursively render an item and all of its descendants.
+    fn render_item(
+        item: &WorkItem,
+        depth: usize,
+        children_of: &HashMap<u64, Vec<&WorkItem>>,
+        s: &mut String,
+        count: &mut usize,
+    ) {
+        if *count >= 200 { return; }
+        *count += 1;
+        let indent = "  ".repeat(depth);
         s.push_str(&format!(
-            "- #{} [{}]: {}\n",
-            st.number, st.state, st.title
+            "{}- #{} [{}]: {}\n",
+            indent, item.number, item.state, item.title
         ));
+        if let Some(kids) = children_of.get(&item.number) {
+            for kid in kids {
+                render_item(kid, depth + 1, children_of, s, count);
+            }
+        }
     }
+
+    // Roots: items with no parent in the pulled set.
+    let roots: Vec<&WorkItem> = {
+        let mut v: Vec<&WorkItem> = items
+            .iter()
+            .filter(|it| it.parent_number.map_or(true, |pn| !by_number.contains_key(&pn))
+                && it.parent_number.is_none())
+            .collect();
+        v.sort_by_key(|it| it.number);
+        v
+    };
+    for root in &roots {
+        render_item(root, 0, &children_of, &mut s, &mut count);
+    }
+
+    // Orphan children: parent was not pulled.
+    let orphans: Vec<&WorkItem> = {
+        let mut v: Vec<&WorkItem> = items
+            .iter()
+            .filter(|it| {
+                it.parent_number
+                    .map(|pn| !by_number.contains_key(&pn))
+                    .unwrap_or(false)
+            })
+            .collect();
+        v.sort_by_key(|it| it.number);
+        v
+    };
+    for orphan in &orphans {
+        // Render as a subtree from the orphan; its own children are still renderable.
+        render_item(orphan, 0, &children_of, &mut s, &mut count);
+    }
+
     s
 }
 
@@ -5102,21 +5206,47 @@ fn IssueManagementPanel(
     }
 }
 
-/// Chorale column set for the work-item table: Repo, #, Title, State (badge), Labels.
-/// Chorale column set for the work-item table: Parent (grouping), Repo, #, Title,
-/// State (badge), Labels. The `parent` column is the grouping key and has a
-/// minimal initial width since Chorale renders it as a group header, not a data
-/// column.
-fn work_item_columns() -> Vec<ColumnDef<WorkItemRow>> {
+/// Chorale column set for the work-item table.
+///
+/// Emits one hidden grouping column per hierarchy depth level (`lvl0`, `lvl1`, …,
+/// `lvl{max_depth}`) followed by the visible data columns (Repo, #, Title, State,
+/// Labels). The hierarchy columns drive `set_grouping` and have a minimal initial
+/// width since Chorale renders them as group headers, not data columns.
+///
+/// `max_depth` must match the value used in `build_work_item_rows`; both are
+/// derived from the same item list inside `WorkItemTable`.
+fn work_item_columns(max_depth: usize) -> Vec<ColumnDef<WorkItemRow>> {
     let state_badges = BadgeVariantMap::new()
         .with("open", BadgeVariant::new("OPEN", "green"))
         .with("closed", BadgeVariant::new("CLOSED", "gray"))
         .with_fallback(BadgeVariant::new("Unknown", "gray"));
-    vec![
-        ColumnDef::new(ColumnId("parent"), "Epic", |r: &WorkItemRow| {
-            CellValue::Text(r.parent_label.clone())
+
+    // One grouping column per hierarchy level.
+    // `ColumnId` wraps `&'static str`; we leak a heap-allocated string so the
+    // `'static` bound is met for dynamically named columns. The number of leaked
+    // strings is bounded by `max_depth + 1` (≤ 9 per table construction).
+    let mut cols: Vec<ColumnDef<WorkItemRow>> = (0..=max_depth)
+        .map(|lvl| {
+            let id: &'static str =
+                Box::leak(format!("lvl{lvl}").into_boxed_str());
+            // The column header is intentionally blank — Chorale renders the
+            // cell value as the group-header label, so no additional header text
+            // is needed at the column level.
+            ColumnDef::new(
+                ColumnId(id),
+                "",
+                move |r: &WorkItemRow| {
+                    CellValue::Text(
+                        r.hierarchy_cols.get(lvl).cloned().unwrap_or_default(),
+                    )
+                },
+            )
+            .initial_width(220.0)
         })
-        .initial_width(220.0),
+        .collect();
+
+    // Visible data columns.
+    cols.extend([
         ColumnDef::new(ColumnId("repo"), "Repo", |r: &WorkItemRow| {
             CellValue::Text(r.work_item.repo.clone())
         })
@@ -5145,29 +5275,45 @@ fn work_item_columns() -> Vec<ColumnDef<WorkItemRow>> {
         })
         .filter(FilterKind::Text)
         .initial_width(240.0),
-    ]
+    ]);
+    cols
 }
 
-/// A provider-agnostic CHORALE table of `WorkItem`s grouped by Epic → child.
-/// Columns: Epic (grouping), Repo, #, Title, State, Labels.
-/// Clicking a row opens its detail MODAL via `on_open` — the parent
+/// A provider-agnostic Chorale table of `WorkItem`s with N-level hierarchy grouping.
+/// Columns: one hidden `lvlN` column per ancestor depth (grouping), then Repo, #,
+/// Title, State, Labels as visible data columns.
+/// Clicking a row opens its detail modal via `on_open` — the parent
 /// (`IssueManagementPanel`) hosts the modal, outside this table's subtree.
 #[component]
 fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element {
-    let rows: Vec<(RowId, WorkItemRow)> = use_hook({
+    // Build rows and derive max_depth from the same item list so the column set
+    // and the grouping call are always in sync.
+    let (rows, max_depth): (Vec<(RowId, WorkItemRow)>, usize) = use_hook({
         let items = items.clone();
         move || {
-            build_work_item_rows(&items)
+            let built = build_work_item_rows(&items);
+            let max_depth = built
+                .first()
+                .map(|r| r.hierarchy_cols.len().saturating_sub(1))
+                .unwrap_or(0);
+            let rows = built
                 .into_iter()
                 .map(|r| (RowId::new(), r))
-                .collect()
+                .collect();
+            (rows, max_depth)
         }
     });
     let id_map: std::collections::HashMap<RowId, String> =
         rows.iter().map(|(r, row)| (*r, row.work_item.id.clone())).collect();
-    let handle = use_table(move || TableState::new(rows.clone(), work_item_columns()));
-    // Group by Epic → child, mirroring the custom-rules-by-domain pattern.
-    use_hook(move || handle.set_grouping(vec![ColumnId("parent")]));
+    let handle = use_table(move || TableState::new(rows.clone(), work_item_columns(max_depth)));
+    // Group by all hierarchy levels (lvl0..lvl{max_depth}), producing genuinely
+    // nested subgroups. Mirrors the 2-level findings-triage pattern.
+    use_hook(move || {
+        let grouping: Vec<ColumnId> = (0..=max_depth)
+            .map(|lvl| ColumnId(Box::leak(format!("lvl{lvl}").into_boxed_str())))
+            .collect();
+        handle.set_grouping(grouping);
+    });
     rsx! {
         Table {
             handle,
@@ -13064,7 +13210,7 @@ mod tests {
 
     // ── Governed Development: pure work-item / UoW helpers ─────────────────────
     use super::{
-        active_mention_partial, apply_mention_selection, build_work_item_rows,
+        active_mention_partial, ancestor_path, apply_mention_selection, build_work_item_rows,
         create_or_open_label, existing_uow_for, filter_mention_candidates, labels_summary,
         render_pulled_issues_for_chat, work_item_state_badge, UowListEntry, UowStage, WorkItem,
     };
@@ -13093,126 +13239,191 @@ mod tests {
         assert_eq!(work_item_state_badge("weird"), ("UNKNOWN", "neutral"));
     }
 
-    #[test]
-    fn build_work_item_rows_groups_epic_child_and_standalone() {
-        let epic = WorkItem {
-            id: "github:o/r#10".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 10,
-            title: "Epic: auth overhaul".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: None,
-        };
-        let child = WorkItem {
-            id: "github:o/r#11".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 11,
-            title: "Token refresh".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: Some(10),
-        };
-        let standalone = WorkItem {
-            id: "github:o/r#99".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 99,
-            title: "Chore: update deps".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: None,
-        };
+    // ── ancestor_path ───────────────────────────────────────────────────────
 
-        let rows = build_work_item_rows(&[epic, child, standalone]);
+    fn make_wi(number: u64, parent_number: Option<u64>) -> WorkItem {
+        WorkItem {
+            id: format!("github:o/r#{number}"),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number,
+            title: format!("Issue {number}"),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: Vec::new(),
+            parent_number,
+        }
+    }
+
+    #[test]
+    fn ancestor_path_three_level_chain() {
+        // root(1) -> child(2) -> grandchild(3)
+        let root = make_wi(1, None);
+        let child = make_wi(2, Some(1));
+        let grandchild = make_wi(3, Some(2));
+        let items = [root, child, grandchild];
+        let by_number: std::collections::HashMap<u64, &WorkItem> =
+            items.iter().map(|it| (it.number, it)).collect();
+
+        // Root has no ancestors.
+        assert_eq!(ancestor_path(&by_number, &items[0]), vec![] as Vec<u64>);
+        // Child has one ancestor: root.
+        assert_eq!(ancestor_path(&by_number, &items[1]), vec![1]);
+        // Grandchild has two ancestors: root, then child.
+        assert_eq!(ancestor_path(&by_number, &items[2]), vec![1, 2]);
+    }
+
+    #[test]
+    fn ancestor_path_cycle_guard_stops_walk() {
+        // Malformed cycle: 10 -> 11 -> 10 (should stop, not infinite-loop).
+        let a = make_wi(10, Some(11));
+        let b = make_wi(11, Some(10));
+        let items = [a, b];
+        let by_number: std::collections::HashMap<u64, &WorkItem> =
+            items.iter().map(|it| (it.number, it)).collect();
+        // The cycle is detected after at most 1 real step; the result is finite.
+        let path_a = ancestor_path(&by_number, &items[0]);
+        let path_b = ancestor_path(&by_number, &items[1]);
+        // Neither path should contain a repeated number.
+        assert!(path_a.len() <= 2, "cycle guard kept path short for a");
+        assert!(path_b.len() <= 2, "cycle guard kept path short for b");
+    }
+
+    #[test]
+    fn ancestor_path_missing_ancestor_stops_walk() {
+        // child(5) -> parent(99), but 99 is not in the list.
+        let child = make_wi(5, Some(99));
+        let items = [child];
+        let by_number: std::collections::HashMap<u64, &WorkItem> =
+            items.iter().map(|it| (it.number, it)).collect();
+        // Walk records 99 as the first ancestor, then stops (99 not in by_number).
+        let path = ancestor_path(&by_number, &items[0]);
+        assert_eq!(path, vec![99]);
+    }
+
+    // ── build_work_item_rows ────────────────────────────────────────────────
+
+    #[test]
+    fn build_work_item_rows_two_level_parent_child_and_standalone() {
+        // 2-level: root(10) -> child(11), standalone(99).
+        let root = make_wi(10, None);
+        let child = make_wi(11, Some(10));
+        let standalone = make_wi(99, None);
+        let rows = build_work_item_rows(&[root, child, standalone]);
         assert_eq!(rows.len(), 3);
+        // All rows have exactly 1 hierarchy column at max_depth=1. Wait — max_depth
+        // = 1 (child has depth 1) so hierarchy_cols length = max_depth + 1 = 2.
+        assert_eq!(rows[0].hierarchy_cols.len(), 2, "root row has 2 cols");
+        assert_eq!(rows[1].hierarchy_cols.len(), 2, "child row has 2 cols");
+        assert_eq!(rows[2].hierarchy_cols.len(), 2, "standalone row has 2 cols");
 
-        // Epic gets its own label (it IS a parent).
-        assert_eq!(rows[0].parent_label, "#10: Epic: auth overhaul");
-        assert_eq!(rows[0].work_item.number, 10);
+        // Root (number 10, it has children): lvl0 = own label, lvl1 = own label (padded).
+        assert_eq!(rows[0].hierarchy_cols[0], "#10: Issue 10");
+        assert_eq!(rows[0].hierarchy_cols[1], "#10: Issue 10");
 
-        // Child gets its parent's label.
-        assert_eq!(rows[1].parent_label, "#10: Epic: auth overhaul");
-        assert_eq!(rows[1].work_item.number, 11);
+        // Child (number 11): lvl0 = parent label, lvl1 = own label (padded).
+        assert_eq!(rows[1].hierarchy_cols[0], "#10: Issue 10");
+        assert_eq!(rows[1].hierarchy_cols[1], "#11: Issue 11");
 
-        // Standalone gets "Standalone".
-        assert_eq!(rows[2].parent_label, "Standalone");
-        assert_eq!(rows[2].work_item.number, 99);
+        // Standalone: lvl0 = "(no parent)", lvl1 = "(no parent)".
+        assert_eq!(rows[2].hierarchy_cols[0], "(no parent)");
+        assert_eq!(rows[2].hierarchy_cols[1], "(no parent)");
     }
 
     #[test]
-    fn build_work_item_rows_orphan_child_uses_fallback_label() {
-        // Child whose parent is NOT in the fetched list (e.g. parent is closed).
-        let orphan = WorkItem {
-            id: "github:o/r#20".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 20,
-            title: "Orphan task".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: Some(99), // parent not in the list
-        };
+    fn build_work_item_rows_three_level_chain() {
+        // root(1) -> child(2) -> grandchild(3), standalone(9).
+        let root = make_wi(1, None);
+        let child = make_wi(2, Some(1));
+        let grandchild = make_wi(3, Some(2));
+        let standalone = make_wi(9, None);
+        let items = [root, child, grandchild, standalone];
+        let rows = build_work_item_rows(&items);
+        assert_eq!(rows.len(), 4);
+        // max_depth = 2, so each row has 3 hierarchy cols.
+        for row in &rows {
+            assert_eq!(row.hierarchy_cols.len(), 3, "all rows have 3 cols at max_depth=2");
+        }
+
+        // Root (number 1, depth=0): all cols = own label.
+        assert_eq!(rows[0].hierarchy_cols[0], "#1: Issue 1");
+        assert_eq!(rows[0].hierarchy_cols[1], "#1: Issue 1");
+        assert_eq!(rows[0].hierarchy_cols[2], "#1: Issue 1");
+
+        // Child (number 2, depth=1): lvl0=root, lvl1=own, lvl2=own (padded).
+        assert_eq!(rows[1].hierarchy_cols[0], "#1: Issue 1");
+        assert_eq!(rows[1].hierarchy_cols[1], "#2: Issue 2");
+        assert_eq!(rows[1].hierarchy_cols[2], "#2: Issue 2");
+
+        // Grandchild (number 3, depth=2): lvl0=root, lvl1=child, lvl2=own.
+        assert_eq!(rows[2].hierarchy_cols[0], "#1: Issue 1");
+        assert_eq!(rows[2].hierarchy_cols[1], "#2: Issue 2");
+        assert_eq!(rows[2].hierarchy_cols[2], "#3: Issue 3");
+
+        // Standalone: all cols = "(no parent)".
+        assert_eq!(rows[3].hierarchy_cols[0], "(no parent)");
+        assert_eq!(rows[3].hierarchy_cols[1], "(no parent)");
+        assert_eq!(rows[3].hierarchy_cols[2], "(no parent)");
+    }
+
+    #[test]
+    fn build_work_item_rows_orphan_child_uses_not_pulled_label() {
+        // Child whose parent is NOT in the fetched list (e.g. filtered/closed).
+        // ancestor_path records 99 as the first ancestor; since 99 is not in
+        // by_number the label becomes "#99: (not pulled)".
+        let orphan = make_wi(20, Some(99));
         let rows = build_work_item_rows(&[orphan]);
-        assert_eq!(rows[0].parent_label, "#99: (Epic)");
+        assert_eq!(rows.len(), 1);
+        // max_depth = 1 (orphan has depth 1), so 2 cols.
+        assert_eq!(rows[0].hierarchy_cols.len(), 2);
+        assert_eq!(rows[0].hierarchy_cols[0], "#99: (not pulled)");
+        // lvl1 is padded with the item's own label.
+        assert_eq!(rows[0].hierarchy_cols[1], "#20: Issue 20");
     }
 
     #[test]
-    fn render_pulled_issues_for_chat_formats_spine() {
-        let epic = WorkItem {
-            id: "github:o/r#10".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 10,
-            title: "Auth overhaul".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: None,
-        };
-        let child = WorkItem {
-            id: "github:o/r#11".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 11,
-            title: "Token refresh".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: Some(10),
-        };
-        let standalone = WorkItem {
-            id: "github:o/r#99".to_string(),
-            provider: "github".to_string(),
-            repo: "o/r".to_string(),
-            number: 99,
-            title: "Chore: update deps".to_string(),
-            body: String::new(),
-            state: "open".to_string(),
-            url: String::new(),
-            labels: Vec::new(),
-            parent_number: None,
-        };
+    fn build_work_item_rows_all_standalone_single_col() {
+        // When no item has a parent the table is flat (max_depth=0, 1 col each).
+        let a = make_wi(1, None);
+        let b = make_wi(2, None);
+        let rows = build_work_item_rows(&[a, b]);
+        for row in &rows {
+            assert_eq!(row.hierarchy_cols.len(), 1);
+            assert_eq!(row.hierarchy_cols[0], "(no parent)");
+        }
+    }
 
-        let section = render_pulled_issues_for_chat(&[epic, child, standalone]);
-        // Epics appear first.
-        assert!(section.contains("#10 [Epic,"), "Epic entry present");
-        // Child is indented under its Epic.
-        assert!(section.contains("  - #11 [child,"), "child indented");
-        // Standalone is listed.
-        assert!(section.contains("#99 ["), "standalone listed");
+    // ── render_pulled_issues_for_chat ───────────────────────────────────────
+
+    #[test]
+    fn render_pulled_issues_for_chat_three_level_indentation() {
+        // root(1) -> child(2) -> grandchild(3), standalone(9).
+        let root = make_wi(1, None);
+        let child = make_wi(2, Some(1));
+        let grandchild = make_wi(3, Some(2));
+        let standalone = make_wi(9, None);
+        let items = [root, child, grandchild, standalone];
+        let section = render_pulled_issues_for_chat(&items);
+
+        // Root at depth 0: no indent.
+        assert!(section.contains("- #1 [open]: Issue 1\n"), "root at no indent");
+        // Child at depth 1: 2-space indent.
+        assert!(section.contains("  - #2 [open]: Issue 2\n"), "child 2-space indent");
+        // Grandchild at depth 2: 4-space indent.
+        assert!(section.contains("    - #3 [open]: Issue 3\n"), "grandchild 4-space indent");
+        // Standalone at depth 0: no indent.
+        assert!(section.contains("- #9 [open]: Issue 9\n"), "standalone no indent");
+        // No "Epic" wording in output.
+        assert!(!section.contains("Epic"), "no Epic wording in chat output");
+    }
+
+    #[test]
+    fn render_pulled_issues_for_chat_orphan_rendered_at_root() {
+        // Child whose parent (99) is not in the list: rendered at depth 0.
+        let orphan = make_wi(5, Some(99));
+        let section = render_pulled_issues_for_chat(&[orphan]);
+        assert!(section.contains("- #5 [open]: Issue 5\n"), "orphan at root level");
     }
 
     #[test]
