@@ -537,9 +537,10 @@ Key behavior:
   full `claude` argv: `-p <task>`, `--strict-mcp-config`, `--mcp-config`,
   `--allowedTools`, `--disallowedTools`, `--dangerously-skip-permissions`,
   `--output-format json`.
-- `run(role, task)` — spawns the process, captures stdout, and parses the JSON
-  output via `serde_json`. Fields extracted: `session_id`, `result`,
-  `total_cost_usd`, `permission_denials`. Returns an `AgentOutcome`.
+- `run(role, task)` — spawns the process, streams stdout line-by-line with
+  inactivity and total-ceiling timeouts (see §4a), and parses the JSON output via
+  `serde_json`. Fields extracted: `session_id`, `result`, `total_cost_usd`,
+  `permission_denials`. Returns an `AgentOutcome`.
 
 `GenericCliDriver` (`crates/agent/src/generic.rs`) is a more general variant.
 
@@ -547,6 +548,193 @@ Key behavior:
 `prepare_session` writes the MCP config JSON and the rules file to temp paths;
 `RULES_FILE_ENV` is the env var name (`CAMERATA_RULES_FILE`) passed to the gate
 process.
+
+---
+
+## 4a. Run liveness and cancellation
+
+### The core principle: progress, not wall-clock
+
+A run (or onboarding scan) is stalled when it produces **no progress** for an idle
+window — not when it has run for a total elapsed time. A legitimately long build
+step that keeps emitting output is NOT stalled. A process that goes silent IS. Wall-
+clock is the wrong discriminator; inactivity is the right one.
+
+This principle is applied at three layers.
+
+### Layer 1 — Bounded subprocess (in `crates/agent/src/`)
+
+Both `ClaudeCliDriver` and `GenericCliDriver` previously called `cmd.output().await`,
+which buffers ALL subprocess output until the child exits. A hung agent produces
+complete silence: no error, no timeout, no heartbeat — the whole run hangs
+indefinitely.
+
+The drivers now **stream stdout line-by-line** via `tokio::io::BufReader::lines()`
+with a per-line `tokio::time::timeout(INACTIVITY_WINDOW, ...)`. Each arriving line:
+1. Fires an injected `on_activity: Option<HeartbeatFn>` callback (`Option<Arc<dyn
+   Fn() + Send + Sync>>`), which resets the inactivity clock at the run layer (§4a
+   Layer 2).
+2. Resets the per-line deadline.
+
+If no line arrives within `INACTIVITY_WINDOW`, the child is killed and
+`AgentError::Stalled { idle_secs, last_line }` is returned — a fail-soft error,
+not a panic. A separate **total hard-ceiling** (`TOTAL_TIMEOUT`) kills runaway
+processes that keep trickling output without doing meaningful work.
+
+| Env var | Default | Controls |
+|---|---|---|
+| `CAMERATA_AGENT_INACTIVITY_SECS` | 120 | Per-line inactivity window in the subprocess driver |
+| `CAMERATA_AGENT_TOTAL_TIMEOUT_SECS` | 3600 | Hard total ceiling in the subprocess driver |
+
+The `on_activity` callback is `Option<HeartbeatFn>` — existing callers that do not
+set it pass `None` and see no behavior change, except that the subprocess is now
+bounded where it was formerly unbounded.
+
+**Motivating example — dep-audit provisioning hang.** `ensure_osv_scanner` built a
+`reqwest::Client` with no connect timeout and no total timeout. On a slow or blocked
+network the download future never resolved, hanging every onboarding scan and every
+test that exercised `audit_repos`. The fix: `connect_timeout(5s)` + `timeout(30s)`
+on the client; the `go install` fallback is bounded at 60 s; the `osv-scanner`
+subprocess itself is bounded at 120 s. On timeout, `run_dep_audit_with_tooling`
+returns an empty findings list with a `CoverageNote` — fail-soft, not a hang.
+(`CAMERATA_DISABLE_DEP_AUDIT` provides a test-isolation escape hatch; never set it
+in production.) This is the "bound the externals" principle in concrete form: any
+async call that touches a network, subprocess, or filesystem-over-network must carry
+an explicit deadline. An unbounded wait is a correctness issue, not a performance
+issue.
+
+### Layer 2 — Run-level heartbeat and stall detection (in `crates/server/src/`)
+
+`Run` tracks two fields:
+- `last_activity_ms: u128` — epoch-ms timestamp of the last progress event,
+  initialized at run creation.
+- `last_progress_label: String` — human-readable description of the last event.
+
+`RunStore::push_event` auto-updates both on every gate event. The driver's
+`on_activity` callback calls `RunStore::touch_activity` so each streamed output line
+also advances the clock.
+
+Two pure functions derive stall state:
+- `idle_ms(last_activity_ms, now_ms) -> u128`
+- `is_stalled(idle_ms, threshold_ms) -> bool`
+
+For onboarding scan jobs, `JobMeta.last_activity_ms` is updated by
+`det_tool_running` and `det_tool_done`, so scan jobs carry the same liveness
+tracking.
+
+### Layer 3 — API contract
+
+`GET /api/runs/:id` returns a `RunStatusResponse` that includes computed stall
+fields alongside the run's normal state:
+
+```json
+{
+  "id": "run-1",
+  "story_id": "CAM-7",
+  "status": "executing",
+  "events": [...],
+  "done": false,
+  "mode": "live",
+  "last_activity_ms": 1750000000000,
+  "last_progress_label": "stage info",
+  "idle_ms": 4200,
+  "stalled": false,
+  "stall_threshold_ms": 120000,
+  "stall_policy": "alert",
+  "failure_reason": null
+}
+```
+
+`GET /api/onboard/audit/job/:id` returns `{ job: JobState, idle_ms: Option<u128>,
+cancel_requested: bool }` (the `JobStatusEnvelope` shape). The UI polls both
+endpoints and renders stall state from the response fields.
+
+### Stall policy: alert vs. cancel
+
+`StallPolicy` (defined in `crates/server/src/`) is keyed off `RunKind`:
+
+| `RunKind` | `StallPolicy` | What happens on stall |
+|---|---|---|
+| `Watched` (interactive dev run) | `Alert` | The cockpit shows an amber stall banner; the run keeps going. The human decides whether to stop it. |
+| `Autonomous` (routine / walk-away) | `Cancel` | The run is auto-stopped into a terminal `Failed { reason }` state. The recorded failure reason IS the operator signal for a walk-away job. |
+
+`stall_decision()` is the pure transition function from stall state + policy to action.
+
+**The key distinction:** for a human-watched run, a stall is unusual but the human
+is present to decide. For an autonomous routine, there is no human watching — auto-
+cancel with a reason is strictly more useful than hanging indefinitely.
+
+### Per-project dual thresholds (`StallThresholds`)
+
+Each `Project` carries `stall_thresholds: StallThresholds { watched_secs, routine_secs }`,
+defaulted at project creation (`#[serde(default)]` for back-compat with existing
+project JSON):
+
+| Field | Default | Applies to |
+|---|---|---|
+| `watched_secs` | 120 | `RunKind::Watched` (interactive dev runs) |
+| `routine_secs` | 600 | `RunKind::Autonomous` (routines) |
+
+`project.stall_threshold_ms(autonomous: bool)` selects the right field and
+converts to milliseconds. There is **no env-var fallback** once a project exists —
+the project's stored value is authoritative, mirroring the `StepModels` pattern.
+Per-project isolation: a change to project A's thresholds never touches project B.
+
+**Why two thresholds?** A human-watched run warrants a shorter patience window —
+the operator can act if something is wrong. A walk-away autonomous routine warrants
+more room to breathe before concluding it is stuck, and when it does stall it auto-
+fails rather than alerting (there is no human to alert to).
+
+`POST /api/projects/:id/stall-thresholds` (`SetStallThresholdsReq { watched_secs: u64,
+routine_secs: u64 }`) updates both values. Zero is rejected server-side (a zero
+threshold would immediately mark every run stalled).
+
+### Cancellation
+
+Two endpoints cancel a run or scan job, both idempotent, both returning `204 No Content`:
+
+- `POST /api/runs/:id/cancel` — cancels a dev run; the run transitions to terminal
+  `Cancelled` state and the streamed child process is killed.
+- `POST /api/onboard/audit/job/:id/cancel` — cancels an onboarding scan; the scan
+  aborts between detection passes.
+
+`RunStatus` has two terminal variants beyond `Done`:
+- `Failed { reason: String }` — the run ended because of an error, including an
+  auto-cancel from `StallPolicy::Cancel`. The `failure_reason` field in the API
+  response carries the reason string (e.g. `"Stall timeout exceeded"`).
+- `Cancelled` — the run was explicitly stopped by the operator (via the Stop button
+  or a direct `POST /cancel`).
+
+The distinction matters: **Failed** (with a reason) signals an unintended stop —
+for an autonomous routine, the reason is the actionable diagnostic. **Cancelled**
+signals an intentional, operator-initiated stop.
+
+### Reusability
+
+The detection and bounding machinery is run-level and generic — it does not vary
+by the kind of work inside the run. Dev runs, onboarding scans, and the future
+routine layer all use the same `idle_ms` / `is_stalled` / `stall_decision` path;
+only the response policy (`alert` vs. `cancel`) and the threshold value differ by
+context.
+
+### UI surface (summary)
+
+Three helpers in `crates/ui/src/cockpit.rs` (all pure, all unit-tested) drive the
+cockpit rendering:
+
+- `format_idle(idle_ms: u128) -> String` — human-readable idle duration (e.g. "2m 3s").
+- `run_is_cancellable(status: &str, done: bool) -> bool` — `true` for any non-
+  done, non-failed, non-cancelled run: the Stop button is always available, not
+  gated on stall.
+- `run_stall_banner_visible(stalled: bool, done: bool) -> bool` — `true` only when
+  `stalled && !done` (the banner never appears on a completed run even if the
+  snapshot carries `stalled=true` from a shutdown race window).
+
+See `docs/decisions/2026-06-23_run_stall_detection.md`,
+`docs/decisions/2026-06-23_stall_policy_cancel_dual_thresholds.md`,
+`docs/decisions/2026-06-23_stall_ui_warn_stop_thresholds.md`, and
+`docs/decisions/2026-06-23_dep_audit_provisioning_hang_fix.md` for the full
+implementation decisions.
 
 ---
 
@@ -2169,3 +2357,11 @@ adapters implement it per tracker.
     silently from the operator's perspective. A human-visible catch-ledger is
     Phase 2 (issue #69). Do not rely on audit trails for denied writes in the
     current build.
+14. **No wall-clock run timeouts — liveness is keyed off progress.** There is no
+    fixed total-elapsed-time timeout that kills a run. The inactivity window
+    (per-line silence from the subprocess) is the stall discriminator; a total
+    hard-ceiling exists only as a runaway-process backstop. A legitimately long
+    step that keeps emitting output is never falsely killed. Every external call
+    (network download, subprocess, filesystem-over-network) carries an explicit
+    deadline; an unbounded wait is treated as a correctness defect, not a
+    performance tradeoff. See §4a.

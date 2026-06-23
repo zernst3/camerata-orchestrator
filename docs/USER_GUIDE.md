@@ -14,11 +14,14 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > Re-onboarding an already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos
 > resolve to **local folders** with a health check, and onboarding state **auto-saves**. Governed
 > Development adds a project-settings **gear popup** (loop guard + tier-map + per-project step-model
-> config), **blank UoWs you author with AI**, an **AI-assisted Update-branch** control, a work-item
-> modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap bypass** for installing
-> tooling, a one-click **Gate self-check** (go/no-go), **multiple concurrent UoWs** (each runs in its
-> own isolated git worktree), **PR lifecycle buttons** per UoW (push, open PR, pull PR info, resolve
-> with agent), and **structured clarifications** that auto-save at pause points. Scan findings now
+> config + **stall thresholds**), **blank UoWs you author with AI**, an **AI-assisted Update-branch**
+> control, a work-item modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap
+> bypass** for installing tooling, a one-click **Gate self-check** (go/no-go), **multiple concurrent
+> UoWs** (each runs in its own isolated git worktree), **PR lifecycle buttons** per UoW (push, open PR,
+> pull PR info, resolve with agent), and **structured clarifications** that auto-save at pause points.
+> Dev runs and onboarding scans show **run liveness**: an amber **stall warning** appears when a run
+> makes no progress for the watched threshold, and a **Stop button** is always available to cancel any
+> running dev run or scan at any time (the run ends in a **Cancelled** state). Scan findings now
 > include a **Test badge** for test-scope violations, a separate **Scan coverage** section (tools that
 > didn't run), and scan tools (Semgrep/ESLint) **auto-install on first use**. The in-app assistant
 > retains **conversation context** across messages and is grounded on your active project and pulled
@@ -261,6 +264,12 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    preview linter: starting → running → done, with a findings count). It's the primary progress view
    in deterministic-only mode, where the AI drawer is empty.
 
+   **Stop button and stall warning during the scan.** A **Stop** button is always visible while the
+   scan is running — you do not have to wait for a stall to stop it. Clicking Stop ends the scan in a
+   **Cancelled** state. Separately, if the scan makes no progress for approximately 2 minutes, an
+   amber **"No progress — possible stall"** warning appears above the progress indicator. The warning
+   is informational; the scan continues until you click Stop or it finishes normally.
+
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
@@ -391,6 +400,16 @@ settings:
   story authoring, decomposition, escalation, clarification). Each step has its own model selector;
   they default to `claude-sonnet-4-6` when a project is created. Per-project isolation: a change to
   project A never touches project B's step models. See §16 for more detail.
+- **Stall thresholds** — two numeric fields (in seconds) that control how long a run can be idle
+  before Camerata considers it stalled:
+  - **Watched (interactive)** — default 120 s. Applies to dev runs you are actively watching. On
+    stall, an amber warning appears in the run panel; the run keeps going and you decide what to do.
+  - **Routine (autonomous)** — default 600 s. Applies to walk-away autonomous runs (scheduled
+    routines). On stall, the run is **auto-cancelled** and transitions to **Failed** with the stall
+    reason recorded — the failure reason is the operator signal for an unattended job. Two separate
+    thresholds exist because a human-watched run warrants a shorter patience window, while a walk-away
+    routine warrants more room and should fail explicitly rather than hang indefinitely. Both values
+    must be positive integers greater than zero; saving zero is blocked.
 
 These are project defaults, not per-UoW knobs. (The tier-map is also still editable in the Rules view
 for discoverability; both surfaces save to the same project row.) Per-run model overrides stay on the
@@ -524,6 +543,36 @@ yet. Enabling this toggle skips **only** the post-task layer-2 lint/test bounce 
 tool-installing run, so you can land the tooling, then turn it back off. **Layer 1 (deny-before-write)
 and the decisions gate still apply** — you never bypass the security gate. It's deliberate and visible,
 never silent or sticky.
+
+#### Run liveness: stall warnings and the Stop button
+
+Camerata watches for **lack of progress**, not elapsed time. A legitimately long build or agent step
+that keeps emitting output is never flagged. A process that goes silent is.
+
+**Stop button — always available.** A **■ Stop** button appears in the run panel bar as long as the
+run is in a non-terminal state. You do not need to wait for a stall warning to stop a run; clicking
+Stop at any point ends the run and transitions it to **Cancelled**.
+
+**Stall warning.** If a dev run produces no progress for the project's configured **Watched** threshold
+(default 120 s), an amber banner appears above the live-events stream:
+
+> ⚠ No progress for Xm — possible stall
+
+The banner shows the idle duration and the last progress label. It is a warning, not an automatic
+kill — for an interactive dev run you remain in control. Dismiss the concern by clicking Stop, or
+wait to see if the agent resumes.
+
+**Failed vs. Cancelled.** These two terminal states mean different things:
+- **Cancelled** — you (or another operator action) explicitly stopped the run. Normal for "I changed
+  my mind" or "something looked wrong."
+- **Failed (with reason)** — the run stopped due to an error, including an automatic stall-cancel
+  for a routine/autonomous run where `StallPolicy` is `Cancel`. The failure reason (e.g. "Stall
+  timeout exceeded") is displayed in the run panel and recorded on the UoW history. For autonomous
+  routines, the recorded reason is the actionable diagnostic — it surfaces in the Routines view and
+  any configured escalation path.
+
+The stall threshold and policy are per project (see "Project settings" above); the Stop button
+behavior is identical regardless of threshold.
 
 #### Later stages (Development → Awaiting QA → Signed Off)
 
