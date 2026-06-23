@@ -3446,17 +3446,304 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
     Json(serde_json::json!({ "ok": true, "onboarded": repos }))
 }
 
+// ── CI story body helpers ─────────────────────────────────────────────────────
+//
+// These functions are extracted from `onboard_ci_rules` so they can be unit-
+// tested without spinning up a GitHub token or an HTTP server. Each produces the
+// complete Markdown issue body for one tier.
+
+/// The preamble shared by both tier stories. Explains the SSOT model up-front so any
+/// developer or agent picking up either story understands how `.camerata/checks.toml`
+/// drives BOTH layers before reading the tier-specific instructions.
+fn ci_story_ssot_preamble() -> &'static str {
+    "## Single Source of Truth: `.camerata/checks.toml`
+
+The canonical place to declare a custom deterministic check is **`.camerata/checks.toml`**. \
+Adding ONE entry there makes the check enforced at BOTH:
+
+- **Layer 2** (in-loop dev gate): checks marked `in_loop = true` run in the governed dev \
+  loop after each agent task. A violation bounces the work back before a PR is even opened — \
+  the same way a failing `cargo clippy` would.
+- **Layer 3** (generated CI workflow): the entire manifest (both `in_loop = true` AND \
+  `in_loop = false`) is consumed by Camerata's workflow generator \
+  (`POST /api/projects/active/generate-ci-workflow`) to produce \
+  `.github/workflows/camerata-gates.yml`. CI is always the superset backstop.
+
+**Parity is structural, not by convention.** Both the Layer-2 runner and the Layer-3 workflow \
+generator call the SAME shared functions over the manifest, so they cannot drift by construction.
+
+### Schema
+
+```toml
+# .camerata/checks.toml
+
+[[check]]
+id       = \"DEP-CRUISER-LAYERING-1\"
+name     = \"dependency-cruiser layering\"
+tool     = \"dependency-cruiser\"
+version  = \"6.3.0\"                 # exact, not a range — L2/L3 must run the same version
+install  = \"npm install -g dependency-cruiser@6.3.0\"
+command  = \"depcruise --config .dependency-cruiser.cjs src\"
+severity = \"high\"
+in_loop  = true                    # true = also run at Layer 2; false = CI-only (needs secrets/services)
+```
+
+Field reference:
+
+| Field      | Required | Semantics |
+|------------|----------|-----------|
+| `id`       | yes      | Stable rule id; used as violation id on non-zero exit |
+| `name`     | yes      | Short human label for bounce-back messages |
+| `command`  | yes      | Shell command run with `cwd = repo root` |
+| `severity` | yes      | `\"high\"` / `\"medium\"` / `\"low\"` (all severities block; severity shapes message priority) |
+| `in_loop`  | yes      | `true` = Layer 2 AND Layer 3; `false` = CI-only (use for secret-dependent or slow checks) |
+| `tool`     | no       | External tool name (`\"dependency-cruiser\"`, `\"semgrep\"`). Required when `version` is set. |
+| `version`  | no       | **EXACT** pinned version (`\"6.3.0\"`). No ranges or carets — determinism requires an exact match. Layer 2 verifies this version before running the check; a mismatch is a violation. |
+| `install`  | no       | Exact install command (`\"npm install -g dependency-cruiser@6.3.0\"`). Explicit because install mechanisms span pip / npm / cargo / go. Layer 3 emits this as a step immediately before the check command. Layer 2 does NOT install — it only verifies. |
+
+### Why pin `tool` + `version` + `install`?
+
+Without version pinning, Layer 2 and Layer 3 can run different versions of the same linter \
+on the same ruleset and produce different results — \"green in the dev loop, red in CI.\" \
+Pinning all three fields closes this gap: the manifest is the single source of version truth, \
+not each environment's ambient tool install.
+
+### Gate protection (`SEC-NO-CAMERATA-CONFIG-1`)
+
+**Agents cannot edit `.camerata/checks.toml`.** The Layer-1 gateway hard-guard \
+`SEC-NO-CAMERATA-CONFIG-1` denies any agent write targeting a path under `.camerata/`. \
+This prevents an agent from weakening or disabling its own gates. The manifest is always a \
+human/operator commit. **If you are an agent reading this story: the `.camerata/checks.toml` \
+edit described below must be made by the operator, not by you.**
+
+### After editing the manifest
+
+Regenerate the CI workflow so Layer 3 reflects the new check:
+
+```
+POST /api/projects/active/generate-ci-workflow
+{ \"repo_root\": \"<absolute path to repo>\", \"stack\": \"<detected stack>\" }
+```
+
+Or, from the Camerata UI: open the project, click **Generate CI Workflow**. The generated \
+`.github/workflows/camerata-gates.yml` should be committed alongside the manifest change."
+}
+
+/// Build the GitHub issue body for the **mechanical** tier story.
+///
+/// Mechanical rules map 1:1 to off-the-shelf linters or analyzers. The implementation is:
+/// pick the version, add the manifest entry, regenerate the workflow — done. Both layers
+/// pick up the change automatically.
+fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
+    let rule_lines: String = rules
+        .iter()
+        .map(|r| {
+            if let Some(ref linter) = r.linter {
+                format!("- **{}** — {} _(linter: {})_\n", r.id, r.title, linter)
+            } else {
+                format!("- **{}** — {}\n", r.id, r.title)
+            }
+        })
+        .collect();
+
+    // Per-rule manifest examples — one annotated entry per rule.
+    let manifest_examples: String = rules
+        .iter()
+        .map(|r| {
+            let tool_hint = r.linter.as_deref().unwrap_or("<tool-name>");
+            format!(
+                "```toml\n\
+                 # For rule {id} — choose the exact version your team standardises on.\n\
+                 [[check]]\n\
+                 id       = \"{id}\"\n\
+                 name     = \"{title}\"\n\
+                 tool     = \"{tool}\"           # the off-the-shelf linter binary\n\
+                 version  = \"<x.y.z>\"          # EXACT pinned version — no ranges\n\
+                 install  = \"{tool}@<x.y.z>\"   # exact install command (npm/pip/cargo/etc.)\n\
+                 command  = \"<linter invocation with --config or --rule flag>\"\n\
+                 severity = \"high\"\n\
+                 in_loop  = true               # bounces the agent at Layer 2; also in CI\n\
+                 ```\n\n",
+                id = r.id,
+                title = r.title,
+                tool = tool_hint,
+            )
+        })
+        .collect();
+
+    let preamble = ci_story_ssot_preamble();
+    format!(
+        "{preamble}\n\n\
+         ---\n\n\
+         ## This story: MECHANICAL tier\n\n\
+         **This story covers the MECHANICAL tier only.** Each rule below maps to a real \
+         off-the-shelf linter or analyzer. The entire implementation is:\n\n\
+         1. Decide the exact tool version your team will standardise on.\n\
+         2. Add the manifest entry to `.camerata/checks.toml` (see examples below).\n\
+         3. Commit the manifest (operator/human commit — agents cannot write `.camerata/`).\n\
+         4. Regenerate the CI workflow: both Layer 2 and Layer 3 automatically enforce \
+         the check. No separate CI wiring step is needed.\n\n\
+         **Repo:** `{repo}`\n\n\
+         **Rules to wire:**\n\
+         {rule_lines}\n\
+         ---\n\n\
+         ## Manifest entries to add\n\n\
+         For each rule, add one `[[check]]` block to `.camerata/checks.toml`. \
+         Examples (fill in the real version and invocation):\n\n\
+         {manifest_examples}\
+         > **Version pinning is not optional.** Without it, Layer 2 and Layer 3 can run \
+         > different tool versions on the same ruleset and produce different results. \
+         > Pin the exact version; use `install` so CI installs it before running the check.\n\n\
+         ---\n\n\
+         ## Implementation checklist\n\n\
+         - [ ] For each rule: confirm the linter is already in the repo or add it as a dev dependency.\n\
+         - [ ] Add the `[[check]]` entry to `.camerata/checks.toml` with pinned `tool`, `version`, \
+         and `install`.\n\
+         - [ ] Commit `.camerata/checks.toml` (human/operator commit).\n\
+         - [ ] Regenerate `.github/workflows/camerata-gates.yml` via Camerata and commit it.\n\
+         - [ ] Open a draft PR; verify CI passes with the new check step visible in the workflow run.\n\
+         - [ ] Do not weaken or delete existing checks.\n\n\
+         _Filed by Camerata onboarding._"
+    )
+}
+
+/// Build the GitHub issue body for the **architectural** tier story.
+///
+/// Architectural rules are deterministic (a PR either violates them or it does not) but have
+/// NO off-the-shelf linter. Each requires a bespoke checker — a script, custom Semgrep rule,
+/// AST pass, or dependency-graph query — designed and scoped by the team before wiring.
+///
+/// The canonical worked example is API-layering enforcement via `dependency-cruiser`:
+/// a JS/TS repo uses a `.dependency-cruiser.cjs` config that asserts the allowed import
+/// graph; `depcruise` returns non-zero on violation.  Register it in the manifest, and
+/// both Layer 2 and Layer 3 enforce it identically with no separate wiring.
+fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
+    let rule_lines: String = rules
+        .iter()
+        .map(|r| format!("- **{}** — {}\n", r.id, r.title))
+        .collect();
+
+    let preamble = ci_story_ssot_preamble();
+    format!(
+        "{preamble}\n\n\
+         ---\n\n\
+         ## This story: ARCHITECTURAL tier\n\n\
+         **This story covers the ARCHITECTURAL tier only.** Each rule below is deterministic \
+         but has **no off-the-shelf linter**. Each one requires a bespoke checker — a script, \
+         custom Semgrep rule, AST pass, or dependency-graph query — that the team must DESIGN \
+         and SCOPE before implementation begins. **This is design work first, not a \
+         configuration task.**\n\n\
+         Scope each rule as a sub-task. Do not block the mechanical CI story on this work.\n\n\
+         **Repo:** `{repo}`\n\n\
+         **Rules that need a custom checker:**\n\
+         {rule_lines}\n\
+         ---\n\n\
+         ## How to implement each rule (step-by-step)\n\n\
+         For each rule in the list above, follow this process:\n\n\
+         ### Step 1 — Design the deterministic checker\n\n\
+         Choose a strategy that returns **exit 0 on pass, non-zero on violation**, with \
+         CWD = repo root. Options (not exhaustive):\n\n\
+         - **dependency-cruiser** (JS/TS layering): write a `.dependency-cruiser.cjs` config \
+         that declares the allowed import graph; the checker command is \
+         `depcruise --config .dependency-cruiser.cjs src`.\n\
+         - **Custom Semgrep rule**: write a `.semgrep.yml` with a `pattern-not-inside` rule \
+         and run `semgrep --config .semgrep.yml --error .`.\n\
+         - **Shell/Python script**: traverse the AST or grep for the pattern; exit non-zero \
+         when a violation is found. Place under `scripts/` and make it executable.\n\
+         - **Any other deterministic static tool**: anything that can be invoked from the \
+         repo root and signals pass/fail via exit code.\n\n\
+         **Worked example — API layering (`ARCH-API-LAYERING-1`):**\n\n\
+         The rule asserts that service modules never import from repository modules directly \
+         (services orchestrate; repositories own data access). `dependency-cruiser` can \
+         encode this as a forbidden dependency arc:\n\n\
+         ```js\n\
+         // .dependency-cruiser.cjs\n\
+         module.exports = {{\n\
+           forbidden: [\n\
+             {{\n\
+               name: 'no-service-to-repo-direct',\n\
+               severity: 'error',\n\
+               from: {{ path: 'src/services/' }},\n\
+               to:   {{ path: 'src/repositories/' }},\n\
+             }},\n\
+           ],\n\
+         }};\n\
+         ```\n\n\
+         Run `depcruise --config .dependency-cruiser.cjs src` — zero output + exit 0 means \
+         clean; non-zero means a service is importing a repository directly.\n\n\
+         ### Step 2 — Add the manifest entry to `.camerata/checks.toml`\n\n\
+         Once the checker script/config is committed and verified locally, register it in \
+         the manifest. Pin the exact tool version so Layer 2 and Layer 3 run identically:\n\n\
+         ```toml\n\
+         # .camerata/checks.toml\n\
+         [[check]]\n\
+         id       = \"ARCH-API-LAYERING-1\"       # matches the rule id in the corpus\n\
+         name     = \"API layering\"\n\
+         tool     = \"dependency-cruiser\"         # omit if using a repo script with no external tool\n\
+         version  = \"6.3.0\"                      # EXACT pinned version — no ranges\n\
+         install  = \"npm install -g dependency-cruiser@6.3.0\"\n\
+         command  = \"depcruise --config .dependency-cruiser.cjs src\"\n\
+         severity = \"high\"\n\
+         in_loop  = true                          # bounces the agent at Layer 2 too\n\
+         ```\n\n\
+         For a repo-local script (no external tool required):\n\n\
+         ```toml\n\
+         [[check]]\n\
+         id       = \"ARCH-MY-CUSTOM-RULE-1\"\n\
+         name     = \"<rule description>\"\n\
+         command  = \"scripts/check_my_rule.sh\"   # must be executable; cwd = repo root\n\
+         severity = \"high\"\n\
+         in_loop  = true\n\
+         # tool / version / install omitted when no external binary is required\n\
+         ```\n\n\
+         > **Gate protection:** `.camerata/checks.toml` is protected by `SEC-NO-CAMERATA-CONFIG-1`. \
+         > Agents cannot write to `.camerata/`. This manifest edit MUST be a human/operator \
+         > commit.\n\n\
+         ### Step 3 — Regenerate the CI workflow\n\n\
+         After committing the manifest, regenerate `.github/workflows/camerata-gates.yml`:\n\n\
+         ```\n\
+         POST /api/projects/active/generate-ci-workflow\n\
+         {{ \"repo_root\": \"<absolute path>\", \"stack\": \"<detected stack>\" }}\n\
+         ```\n\n\
+         Or use the Camerata UI: open the project, click **Generate CI Workflow**. \
+         Commit the updated workflow file.\n\n\
+         ### Step 4 — Verify at both layers\n\n\
+         - **Layer 2**: trigger a governed dev run in Camerata and confirm the check fires \
+         and bounces on a known violation.\n\
+         - **Layer 3**: open a PR and confirm the check step appears in the generated \
+         `.github/workflows/camerata-gates.yml` workflow run.\n\n\
+         The result: one definition in `.camerata/checks.toml`, enforced identically at \
+         Layer 2 and Layer 3. No separate L2 vs L3 wiring is needed.\n\n\
+         ---\n\n\
+         ## Implementation checklist (per rule)\n\n\
+         - [ ] Agree on the checker strategy and scope it (design phase).\n\
+         - [ ] Build and verify the checker in isolation (returns 0 on pass, non-zero on violation).\n\
+         - [ ] Commit the checker script/config to the repo.\n\
+         - [ ] Add the `[[check]]` entry to `.camerata/checks.toml` with pinned `tool` + \
+         `version` + `install` (if using an external tool).\n\
+         - [ ] Commit `.camerata/checks.toml` (human/operator commit — not an agent).\n\
+         - [ ] Regenerate `.github/workflows/camerata-gates.yml` via Camerata and commit it.\n\
+         - [ ] Verify the check fires at Layer 2 (governed dev run) and Layer 3 (CI on PR).\n\
+         - [ ] Do not weaken or delete existing checks.\n\
+         - [ ] Scope each rule as its own sub-task if the list is long. Do not block the \
+         mechanical CI story on this work.\n\n\
+         _Filed by Camerata onboarding._"
+    )
+}
+
 /// Emit a tier-specific "wire CI rules" story as a GitHub issue.
 ///
 /// Two tiers are supported:
 /// - "mechanical"   — rules that map 1:1 to an off-the-shelf linter/analyzer. Wiring is
-///   straightforward: enable the cited linter rule in CI. This story is safe to implement
-///   immediately without team refinement.
+///   straightforward: add a manifest entry to `.camerata/checks.toml` (the SSOT) and both
+///   Layer 2 (in-loop) and Layer 3 (CI) automatically enforce it.
 /// - "architectural" — rules that are also deterministic but require a bespoke AST or static-
 ///   analysis checker the team must DESIGN before implementing. This story should be scoped
 ///   and refined first; it should NOT ride with the mechanical story.
 ///
 /// The UI files each story separately so the two tracks land as distinct GitHub issues.
+/// Both stories carry the full SSOT HOW-TO so a developer or AI agent can implement
+/// the check correctly without additional hand-holding.
 async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
@@ -3482,50 +3769,10 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
         );
     };
 
-    // The preamble is identical for both tiers — it sets up the distinction once and up
-    // front so the reader doesn't have to infer it from the title alone.
-    let preamble = "Mechanical and architectural rules are both deterministic CI-tier checks. \
-        Mechanical rules map to an existing off-the-shelf linter (simple to wire). \
-        Architectural rules require a custom checker and team refinement before implementing. \
-        Wire each check into the repo's CANONICAL check command (the lint/test command that \
-        Camerata's in-loop layer-2 check also runs) AND the CI workflow — one wiring covers BOTH \
-        the in-loop layer-2 check (fast, during a governed run) and the authoritative layer-3 CI \
-        gate (every PR, including non-Camerata changes).";
-
     let (title, body) = match req.tier.as_str() {
         "mechanical" => {
             let t = format!("Wire mechanical (off-the-shelf linter) rules into CI — {}", req.repo);
-            let rule_lines: String = req
-                .rules
-                .iter()
-                .map(|r| {
-                    if let Some(ref linter) = r.linter {
-                        format!("- {} — {} (linter: {})\n", r.id, r.title, linter)
-                    } else {
-                        format!("- {} — {}\n", r.id, r.title)
-                    }
-                })
-                .collect();
-            let b = format!(
-                "{preamble}\n\n\
-                 **This story covers the MECHANICAL tier only.** Each rule listed below maps to a \
-                 real off-the-shelf linter or analyzer — enabling the cited tool rule in CI is the \
-                 entire implementation. No bespoke checker is needed.\n\n\
-                 **Repo:** `{repo}`\n\n\
-                 **Rules to wire:**\n\
-                 {rule_lines}\n\
-                 For each rule:\n\
-                 1. Check whether it is already enforced in CI (inspect `.github/workflows/`, the \
-                 linter config, package scripts).\n\
-                 2. If it is, leave it.\n\
-                 3. If not, enable the cited linter rule in the repo's lint config so the repo's \
-                 canonical lint command runs it (this makes Camerata's in-loop layer-2 check pick \
-                 it up automatically), AND wire that same command into the CI workflow so it runs \
-                 on every PR (layer 3). One wiring covers both layers; a failing PR means the rule \
-                 is violated.\n\n\
-                 Do not weaken or delete existing checks.\n\n\
-                 _Filed by Camerata onboarding._"
-            );
+            let b = ci_story_body_mechanical(repo, &req.rules);
             (t, b)
         }
         _ => {
@@ -3534,31 +3781,7 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
                 "Wire architectural (custom-checker) rules into CI — {}",
                 req.repo
             );
-            let rule_lines: String = req
-                .rules
-                .iter()
-                .map(|r| format!("- {} — {}\n", r.id, r.title))
-                .collect();
-            let b = format!(
-                "{preamble}\n\n\
-                 **This story covers the ARCHITECTURAL tier only.** Each rule below is \
-                 deterministic but has NO off-the-shelf linter. Each one needs a bespoke AST or \
-                 static-analysis checker designed by the team. **This story is more involved than \
-                 the mechanical story and should be scoped and refined with the team before \
-                 implementation begins.**\n\n\
-                 **Repo:** `{repo}`\n\n\
-                 **Rules to wire (each needs a custom checker):**\n\
-                 {rule_lines}\n\
-                 For each rule:\n\
-                 1. Agree on a checker strategy (AST transform, grep pattern, Semgrep rule, etc.).\n\
-                 2. Implement and test the checker in isolation.\n\
-                 3. Wire the checker into the repo's canonical check command (e.g. its lint/test \
-                 script, so Camerata's in-loop layer-2 check runs it) AND the CI workflow so it \
-                 runs on every PR (layer 3). One wiring covers both layers.\n\n\
-                 Do not weaken or delete existing checks. Scope each checker as a sub-task if the \
-                 list is long — do not block the mechanical CI story on this work.\n\n\
-                 _Filed by Camerata onboarding._"
-            );
+            let b = ci_story_body_architectural(repo, &req.rules);
             (t, b)
         }
     };
@@ -8835,5 +9058,281 @@ mod tests {
                 "rule '{rule}' must map to None (no floor twin)"
             );
         }
+    }
+
+    // ── ci_story_body helpers ─────────────────────────────────────────────────
+    //
+    // These tests verify that the enriched story bodies contain the SSOT model
+    // content that makes them self-sufficient for implementation. They assert on
+    // structural landmarks — not exact string equality — so minor prose edits
+    // do not break them.
+
+    fn mechanical_rules_fixture() -> Vec<CiStoryRule> {
+        vec![
+            CiStoryRule {
+                id: "LINT-NO-CONSOLE-1".to_string(),
+                title: "No console.log in production code".to_string(),
+                linter: Some("eslint".to_string()),
+            },
+            CiStoryRule {
+                id: "LINT-STRICT-1".to_string(),
+                title: "TypeScript strict mode".to_string(),
+                linter: None,
+            },
+        ]
+    }
+
+    fn architectural_rules_fixture() -> Vec<CiStoryRule> {
+        vec![
+            CiStoryRule {
+                id: "ARCH-API-LAYERING-1".to_string(),
+                title: "Services must not import repositories directly".to_string(),
+                linter: None,
+            },
+            CiStoryRule {
+                id: "ARCH-NO-CIRCULAR-DEPS-1".to_string(),
+                title: "No circular module dependencies".to_string(),
+                linter: None,
+            },
+        ]
+    }
+
+    // ── shared SSOT content (must appear in BOTH tier bodies) ─────────────────
+
+    #[test]
+    fn mechanical_body_contains_ssot_file_reference() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        assert!(
+            body.contains(".camerata/checks.toml"),
+            "mechanical body must reference .camerata/checks.toml as SSOT"
+        );
+    }
+
+    #[test]
+    fn architectural_body_contains_ssot_file_reference() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains(".camerata/checks.toml"),
+            "architectural body must reference .camerata/checks.toml as SSOT"
+        );
+    }
+
+    #[test]
+    fn mechanical_body_mentions_both_layers() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        assert!(
+            body.contains("Layer 2") && body.contains("Layer 3"),
+            "mechanical body must explain enforcement at both Layer 2 and Layer 3"
+        );
+    }
+
+    #[test]
+    fn architectural_body_mentions_both_layers() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("Layer 2") && body.contains("Layer 3"),
+            "architectural body must explain enforcement at both Layer 2 and Layer 3"
+        );
+    }
+
+    #[test]
+    fn mechanical_body_explains_parity_guarantee() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        // The parity guarantee is the key correctness claim — both layers derive from SSOT.
+        assert!(
+            body.contains("Parity is structural") || body.contains("parity"),
+            "mechanical body must state that Layer-2/Layer-3 parity is structural, not by convention"
+        );
+    }
+
+    #[test]
+    fn architectural_body_explains_parity_guarantee() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("Parity is structural") || body.contains("parity"),
+            "architectural body must state that Layer-2/Layer-3 parity is structural"
+        );
+    }
+
+    // ── schema / pinning fields ───────────────────────────────────────────────
+
+    #[test]
+    fn mechanical_body_contains_toml_schema_fields() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        // All five required fields must appear.
+        for field in &["id", "name", "command", "severity", "in_loop"] {
+            assert!(
+                body.contains(field),
+                "mechanical body must document the `{field}` manifest field"
+            );
+        }
+        // The three pinning fields must also appear.
+        for field in &["tool", "version", "install"] {
+            assert!(
+                body.contains(field),
+                "mechanical body must document the `{field}` pinning field"
+            );
+        }
+    }
+
+    #[test]
+    fn architectural_body_contains_toml_schema_fields() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        for field in &["id", "name", "command", "severity", "in_loop"] {
+            assert!(
+                body.contains(field),
+                "architectural body must document the `{field}` manifest field"
+            );
+        }
+        for field in &["tool", "version", "install"] {
+            assert!(
+                body.contains(field),
+                "architectural body must document the `{field}` pinning field"
+            );
+        }
+    }
+
+    #[test]
+    fn mechanical_body_stresses_exact_version_pinning() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        // "EXACT" or "exact" or "pin" or "pinned" — any of these confirms the story
+        // emphasises version pinning over floating versions.
+        let lower = body.to_lowercase();
+        assert!(
+            lower.contains("exact") || lower.contains("pin"),
+            "mechanical body must stress that version pinning is exact (no ranges/carets)"
+        );
+    }
+
+    #[test]
+    fn architectural_body_stresses_exact_version_pinning() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        let lower = body.to_lowercase();
+        assert!(
+            lower.contains("exact") || lower.contains("pin"),
+            "architectural body must stress that version pinning is exact"
+        );
+    }
+
+    // ── gate-protection note ──────────────────────────────────────────────────
+
+    #[test]
+    fn mechanical_body_mentions_gate_protection() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        assert!(
+            body.contains("SEC-NO-CAMERATA-CONFIG-1") || body.contains("agents cannot"),
+            "mechanical body must mention the gate that prevents agents editing .camerata/"
+        );
+    }
+
+    #[test]
+    fn architectural_body_mentions_gate_protection() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("SEC-NO-CAMERATA-CONFIG-1") || body.contains("agents cannot"),
+            "architectural body must mention SEC-NO-CAMERATA-CONFIG-1 gate protection"
+        );
+    }
+
+    // ── tier-specific content ─────────────────────────────────────────────────
+
+    #[test]
+    fn mechanical_body_names_linter_for_rules_that_have_one() {
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        // LINT-NO-CONSOLE-1 has linter: "eslint" — must appear.
+        assert!(
+            body.contains("eslint"),
+            "mechanical body must surface the linter hint (eslint) for rules that supply one"
+        );
+    }
+
+    #[test]
+    fn mechanical_body_includes_all_rule_ids() {
+        let rules = mechanical_rules_fixture();
+        let body = ci_story_body_mechanical("owner/repo", &rules);
+        for r in &rules {
+            assert!(
+                body.contains(&r.id),
+                "mechanical body must list rule id `{}`",
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn architectural_body_includes_all_rule_ids() {
+        let rules = architectural_rules_fixture();
+        let body = ci_story_body_architectural("owner/repo", &rules);
+        for r in &rules {
+            assert!(
+                body.contains(&r.id),
+                "architectural body must list rule id `{}`",
+                r.id
+            );
+        }
+    }
+
+    #[test]
+    fn architectural_body_describes_custom_checker_requirement() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        // The story must be explicit that a bespoke checker must be BUILT.
+        assert!(
+            body.contains("bespoke checker") || body.contains("custom checker"),
+            "architectural body must state that a custom/bespoke checker must be built"
+        );
+    }
+
+    #[test]
+    fn architectural_body_contains_api_layering_worked_example() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        // The dependency-cruiser worked example for API layering must appear.
+        assert!(
+            body.contains("dependency-cruiser"),
+            "architectural body must include the dependency-cruiser worked example"
+        );
+        assert!(
+            body.contains("ARCH-API-LAYERING-1"),
+            "architectural body must reference ARCH-API-LAYERING-1 as the canonical example"
+        );
+    }
+
+    #[test]
+    fn architectural_body_teaches_regenerate_workflow_step() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        // Step 3 in the how-to is regenerating the CI workflow after editing the manifest.
+        assert!(
+            body.contains("generate-ci-workflow") || body.contains("Generate CI Workflow"),
+            "architectural body must explain how to regenerate the CI workflow after editing the manifest"
+        );
+    }
+
+    #[test]
+    fn architectural_body_scoping_guidance_present() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        // The story must tell teams not to block the mechanical story on architectural work.
+        assert!(
+            body.contains("mechanical CI story") || body.contains("mechanical story"),
+            "architectural body must tell teams not to block the mechanical story on this work"
+        );
+    }
+
+    // ── repo name propagation ─────────────────────────────────────────────────
+
+    #[test]
+    fn mechanical_body_includes_repo_name() {
+        let body = ci_story_body_mechanical("my-org/my-repo", &mechanical_rules_fixture());
+        assert!(
+            body.contains("my-org/my-repo"),
+            "mechanical body must include the repo name"
+        );
+    }
+
+    #[test]
+    fn architectural_body_includes_repo_name() {
+        let body = ci_story_body_architectural("my-org/my-repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("my-org/my-repo"),
+            "architectural body must include the repo name"
+        );
     }
 }
