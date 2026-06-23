@@ -16,6 +16,7 @@
 pub mod ai_audit;
 pub mod arm;
 pub mod auto_fire;
+pub mod dep_audit;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod connections;
