@@ -1,8 +1,6 @@
 # Camerata Orchestrator
 
-> Working name. "Conductor" is a candidate, fitting the Camerata / Chorale musical
-> theme: Camerata writes the rules, Chorale renders the tables, the Conductor leads
-> the ensemble.
+I set out to build Camerata because managing multiple AI agents across multiple projects through conversational chat alone became unwieldy, and frankly cognitively tiring. The governance itself worked: my rules held and the agent's code quality stayed high. But routines would fail silently, and I often wouldn't know a run had failed until I went and asked the agent about it. The missing piece was never the governance, it is already baked into my process. What was missing was a structured place for it to live: status and state visible and managed in a real interface, instead of buried in chat. That is what Camerata is: a structured management layer for orchestrating AI agents across any number of projects, while enforcing rules and deterministic gates to maintain code quality.
 
 Camerata is an all-Rust, governed multi-agent engineering platform. This README leads
 with what runs and is defensible today, and is explicit about what is built but staged.
@@ -11,6 +9,31 @@ The intended reader is the person who will clone the repo and check, so the line
 
 The fastest way to see the real, working part: `cargo run -p camerata-ui` (the Enterprise
 Cockpit, a Dioxus desktop app), then open the **Onboard repos** view.
+
+```text
+ CAMERATA — WHAT'S REAL vs STAGED
+ ════════════════════════════════════════════════════════════════════════════
+
+ ✅ REAL — runs today, you can reproduce it
+    ▸ GOVERNANCE GATE — deny-before-execute blocks a real `claude -p` agent's
+      forbidden write before it touches disk. Fail-closed, provider-neutral,
+      binary pass/fail (not an LLM grading an LLM).      ← the defensible wedge
+      Runs in the CLI, not yet in the UI. The video shows the onboarding
+      pipeline; the gate is verified separately at the command line:
+      cargo run -p camerata -- live-demo
+    ▸ BROWNFIELD ONBOARDING, end-to-end on fixtures — detect → two-tier audit
+      → calibrate/dedup → triage → baseline waivers + GitHub issues → apply.
+    ▸ 14-crate Rust workspace · 670+ tests · governs its OWN source in CI.
+
+ ⏳ STAGED — built & tested, NOT yet live (please don't grade these as proven)
+    ▸ App-builder "AI lead engineer" is a deterministic stub by default
+      (real governed fleet opt-in: CAMERATA_LIVE_BUILD=1); Azure deploy = plan.
+    ▸ Architect / board adapters tested against fake transports — 0 live calls.
+    ▸ The gate inside a full live DEVELOPMENT CYCLE — next milestone, not done.
+
+ → Grade the wedge: the GATE is the proven core. Everything staged is labeled
+   honestly in the sections below — nothing here is blurred.
+```
 
 ## What works today: brownfield onboarding, end to end
 
