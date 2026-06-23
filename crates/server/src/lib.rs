@@ -3571,6 +3571,95 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
         })
         .collect();
 
+    // Rule-specific cadence guidance: the dep-audit rule requires the developer
+    // to choose and implement a cadence (weekly cron, per-PR, in-loop, or manual).
+    // Camerata does NOT build a scheduling engine — the cadence is a project decision
+    // carried here as concrete implementation guidance.
+    let dep_audit_cadence_section =
+        if rules.iter().any(|r| r.id == "CICD-DEPENDENCY-AUDIT-1") {
+            "\n---\n\n\
+             ## Dependency vulnerability scanning — cadence (CICD-DEPENDENCY-AUDIT-1)\n\n\
+             **Camerata does not build a scheduling engine.** The cadence for dependency \
+             scanning is a project decision you make on the rule, and the developer \
+             implements the cadence (cron job, PR trigger, in-loop, or on-demand) when \
+             wiring CI. The manifest entry above registers the tool and version; the \
+             CI workflow wires the trigger.\n\n\
+             ### Cadence options\n\n\
+             Choose ONE of the following cadences and implement it in your CI workflow:\n\n\
+             #### Option A — Weekly scheduled CI job (recommended)\n\n\
+             Catches newly-disclosed CVEs that affect already-merged dependencies — the \
+             class of vulnerability a per-PR scan misses entirely. Low noise, no per-PR \
+             friction. The standard cadence for dependency scanning.\n\n\
+             ```yaml\n\
+             # .github/workflows/dep-audit.yml\n\
+             on:\n\
+             \x20 schedule:\n\
+             \x20   - cron: '0 3 * * 1'   # every Monday at 03:00 UTC\n\
+             \x20 workflow_dispatch:        # allow manual on-demand runs\n\
+             ```\n\n\
+             Manifest entry — set `in_loop = false` (CI-only cadence):\n\n\
+             ```toml\n\
+             [[check]]\n\
+             id       = \"CICD-DEPENDENCY-AUDIT-1\"\n\
+             name     = \"dependency vulnerability scan\"\n\
+             tool     = \"osv-scanner\"\n\
+             version  = \"<x.y.z>\"          # EXACT pinned version — no ranges\n\
+             install  = \"curl -sSfL https://github.com/google/osv-scanner/releases/download/v<x.y.z>/osv-scanner_linux_amd64 -o osv-scanner && chmod +x osv-scanner && sudo mv osv-scanner /usr/local/bin/\"\n\
+             command  = \"osv-scanner -r .\"\n\
+             severity = \"high\"\n\
+             in_loop  = false               # weekly CI job; not run on every agent task\n\
+             ```\n\n\
+             #### Option B — Per-PR / push trigger\n\n\
+             Catches a vulnerable dependency the moment it lands in a PR. Higher per-PR \
+             friction; appropriate for regulated environments or low-tolerance security postures.\n\n\
+             ```yaml\n\
+             on:\n\
+             \x20 pull_request:\n\
+             \x20 push:\n\
+             \x20   branches: [main]\n\
+             ```\n\n\
+             Use the same manifest entry as Option A (`in_loop = false`).\n\n\
+             #### Option C — In-loop AND CI (every-pass, highest coverage)\n\n\
+             Set `in_loop = true` so osv-scanner also runs in the Camerata Layer-2 \
+             in-loop dev gate after each agent task. osv-scanner is fast (lock-file \
+             read, no full build), so in-loop overhead is typically a few seconds.\n\n\
+             ```toml\n\
+             in_loop  = true   # bounces the agent at Layer 2 too; also in CI\n\
+             ```\n\n\
+             Pair with any CI trigger (weekly cron, per-PR, or both).\n\n\
+             #### Option D — Manual / on-demand only\n\n\
+             `workflow_dispatch` only. No automated trigger. Appropriate for early-stage \
+             projects or teams that fire the scan deliberately (pre-release, post-dep-bump).\n\n\
+             ```yaml\n\
+             on:\n\
+             \x20 workflow_dispatch:\n\
+             ```\n\n\
+             Use `in_loop = false` in the manifest.\n\n\
+             ### osv-scanner invocation\n\n\
+             ```sh\n\
+             # Recursive scan from repo root — reads all supported lock files.\n\
+             osv-scanner --format json -r . | tee osv-results.json\n\
+             osv-scanner -r . 2>&1 || exit 1\n\
+             ```\n\n\
+             `osv-scanner -r .` exits non-zero on any finding — which is what the \
+             `.camerata/checks.toml` manifest runner and CI gate both test. Pin the \
+             osv-scanner version in `tool` + `version` + `install` in the manifest \
+             so Layer 2 and Layer 3 always run the same binary.\n\n\
+             ### Checklist for this rule\n\n\
+             - [ ] Decide the cadence (A, B, C, or D above).\n\
+             - [ ] Add the `[[check]]` entry to `.camerata/checks.toml` with pinned \
+             `tool`, `version`, and `install`; set `in_loop` to match the cadence.\n\
+             - [ ] Commit `.camerata/checks.toml` (human/operator commit — agents \
+             cannot write `.camerata/`).\n\
+             - [ ] Wire the CI workflow trigger (cron/pull_request/workflow_dispatch) \
+             in `.github/workflows/dep-audit.yml`.\n\
+             - [ ] Regenerate `.github/workflows/camerata-gates.yml` via Camerata.\n\
+             - [ ] Verify the scan fires at the chosen cadence and fails on a known \
+             vulnerable lockfile (e.g. introduce a known-CVE package, confirm exit non-zero).\n"
+        } else {
+            ""
+        };
+
     let preamble = ci_story_ssot_preamble();
     format!(
         "{preamble}\n\n\
@@ -3593,7 +3682,8 @@ fn ci_story_body_mechanical(repo: &str, rules: &[CiStoryRule]) -> String {
          {manifest_examples}\
          > **Version pinning is not optional.** Without it, Layer 2 and Layer 3 can run \
          > different tool versions on the same ruleset and produce different results. \
-         > Pin the exact version; use `install` so CI installs it before running the check.\n\n\
+         > Pin the exact version; use `install` so CI installs it before running the check.\
+         {dep_audit_cadence_section}\n\n\
          ---\n\n\
          ## Implementation checklist\n\n\
          - [ ] For each rule: confirm the linter is already in the repo or add it as a dev dependency.\n\
@@ -9333,6 +9423,145 @@ mod tests {
         assert!(
             body.contains("my-org/my-repo"),
             "architectural body must include the repo name"
+        );
+    }
+
+    // ── CICD-DEPENDENCY-AUDIT-1 cadence guidance ──────────────────────────────
+    //
+    // When the dep-audit rule is armed, the mechanical story body must include
+    // a "cadence" section that names the four options and the osv-scanner command.
+    // When it is NOT armed, the section must be absent (no spurious cadence noise).
+
+    fn dep_audit_rule() -> CiStoryRule {
+        CiStoryRule {
+            id: "CICD-DEPENDENCY-AUDIT-1".to_string(),
+            title: "Scan dependencies for known vulnerabilities (osv-scanner)".to_string(),
+            linter: Some("osv-scanner".to_string()),
+        }
+    }
+
+    fn dep_audit_only_fixture() -> Vec<CiStoryRule> {
+        vec![dep_audit_rule()]
+    }
+
+    fn dep_audit_mixed_fixture() -> Vec<CiStoryRule> {
+        let mut rules = mechanical_rules_fixture();
+        rules.push(dep_audit_rule());
+        rules
+    }
+
+    #[test]
+    fn dep_audit_armed_mechanical_body_contains_cadence_section() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        assert!(
+            body.contains("cadence"),
+            "mechanical body with dep-audit rule must include a cadence section"
+        );
+    }
+
+    #[test]
+    fn dep_audit_armed_mechanical_body_mentions_osv_scanner_command() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        assert!(
+            body.contains("osv-scanner -r ."),
+            "dep-audit cadence section must include the osv-scanner invocation"
+        );
+    }
+
+    #[test]
+    fn dep_audit_armed_mechanical_body_lists_all_four_cadence_options() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // Four cadence options: weekly cron, per-PR, in-loop (every-pass), manual.
+        assert!(
+            body.contains("Weekly") || body.contains("weekly"),
+            "cadence section must describe the weekly CI job option"
+        );
+        assert!(
+            body.contains("pull_request") || body.contains("Per-PR") || body.contains("per-PR"),
+            "cadence section must describe the per-PR option"
+        );
+        assert!(
+            body.contains("in_loop") && body.contains("in-loop"),
+            "cadence section must describe the in-loop / every-pass option"
+        );
+        assert!(
+            body.contains("workflow_dispatch") || body.contains("manual"),
+            "cadence section must describe the manual / on-demand option"
+        );
+    }
+
+    #[test]
+    fn dep_audit_armed_mechanical_body_states_developer_implements_cadence() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // The story must make clear that the developer wires the cadence, not Camerata.
+        assert!(
+            body.contains("developer") || body.contains("project decision"),
+            "cadence section must state that the developer implements the cadence, not Camerata"
+        );
+    }
+
+    #[test]
+    fn dep_audit_armed_mechanical_body_references_checks_toml_for_version_pin() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // The cadence section must reference version pinning in .camerata/checks.toml.
+        assert!(
+            body.contains(".camerata/checks.toml"),
+            "cadence section must reference .camerata/checks.toml for version pinning"
+        );
+        assert!(
+            body.contains("osv-scanner"),
+            "cadence section must name osv-scanner as the tool to pin"
+        );
+    }
+
+    #[test]
+    fn dep_audit_absent_mechanical_body_has_no_cadence_section() {
+        // When CICD-DEPENDENCY-AUDIT-1 is NOT among the rules, the cadence section
+        // must not appear — no spurious guidance for unrelated mechanical rules.
+        let body = ci_story_body_mechanical("owner/repo", &mechanical_rules_fixture());
+        assert!(
+            !body.contains("Dependency vulnerability scanning"),
+            "mechanical body WITHOUT dep-audit must not include the cadence section"
+        );
+    }
+
+    #[test]
+    fn dep_audit_mixed_rules_cadence_section_present() {
+        // When dep-audit is one of several mechanical rules, cadence guidance still appears.
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_mixed_fixture());
+        assert!(
+            body.contains("cadence"),
+            "mixed-rule mechanical body with dep-audit must include the cadence section"
+        );
+    }
+
+    #[test]
+    fn dep_audit_cadence_section_recommends_weekly_as_default() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // The weekly option should be called out as recommended.
+        assert!(
+            body.contains("recommended") || body.contains("standard"),
+            "cadence section must identify the weekly job as the recommended or standard default"
+        );
+    }
+
+    #[test]
+    fn dep_audit_cadence_section_explains_cron_schedule_example() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // A concrete cron schedule example must be present so the developer can copy it.
+        assert!(
+            body.contains("cron:"),
+            "cadence section must include a concrete cron schedule example"
+        );
+    }
+
+    #[test]
+    fn dep_audit_cadence_section_mentions_camerata_does_not_schedule() {
+        let body = ci_story_body_mechanical("owner/repo", &dep_audit_only_fixture());
+        // Must be explicit that Camerata does not build a scheduling engine.
+        assert!(
+            body.contains("scheduling engine") || body.contains("does not build"),
+            "cadence section must be explicit that Camerata does not build a scheduling engine"
         );
     }
 }
