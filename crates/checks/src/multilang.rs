@@ -1232,44 +1232,83 @@ impl CheckRunner for PolyglotCheckRunner {
     }
 }
 
+/// Combined runner: language-tier checks (fmt/clippy/test/polyglot) FOLLOWED BY
+/// manifest-tier checks (`.camerata/checks.toml`, `in_loop = true`).
+///
+/// This is the runner returned by [`runner_for_worktree`]. It ensures:
+///
+/// 1. Built-in language checks always run first (cheapest signal first, same
+///    ordering the existing `RustCheckRunner` uses internally).
+/// 2. Manifest checks run AFTER — they are ADDITIVE, never replacing built-ins.
+/// 3. If the language runner produces violations the manifest runner still runs,
+///    so the agent gets the full picture in a single bounce-back pass.
+///
+/// If either sub-runner returns `Err`, the combined runner propagates it. This
+/// is the fail-closed stance: a half-verified worktree is not a verified one.
+pub struct CombinedCheckRunner {
+    /// Handles built-in language checks (fmt/clippy/test/polyglot or noop).
+    pub language: Box<dyn CheckRunner>,
+    /// Handles manifest checks (`.camerata/checks.toml` `in_loop = true`).
+    pub manifest: crate::manifest_runner::ManifestCheckRunner,
+}
+
+#[async_trait::async_trait]
+impl CheckRunner for CombinedCheckRunner {
+    async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        // Run language-tier first. On Err, propagate immediately (fail-closed).
+        let mut violations = self.language.check(role, worktree).await?;
+
+        // Run manifest-tier. On Err, propagate (fail-closed).
+        let mut manifest_violations = self.manifest.check(role, worktree).await?;
+        violations.append(&mut manifest_violations);
+
+        // Deduplicate so the bounce-back message is clean.
+        violations.dedup_by(|a, b| a.0 == b.0);
+        Ok(violations)
+    }
+}
+
 /// Pick the right layer-2 [`CheckRunner`] for `worktree` by detecting EVERY
 /// language present (recursively). This is the single injection point the fleet
 /// and the po-demo use in place of the old hardcoded `RustCheckRunner::new()`.
 ///
-/// - Zero languages detected -> [`NoopChecks`] AND a logged warning: the loop
-///   degrades, but visibly (no silent loss of layer-2 for a tree we could not
-///   classify).
-/// - One or more -> a [`PolyglotCheckRunner`] over all detected `(language, dir)`
-///   pairs. A single-language repo simply has one entry; behavior is unchanged
-///   for it. A polyglot monorepo gets a runner per project, all run, violations
-///   unioned, fail-closed if any could not run.
+/// - Zero languages detected -> a [`CombinedCheckRunner`] over [`NoopChecks`]
+///   + manifest runner AND a logged warning: the loop degrades for language
+///   checks, but manifest checks still run if a manifest is present.
+/// - One or more -> a [`CombinedCheckRunner`] over a [`PolyglotCheckRunner`] +
+///   manifest runner. A single-language repo has one polyglot entry.
 ///
 /// The fleet wiring is untouched: this still returns `Box<dyn CheckRunner>`.
 pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
     let detected = detect_languages(worktree);
-    if detected.is_empty() {
+    let language: Box<dyn CheckRunner> = if detected.is_empty() {
         eprintln!(
             "[camerata-checks] no layer-2 runner matched worktree {} \
              (no Cargo.toml / package.json / go.mod / pyproject.toml|requirements.txt|Pipfile / \
              Gemfile / pom.xml|build.gradle|build.gradle.kts / *.csproj|*.sln \
              found anywhere outside pruned dirs {PRUNED_DIRS:?}); \
-             degrading to NoopChecks — layer-2 bounce-and-revise is INACTIVE for this tree",
+             degrading to NoopChecks — built-in layer-2 bounce-and-revise is INACTIVE, \
+             manifest checks still run if .camerata/checks.toml is present",
             worktree.display()
         );
-        return Box::new(NoopChecks);
-    }
+        Box::new(NoopChecks)
+    } else {
+        eprintln!(
+            "[camerata-checks] layer-2 detected {} project(s) in worktree {}: {}",
+            detected.len(),
+            worktree.display(),
+            detected
+                .iter()
+                .map(|(l, d)| format!("{l:?}@{}", d.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Box::new(PolyglotCheckRunner::from_detected(detected))
+    };
 
-    eprintln!(
-        "[camerata-checks] layer-2 detected {} project(s) in worktree {}: {}",
-        detected.len(),
-        worktree.display(),
-        detected
-            .iter()
-            .map(|(l, d)| format!("{l:?}@{}", d.display()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    Box::new(PolyglotCheckRunner::from_detected(detected))
+    let manifest = crate::manifest_runner::ManifestCheckRunner::load_from(worktree);
+
+    Box::new(CombinedCheckRunner { language, manifest })
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

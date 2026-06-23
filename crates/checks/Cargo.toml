@@ -19,3 +19,5 @@ serde.workspace = true
 serde_json.workspace = true
 # Disk-headroom preflight guard before cargo builds (Decision: 2026-06-22_dogfood_disk_safety).
 fs2 = { workspace = true }
+# Manifest (.camerata/checks.toml) parsing (Decision: 2026-06-22_check_manifest_single_source_of_truth).
+toml = "0.8"

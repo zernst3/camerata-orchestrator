@@ -31,9 +31,22 @@ pub mod architectural;
 /// `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 pub mod multilang;
 pub use multilang::{
-    detect_language, runner_for_worktree, CSharpCheckRunner, GoCheckRunner, JavaCheckRunner,
-    JsCheckRunner, PythonCheckRunner, RubyCheckRunner, WorktreeLanguage,
+    detect_language, runner_for_worktree, CombinedCheckRunner, CSharpCheckRunner, GoCheckRunner,
+    JavaCheckRunner, JsCheckRunner, PythonCheckRunner, RubyCheckRunner, WorktreeLanguage,
 };
+
+/// Single source of truth manifest (`.camerata/checks.toml`) — schema, loader,
+/// and shared command-list helpers consumed by BOTH the Layer-2 runner and the
+/// Layer-3 CI workflow generator.
+/// See `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
+pub mod manifest;
+pub use manifest::{CheckManifest, ManifestCheck};
+
+/// Layer-2 executor for manifest checks (`in_loop = true` entries).
+/// Additive on top of the built-in language runners; composed into
+/// [`CombinedCheckRunner`] via [`runner_for_worktree`].
+pub mod manifest_runner;
+pub use manifest_runner::ManifestCheckRunner;
 
 pub mod parse;
 pub mod subprocess;
