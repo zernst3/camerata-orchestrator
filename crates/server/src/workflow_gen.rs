@@ -132,10 +132,20 @@ impl RepoStack {
 /// derive from this function. Parity is therefore structural.
 ///
 /// The returned strings are plain shell commands (what goes in `run:` in the YAML
-/// and in `sh -c <cmd>` in the runner).
+/// and in `sh -c <cmd>` in the runner). For manifest checks with an `install`
+/// command, the install command appears IMMEDIATELY BEFORE the check command in
+/// the returned list, matching the step ordering in the generated CI workflow.
+/// Layer 2 does NOT execute install commands at runtime (it only VERIFIES the
+/// locally installed version), but the install command IS included here so the
+/// parity invariant `layer2_commands ⊆ all_ci_commands` remains structurally
+/// true without special-casing: the subset test compares command strings, and
+/// install commands from in_loop checks appear in both.
 pub fn layer2_commands(stack: &RepoStack, manifest: &CheckManifest) -> Vec<String> {
     let mut cmds = stack.builtin_commands();
     for check in manifest.in_loop_checks() {
+        if let Some(install) = &check.install {
+            cmds.push(install.clone());
+        }
         cmds.push(check.command.clone());
     }
     cmds
@@ -145,9 +155,18 @@ pub fn layer2_commands(stack: &RepoStack, manifest: &CheckManifest) -> Vec<Strin
 ///
 /// Layer 3 is the superset: it runs everything Layer 2 runs PLUS ci-only checks.
 /// [`generate_gates_workflow`] calls this to know what to emit.
+///
+/// For manifest checks with an `install` command, the install command appears
+/// IMMEDIATELY BEFORE the check command — the same ordering as in the generated
+/// workflow. This ensures the subset invariant (`layer2_commands ⊆ all_ci_commands`)
+/// holds structurally: in_loop install+check pairs appear in both, while
+/// ci-only install+check pairs appear only in `all_ci_commands`.
 pub fn all_ci_commands(stack: &RepoStack, manifest: &CheckManifest) -> Vec<String> {
     let mut cmds = stack.builtin_commands();
     for check in manifest.all_checks() {
+        if let Some(install) = &check.install {
+            cmds.push(install.clone());
+        }
         cmds.push(check.command.clone());
     }
     cmds
@@ -223,10 +242,41 @@ pub fn generate_gates_workflow(stack: &RepoStack, manifest: &CheckManifest) -> S
             "      # Generated from the manifest. Both in_loop AND ci-only checks run\n",
         );
         out.push_str(
-            "      # here; Layer 2 runs only the in_loop subset.\n\n",
+            "      # here; Layer 2 runs only the in_loop subset.\n",
+        );
+        out.push_str(
+            "      # For pinned-tool checks, the install step always runs first so\n",
+        );
+        out.push_str(
+            "      # CI uses the exact version declared in the manifest.\n\n",
         );
         for check in all_manifest {
             let loop_tag = if check.in_loop { "in_loop" } else { "ci-only" };
+
+            // ── install step (pinned-tool checks only) ───────────────────────
+            // Emitted BEFORE the check step so CI always installs the exact
+            // pinned version before running the command. This is the Layer-3
+            // counterpart to Layer-2's version drift detection: CI installs
+            // exact; Layer 2 verifies exact.
+            if let Some(install_cmd) = &check.install {
+                let version_label = check
+                    .version
+                    .as_deref()
+                    .map(|v| format!(" ({})", v))
+                    .unwrap_or_default();
+                let tool_label = check
+                    .tool
+                    .as_deref()
+                    .map(|t| format!("install {}{}", t, version_label))
+                    .unwrap_or_else(|| "install pinned tool".to_string());
+                out.push_str(&format!(
+                    "      - name: \"{}\" # pinned install for {}\n",
+                    tool_label, check.id
+                ));
+                out.push_str(&format!("        run: {install_cmd}\n\n"));
+            }
+
+            // ── check step ───────────────────────────────────────────────────
             out.push_str(&format!(
                 "      - name: \"{} ({})\" # {} | severity: {}\n",
                 check.name, check.id, loop_tag, check.severity
@@ -262,6 +312,22 @@ mod tests {
             command: cmd.to_string(),
             severity: "high".to_string(),
             in_loop,
+            tool: None,
+            version: None,
+            install: None,
+        }
+    }
+
+    fn pinned_check(id: &str, cmd: &str, in_loop: bool, tool: &str, version: &str, install: &str) -> ManifestCheck {
+        ManifestCheck {
+            id: id.to_string(),
+            name: format!("check {id}"),
+            command: cmd.to_string(),
+            severity: "high".to_string(),
+            in_loop,
+            tool: Some(tool.to_string()),
+            version: Some(version.to_string()),
+            install: Some(install.to_string()),
         }
     }
 
@@ -434,6 +500,218 @@ mod tests {
         assert!(
             !l2.contains(&"run_ci_only.sh".to_string()),
             "ci-only command must NOT be in L2"
+        );
+    }
+
+    // ── pinned-tool checks: install step emitted in workflow ─────────────────
+
+    /// A check with `install` must produce an install step BEFORE the check
+    /// step in the generated CI workflow.
+    #[test]
+    fn generated_workflow_emits_install_step_before_check_for_pinned_tool() {
+        let manifest = CheckManifest {
+            checks: vec![pinned_check(
+                "DEP-CRUISER-LAYERING-1",
+                "depcruise --config .dependency-cruiser.cjs src",
+                true,
+                "dependency-cruiser",
+                "6.3.0",
+                "npm install -g dependency-cruiser@6.3.0",
+            )],
+        };
+        let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
+
+        // The install command must appear in the workflow.
+        assert!(
+            yaml.contains("npm install -g dependency-cruiser@6.3.0"),
+            "install command must appear in generated YAML"
+        );
+
+        // The check command must also appear.
+        assert!(
+            yaml.contains("depcruise --config .dependency-cruiser.cjs src"),
+            "check command must appear in generated YAML"
+        );
+
+        // The install step must come BEFORE the check step.
+        let install_pos = yaml
+            .find("npm install -g dependency-cruiser@6.3.0")
+            .expect("install command must be present");
+        let check_pos = yaml
+            .find("depcruise --config .dependency-cruiser.cjs src")
+            .expect("check command must be present");
+        assert!(
+            install_pos < check_pos,
+            "install step must appear before check step in generated YAML"
+        );
+    }
+
+    /// A check WITHOUT `install` must NOT produce any install step.
+    #[test]
+    fn generated_workflow_no_install_step_for_unpinned_check() {
+        let manifest = CheckManifest {
+            checks: vec![check("ARCH-A", "scripts/arch.sh", true)],
+        };
+        let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
+        assert!(
+            !yaml.contains("install pinned tool"),
+            "unpinned check must not emit a tool-install step"
+        );
+        // The check's command must still appear.
+        assert!(yaml.contains("scripts/arch.sh"), "check command must appear");
+    }
+
+    // ── parity: layer2_commands ⊆ all_ci_commands with install commands ───────
+
+    /// For a pinned in_loop check, BOTH the install command AND the check command
+    /// must appear in layer2_commands (in order) and in all_ci_commands.
+    #[test]
+    fn layer2_includes_install_and_command_for_pinned_in_loop_check() {
+        let stack = RepoStack::Rust;
+        let manifest = CheckManifest {
+            checks: vec![pinned_check(
+                "DEP-CRUISER-LAYERING-1",
+                "depcruise --config .dc.cjs src",
+                true,
+                "dependency-cruiser",
+                "6.3.0",
+                "npm install -g dependency-cruiser@6.3.0",
+            )],
+        };
+        let l2 = layer2_commands(&stack, &manifest);
+        let l3 = all_ci_commands(&stack, &manifest);
+
+        assert!(
+            l2.contains(&"npm install -g dependency-cruiser@6.3.0".to_string()),
+            "in_loop check's install command must appear in L2"
+        );
+        assert!(
+            l2.contains(&"depcruise --config .dc.cjs src".to_string()),
+            "in_loop check's command must appear in L2"
+        );
+
+        // Parity: everything in L2 is in L3.
+        for cmd in &l2 {
+            assert!(
+                l3.contains(cmd),
+                "L2 command {cmd:?} must appear in L3; l3={l3:?}"
+            );
+        }
+    }
+
+    /// For a pinned ci-only check, the install and check commands appear in
+    /// all_ci_commands but NOT in layer2_commands.
+    #[test]
+    fn ci_only_pinned_check_install_in_l3_not_l2() {
+        let stack = RepoStack::Rust;
+        let manifest = CheckManifest {
+            checks: vec![pinned_check(
+                "SEMGREP-SEC-1",
+                "semgrep --config .semgrep.yml .",
+                false, // ci-only
+                "semgrep",
+                "1.55.2",
+                "pip install semgrep==1.55.2",
+            )],
+        };
+        let l2 = layer2_commands(&stack, &manifest);
+        let l3 = all_ci_commands(&stack, &manifest);
+
+        // ci-only: neither install nor check command in L2.
+        assert!(
+            !l2.contains(&"pip install semgrep==1.55.2".to_string()),
+            "ci-only install must NOT be in L2"
+        );
+        assert!(
+            !l2.contains(&"semgrep --config .semgrep.yml .".to_string()),
+            "ci-only check must NOT be in L2"
+        );
+
+        // Both must be in L3.
+        assert!(
+            l3.contains(&"pip install semgrep==1.55.2".to_string()),
+            "ci-only install must be in L3"
+        );
+        assert!(
+            l3.contains(&"semgrep --config .semgrep.yml .".to_string()),
+            "ci-only check must be in L3"
+        );
+
+        // L2 ⊆ L3 still holds.
+        for cmd in &l2 {
+            assert!(
+                l3.contains(cmd),
+                "L2 command {cmd:?} must appear in L3; l3={l3:?}"
+            );
+        }
+    }
+
+    /// Mixed manifest (pinned + unpinned, in_loop + ci-only): parity holds for all.
+    #[test]
+    fn parity_holds_for_mixed_pinned_and_unpinned_checks() {
+        let stacks = [
+            RepoStack::Rust,
+            RepoStack::JavaScript,
+            RepoStack::Python,
+            RepoStack::Unknown,
+        ];
+        let manifest = CheckManifest {
+            checks: vec![
+                check("ARCH-A", "scripts/arch.sh", true),
+                check("SEC-B", "trufflehog .", false),
+                pinned_check(
+                    "DEP-C",
+                    "depcruise src",
+                    true,
+                    "dependency-cruiser",
+                    "6.3.0",
+                    "npm install -g dependency-cruiser@6.3.0",
+                ),
+                pinned_check(
+                    "SEMGREP-D",
+                    "semgrep .",
+                    false,
+                    "semgrep",
+                    "1.55.2",
+                    "pip install semgrep==1.55.2",
+                ),
+            ],
+        };
+        for stack in &stacks {
+            let l2 = layer2_commands(stack, &manifest);
+            let l3 = all_ci_commands(stack, &manifest);
+            for cmd in &l2 {
+                assert!(
+                    l3.contains(cmd),
+                    "stack {stack:?}: L2 command {cmd:?} missing from L3; l3={l3:?}"
+                );
+            }
+        }
+    }
+
+    /// Install step appears in the YAML in correct order for a ci-only pinned check.
+    #[test]
+    fn generated_workflow_emits_install_step_for_ci_only_pinned_check() {
+        let manifest = CheckManifest {
+            checks: vec![pinned_check(
+                "SEMGREP-SEC-1",
+                "semgrep --config .semgrep.yml .",
+                false,
+                "semgrep",
+                "1.55.2",
+                "pip install semgrep==1.55.2",
+            )],
+        };
+        let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
+        assert!(
+            yaml.contains("pip install semgrep==1.55.2"),
+            "ci-only pinned check install must appear in YAML"
+        );
+        let install_pos = yaml.find("pip install semgrep==1.55.2").unwrap();
+        let check_pos = yaml.find("semgrep --config .semgrep.yml .").unwrap();
+        assert!(
+            install_pos < check_pos,
+            "install must appear before check command in YAML"
         );
     }
 }

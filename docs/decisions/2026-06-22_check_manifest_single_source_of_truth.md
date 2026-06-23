@@ -182,3 +182,74 @@ decision remains with the operator.
 | `crates/checks/src/manifest_runner.rs::tests` | No manifest → zero violations; exit 0 → clean; exit nonzero → violation under check id; ci-only skipped; multiple violations collected; unspawnable cmd → no panic |
 | `crates/server/src/workflow_gen.rs::tests` | Parity (L2 ⊆ L3) for all stacks; ci-only in L3 not L2; YAML contains built-in commands; YAML contains all manifest checks; TODO block for non-Rust stacks |
 | `crates/gateway/src/lib.rs::adversarial` | `.camerata/checks.toml` → Deny; `.camerata/features.toml` → Deny; paths outside `.camerata/` → Allow; Windows backslash separator → Deny |
+
+---
+
+## Tool-version pinning
+
+**Added in `feat/manifest-version-pinning`.** Extends the manifest schema with three optional fields on `ManifestCheck` that together pin the exact external tool version a check depends on.
+
+### Problem
+
+The manifest SSOT eliminated rule-definition drift. But a user-wired external linter (e.g. dependency-cruiser 5.x vs 6.x, or Semgrep 1.x vs 1.y) can return DIFFERENT results on the SAME ruleset across versions. This produces "green at Layer 2, red at Layer 3" even with a single, stable rule definition — the SSOT property breaks at the tool-version boundary.
+
+### Schema additions (manifest.rs)
+
+Three optional fields added to `ManifestCheck` with `#[serde(default)]` for back-compat:
+
+| Field     | Type            | Semantics |
+|-----------|-----------------|-----------|
+| `tool`    | `Option<String>` | Tool/binary name (`"dependency-cruiser"`, `"semgrep"`). Required when `version` is set. |
+| `version` | `Option<String>` | EXACT pinned version (`"6.3.0"`). No ranges or carets — determinism requires an exact match. |
+| `install` | `Option<String>` | Exact install command (`"npm install -g dependency-cruiser@6.3.0"`). Explicit because install mechanisms span pip/npm/cargo/go and guessing is fragile. |
+
+Back-compat: any existing manifest entry that omits these fields parses unchanged — all three default to `None`. A missing field is NOT a parse error (unlike the required core fields).
+
+Example full entry:
+
+```toml
+[[check]]
+id       = "DEP-CRUISER-LAYERING-1"
+name     = "dependency-cruiser layering"
+tool     = "dependency-cruiser"
+version  = "6.3.0"
+install  = "npm install -g dependency-cruiser@6.3.0"
+command  = "depcruise --config .dependency-cruiser.cjs src"
+severity = "high"
+in_loop  = true
+```
+
+### Layer 3: CI installs the exact version (workflow_gen.rs)
+
+For each check with an `install` command, the generated CI workflow emits a dedicated install step IMMEDIATELY BEFORE the check's command step:
+
+```yaml
+- name: "install dependency-cruiser (6.3.0)"  # pinned install for DEP-CRUISER-LAYERING-1
+  run: npm install -g dependency-cruiser@6.3.0
+
+- name: "dependency-cruiser layering (DEP-CRUISER-LAYERING-1)"  # in_loop | severity: high
+  run: depcruise --config .dependency-cruiser.cjs src
+```
+
+`all_ci_commands` and `layer2_commands` both interleave install commands (when present) immediately before their check commands in the returned list. This maintains the structural parity invariant: in_loop install+check pairs appear in both `layer2_commands` and `all_ci_commands`; ci-only install+check pairs appear only in `all_ci_commands`. The `layer2_commands ⊆ all_ci_commands` invariant holds by construction; the existing parity test confirms it.
+
+### Layer 2: detects version drift, never installs (manifest_runner.rs)
+
+Before running a check that declares `tool` + `version`, the runner calls `check_tool_version(tool, pinned)`, which runs `<tool> --version` and compares the output against the pinned version using the pure function `version_matches`.
+
+**`version_matches(output, pinned)`** — pure, unit-testable:
+
+- Scans `output` for the `pinned` string with word-boundary enforcement: the character immediately before/after the match must NOT be a digit or dot (the boundary chars of a version token). This ensures `"6.3.0"` does not match inside `"16.3.0"` (left boundary is digit `1`) but does match in `"v6.3.0"` (left boundary is `v`, a letter, not a version char) and `"tool 6.3.0\n"` (right boundary is `\n`).
+- Byte-exact comparison — no semver range semantics. Pinning means pinning.
+
+**On mismatch or tool absent:** a VIOLATION is reported under the check's `id` (not a warning). Rationale: a warning would still allow the agent loop to complete "green" on the wrong version, reproducing the exact failure mode being eliminated. The operator resolves it by running the `install` command from the manifest. The check command is NOT run on mismatch — its output would be untrustworthy and could produce a false-green result.
+
+**Layer 2 does NOT install tools.** Installing tools in the agent dev loop is too heavy and side-effectful. Layer 2 verifies; Layer 3 installs. The diagnostic message always includes the `install` command (when set) so the operator knows exactly how to resolve the mismatch.
+
+### New test coverage
+
+| Test location | What it proves |
+|---------------|----------------|
+| `crates/checks/src/manifest.rs::tests` | Pinned check (all three fields) parses correctly; legacy check (no pinning fields) back-compat; mixed manifest (pinned + legacy) parses |
+| `crates/checks/src/manifest_runner.rs::tests` | `version_matches`: exact match, with newline, with `v` prefix, mismatch, prefix false-positive prevention, suffix false-positive prevention, empty pin, absent in output, multiline; `absent_tool_produces_violation_not_crash`; `mismatched_version_produces_violation_and_skips_command`; `matching_version_runs_check_command` |
+| `crates/server/src/workflow_gen.rs::tests` | Install step in YAML before check step (in_loop); no install step for unpinned check; L2 includes install+command for pinned in_loop check; ci-only pinned check install in L3 not L2; parity holds for mixed manifests; install step for ci-only pinned check in YAML |

@@ -29,11 +29,22 @@
 //! # Schema
 //!
 //! ```toml
-//! # .camerata/checks.toml
+//! # .camerata/checks.toml — minimal (built-in tooling, no pinning needed)
 //! [[check]]
 //! id       = "ARCH-API-LAYERING-1"
 //! name     = "API layering"
 //! command  = "scripts/check_layering.sh"
+//! severity = "high"
+//! in_loop  = true
+//!
+//! # External tool with pinned version (dependency-cruiser example)
+//! [[check]]
+//! id       = "DEP-CRUISER-LAYERING-1"
+//! name     = "dependency-cruiser layering"
+//! tool     = "dependency-cruiser"
+//! version  = "6.3.0"
+//! install  = "npm install -g dependency-cruiser@6.3.0"
+//! command  = "depcruise --config .dependency-cruiser.cjs src"
 //! severity = "high"
 //! in_loop  = true
 //! ```
@@ -45,6 +56,19 @@
 //! - `severity` — `"high"` | `"medium"` | `"low"`.
 //! - `in_loop`  — `true` = also run at Layer 2; `false` = CI-only (use for
 //!   checks that need secrets, services, or long-running time budgets).
+//! - `tool`     — (optional) tool/binary name for the external tool (e.g.
+//!   `"dependency-cruiser"`, `"semgrep"`). Required when `version` is set.
+//! - `version`  — (optional) EXACT pinned version string (e.g. `"6.3.0"`).
+//!   No ranges or carets — determinism requires an exact version. When set,
+//!   Layer 2 will verify the locally-installed tool reports this version before
+//!   running the check, surfacing a drift violation if there is a mismatch.
+//! - `install`  — (optional) exact install command that installs the pinned
+//!   version (e.g. `"npm install -g dependency-cruiser@6.3.0"`). Explicit
+//!   because install mechanisms span pip/npm/cargo/go and guessing is fragile.
+//!   When present, this step is emitted by the CI workflow generator
+//!   IMMEDIATELY BEFORE the check's `command`, so CI always runs the exact
+//!   pinned version. Not executed at Layer 2 (too heavy for the dev loop) —
+//!   only verified.
 //!
 //! # Absent / malformed manifest
 //!
@@ -60,9 +84,12 @@ use std::path::Path;
 
 /// A single check entry in `.camerata/checks.toml`.
 ///
-/// Matches the TOML `[[check]]` array-of-tables shape. All fields are required
-/// (no serde defaults) so a misconfigured entry fails loudly at parse time
-/// rather than silently running a wrong command.
+/// Matches the TOML `[[check]]` array-of-tables shape. The core fields (`id`,
+/// `name`, `command`, `severity`, `in_loop`) are required; a missing required
+/// field is a parse error so misconfigured entries fail loudly rather than
+/// silently running wrong commands. The tool-pinning fields (`tool`, `version`,
+/// `install`) are optional with `#[serde(default)]` for full back-compat with
+/// manifests written before version pinning was introduced.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ManifestCheck {
     /// Stable rule id. Should match a rule in the Camerata corpus where the
@@ -90,6 +117,49 @@ pub struct ManifestCheck {
     /// - `false` — CI-only (use for checks that need secrets, external services,
     ///   or long-running time budgets that would stall the agent loop).
     pub in_loop: bool,
+
+    // ── tool-version pinning (optional, back-compat) ──────────────────────────
+    //
+    // These three fields travel together. When `version` is set, `tool` and
+    // `install` SHOULD also be set (the fields are independent by serde but the
+    // combination is meaningful). A check without any of these fields is
+    // un-pinned (back-compat); its behavior at Layer 2 and Layer 3 is unchanged.
+
+    /// The external tool name to verify / install (e.g. `"dependency-cruiser"`,
+    /// `"semgrep"`). Used by Layer 2 as the binary to `<tool> --version` against,
+    /// and by the workflow generator as a human label for the install step.
+    ///
+    /// When absent, no version verification is performed at Layer 2.
+    #[serde(default)]
+    pub tool: Option<String>,
+
+    /// The EXACT pinned version of the tool (e.g. `"6.3.0"`). No ranges or
+    /// carets — determinism requires an exact version so that Layer 2 and Layer 3
+    /// run identical tool behavior on the same ruleset.
+    ///
+    /// When set, Layer 2 runs `<tool> --version` and compares the output against
+    /// this string before executing `command`. A mismatch is surfaced as a
+    /// violation under `id` with a human-readable drift message including the
+    /// pinned install command (if `install` is set).
+    ///
+    /// When absent, no version verification is performed.
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// The exact install command that installs the pinned version, e.g.
+    /// `"npm install -g dependency-cruiser@6.3.0"` or
+    /// `"pip install semgrep==1.55.2"`. Explicit because install mechanisms span
+    /// pip / npm / cargo / go / brew and guessing the right invocation is fragile.
+    ///
+    /// When present, the Layer-3 CI workflow generator emits a dedicated step
+    /// that runs this command IMMEDIATELY BEFORE the check's `command` step, so
+    /// CI always installs and runs the exact pinned version.
+    ///
+    /// NOT executed at Layer 2 — installing tools in the agent dev loop is too
+    /// heavy and side-effectful. Layer 2 only VERIFIES the locally-installed
+    /// version and surfaces a drift violation if it does not match.
+    #[serde(default)]
+    pub install: Option<String>,
 }
 
 /// The parsed `.camerata/checks.toml` manifest.
@@ -332,6 +402,9 @@ severity = "high"
                     command: "cmd_a".to_string(),
                     severity: "high".to_string(),
                     in_loop: true,
+                    tool: None,
+                    version: None,
+                    install: None,
                 },
                 ManifestCheck {
                     id: "B".to_string(),
@@ -339,6 +412,9 @@ severity = "high"
                     command: "cmd_b".to_string(),
                     severity: "low".to_string(),
                     in_loop: false,
+                    tool: None,
+                    version: None,
+                    install: None,
                 },
                 ManifestCheck {
                     id: "C".to_string(),
@@ -346,6 +422,9 @@ severity = "high"
                     command: "cmd_c".to_string(),
                     severity: "medium".to_string(),
                     in_loop: true,
+                    tool: None,
+                    version: None,
+                    install: None,
                 },
             ],
         };
@@ -355,5 +434,131 @@ severity = "high"
 
         let all_cmds: Vec<&str> = manifest.all_checks().map(|c| c.command.as_str()).collect();
         assert_eq!(all_cmds, vec!["cmd_a", "cmd_b", "cmd_c"]);
+    }
+
+    // ── tool-version pinning fields: parse WITH and WITHOUT ───────────────────
+
+    /// A fully-pinned check (tool + version + install) parses correctly.
+    #[test]
+    fn manifest_with_tool_version_install_parses() {
+        let root = tmpdir();
+        let camerata_dir = root.join(".camerata");
+        fs::create_dir_all(&camerata_dir).unwrap();
+        fs::write(
+            camerata_dir.join("checks.toml"),
+            r#"
+[[check]]
+id       = "DEP-CRUISER-LAYERING-1"
+name     = "dependency-cruiser layering"
+tool     = "dependency-cruiser"
+version  = "6.3.0"
+install  = "npm install -g dependency-cruiser@6.3.0"
+command  = "depcruise --config .dependency-cruiser.cjs src"
+severity = "high"
+in_loop  = true
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_manifest(&root)
+            .expect("no parse error")
+            .expect("manifest present");
+
+        assert_eq!(manifest.checks.len(), 1);
+        let c = &manifest.checks[0];
+        assert_eq!(c.id, "DEP-CRUISER-LAYERING-1");
+        assert_eq!(c.tool.as_deref(), Some("dependency-cruiser"));
+        assert_eq!(c.version.as_deref(), Some("6.3.0"));
+        assert_eq!(
+            c.install.as_deref(),
+            Some("npm install -g dependency-cruiser@6.3.0")
+        );
+        assert_eq!(c.command, "depcruise --config .dependency-cruiser.cjs src");
+        assert!(c.in_loop);
+    }
+
+    /// A legacy check (no tool/version/install) parses correctly — the optional
+    /// fields default to `None` (back-compat guarantee).
+    #[test]
+    fn manifest_without_pinning_fields_is_back_compat() {
+        let root = tmpdir();
+        let camerata_dir = root.join(".camerata");
+        fs::create_dir_all(&camerata_dir).unwrap();
+        fs::write(
+            camerata_dir.join("checks.toml"),
+            r#"
+[[check]]
+id       = "ARCH-API-LAYERING-1"
+name     = "API layering"
+command  = "scripts/check_layering.sh"
+severity = "high"
+in_loop  = true
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_manifest(&root)
+            .expect("no parse error")
+            .expect("manifest present");
+
+        let c = &manifest.checks[0];
+        assert!(
+            c.tool.is_none(),
+            "absent `tool` must default to None for back-compat"
+        );
+        assert!(
+            c.version.is_none(),
+            "absent `version` must default to None for back-compat"
+        );
+        assert!(
+            c.install.is_none(),
+            "absent `install` must default to None for back-compat"
+        );
+    }
+
+    /// Mixed manifest: one pinned check + one legacy check — both parse without error.
+    #[test]
+    fn manifest_mixed_pinned_and_legacy_checks_parse() {
+        let root = tmpdir();
+        let camerata_dir = root.join(".camerata");
+        fs::create_dir_all(&camerata_dir).unwrap();
+        fs::write(
+            camerata_dir.join("checks.toml"),
+            r#"
+[[check]]
+id       = "ARCH-API-LAYERING-1"
+name     = "API layering"
+command  = "scripts/check_layering.sh"
+severity = "high"
+in_loop  = true
+
+[[check]]
+id       = "SEMGREP-SEC-1"
+name     = "Semgrep security scan"
+tool     = "semgrep"
+version  = "1.55.2"
+install  = "pip install semgrep==1.55.2"
+command  = "semgrep --config .semgrep.yml ."
+severity = "high"
+in_loop  = false
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_manifest(&root)
+            .expect("no parse error")
+            .expect("manifest present");
+
+        assert_eq!(manifest.checks.len(), 2);
+
+        let legacy = &manifest.checks[0];
+        assert!(legacy.tool.is_none());
+        assert!(legacy.version.is_none());
+        assert!(legacy.install.is_none());
+
+        let pinned = &manifest.checks[1];
+        assert_eq!(pinned.tool.as_deref(), Some("semgrep"));
+        assert_eq!(pinned.version.as_deref(), Some("1.55.2"));
+        assert_eq!(pinned.install.as_deref(), Some("pip install semgrep==1.55.2"));
     }
 }
