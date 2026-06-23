@@ -287,6 +287,77 @@ fn severity_for(_rule_id: &str) -> &'static str {
     "critical"
 }
 
+/// Returns `true` when `path` is in a test, fixture, or example context where a
+/// flagged secret/SQL pattern is almost certainly a non-exploitable test value.
+///
+/// Matching rules (all comparisons are case-insensitive):
+/// - Any **path segment** (directory component) equals one of:
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `examples`, `benches`
+/// - The **filename** (last segment) matches one of:
+///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
+///
+/// Production paths are unchanged — only test/fixture paths are down-ranked.
+pub fn is_test_or_fixture_path(path: &str) -> bool {
+    use std::path::Path;
+
+    // Normalise to forward-slash components (handles both Unix and Windows paths).
+    let p = Path::new(path);
+    let segments: Vec<String> = p
+        .components()
+        .filter_map(|c| {
+            c.as_os_str().to_str().map(|s| s.to_ascii_lowercase())
+        })
+        .collect();
+
+    // Check every directory segment (all but the last, which is the filename).
+    let dir_segments = if segments.len() > 1 {
+        &segments[..segments.len() - 1]
+    } else {
+        &[][..]
+    };
+    for seg in dir_segments {
+        match seg.as_str() {
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "examples" | "benches" => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    // Check the filename against test-file naming conventions.
+    if let Some(filename) = segments.last() {
+        // conftest.py
+        if filename == "conftest.py" {
+            return true;
+        }
+        // test_*.py  (Python unittest convention)
+        if filename.starts_with("test_") && filename.ends_with(".py") {
+            return true;
+        }
+        // *_test.<ext>  (Go / Rust convention: foo_test.go, auth_test.rs)
+        // *.test.<ext>  (JS/TS convention: auth.test.ts)
+        // *.spec.<ext>  (JS/TS convention: auth.spec.ts)
+        //
+        // Strategy: strip the final extension to get the stem, then check whether
+        // the stem ends with "_test", ".test", or ".spec".
+        if let Some(dot_pos) = filename.rfind('.') {
+            let stem = &filename[..dot_pos];
+            if stem.ends_with("_test") || stem.ends_with(".test") || stem.ends_with(".spec") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// The note appended to floor findings whose path is in test/fixture code.
+const TEST_PATH_NOTE: &str =
+    " (in test/fixture code — likely a non-exploitable test value; verify)";
+
+/// The down-ranked severity used for floor findings in test/fixture paths.
+const TEST_PATH_SEVERITY: &str = "low";
+
 /// The gate's description for a rule id, or the id if unknown.
 fn title_for(rule_id: &str) -> String {
     camerata_gateway::RULE_REGISTRY
@@ -298,9 +369,15 @@ fn title_for(rule_id: &str) -> String {
 
 /// Audit one file's content against the content rules, line by line, reusing the
 /// gate's own arms. A line the gate would deny becomes a finding tagged with `repo`.
+///
+/// Findings in test/fixture paths (see `is_test_or_fixture_path`) are down-ranked
+/// from `critical` to `low` and annotated with a note so the architect can verify
+/// without being alarmed by fake credentials in unit-test fixtures. The finding
+/// is still surfaced — a real secret in a test file still merits a look.
 pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
+    let in_test_path = is_test_or_fixture_path(path);
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
@@ -310,14 +387,25 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 .get(line_no.saturating_sub(1))
                 .map(|l| l.trim().chars().take(160).collect())
                 .unwrap_or_default();
+            // Down-rank floor findings in test/fixture paths: they almost always flag
+            // synthetic credentials or SQL used to verify the detection logic itself.
+            // Production paths keep the full `critical` rating.
+            let (severity, detail) = if in_test_path {
+                (
+                    TEST_PATH_SEVERITY.to_string(),
+                    format!("{}{}", title_for(rule_id), TEST_PATH_NOTE),
+                )
+            } else {
+                (severity_for(rule_id).to_string(), title_for(rule_id))
+            };
             findings.push(Finding {
                 repo: repo.to_string(),
                 path: path.to_string(),
                 line: line_no,
                 rule_id: rule_id.to_string(),
-                severity: severity_for(rule_id).to_string(),
+                severity,
                 snippet,
-                detail: title_for(rule_id),
+                detail,
                 status: default_status(),
                 also_matches: Vec::new(),
                 preview: false,
@@ -3136,5 +3224,99 @@ mod tests {
             compute_proposed_flags(&r, false /* not stack-relevant */);
         assert!(!recommended, "not stack-relevant + opt_in_only must not be recommended");
         assert!(!is_auto_recommended, "not stack-relevant + opt_in_only must not be auto-recommended");
+    }
+
+    // ── is_test_or_fixture_path ───────────────────────────────────────────────
+
+    #[test]
+    fn test_path_classifier_false_cases() {
+        // Production paths must not be classified as test paths.
+        assert!(!is_test_or_fixture_path("src/auth.rs"), "src/auth.rs is production");
+        assert!(!is_test_or_fixture_path("src/config.rs"), "src/config.rs is production");
+        assert!(!is_test_or_fixture_path("crates/api/src/handlers.rs"), "nested production path");
+        assert!(!is_test_or_fixture_path("apps/ui/src/page.tsx"), "JS production file");
+        assert!(!is_test_or_fixture_path("migrations/001_init.sql"), "migrations are production");
+        assert!(!is_test_or_fixture_path("lib/utils.py"), "plain Python lib");
+        assert!(!is_test_or_fixture_path("app.rs"), "bare filename with no test indicators");
+    }
+
+    #[test]
+    fn test_path_classifier_true_cases() {
+        // Directory-segment matches.
+        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "tests/ segment");
+        assert!(is_test_or_fixture_path("test/helpers.ts"), "test/ segment");
+        assert!(is_test_or_fixture_path("testdata/sample.json"), "testdata/ segment");
+        assert!(is_test_or_fixture_path("fixtures/keys.env"), "fixtures/ segment");
+        assert!(is_test_or_fixture_path("crates/x/src/fixtures/keys.py"), "nested fixtures/");
+        assert!(is_test_or_fixture_path("__tests__/auth.test.ts"), "__tests__/ segment");
+        assert!(is_test_or_fixture_path("examples/demo.rs"), "examples/ segment");
+        assert!(is_test_or_fixture_path("benches/bench.rs"), "benches/ segment");
+
+        // Filename-pattern matches.
+        assert!(is_test_or_fixture_path("tests/auth_test.rs"), "*_test.rs (Rust/Go style)");
+        assert!(is_test_or_fixture_path("src/auth_test.go"), "*_test.go in production dir");
+        assert!(is_test_or_fixture_path("app.test.ts"), "*.test.ts (JS/TS style)");
+        assert!(is_test_or_fixture_path("app.spec.ts"), "*.spec.ts (JS/TS style)");
+        assert!(is_test_or_fixture_path("src/auth.spec.tsx"), "*.spec.tsx");
+        assert!(is_test_or_fixture_path("test_secrets.py"), "test_*.py (Python unittest)");
+        assert!(is_test_or_fixture_path("conftest.py"), "conftest.py (pytest)");
+
+        // Case-insensitive segment match.
+        assert!(is_test_or_fixture_path("Tests/config.rs"), "Tests/ (capital T)");
+        assert!(is_test_or_fixture_path("FIXTURES/creds.json"), "FIXTURES/ (all caps)");
+    }
+
+    #[test]
+    fn floor_finding_on_test_path_is_low_with_note() {
+        // A GitHub PAT inside a tests/ directory must be down-ranked to "low" and
+        // annotated, not critical — it's overwhelmingly a detection-fixture value.
+        let secret = "const TOKEN = \"ghp_0123456789012345678901234567890123456\";";
+        let findings = audit_content("me/api", "tests/auth_test.rs", secret);
+        assert_eq!(findings.len(), 1, "finding still visible: {findings:?}");
+        let f = &findings[0];
+        assert_eq!(
+            f.severity, TEST_PATH_SEVERITY,
+            "test-path finding must be down-ranked to {TEST_PATH_SEVERITY}"
+        );
+        assert!(
+            f.detail.contains("test/fixture code"),
+            "detail must contain the test-path note: {:?}",
+            f.detail
+        );
+        assert!(
+            f.detail.contains("verify"),
+            "note must tell the architect to verify: {:?}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn floor_finding_on_production_path_stays_critical() {
+        // The SAME secret on a production path must remain critical — no down-rank.
+        let secret = "const TOKEN = \"ghp_0123456789012345678901234567890123456\";";
+        let findings = audit_content("me/api", "src/config.rs", secret);
+        assert_eq!(findings.len(), 1, "finding still visible: {findings:?}");
+        let f = &findings[0];
+        assert_eq!(
+            f.severity, "critical",
+            "production-path finding must stay critical"
+        );
+        assert!(
+            !f.detail.contains("test/fixture code"),
+            "production finding must NOT carry the test-path note: {:?}",
+            f.detail
+        );
+    }
+
+    #[test]
+    fn floor_finding_on_fixture_subdir_is_low() {
+        // `crates/x/src/fixtures/keys.py` contains a secret the floor would normally
+        // flag critical — but fixtures/ makes it a test context.
+        let secret = "API_KEY = \"ghp_0123456789012345678901234567890123456\"\n";
+        let findings = audit_content("me/svc", "crates/x/src/fixtures/keys.py", secret);
+        assert!(
+            findings.iter().all(|f| f.severity == TEST_PATH_SEVERITY),
+            "all findings in fixture subdir must be down-ranked: {findings:?}"
+        );
     }
 }

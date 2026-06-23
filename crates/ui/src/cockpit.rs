@@ -4560,12 +4560,6 @@ pub fn CockpitApp() -> Element {
     // The active connection (native vs GitHub), shown honestly in the Onboard view.
     let provider_res = use_resource(fetch_provider);
 
-    // Ask-a-finding (#54): the signal is provided by App (in main.rs) so that
-    // ChatBubble — which is a sibling of CockpitShell, not a descendant — can
-    // read it. We just consume it here so children can get it from context.
-    // (App guarantees it's provided before CockpitApp mounts.)
-    let _ask_finding_present = use_context::<Signal<Option<crate::chat::FindingContext>>>();
-
     // Onboard state lifted to app scope so it SURVIVES navigating between cockpit views:
     // the Phase-1 scan result, and the id of an in-flight async audit job. A background
     // job keeps running server-side regardless; these let the UI re-attach (resume the
@@ -7600,11 +7594,6 @@ fn FindingsTable(
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    // Ask-a-finding (#54): the app-level lifted signal, provided by CockpitApp via context.
-    // When the architect selects a finding and presses "Ask", we build a FindingContext
-    // and write it here; ChatBubble in main.rs reads from the same signal.
-    let mut ask_finding =
-        use_context::<Signal<Option<crate::chat::FindingContext>>>();
     // Keep only the findings in THIS table's triage state (absent from the map = Unresolved).
     let findings: Vec<FindingView> = {
         let d = dispositions.peek();
@@ -7684,8 +7673,6 @@ fn FindingsTable(
     // Two more clones for the tech-debt bucket buttons (resolve later / now).
     let id_map_c = id_map.clone();
     let id_map_d = id_map.clone();
-    // Ask-a-finding (#54): one more id_map clone for the "Ask" button.
-    let id_map_ask = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -7912,34 +7899,6 @@ fn FindingsTable(
                         "Move to Ignored"
                     }
                 },
-            }
-            // Ask-a-finding (#54): builds a FindingContext from the FIRST selected finding
-            // and writes it to the app-level `ask_finding` signal. The ChatBubble (mounted
-            // in App above this subtree) reads the signal and auto-opens in Project mode
-            // focused on that finding.
-            button {
-                class: "ask-finding-btn",
-                title: "Open the research chat focused on this finding (Project mode)",
-                onclick: move |_| {
-                    let sel = handle.selected_ids();
-                    // Use the FIRST selected row; selecting multiple and asking about all
-                    // is deferred — one coherent conversation per finding is the better UX.
-                    let Some(first_id) = sel.into_iter().next() else { return; };
-                    let Some(f) = id_map_ask.get(&first_id).cloned() else { return; };
-                    // Map FindingView -> FindingContext (pub in chat.rs).
-                    // FindingView fields: rule_id, path, line (usize), severity,
-                    // snippet, detail, repo.
-                    ask_finding.set(Some(crate::chat::FindingContext {
-                        rule_id: f.rule_id.clone(),
-                        severity: f.severity.clone(),
-                        path: f.path.clone(),
-                        line: f.line,
-                        snippet: f.snippet.clone(),
-                        detail: f.detail.clone(),
-                        repo: f.repo.clone(),
-                    }));
-                },
-                "Ask AI about this finding"
             }
             button {
                 class: "btn-edit-sm",
