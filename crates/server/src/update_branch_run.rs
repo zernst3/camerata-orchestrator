@@ -149,6 +149,7 @@ pub async fn execute_update_branch_run(
                 verdict: "info".to_string(),
                 rule: None,
                 detail,
+                content_hash: None,
             },
         );
     };
@@ -161,6 +162,7 @@ pub async fn execute_update_branch_run(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: detail.clone(),
+                content_hash: None,
             },
         );
         uow.append_history(&story_id, "update_branch", &format!("Update branch failed: {detail}"));
@@ -273,6 +275,7 @@ async fn resolve_conflicts_and_commit(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: format!("{detail} (merge aborted — tree restored)."),
+            content_hash: None,
             },
         );
         uow.append_history(
@@ -334,6 +337,7 @@ async fn resolve_conflicts_and_commit(
                 "Spawning single gated conflict-resolution agent on model `{}`.",
                 if model.trim().is_empty() { "<cli default>" } else { model }
             ),
+            content_hash: None,
         },
     );
 
@@ -366,6 +370,7 @@ async fn resolve_conflicts_and_commit(
                     verdict: "allow".to_string(),
                     rule: None,
                     detail: format!("Conflicts resolved by the gated agent; merge committed. {out}"),
+                    content_hash: None,
                 },
             );
             uow.append_history(

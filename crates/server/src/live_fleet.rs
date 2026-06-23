@@ -44,6 +44,11 @@ struct GateDecisionRecord {
     #[allow(dead_code)]
     #[serde(default)]
     ts_ms: u128,
+    /// FNV-1a hex hash of the denied write's content (NEVER the raw content).
+    /// Set on DENY records only; `None` for allow / delegation records.
+    /// Carried through to `GateEvent` for capture at run finalization.
+    #[serde(default)]
+    content_hash: Option<String>,
 }
 
 /// Map ONE gateway gate-decision JSONL record to a run [`GateEvent`]. PURE +
@@ -61,6 +66,7 @@ fn gate_record_to_event(seq: usize, rec: &GateDecisionRecord) -> GateEvent {
             verdict: "dispatch".to_string(),
             rule: None,
             detail: rec.reason.clone(),
+            content_hash: None,
         },
         "delegate-return" => GateEvent {
             seq,
@@ -69,6 +75,7 @@ fn gate_record_to_event(seq: usize, rec: &GateDecisionRecord) -> GateEvent {
             verdict: rec.verdict.clone(),
             rule: None,
             detail: rec.reason.clone(),
+            content_hash: None,
         },
         // "gate" or empty (legacy): a layer-1 write decision.
         _ => GateEvent {
@@ -81,6 +88,9 @@ fn gate_record_to_event(seq: usize, rec: &GateDecisionRecord) -> GateEvent {
             } else {
                 format!("Write to {} allowed.", rec.target)
             },
+            // Carry the content hash through so run-finalization capture can write
+            // it to the enforcement ledger without re-reading the denied content.
+            content_hash: rec.content_hash.clone(),
         },
     }
 }
@@ -206,6 +216,7 @@ pub async fn execute_live_run(
                         "Live fleet needs the gateway binary: {e}. Build it with \
                          `cargo build -p camerata-gateway`, then retry with CAMERATA_LIVE_BUILD=1."
                     ),
+                    content_hash: None,
                 },
             );
             store.set_status(&run_id, RunStatus::AwaitingQa, true);
@@ -296,6 +307,7 @@ pub async fn execute_live_run_tiered(
                         "Live fleet needs the gateway binary: {e}. Build it with \
                          `cargo build -p camerata-gateway`, then retry with CAMERATA_LIVE_BUILD=1."
                     ),
+                    content_hash: None,
                 },
             );
             store.set_status(&run_id, RunStatus::AwaitingQa, true);
@@ -315,6 +327,7 @@ pub async fn execute_live_run_tiered(
                 "Tiered run: lead/orchestrator = {} (strongest); balanced = {}; fast = {}.",
                 tier_map.strongest, tier_map.balanced, tier_map.fast
             ),
+            content_hash: None,
         },
     );
 
@@ -384,6 +397,7 @@ fn announce_bootstrap_if_skipping(store: &RunStore, run_id: &str, skip_layer2: b
                      for this one run so the linters/checkers can be installed. The security \
                      gate (layer 1) still applies. Turn this off after the tooling lands."
                 .to_string(),
+            content_hash: None,
         },
     );
 }
@@ -424,6 +438,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
             verdict: "info".to_string(),
             rule: None,
             detail: "Scaffolding the governed worktree.".to_string(),
+            content_hash: None,
         },
         BuildEvent::StageStarted {
             index,
@@ -440,6 +455,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
                 index + 1,
                 total
             ),
+            content_hash: None,
         },
         BuildEvent::AgentTier {
             index,
@@ -456,6 +472,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
             } else {
                 format!("Stage {}: {role} → {model}.", index + 1)
             },
+            content_hash: None,
         },
         BuildEvent::Layer2Result {
             index,
@@ -481,6 +498,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
                     violated_rules.join(", ")
                 )
             },
+            content_hash: None,
         },
         BuildEvent::ReviseIteration {
             index,
@@ -503,6 +521,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
                     violated_rules.join(", ")
                 }
             ),
+            content_hash: None,
         },
         BuildEvent::StageFinished {
             index,
@@ -520,6 +539,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
                 index + 1,
                 total
             ),
+            content_hash: None,
         },
         BuildEvent::Done {
             compiled,
@@ -530,6 +550,7 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
             verdict: if compiled && tests_passed { "allow" } else { "deny" }.to_string(),
             rule: None,
             detail: format!("cargo build={compiled}, cargo test={tests_passed}."),
+            content_hash: None,
         },
         BuildEvent::Verifying => return None,
     };
@@ -551,6 +572,7 @@ fn finish_live_run(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: format!("Live fleet run failed: {e}"),
+                content_hash: None,
             },
         );
     }

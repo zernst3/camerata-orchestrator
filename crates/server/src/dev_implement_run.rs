@@ -161,6 +161,7 @@ pub async fn execute_dev_implement_run(
                 verdict: verdict.to_string(),
                 rule: None,
                 detail,
+                content_hash: None,
             },
         );
     };
@@ -173,6 +174,7 @@ pub async fn execute_dev_implement_run(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: detail.clone(),
+                content_hash: None,
             },
         );
         uow.append_history(
@@ -333,6 +335,7 @@ pub async fn execute_dev_implement_run(
                         detail: format!(
                             "Stage 1/1 finished: clean=true, bounced={iteration}."
                         ),
+                        content_hash: None,
                     },
                 );
                 break Ok(());
@@ -351,6 +354,7 @@ pub async fn execute_dev_implement_run(
                         detail: format!(
                             "Stage 1/1 failed layer-2: {rule_summary}."
                         ),
+                        content_hash: None,
                     },
                 );
                 iteration += 1;
@@ -367,6 +371,7 @@ pub async fn execute_dev_implement_run(
                                  residual violations: {rule_summary}.",
                                 iteration - 1
                             ),
+                            content_hash: None,
                         },
                     );
                     break Err(format!(
@@ -384,6 +389,7 @@ pub async fn execute_dev_implement_run(
                         detail: format!(
                             "Stage 1: bounce-and-revise — sent back to the agent to fix {rule_summary}."
                         ),
+                        content_hash: None,
                     },
                 );
             }
@@ -399,6 +405,7 @@ pub async fn execute_dev_implement_run(
                         verdict: "fail".to_string(),
                         rule: None,
                         detail: format!("Layer-2 runner error: {e}"),
+                        content_hash: None,
                     },
                 );
                 break Err(format!("layer-2 runner error: {e}"));

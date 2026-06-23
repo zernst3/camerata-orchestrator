@@ -15,6 +15,7 @@ use sqlx::{Pool, Row, Sqlite, SqlitePool};
 
 use crate::{
     artifacts::ArtifactStore,
+    enforcement_catch::EnforcementCatchLedger,
     error::PersistenceError,
     model::{ProvenanceEntry, ProvenanceId, SessionRecord},
 };
@@ -117,6 +118,7 @@ impl SqliteStore {
         let store = Self { pool };
         store.migrate().await?;
         store.migrate_artifacts().await?;
+        store.migrate_enforcement().await?;
         Ok(store)
     }
 
@@ -138,6 +140,7 @@ impl SqliteStore {
         let store = Self { pool };
         store.migrate().await?;
         store.migrate_artifacts().await?;
+        store.migrate_enforcement().await?;
         Ok(store)
     }
 

@@ -109,6 +109,7 @@ pub async fn execute_pr_resolve_run(
                 verdict: verdict.to_string(),
                 rule: None,
                 detail,
+                content_hash: None,
             },
         );
     };
@@ -121,6 +122,7 @@ pub async fn execute_pr_resolve_run(
                 verdict: "error".to_string(),
                 rule: None,
                 detail: detail.clone(),
+                content_hash: None,
             },
         );
         uow.append_history(&story_id, "pr_resolve", &format!("Resolve PR feedback failed: {detail}"));

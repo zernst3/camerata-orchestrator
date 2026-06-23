@@ -22,6 +22,7 @@ pub mod clarify_resume;
 pub mod connections;
 pub mod decompose;
 pub mod draft;
+pub mod enforcement_ledger;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
@@ -129,6 +130,11 @@ pub struct AppState {
     /// folds into this; the `/api/usage` endpoint snapshots it for the cockpit's persistent
     /// usage meter. Provider-agnostic: keys off the vendor-neutral `LlmResponse` usage fields.
     pub usage_ledger: Arc<crate::usage_ledger::UsageLedger>,
+    /// Optional append-only enforcement-catch ledger (SQLite). Captures every Layer-1
+    /// gate deny, Layer-2 bounce, and floor audit catch for external SQL analytics
+    /// (prevented-merges dataset). Write-only in app code; fail-soft: if it can't be
+    /// opened the run/scan paths are unaffected. `None` in tests and on open failure.
+    pub enforcement_ledger: crate::enforcement_ledger::EnforcementLedger,
 }
 
 impl AppState {
@@ -155,6 +161,8 @@ impl AppState {
             artifacts: None,
             feature_flags: crate::feature_flags::FeatureFlags::default(),
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
+            // Tests and in-process runs start without a ledger (no-op; fail-soft).
+            enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
         }
     }
 
@@ -221,6 +229,16 @@ impl AppState {
                     state.artifacts = Some(store.clone());
                     state.uow = state.uow.with_artifacts(store);
                 }
+
+                // Enforcement-catch ledger: append-only SQLite log of every gate deny,
+                // layer-2 bounce, and floor audit catch. Opened best-effort (fail-soft):
+                // if it can't open, a no-op ledger is used and runs/scans are unaffected.
+                let ledger_path = dir.join("enforcement_catches.db");
+                state.enforcement_ledger = tokio::task::block_in_place(|| {
+                    handle.block_on(
+                        crate::enforcement_ledger::EnforcementLedger::open(&ledger_path),
+                    )
+                });
             }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
@@ -916,13 +934,17 @@ async fn start_governed_run(
     // from the run's gate decisions + provenance + scoped audit over the changed files,
     // attaches it to the UoW, and posts it as a PR comment when a PR number is known
     // from the UoW's branch. Graceful degradation: evidence failure never blocks the run.
+    //
+    // Enforcement-catch ledger capture: after the run is done, iterate its gate events
+    // and write one catch per deny to the enforcement ledger (best-effort, fail-soft).
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
         let watch_id = run_id.clone();
         let watch_story = story_id.to_string();
+        let ledger = state.enforcement_ledger.clone();
         tokio::spawn(async move {
-            stamp_provenance_when_done(runs, uow, watch_id, watch_story).await;
+            stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
         });
     }
 
@@ -936,6 +958,7 @@ async fn start_governed_run(
 async fn stamp_provenance_when_done(
     runs: RunStore,
     uow: crate::uow::UowStore,
+    ledger: crate::enforcement_ledger::EnforcementLedger,
     run_id: String,
     story_id: String,
 ) {
@@ -970,6 +993,19 @@ async fn stamp_provenance_when_done(
                 // best-effort: a failure here never blocks the run's AwaitingQa state.
                 let evidence = assemble_evidence_for_run(&run, &prov, &story_id);
                 uow.attach_evidence(&story_id, evidence);
+
+                // ── Enforcement-catch ledger capture (terminal point 1) ──────────
+                // After run is done, write one catch per deny/bounce gate event to the
+                // append-only enforcement ledger. Best-effort / fail-soft: errors are
+                // logged and swallowed inside `capture_run_finalization`; a ledger
+                // failure never affects the run's terminal state or provenance.
+                crate::enforcement_ledger::capture_run_finalization(
+                    &ledger,
+                    &run.events,
+                    &run.id,
+                    &story_id,
+                )
+                .await;
 
                 return;
             }
@@ -2419,6 +2455,19 @@ async fn onboard_audit(
     if run_deterministic {
         merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
     }
+
+    // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ──────────
+    // After a scan completes, write one floor/catch record for each ACTIVE floor finding
+    // to the enforcement ledger. Best-effort / fail-soft: runs in a background task so
+    // the response is never delayed by ledger writes. Errors inside are logged and swallowed.
+    {
+        let ledger = state.enforcement_ledger.clone();
+        let all_findings = report.findings.clone();
+        tokio::spawn(async move {
+            crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+        });
+    }
+
     Json(report)
 }
 
@@ -8220,6 +8269,7 @@ mod tests {
                     verdict: "deny".to_string(),
                     rule: Some(format!("TEST-RULE-{i}")),
                     detail: format!("test deny target {i}"),
+                    content_hash: None,
                 },
             );
         }
@@ -8232,6 +8282,7 @@ mod tests {
                     verdict: "allow".to_string(),
                     rule: None,
                     detail: format!("src/clean_{i}.rs"),
+                    content_hash: None,
                 },
             );
         }
@@ -8301,6 +8352,7 @@ mod tests {
         run_store.push_event(&id, crate::run::GateEvent {
             seq: 1, layer: "fleet".to_string(), verdict: "info".to_string(),
             rule: None, detail: "Scaffolding the worktree.".to_string(),
+            content_hash: None,
         });
         run_store.set_status(&id, crate::run::RunStatus::AwaitingQa, true);
         let run = run_store.get(&id).unwrap();

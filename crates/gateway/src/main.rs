@@ -89,6 +89,11 @@ pub struct GateDecisionRecord {
     pub reason: String,
     /// Unix-epoch milliseconds when the decision was recorded.
     pub ts_ms: u128,
+    /// FNV-1a hex hash of the denied content (NEVER the raw content — public repo).
+    /// Set only for DENY records where content is available; `None` for allow records
+    /// and delegation records. Observability-only; cannot affect any gate verdict.
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
 
 fn default_gate_kind() -> String {
@@ -188,11 +193,34 @@ pub fn clarify_requests_sink_path() -> Option<std::path::PathBuf> {
     Some(dir.join("clarify-requests.jsonl"))
 }
 
+/// FNV-1a 64-bit hash of `s`, returned as a 16-char hex string. Stable across
+/// machines and Rust versions (unlike `DefaultHasher`). Matches the algorithm in
+/// `camerata_persistence::content_hash` and `server::suppression::fnv1a`.
+///
+/// Used ONLY to hash the content of denied writes before recording them. The raw
+/// content is never stored in the observability record (public repo safety).
+fn fnv1a_hex(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", h)
+}
+
 /// Build a [`GateDecisionRecord`] from a gate outcome. PURE: the verdict/rule/reason are
 /// derived from the same `decision` string [`Gateway::gated_write`] returns, so this is
 /// a faithful recording with zero decision logic of its own. Separated out so it is
 /// unit-testable without a filesystem or clock (`ts_ms` is injected).
-pub fn build_gate_record(target: &str, decision: &str, ts_ms: u128) -> GateDecisionRecord {
+///
+/// `content` is the write content: it is hashed (FNV-1a hex) and stored as
+/// `content_hash` on DENY records. The raw content is NEVER stored.
+pub fn build_gate_record(
+    target: &str,
+    decision: &str,
+    ts_ms: u128,
+    content: &str,
+) -> GateDecisionRecord {
     // The decision string shape is one of:
     //   "ALLOWED: wrote N bytes to <path>"
     //   "ALLOWED but IO error on <path>: <e>"
@@ -209,6 +237,7 @@ pub fn build_gate_record(target: &str, decision: &str, ts_ms: u128) -> GateDecis
             rule: Some(rule.to_string()),
             reason: decision.to_string(),
             ts_ms,
+            content_hash: Some(fnv1a_hex(content)),
         }
     } else {
         GateDecisionRecord {
@@ -218,6 +247,7 @@ pub fn build_gate_record(target: &str, decision: &str, ts_ms: u128) -> GateDecis
             rule: None,
             reason: decision.to_string(),
             ts_ms,
+            content_hash: None,
         }
     }
 }
@@ -490,7 +520,9 @@ impl Gateway {
         // of THIS decision so the server can fold real gate decisions out of the
         // subprocess into the run's event stream. Records what was decided above; it
         // does not — and cannot — change the decision.
-        append_gate_record(&build_gate_record(&path, &decision, now_ms()));
+        // content_hash is the FNV-1a hex of the denied write's content on DENY records
+        // (raw content is NEVER stored — public repo).
+        append_gate_record(&build_gate_record(&path, &decision, now_ms(), &content));
 
         // Best-effort decision log next to the per-session rules file. The dir
         // may not exist in every environment; ignore failures (the stderr line
@@ -595,6 +627,7 @@ impl Gateway {
             rule: None,
             reason: format!("Delegated a subtask to the {tier} tier."),
             ts_ms: now_ms(),
+            content_hash: None, // delegation records carry no content
         });
 
         let result = delegate::run_delegated(config, (*self.rule_subset).clone(), &subtask, &tier)
@@ -617,6 +650,7 @@ impl Gateway {
                 format!("Delegate ({tier}) returned its result.")
             },
             ts_ms: now_ms(),
+            content_hash: None, // delegation records carry no content
         });
 
         result
@@ -667,12 +701,15 @@ mod gate_sink_tests {
             "crates/api/src/members_repo.rs",
             "ALLOWED: wrote 42 bytes to crates/api/src/members_repo.rs",
             123,
+            "pub fn export_members() -> Vec<Member> { repo.all() }",
         );
         assert_eq!(r.verdict, "allow");
         assert!(r.rule.is_none());
         assert_eq!(r.target, "crates/api/src/members_repo.rs");
         assert_eq!(r.ts_ms, 123);
         assert!(r.reason.contains("ALLOWED"));
+        // Allow records carry no content_hash (raw content must never be stored).
+        assert!(r.content_hash.is_none());
     }
 
     #[test]
@@ -681,10 +718,16 @@ mod gate_sink_tests {
             "crates/api/src/export_config.rs",
             "DENIED [SEC-NO-HARDCODED-SECRETS-1] path=crates/api/src/export_config.rs",
             7,
+            "let token = \"secret\";",
         );
         assert_eq!(r.verdict, "deny");
         assert_eq!(r.rule.as_deref(), Some("SEC-NO-HARDCODED-SECRETS-1"));
         assert_eq!(r.target, "crates/api/src/export_config.rs");
+        // Deny records carry a content_hash (FNV-1a hex, NOT the raw content).
+        assert!(r.content_hash.is_some());
+        let hash = r.content_hash.as_deref().unwrap();
+        assert_eq!(hash.len(), 16, "FNV-1a hex is 16 chars");
+        assert!(!hash.contains("secret"), "hash must not contain raw content");
     }
 
     #[test]
@@ -693,20 +736,38 @@ mod gate_sink_tests {
             "/etc/cron.d/payload",
             "DENIED [JAIL: outside the worktree] path=/etc/cron.d/payload",
             0,
+            "*/1 * * * * root sh -c id",
         );
         assert_eq!(r.verdict, "deny");
         assert_eq!(r.rule.as_deref(), Some("JAIL: outside the worktree"));
+        assert!(r.content_hash.is_some());
     }
 
     #[test]
     fn record_round_trips_through_jsonl() {
-        let r = build_gate_record("a/b.rs", "DENIED [GOV-1] path=a/b.rs", 9);
+        let r = build_gate_record("a/b.rs", "DENIED [GOV-1] path=a/b.rs", 9, "content");
         let line = serde_json::to_string(&r).unwrap();
         let back: GateDecisionRecord = serde_json::from_str(&line).unwrap();
         assert_eq!(back.verdict, "deny");
         assert_eq!(back.rule.as_deref(), Some("GOV-1"));
         assert_eq!(back.target, "a/b.rs");
         assert_eq!(back.ts_ms, 9);
+        // content_hash round-trips; raw content is absent.
+        assert!(back.content_hash.is_some());
+    }
+
+    #[test]
+    fn allow_record_has_no_content_hash_after_jsonl_roundtrip() {
+        // #[serde(default)] means a missing field deserializes to None.
+        let r = build_gate_record(
+            "a/b.rs",
+            "ALLOWED: wrote 5 bytes to a/b.rs",
+            1,
+            "hello",
+        );
+        let line = serde_json::to_string(&r).unwrap();
+        let back: GateDecisionRecord = serde_json::from_str(&line).unwrap();
+        assert!(back.content_hash.is_none());
     }
 
     // Serialize the env-mutating test so it is order-independent within the binary.

@@ -184,6 +184,7 @@ pub async fn execute_investigation_run(
                 detail: "Investigation started (live mode off): no agent spawned. \
                          Set CAMERATA_LIVE_BUILD=1 to run the real single-agent analysis."
                     .to_string(),
+                content_hash: None,
             },
         );
         let note = InvestigationArtifact::ai_authored(
@@ -250,6 +251,7 @@ pub async fn resume_investigation_after_clarification(
                 "Answer received (\"{answer_summary}\"). Resuming the gated investigation \
                  agent with the answer in context.",
             ),
+            content_hash: None,
         },
     );
 
@@ -338,6 +340,7 @@ pub(crate) fn pause_run_on_clarification(
                  you — answer it to resume. ({})",
                 req.question, clar.id
             ),
+            content_hash: None,
         },
     );
     // Parked, NOT done: the run resumes when the clarification is answered.
@@ -398,6 +401,7 @@ async fn run_one_investigation_pass(
                         "Investigation needs the gateway binary: {e}. Build it with \
                          `cargo build -p camerata-gateway`, then retry."
                     ),
+                    content_hash: None,
                 },
             );
             runs.set_status(&run_id, RunStatus::AwaitingQa, true);
@@ -419,6 +423,7 @@ async fn run_one_investigation_pass(
                     verdict: "error".to_string(),
                     rule: None,
                     detail: format!("Could not build the governed investigator role: {e}"),
+                    content_hash: None,
                 },
             );
             runs.set_status(&run_id, RunStatus::AwaitingQa, true);
@@ -449,6 +454,7 @@ async fn run_one_investigation_pass(
                     verdict: "error".to_string(),
                     rule: None,
                     detail: format!("Could not prepare the investigation session: {e}"),
+                    content_hash: None,
                 },
             );
             runs.set_status(&run_id, RunStatus::AwaitingQa, true);
@@ -476,6 +482,7 @@ async fn run_one_investigation_pass(
                     model.as_str()
                 }
             ),
+            content_hash: None,
         },
     );
 
@@ -529,6 +536,7 @@ async fn run_one_investigation_pass(
                         "Investigation note recorded ({} chars). Architect reviews + records decisions next.",
                         outcome.result.len()
                     ),
+                    content_hash: None,
                 },
             );
         }
@@ -541,6 +549,7 @@ async fn run_one_investigation_pass(
                     verdict: "error".to_string(),
                     rule: None,
                     detail: format!("Investigation agent failed: {e}"),
+                    content_hash: None,
                 },
             );
         }

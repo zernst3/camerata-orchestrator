@@ -89,6 +89,13 @@ pub struct GateEvent {
     pub rule: Option<String>,
     /// Human-readable narrative plus the gate's own reason text.
     pub detail: String,
+    /// FNV-1a hex hash of the denied write's content (NEVER the raw content).
+    /// Present only on layer-1 deny events sourced from the LIVE gateway JSONL sink.
+    /// None for scripted runs, allow events, and non-content events (delegate, fleet).
+    /// Carried here so run-finalization capture can write it to the enforcement ledger
+    /// without re-reading the original denied content.
+    #[serde(default)]
+    pub content_hash: Option<String>,
 }
 
 /// A run: a story being governed, its current status, and the real gate activity so far.
@@ -444,6 +451,10 @@ fn gate_event(seq: usize, rules: &[RuleId], call: &ToolCall, narrative: &str) ->
             verdict: "deny".to_string(),
             rule: Some(rule.0),
             detail: format!("{narrative} {reason}"),
+            // Scripted runs have no raw content to hash (the content is test fixture data
+            // embedded in the call builder). content_hash remains None for scripted events;
+            // it is populated only for LIVE gateway events via gate_record_to_event.
+            content_hash: None,
         },
         Decision::Allow => GateEvent {
             seq,
@@ -451,6 +462,7 @@ fn gate_event(seq: usize, rules: &[RuleId], call: &ToolCall, narrative: &str) ->
             verdict: "allow".to_string(),
             rule: None,
             detail: narrative.to_string(),
+            content_hash: None,
         },
     }
 }
@@ -679,6 +691,7 @@ mod tests {
                 verdict: "allow".to_string(),
                 rule: None,
                 detail: "clean write".to_string(),
+                content_hash: None,
             },
         );
         let run = store.get(&id).expect("run exists");
@@ -733,6 +746,7 @@ mod tests {
             verdict: "allow".to_string(),
             rule: None,
             detail: "test".to_string(),
+            content_hash: None,
         });
         let after = store.get(&id).unwrap().last_activity_ms;
         assert!(after >= before, "last_activity_ms must advance after push_event");
@@ -757,6 +771,7 @@ mod tests {
             verdict: "dispatch".to_string(),
             rule: None,
             detail: "dispatching".to_string(),
+            content_hash: None,
         });
         let run = store.get(&id).unwrap();
         assert!(run.last_progress_label.contains("delegate"));
