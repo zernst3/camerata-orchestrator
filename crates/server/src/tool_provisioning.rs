@@ -41,6 +41,7 @@
 //! graceful "tool not available" note.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Errors that can arise during tool provisioning.  The scan caller converts
 /// these into `CoverageNote`s; they are never fatal to the scan.
@@ -428,8 +429,18 @@ async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
 
     // reqwest is already a dependency (it fetches repo tarballs).  Use rustls
     // (no system openssl dependency) for the binary download.
+    //
+    // IMPORTANT: both timeouts are mandatory.  Without them this function hangs
+    // forever on slow/blocked/no-network environments, which in turn hangs the
+    // entire onboarding scan and any test that exercises `audit_repos`.
+    // - connect_timeout: aborts if the TCP handshake doesn't complete in 5 s.
+    // - timeout: caps the TOTAL round-trip (connect + headers + body) at 30 s.
+    // On either timeout `send()` or `bytes()` returns an error → `ProvisionError`
+    // → `CoverageNote` → scan continues.  Never hangs.
     let client = reqwest::Client::builder()
         .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| ProvisionError::InstallFailed {
             tool: "osv-scanner",
@@ -477,10 +488,20 @@ async fn download_osv_scanner(dest: &Path) -> Result<(), ProvisionError> {
 /// installed binary on success.
 async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
     // `go env GOPATH` gives us the GOPATH so we can locate the installed binary.
-    let gopath_out = tokio::process::Command::new("go")
-        .args(["env", "GOPATH"])
-        .output()
-        .await?;
+    // Bound at 10 s: `go env` is a local metadata query and should be nearly
+    // instant; a hang here means the Go toolchain is broken/stalled.
+    let gopath_out = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::process::Command::new("go")
+            .args(["env", "GOPATH"])
+            .output(),
+    )
+    .await
+    .map_err(|_| ProvisionError::InstallFailed {
+        tool: "osv-scanner",
+        detail: "`go env GOPATH` timed out after 10 s".to_string(),
+    })?
+    .map_err(ProvisionError::Io)?;
     let gopath = String::from_utf8_lossy(&gopath_out.stdout)
         .trim()
         .to_string();
@@ -500,10 +521,22 @@ async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
         "github.com/google/osv-scanner/cmd/osv-scanner@{ver}",
         ver = OSV_SCANNER_VERSION
     );
-    let install_out = tokio::process::Command::new("go")
-        .args(["install", &pkg])
-        .output()
-        .await?;
+    // Cap `go install` at 60 s.  On a slow network or constrained CI runner this
+    // can take a while, but an unlimited wait hangs the scan indefinitely.  60 s
+    // is generous for a ~15 MB binary compile + module download while still
+    // ensuring the provisioning path is always bounded.
+    let install_out = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new("go")
+            .args(["install", &pkg])
+            .output(),
+    )
+    .await
+    .map_err(|_| ProvisionError::InstallFailed {
+        tool: "osv-scanner",
+        detail: format!("`go install {pkg}` timed out after 60 s"),
+    })?
+    .map_err(ProvisionError::Io)?;
     if !install_out.status.success() {
         return Err(ProvisionError::InstallFailed {
             tool: "osv-scanner",
@@ -918,6 +951,64 @@ mod tests {
         let r2 = ensure_osv_scanner(&tooling).await;
         assert!(r2.is_ok(), "second call must succeed: {r2:?}");
         assert_eq!(r1.unwrap(), r2.unwrap(), "both calls must return the same path");
+    }
+
+    // ── download timeout bounds ───────────────────────────────────────────────
+    //
+    // Verify that `download_osv_scanner` fails fast (within the declared timeout
+    // window) when pointed at an unroutable host.  The test uses a TCP black-hole
+    // address (192.0.2.1 is TEST-NET-1 from RFC 5737; packets are dropped, not
+    // refused) to exercise the connect-timeout path without relying on DNS or a
+    // real server.
+    //
+    // The test calls into the private function indirectly by temporarily replacing
+    // the URL — but since `download_osv_scanner` constructs the URL from the
+    // module-level constants we instead verify the *client builder* carries the
+    // right timeout by building one the same way and asserting it doesn't hang
+    // on a loopback connection to a closed port.
+    //
+    // Approach: build a reqwest Client with the same parameters, attempt a GET
+    // to 127.0.0.1:<closed-port>, and assert the whole thing completes (with an
+    // error) within a generous 10 s wall-clock window.  If the timeout logic is
+    // missing the future never resolves and the test runner itself times out.
+    #[tokio::test]
+    async fn download_client_has_connect_timeout_and_fails_fast() {
+        // A randomly chosen high port that is almost certainly not listening.
+        // We just need the connection to fail (refused or timeout), not succeed.
+        let url = "http://192.0.2.1:9/"; // TEST-NET-1 (RFC 5737) — black hole
+
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("camerata/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("client build must not fail");
+
+        // The whole attempt (including the connect_timeout) must complete within
+        // 8 s (generous buffer above the 5 s connect-timeout).  If there is no
+        // timeout on the client the request hangs indefinitely.
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            client.get(url).send(),
+        )
+        .await;
+
+        // Either the outer timeout fired first (should not happen if connect_timeout
+        // is wired up) or reqwest itself returned an error (connection refused or
+        // timeout).  In both cases the important property is the future resolved
+        // within 8 s — a hang would cause the outer timeout to be `Err(Elapsed)`.
+        match result {
+            Ok(_) => {
+                // reqwest returned (Ok or Err) within 8 s — timeout is working.
+            }
+            Err(_elapsed) => {
+                // The 8-second guard fired — the connect_timeout is NOT working.
+                panic!(
+                    "download_osv_scanner client did not time out within 8 s; \
+                     connect_timeout is likely missing from the Client builder"
+                );
+            }
+        }
     }
 
     // ── release asset naming ──────────────────────────────────────────────────

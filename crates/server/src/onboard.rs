@@ -3352,6 +3352,11 @@ mod tests {
     /// every `audit_repo` / deep-tier LLM call, so this test never touches a model.)
     #[tokio::test]
     async fn deterministic_only_runs_floor_and_skips_ai() {
+        // Disable the always-on dep-audit pass so this test does not trigger
+        // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
+        // This test exercises the deterministic floor + scan-mode selector logic,
+        // not dep-audit. See `crate::dep_audit::DISABLE_ENV_VAR`.
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,
@@ -3390,6 +3395,11 @@ mod tests {
     /// invoking a model; the assertion isolates the deterministic-floor gate.
     #[tokio::test]
     async fn deterministic_off_skips_floor() {
+        // Disable the always-on dep-audit pass so this test does not trigger
+        // `ensure_osv_scanner` → `download_osv_scanner` (live network request).
+        // This test exercises the scan-mode selector (deterministic gate), not dep-audit.
+        // See `crate::dep_audit::DISABLE_ENV_VAR`.
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
             &sources,

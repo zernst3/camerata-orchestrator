@@ -42,9 +42,30 @@
 //! contract, and the non-gate classification.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::onboard::{CoverageNote, Finding};
 use crate::tool_provisioning;
+
+/// When this environment variable is set (to any non-empty value), `run_dep_audit`
+/// and `run_dep_audit_with_tooling` return immediately with an empty findings list
+/// and no coverage note — skipping ALL provisioning and network activity.
+///
+/// **Purpose:** test isolation.  Onboarding scan tests (`audit_repos` tests in
+/// `onboard.rs`) exercise scan logic, not dep-audit specifically.  Without this
+/// escape hatch those tests trigger `ensure_osv_scanner` → `download_osv_scanner`,
+/// which makes a live network request and hangs indefinitely in environments with
+/// no network or a blocked GitHub releases URL.
+///
+/// Set this in any test that calls `audit_repos` / `audit_repos_with_tooling` but
+/// is not specifically testing the dep-audit path:
+///
+/// ```rust
+/// std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+/// ```
+///
+/// Never set this variable in production code paths.
+const DISABLE_ENV_VAR: &str = "CAMERATA_DISABLE_DEP_AUDIT";
 
 /// The stable rule id that all dep-audit findings carry.  Advisory-specific ids
 /// (RUSTSEC-…, GHSA-…, CVE-…) are placed in `detail` so they are searchable
@@ -281,6 +302,15 @@ async fn run_dep_audit_with_tooling(
     repo_dir: &Path,
     tooling_dir: &Path,
 ) -> (Vec<Finding>, Option<CoverageNote>) {
+    // Fast-exit when the disable env var is set.  This is exclusively for test
+    // isolation — see the `DISABLE_ENV_VAR` constant doc for the rationale.
+    if std::env::var(DISABLE_ENV_VAR)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return (Vec::new(), None);
+    }
+
     let bin = match tool_provisioning::ensure_osv_scanner(tooling_dir).await {
         Ok(b) => b,
         Err(e) => {
@@ -302,15 +332,23 @@ async fn run_dep_audit_with_tooling(
     // `-r` = recursive lockfile discovery from the given root directory.
     // Exit 1 is the normal "vulnerabilities found" signal — do NOT treat it as
     // an error.  Exit 2+ indicates a real scan error.
-    let result = tokio::process::Command::new(&bin_str)
-        .args(["--format", "json", "-r"])
-        .arg(repo_dir)
-        .output()
-        .await;
+    //
+    // Cap the subprocess at 120 s.  On very large repos with hundreds of
+    // lockfiles osv-scanner can be slow, but an unbounded wait blocks the scan
+    // (and any test exercising `audit_repos`) indefinitely.  120 s is generous
+    // for a real repo; in practice osv-scanner on typical projects takes < 10 s.
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::process::Command::new(&bin_str)
+            .args(["--format", "json", "-r"])
+            .arg(repo_dir)
+            .output(),
+    )
+    .await;
 
     let output = match result {
-        Ok(o) => o,
-        Err(e) => {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
             return (
                 Vec::new(),
                 Some(CoverageNote {
@@ -319,6 +357,17 @@ async fn run_dep_audit_with_tooling(
                         "dependency audit (osv-scanner) did not run: \
                          could not spawn process: {e}"
                     ),
+                }),
+            );
+        }
+        Err(_elapsed) => {
+            return (
+                Vec::new(),
+                Some(CoverageNote {
+                    tool: TOOL_NAME.to_string(),
+                    message: "dependency audit (osv-scanner) did not run: \
+                              subprocess timed out after 120 s"
+                        .to_string(),
                 }),
             );
         }
