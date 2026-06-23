@@ -16,15 +16,16 @@
 //! gate-activity panels are still representative; live execution + a status stream are
 //! the next phase (the same path `worktracker-demo` / `po-demo` exercise).
 
-use dioxus::prelude::*;
+pub(crate) use dioxus::prelude::*;
 
 // Chorale (crates.io, headless table) backs the brownfield audit-findings and
 // proposed-rules tables — the surfaces where the data genuinely scales.
-use chorale_core::{
+// `pub(crate) use` so submodules inherit these via `use super::*;`.
+pub(crate) use chorale_core::{
     BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
     RenderKind, RowId, TableState,
 };
-use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
+pub(crate) use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
 
 // ── Projects ───────────────────────────────────────────────────────────────────
 

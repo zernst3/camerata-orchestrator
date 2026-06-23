@@ -1,10 +1,4 @@
 use super::*;
-use dioxus::prelude::*;
-use chorale_core::{{
-    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
-    RenderKind, RowId, TableState,
-}};
-use chorale_dioxus::{{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table}};
 
 
 /// Re-emit the project's ruleset (source of truth) into its repos — one PR per repo.

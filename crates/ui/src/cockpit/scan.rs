@@ -1,10 +1,4 @@
 use super::*;
-use dioxus::prelude::*;
-use chorale_core::{{
-    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
-    RenderKind, RowId, TableState,
-}};
-use chorale_dioxus::{{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table}};
 
 
 /// One repo's local-path resolution status (issue #33), from `/api/projects/:id/repo-health`.
