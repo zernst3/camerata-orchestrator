@@ -51,6 +51,10 @@ pub mod model_tier;
 pub mod settings;
 pub mod suppression;
 pub mod terminal;
+/// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
+/// from the built-in language gate commands + manifest checks. See
+/// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
+pub mod workflow_gen;
 pub mod transcript;
 pub mod uow;
 pub mod usage_ledger;
@@ -327,6 +331,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/repo-health", get(project_repo_health))
         .route("/api/repo-path", post(set_repo_path))
         .route("/api/onboard/ci-rules", post(onboard_ci_rules))
+        .route(
+            "/api/projects/active/generate-ci-workflow",
+            post(generate_ci_workflow),
+        )
         .route("/api/onboard/greenfield", post(onboard_greenfield))
         .route("/api/onboard/complete", post(onboard_complete))
         .route("/api/projects/:id/suppressions", get(project_suppressions))
@@ -3559,6 +3567,84 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
         Ok(url) => Json(serde_json::json!({ "ok": true, "url": url })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
+}
+
+// ── CI workflow generator endpoint ───────────────────────────────────────────
+
+/// Request body for the CI workflow generation endpoint.
+///
+/// The caller supplies the active project's repo root path and the detected
+/// language stack. The server loads `.camerata/checks.toml` from the root and
+/// generates the complete `.github/workflows/camerata-gates.yml` YAML.
+#[derive(serde::Deserialize)]
+struct GenerateCiWorkflowReq {
+    /// Absolute path to the repo/worktree root on the server's filesystem.
+    repo_root: String,
+    /// The detected language stack (defaults to Rust when omitted).
+    #[serde(default)]
+    stack: crate::workflow_gen::RepoStack,
+}
+
+/// `POST /api/projects/active/generate-ci-workflow`
+///
+/// Load `.camerata/checks.toml` from `req.repo_root`, generate the
+/// `.github/workflows/camerata-gates.yml` YAML for the given stack, write it to
+/// disk under `repo_root`, and return the YAML body.
+///
+/// A missing manifest is NOT an error — it generates a workflow with only the
+/// built-in language steps. The caller can store the YAML in the repo.
+async fn generate_ci_workflow(
+    Json(req): Json<GenerateCiWorkflowReq>,
+) -> Json<serde_json::Value> {
+    use crate::workflow_gen::generate_gates_workflow;
+    use camerata_checks::manifest::load_manifest;
+    use std::path::Path;
+
+    let root = Path::new(&req.repo_root);
+
+    // Load manifest (best-effort: absent/invalid → empty).
+    let manifest = match load_manifest(root) {
+        Ok(Some(m)) => m,
+        Ok(None) => camerata_checks::CheckManifest::default(),
+        Err(e) => {
+            eprintln!(
+                "[camerata-server] generate-ci-workflow: manifest parse error: {}; \
+                 generating without manifest checks",
+                e
+            );
+            camerata_checks::CheckManifest::default()
+        }
+    };
+
+    let yaml = generate_gates_workflow(&req.stack, &manifest);
+
+    // Write to <repo_root>/.github/workflows/camerata-gates.yml.
+    let workflow_path = root
+        .join(".github")
+        .join("workflows")
+        .join("camerata-gates.yml");
+
+    if let Some(parent) = workflow_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to create workflow dir: {e}")
+            }));
+        }
+    }
+
+    if let Err(e) = std::fs::write(&workflow_path, &yaml) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("failed to write workflow file: {e}")
+        }));
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "path": workflow_path.display().to_string(),
+        "yaml": yaml
+    }))
 }
 
 // ── Greenfield scaffold handler ───────────────────────────────────────────────
@@ -7144,8 +7230,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        // The nine substantive rules, GOV-1 (the synthetic test rule) filtered out.
-        assert_eq!(arr.len(), 9);
+        // The ten substantive rules, GOV-1 (the synthetic test rule) filtered out.
+        // Count updated when SEC-NO-CAMERATA-CONFIG-1 was added (2026-06-22).
+        assert_eq!(arr.len(), 10);
         let ids: Vec<&str> = arr.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"SEC-NO-HARDCODED-SECRETS-1"));
         assert!(ids.contains(&"SEC-NO-PATH-ESCAPE-1"));
@@ -7154,6 +7241,7 @@ mod tests {
         assert!(ids.contains(&"SEC-NO-VENDOR-TOKEN-1"));
         assert!(ids.contains(&"SEC-NO-SECRET-FILE-1"));
         assert!(ids.contains(&"SEC-NO-DISABLED-TLS-1"));
+        assert!(ids.contains(&"SEC-NO-CAMERATA-CONFIG-1"));
         assert!(!ids.contains(&"GOV-1"));
     }
 

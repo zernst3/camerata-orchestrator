@@ -99,6 +99,16 @@ pub fn sec_no_disabled_tls_1_rule() -> RuleId {
     RuleId("SEC-NO-DISABLED-TLS-1".to_string())
 }
 
+/// The id for the Camerata config protection rule.
+///
+/// `.camerata/` contains operator-controlled configuration (governance rules,
+/// feature flags, check manifests). Agents must not modify it — the manifest
+/// defines what Layer 2 enforces; an agent that can edit it can silently disable
+/// its own gates. This rule is the hard-guard that enforces that invariant.
+pub fn sec_no_camerata_config_1_rule() -> RuleId {
+    RuleId("SEC-NO-CAMERATA-CONFIG-1".to_string())
+}
+
 // ─── test-scope policy ────────────────────────────────────────────────────────
 
 /// Gate-layer policy when a matched line falls inside a test scope.
@@ -223,6 +233,16 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
                       NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false/0). \
                       Waive policy in test scope.",
         arm: arm_sec_no_disabled_tls_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-CAMERATA-CONFIG-1",
+        description: "Deny any write whose path targets the `.camerata/` configuration \
+                      directory. This directory contains operator-controlled governance \
+                      config (rules, feature flags, check manifests). An agent that can \
+                      edit `.camerata/checks.toml` could disable its own Layer-2 gates — \
+                      this rule hard-guards against that. Only the repo operator may \
+                      modify `.camerata/` files.",
+        arm: arm_sec_no_camerata_config_1,
     },
 ];
 
@@ -1110,6 +1130,51 @@ fn arm_sec_no_disabled_tls_1(path: &str, content: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+// ── SEC-NO-CAMERATA-CONFIG-1 ──────────────────────────────────────────────────
+
+/// SEC-NO-CAMERATA-CONFIG-1: deny any write whose path targets the `.camerata/`
+/// configuration directory.
+///
+/// # Rationale
+///
+/// `.camerata/` holds operator-controlled governance configuration:
+/// - `.camerata/features.toml` — feature flags
+/// - `.camerata/checks.toml`   — the check manifest (Layer-2 + Layer-3 SSOT)
+///
+/// The manifest defines WHAT the Layer-2 gate enforces. An agent that can edit
+/// `.camerata/checks.toml` can silently remove or weaken its own gates — the
+/// canonical example of a "gate-weakening" attack. This rule hard-guards against
+/// that by blocking ALL agent writes into `.camerata/`.
+///
+/// # Trust model
+///
+/// `.camerata/` is repo-operator configuration, not agent-authored content. The
+/// same trust boundary that keeps `.git/` off-limits keeps `.camerata/` off-limits.
+/// Human commits to `.camerata/` are always allowed (this gate only governs the
+/// `gated_write` tool call the agent uses).
+///
+/// # Matching
+///
+/// Matches on path SEGMENTS so that a file at `my-camerata/checks.toml` (not under
+/// `.camerata/`) is NOT a false positive, while `.camerata/checks.toml`,
+/// `repo/.camerata/features.toml`, and any nested path containing a `.camerata`
+/// segment ARE denied.
+fn arm_sec_no_camerata_config_1(path: &str, _content: &str) -> Result<(), String> {
+    // Split on both `/` and `\` to handle all path separators robustly.
+    for segment in path.split(['/', '\\']) {
+        if segment == ".camerata" {
+            return Err(format!(
+                "SEC-NO-CAMERATA-CONFIG-1: writes to `.camerata/` are denied — \
+                 this directory contains operator-controlled governance configuration \
+                 (features.toml, checks.toml). Agents must not modify governance \
+                 config; only the repo operator may edit `.camerata/` files \
+                 (path={path})"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ─── GovernedGateway: the session -> role map + GovernanceGateway impl ────────
@@ -2440,5 +2505,84 @@ mod adversarial {
         ] {
             assert_allow(rule.clone(), &path_call(path), why);
         }
+    }
+
+    // ── SEC-NO-CAMERATA-CONFIG-1 ─────────────────────────────────────────────
+    //
+    // `path_call` is defined above in the `adversarial` module; `write_call`
+    // from `crate::tests` is not in scope here, so we use `path_call` (same
+    // shape: a `gated_write` call with the given path and content "x").
+
+    fn assert_camerata_deny(path: &str, why: &str) {
+        let rule = vec![sec_no_camerata_config_1_rule()];
+        let call = path_call(path);
+        let d = evaluate_call(&rule, &call);
+        assert!(
+            matches!(d, Decision::Deny { .. }),
+            "expected Deny for {path:?} ({why}), got {d:?}"
+        );
+    }
+
+    fn assert_camerata_allow(path: &str, why: &str) {
+        let rule = vec![sec_no_camerata_config_1_rule()];
+        let call = path_call(path);
+        let d = evaluate_call(&rule, &call);
+        assert!(
+            matches!(d, Decision::Allow),
+            "expected Allow for {path:?} ({why}), got {d:?}"
+        );
+    }
+
+    #[test]
+    fn camerata_config_rule_denies_writes_to_dotcamerata_dir() {
+        assert_camerata_deny(
+            ".camerata/checks.toml",
+            "direct write to the manifest must be denied",
+        );
+        assert_camerata_deny(
+            ".camerata/features.toml",
+            "direct write to feature flags must be denied",
+        );
+        assert_camerata_deny(
+            ".camerata/any-other-file.json",
+            "any file under .camerata/ must be denied",
+        );
+        assert_camerata_deny(
+            "repo/.camerata/checks.toml",
+            "nested path containing .camerata segment must be denied",
+        );
+    }
+
+    #[test]
+    fn camerata_config_rule_allows_writes_outside_dotcamerata() {
+        assert_camerata_allow(
+            "camerata/checks.toml",
+            "no dot prefix — not the protected dir",
+        );
+        assert_camerata_allow(
+            "src/camerata-checks.rs",
+            "source file with camerata in name, not in .camerata/",
+        );
+        assert_camerata_allow(
+            "docs/camerata_design.md",
+            "docs file, not .camerata/ config",
+        );
+        assert_camerata_allow(
+            "my-camerata/features.toml",
+            "different directory, not .camerata/",
+        );
+        assert_camerata_allow(
+            "scripts/check_layering.sh",
+            "a manifest-referenced script itself is outside .camerata/",
+        );
+    }
+
+    #[test]
+    fn camerata_config_rule_denies_windows_style_path_separator() {
+        // The rule must fire for Windows-style paths too.
+        assert_camerata_deny(
+            ".camerata\\checks.toml",
+            "Windows-style backslash separator must also be caught",
+        );
     }
 }
