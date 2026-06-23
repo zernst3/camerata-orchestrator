@@ -48,6 +48,8 @@ chrono = { version = "0.4", features = ["clock"] }
 portable-pty = "0.8"
 # Feature-flags config file parsing (.camerata/features.toml).
 toml = "0.8"
+# Typed error enums for the tool-provisioning module.
+thiserror = { workspace = true }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }

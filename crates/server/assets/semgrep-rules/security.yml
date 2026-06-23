@@ -1,0 +1,180 @@
+rules:
+  # ── Hardcoded secrets ────────────────────────────────────────────────────────
+  #
+  # Catches string literals that look like API keys, tokens, or passwords
+  # assigned directly in source. The pattern covers the most common idioms
+  # across Python, JavaScript, TypeScript, Go, Java, and Ruby.
+
+  - id: camerata.security.hardcoded-secret
+    message: >
+      Hardcoded secret detected: '$METAVAR' appears to be assigned a literal
+      credential. Move this value to an environment variable or a secrets
+      manager and load it at runtime.
+    severity: ERROR
+    languages: [python, javascript, typescript, go, java, ruby]
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "..."
+          - pattern: $VAR = '...'
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: >-
+            (?i)(password|passwd|secret|api_key|apikey|token|auth_token|
+            access_token|private_key|client_secret|client_id|aws_secret|
+            stripe_key|twilio_auth|sendgrid_key|slack_token|github_token)
+      - metavariable-regex:
+          metavariable: $LITERAL
+          # Filter trivial placeholders and empty strings so we get signal, not noise.
+          regex: ^(?!(?:""?|''?|<.*>|\$\{.*\}|%s|%v|your[-_].*here)$).{4,}
+
+  # ── eval / exec injection ────────────────────────────────────────────────────
+  #
+  # Direct calls to exec/eval with non-literal arguments are a common code
+  # injection vector.  Flag every call whose argument is not a plain string
+  # literal.
+
+  - id: camerata.security.exec-injection
+    message: >
+      Dangerous call: exec() / eval() called with a non-literal argument.
+      An attacker who can influence '$ARG' may achieve arbitrary code execution.
+      Use a safe alternative (subprocess with a fixed argument list, ast.literal_eval,
+      or a template engine) instead.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: exec($ARG)
+          - pattern: eval($ARG)
+      - pattern-not: exec("...")
+      - pattern-not: eval("...")
+
+  - id: camerata.security.exec-injection-js
+    message: >
+      Dangerous call: eval() called with a non-literal argument.
+      An attacker who can influence '$ARG' may achieve arbitrary code execution.
+      Avoid eval(); use JSON.parse() for data or a template engine for HTML.
+    severity: ERROR
+    languages: [javascript, typescript]
+    patterns:
+      - pattern: eval($ARG)
+      - pattern-not: eval("...")
+
+  # ── SQL string concatenation ─────────────────────────────────────────────────
+  #
+  # String concatenation (or f-string interpolation) inside a SQL query argument
+  # is the classic injection path.
+
+  - id: camerata.security.sql-string-concat-python
+    message: >
+      Possible SQL injection: the query is built by string concatenation or
+      f-string interpolation. Use parameterised queries (cursor.execute(sql, params))
+      instead of embedding user-controlled data in the SQL string.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute("..." + $VAR)
+          - pattern: $CURSOR.execute(f"...")
+          - pattern: $CURSOR.execute("..." % $VAR)
+      - pattern-not: $CURSOR.execute("...", ...)
+
+  - id: camerata.security.sql-string-concat-js
+    message: >
+      Possible SQL injection: the query is built by template-literal interpolation
+      or string concatenation. Use parameterised queries / prepared statements
+      instead of embedding variables directly in the SQL string.
+    severity: ERROR
+    languages: [javascript, typescript]
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(`...${$VAR}...`)
+          - pattern: $DB.execute(`...${$VAR}...`)
+          - pattern: $DB.raw(`...${$VAR}...`)
+          - pattern: $DB.query("..." + $VAR)
+          - pattern: $DB.execute("..." + $VAR)
+
+  # ── Weak / broken cryptography ───────────────────────────────────────────────
+  #
+  # MD5 and SHA-1 are cryptographically broken for collision resistance; they
+  # must not be used for password hashing, HMAC, or digital signatures (they
+  # may still be used for non-security checksums, but flag them so the intent
+  # is conscious).
+
+  - id: camerata.security.weak-hash-python
+    message: >
+      Weak or broken hash function: '$HASH' is cryptographically broken and
+      MUST NOT be used for passwords, MACs, or digital signatures. Use
+      hashlib.sha256() or better, or bcrypt/argon2 for passwords.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: hashlib.md5(...)
+      - pattern: hashlib.sha1(...)
+      - pattern: hashlib.new("md5", ...)
+      - pattern: hashlib.new("sha1", ...)
+
+  - id: camerata.security.weak-hash-js
+    message: >
+      Weak or broken hash function: MD5 and SHA-1 are cryptographically broken
+      and MUST NOT be used for passwords, MACs, or digital signatures. Use
+      SHA-256 or stronger via the Web Crypto API or the 'crypto' module.
+    severity: WARNING
+    languages: [javascript, typescript]
+    patterns:
+      - pattern-either:
+          - pattern: $CRYPTO.createHash("md5")
+          - pattern: $CRYPTO.createHash("sha1")
+          - pattern: $CRYPTO.createHash('md5')
+          - pattern: $CRYPTO.createHash('sha1')
+
+  # ── Path traversal ───────────────────────────────────────────────────────────
+  #
+  # Opening a file with a path derived from user input without sanitisation
+  # allows an attacker to read arbitrary files on the server.
+
+  - id: camerata.security.path-traversal-python
+    message: >
+      Potential path traversal: a file is opened with a path that includes a
+      variable ('$PATH'). If '$PATH' is derived from user input, an attacker
+      can read arbitrary files. Validate and normalise the path against an
+      allowed base directory before use (os.path.realpath + prefix check).
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: open($PATH, ...)
+          - pattern: open($PATH)
+      - pattern-not: open("...", ...)
+      - pattern-not: open("...")
+
+  # ── Subprocess shell=True ────────────────────────────────────────────────────
+  #
+  # shell=True passes the command through /bin/sh, so any user-controlled
+  # fragment in the command string becomes a shell injection vector.
+
+  - id: camerata.security.subprocess-shell-true
+    message: >
+      Dangerous subprocess call: shell=True passes the command to /bin/sh.
+      If any part of the command string is user-controlled, this is a shell
+      injection vulnerability. Pass a list of arguments instead and omit
+      shell=True.
+    severity: ERROR
+    languages: [python]
+    pattern: subprocess.$FUNC(..., shell=True, ...)
+
+  # ── Unsafe YAML load ─────────────────────────────────────────────────────────
+  #
+  # yaml.load() without a Loader deserialises arbitrary Python objects, giving
+  # code execution on untrusted YAML. Use yaml.safe_load() instead.
+
+  - id: camerata.security.yaml-unsafe-load
+    message: >
+      Unsafe YAML deserialisation: yaml.load() without an explicit Loader can
+      execute arbitrary Python code embedded in the YAML. Use yaml.safe_load()
+      for untrusted input, or pass Loader=yaml.SafeLoader explicitly.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern: yaml.load($DATA)
+      - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
+      - pattern-not: yaml.load($DATA, Loader=yaml.BaseLoader)

@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::onboard::{CoverageNote, Finding, SelectedRule};
+use crate::tool_provisioning;
 use camerata_rules::Rule;
 
 /// The deterministic tools the scan preview can drive. Each maps to a known
@@ -581,12 +582,23 @@ async fn run_one_tool<'r>(
 
     match tool {
         ScanTool::Semgrep => {
-            // Semgrep selects by config PACK, not individual ids. Camerata supplies
-            // the curated CI security pack; the gate later pins the repo's choice.
+            // Semgrep selects by config PACK, not individual ids.  Camerata
+            // auto-provisions semgrep into a stable venv so the user never
+            // needs to install it manually.  The preview runs against the
+            // bundled offline ruleset (no network call to the semgrep registry).
+            let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
+                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+            })?;
+            let semgrep_bin = tool_provisioning::ensure_semgrep(&tooling_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("semgrep provisioning: {e}"))?;
+            let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
+            let rules_str = rules_dir.to_string_lossy().into_owned();
+            let bin_str = semgrep_bin.to_string_lossy().into_owned();
             let (stdout, _ok) = run_capture_stdout(
                 dir,
-                "semgrep",
-                &["--sarif", "--config", "p/ci", "--quiet", "."],
+                &bin_str,
+                &["--sarif", "--config", &rules_str, "--quiet", "."],
             )
             .await?;
             parse_sarif(repo, ScanTool::Semgrep, &stdout)
@@ -639,12 +651,25 @@ async fn run_one_tool<'r>(
             if selectors.is_empty() {
                 anyhow::bail!("no eslint rule ids derived from the selection");
             }
-            // Camerata-supplied config: force each rule to "error" via repeated
-            // `--rule`, and emit SARIF via the official formatter. `--no-eslintrc`
-            // keeps the preview to EXACTLY the supplied rules (decoupled from the
-            // repo's own config, which the gate owns).
+            // Camerata auto-provisions eslint + the SARIF formatter into a
+            // stable node_modules workspace so the user never needs to install
+            // it manually.  We use the bundled flat config as the base and
+            // override individual rules to "error" via `--rule`.  `--no-eslintrc`
+            // is replaced by `--no-ignore` + an explicit `--config` pointing at
+            // the bundled flat config (eslint v9 flat-config style).
+            let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
+                anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
+            })?;
+            let eslint_bin = tool_provisioning::ensure_eslint(&tooling_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("eslint provisioning: {e}"))?;
+            let workspace = tool_provisioning::eslint_workspace_dir(&tooling_dir);
+            let config_path = tool_provisioning::eslint_config_path(&workspace);
+            let bin_str = eslint_bin.to_string_lossy().into_owned();
+            let config_str = config_path.to_string_lossy().into_owned();
             let mut args: Vec<String> = vec![
-                "--no-eslintrc".into(),
+                "--config".into(),
+                config_str,
                 "--format".into(),
                 "@microsoft/eslint-formatter-sarif".into(),
             ];
@@ -654,7 +679,7 @@ async fn run_one_tool<'r>(
             }
             args.push(".".into());
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok) = run_capture_stdout(dir, "eslint", &arg_refs).await?;
+            let (stdout, _ok) = run_capture_stdout(dir, &bin_str, &arg_refs).await?;
             parse_sarif(repo, ScanTool::Eslint, &stdout)
         }
     }

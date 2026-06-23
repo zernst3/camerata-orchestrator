@@ -46,6 +46,7 @@ pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
 pub mod schedule;
+pub mod tool_provisioning;
 pub mod model_tier;
 pub mod settings;
 pub mod suppression;
