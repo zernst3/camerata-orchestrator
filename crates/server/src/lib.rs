@@ -1093,16 +1093,45 @@ fn assemble_evidence_for_run(
     record
 }
 
-/// The current state of a run: its status plus the real gate verdicts so far.
+/// The current state of a run enriched with live stall diagnostics.
+///
+/// Fields added beyond `Run`:
+/// - `idle_ms` — milliseconds since last activity (now − last_activity_ms).
+/// - `stalled` — true when idle_ms > stall_threshold_ms.
+/// - `stall_threshold_ms` — the active threshold (env-overridable, default 120 000ms).
+#[derive(serde::Serialize)]
+struct RunStatusResponse {
+    #[serde(flatten)]
+    run: Run,
+    idle_ms: u128,
+    stalled: bool,
+    stall_threshold_ms: u128,
+}
+
+/// `GET /api/runs/:id` — the current state of a run: status, gate verdicts, and
+/// live stall diagnostics so the cockpit can surface a stalled run without polling
+/// a separate endpoint.
 async fn get_run(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Run>, AppError> {
-    state
+) -> Result<Json<RunStatusResponse>, AppError> {
+    let run = state
         .runs
         .get(&id)
-        .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))
+        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+    let threshold_ms = crate::run::run_stall_threshold_ms();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let idle = crate::run::idle_ms(run.last_activity_ms, now_ms);
+    let stalled = crate::run::is_stalled(idle, threshold_ms);
+    Ok(Json(RunStatusResponse {
+        run,
+        idle_ms: idle,
+        stalled,
+        stall_threshold_ms: threshold_ms,
+    }))
 }
 
 /// The per-agent transcripts for a run: the GENERATED prompt each agent was handed and

@@ -78,7 +78,7 @@ fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 ///
 /// Derivation: `worktree.parent().parent().join(".camerata-shared-target")`. Falls
 /// back gracefully (no env var set) for out-of-band worktrees where derivation fails.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenericCliDriver {
     /// The binary to invoke (e.g. `"llm"`, `"aider"`, `"my-agent"`). Must be
     /// on `$PATH` or be an absolute path.
@@ -91,6 +91,22 @@ pub struct GenericCliDriver {
     /// process runs inside that directory, matching [`crate::ClaudeCliDriver`]'s
     /// worktree binding behavior.
     pub worktree: Option<PathBuf>,
+    /// Optional heartbeat callback fired once per stdout line received from the subprocess.
+    /// Callers that track run activity (e.g. the server's RunStore) wire this to update
+    /// `last_activity_ms`. `None` = no callback.
+    pub on_activity: Option<crate::HeartbeatFn>,
+}
+
+impl std::fmt::Debug for GenericCliDriver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenericCliDriver")
+            .field("program", &self.program)
+            .field("base_args", &self.base_args)
+            .field("task_flag", &self.task_flag)
+            .field("worktree", &self.worktree)
+            .field("on_activity", &self.on_activity.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
 }
 
 impl GenericCliDriver {
@@ -109,7 +125,15 @@ impl GenericCliDriver {
             task_flag: task_flag.into(),
             base_args: base_args.iter().map(|s| s.to_string()).collect(),
             worktree: None,
+            on_activity: None,
         }
+    }
+
+    /// Set the heartbeat callback fired once per stdout line from the subprocess.
+    /// Callers that track run activity wire this to `RunStore::touch_activity`. Builder.
+    pub fn with_on_activity(mut self, cb: crate::HeartbeatFn) -> Self {
+        self.on_activity = Some(cb);
+        self
     }
 
     /// Bind this driver to a worktree directory. The spawned process runs with
@@ -166,27 +190,23 @@ impl GenericCliDriver {
 
 #[async_trait::async_trait]
 impl AgentDriver for GenericCliDriver {
-    /// Spawn `program` with the assembled args, capture stdout, and produce an
-    /// [`AgentOutcome`].
+    /// Spawn `program` with the assembled args, capture stdout line-by-line via the
+    /// bounded [`crate::stream_subprocess`] helper, and produce an [`AgentOutcome`].
     ///
     /// Output parsing: attempts JSON first (`"result"` field), falls back to raw
     /// stdout. Either way the coordinator receives the same [`AgentOutcome`] shape
     /// it would from any other driver, and the governance layers above are
     /// unaffected by which binary ran here.
     async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome> {
-        let mut cmd = self.build_command(role, task);
+        let cmd = self.build_command(role, task);
 
-        let out = cmd.output().await.map_err(crate::AgentError::Spawn)?;
-
-        if !out.status.success() {
-            return Err(crate::AgentError::NonZeroExit {
-                status: out.status.to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            }
-            .into());
-        }
-
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let (stdout, _status) = crate::stream_subprocess(
+            cmd,
+            self.on_activity.clone(),
+            crate::agent_inactivity_window(),
+            crate::agent_total_timeout(),
+        )
+        .await?;
 
         // Attempt JSON parse first. If the JSON has a `result` field, use the
         // structured fields. Otherwise treat the entire stdout as the result.
