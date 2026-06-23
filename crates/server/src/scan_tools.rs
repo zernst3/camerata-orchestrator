@@ -40,7 +40,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::onboard::{Finding, SelectedRule};
+use crate::onboard::{CoverageNote, Finding, SelectedRule};
 use camerata_rules::Rule;
 
 /// The deterministic tools the scan preview can drive. Each maps to a known
@@ -210,8 +210,10 @@ pub fn group_by_tool<'a, 'r>(
             ungrouped.push(sr);
             continue;
         };
-        // Mechanical only, and NEVER layer3_only (CodeQL / paid tiers).
-        if !rule.enforcement.is_ci_enforced() || rule.is_layer3_only() {
+        // Architectural rules have no off-the-shelf linter (they need a custom AST checker),
+        // so the preview cannot run them. They remain covered by the AI review (advisory).
+        // Only MECHANICAL rules attempt the preview.
+        if rule.enforcement != camerata_rules::EnforcementKind::Mechanical || rule.is_layer3_only() {
             continue;
         }
         match tool_for_rule(rule) {
@@ -484,9 +486,10 @@ pub async fn run_scan_tools<'r>(
     selected: &[SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     progress: Option<(&crate::jobs::JobStore, &str)>,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, Vec<CoverageNote>) {
     let (by_tool, ungrouped) = group_by_tool(selected, lookup);
     let mut findings = Vec::new();
+    let mut coverage_notes: Vec<CoverageNote> = Vec::new();
 
     // Pre-register every tool we know we'll drive so the progress denominator is accurate
     // from the start (the UI shows the full set of tools queued, not one-at-a-time growth).
@@ -507,15 +510,14 @@ pub async fn run_scan_tools<'r>(
         }
     }
     for sr in &ungrouped {
-        findings.push(note_finding(
-            repo,
-            "unrouted",
-            format!(
+        coverage_notes.push(CoverageNote {
+            tool: "unrouted".to_string(),
+            message: format!(
                 "Could not preview {} — no scan-runnable tool wired for its linter source; \
                  it enforces once wired into CI.",
                 sr.id
             ),
-        ));
+        });
     }
     if let Some((jstore, jid)) = progress {
         if !ungrouped.is_empty() {
@@ -534,16 +536,15 @@ pub async fn run_scan_tools<'r>(
                 n
             }
             Err(e) => {
-                findings.push(note_finding(
-                    repo,
-                    tool.name(),
-                    format!(
+                coverage_notes.push(CoverageNote {
+                    tool: tool.name().to_string(),
+                    message: format!(
                         "Could not preview {} rule(s) with {}: {e}. It enforces once wired into CI.",
                         rules.len(),
                         tool.name()
                     ),
-                ));
-                1
+                });
+                0
             }
         };
         if let Some((jstore, jid)) = progress {
@@ -551,7 +552,7 @@ pub async fn run_scan_tools<'r>(
         }
     }
 
-    findings
+    (findings, coverage_notes)
 }
 
 /// Run a SINGLE tool over the repo with a Camerata-supplied config that enables
@@ -886,14 +887,62 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
-        // the pass must emit a NOTE finding, NOT an empty (clean) result.
+        // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let out = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
-        assert!(!out.is_empty(), "missing tool must yield a note, not a clean");
-        assert!(out.iter().all(|f| f.preview), "the note is a preview finding");
-        assert!(out
-            .iter()
-            .any(|f| f.detail.contains("Could not preview") || f.rule_id.starts_with("PREVIEW-NOTE")));
+        let (findings, notes) = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
+        assert!(findings.is_empty(), "missing tool must yield no finding rows");
+        assert!(!notes.is_empty(), "missing tool must yield a coverage note");
+        assert!(notes.iter().any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
+    }
+
+    #[test]
+    fn group_by_tool_skips_architectural_rules() {
+        // An architectural rule must be SKIPPED entirely by group_by_tool —
+        // not ungrouped (no note), not routed to a tool.
+        let rules = vec![
+            rule_with("MECH-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
+            rule_with("ARCH-1", EnforcementKind::Architectural, false, &["clippy: some_ast_check"]),
+        ];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("MECH-1"), selected("ARCH-1")];
+        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup);
+        // MECH-1 routes to clippy
+        assert!(
+            by_tool
+                .get(&ScanTool::Clippy)
+                .map(|v| v.iter().any(|s| s.id == "MECH-1"))
+                .unwrap_or(false)
+        );
+        // ARCH-1 must not appear anywhere
+        assert!(
+            !by_tool.values().flatten().any(|s| s.id == "ARCH-1"),
+            "architectural must not route to a tool"
+        );
+        assert!(
+            !ungrouped.iter().any(|s| s.id == "ARCH-1"),
+            "architectural must not be ungrouped (no note)"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_tool_emits_coverage_note_not_finding() {
+        let rules = vec![rule_with(
+            "PY-A",
+            EnforcementKind::Mechanical,
+            false,
+            &["Ruff: S608"],
+        )];
+        let lookup = lookup_over(&rules);
+        let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
+        let (findings, notes) =
+            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
+        assert!(findings.is_empty(), "a missing tool must yield NO finding row");
+        assert!(!notes.is_empty(), "a missing tool must yield a coverage note");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.message.contains("Could not preview") || !n.tool.is_empty())
+        );
     }
 
     #[test]

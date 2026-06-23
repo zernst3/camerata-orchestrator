@@ -5951,6 +5951,12 @@ struct FindingView {
     /// `semgrep`). `None` for non-preview findings. Shown in the Authority badge label.
     #[serde(default)]
     preview_tool: Option<String>,
+    /// True when this finding is in test/fixture scope.
+    #[serde(default)]
+    in_test: bool,
+    /// True when this finding needs manual verification.
+    #[serde(default)]
+    needs_review: bool,
 }
 
 fn default_finding_status() -> String {
@@ -6542,6 +6548,12 @@ struct DeepReportView {
     disclaimer: String,
 }
 
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+struct CoverageNoteView {
+    tool: String,
+    message: String,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct ScanReportView {
     #[serde(default)]
@@ -6567,6 +6579,9 @@ struct ScanReportView {
     /// request sent `deep: true`. Everything inside is ADVISORY + model-inferred.
     #[serde(default)]
     deep: Option<DeepReportView>,
+    /// Coverage notes from the scan preview (tools skipped or unavailable).
+    #[serde(default)]
+    coverage_notes: Vec<CoverageNoteView>,
 }
 
 async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -7410,7 +7425,9 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
             ColumnId("needs_review"),
             "Needs review",
             |f: &FindingView| {
-                CellValue::Text(if split_needs_review(&f.detail).1.is_some() {
+                CellValue::Text(if f.in_test {
+                    "test".to_string()
+                } else if f.needs_review || split_needs_review(&f.detail).1.is_some() {
                     "yes".to_string()
                 } else {
                     "no".to_string()
@@ -7419,8 +7436,14 @@ fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<Findi
         )
         .sortable()
         .filter(FilterKind::MultiSelect {
-            options: vec!["yes".to_string(), "no".to_string()],
+            options: vec!["test".to_string(), "yes".to_string(), "no".to_string()],
         })
+        .render_kind(RenderKind::Badge(
+            BadgeVariantMap::new()
+                .with("test", BadgeVariant::new("Test", "yellow"))
+                .with("yes", BadgeVariant::new("Needs review", "orange"))
+                .with("no", BadgeVariant::new("", "gray")),
+        ))
         .initial_width(300.0),
         // The ratchet: enforced (active = new/changed) vs suppressed (baseline debt or
         // an inline waiver). Report shows all; the gate blocks only the enforced ones.
@@ -7712,17 +7735,23 @@ fn FindingsTable(
         m.insert(
             ColumnId("needs_review"),
             std::sync::Arc::new(
-                move |f: &FindingView, _val: &CellValue| match split_needs_review(&f.detail).1 {
-                    Some(reason) => {
-                        let reason = reason.clone();
-                        rsx! {
-                            span { class: "nr-flag", "Needs review" }
-                            if !reason.is_empty() {
-                                span { class: "nr-reason", " {reason}" }
+                move |f: &FindingView, _val: &CellValue| {
+                    if f.in_test {
+                        rsx! { span { class: "badge badge-yellow", "Test" } }
+                    } else {
+                        match split_needs_review(&f.detail).1 {
+                            Some(reason) => {
+                                let reason = reason.clone();
+                                rsx! {
+                                    span { class: "nr-flag", "Needs review" }
+                                    if !reason.is_empty() {
+                                        span { class: "nr-reason", " {reason}" }
+                                    }
+                                }
                             }
+                            None => rsx! {},
                         }
                     }
-                    None => rsx! {},
                 },
             ) as RowCellRenderer<FindingView>,
         );
@@ -9909,6 +9938,17 @@ fn ScanResults(report: ScanReportView) -> Element {
                         title: "{report.excluded_mechanical_rules.join(\", \")}",
                         span { class: "scan-stat-n", "{report.excluded_mechanical_rules.len()}" }
                         " mechanical rule(s) enforced in CI, not scanned"
+                    }
+                }
+            }
+            if !report.coverage_notes.is_empty() {
+                div { class: "scan-coverage-notes",
+                    p { class: "scan-coverage-notes-title", "Scan coverage" }
+                    for note in report.coverage_notes.iter() {
+                        div { class: "scan-coverage-note",
+                            span { class: "scan-coverage-note-tool", "{note.tool}" }
+                            span { class: "scan-coverage-note-msg", " — {note.message}" }
+                        }
                     }
                 }
             }

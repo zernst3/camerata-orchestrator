@@ -68,6 +68,16 @@ pub struct Finding {
     /// about which tool/version generated it (the gate may pin a different version).
     #[serde(default)]
     pub preview_tool: Option<String>,
+    /// True when this finding is in a test/fixture scope (inline `#[cfg(test)]` block
+    /// or a test-path file). A test-scoped finding is down-ranked to `low` and
+    /// `needs_review = true` is set. False for production findings.
+    #[serde(default)]
+    pub in_test: bool,
+    /// True when this finding's applicability warrants manual verification — either
+    /// because it is in test/fixture code (`in_test = true`) or the calibration pass
+    /// flagged it with `[needs review]`. False for clear-cut production findings.
+    #[serde(default)]
+    pub needs_review: bool,
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
@@ -93,6 +103,8 @@ impl Default for Finding {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         }
     }
 }
@@ -206,6 +218,17 @@ pub struct RepoStack {
     pub frameworks: Vec<String>,
 }
 
+/// A scan-coverage note: a tool that was skipped or could not run during the
+/// preview pass. This is informational (not a violation). The UI renders these
+/// in a separate "Scan coverage" section, distinct from the violations table.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CoverageNote {
+    /// The tool or source that generated this note (e.g. `ruff`, `eslint`, `unrouted`).
+    pub tool: String,
+    /// Human-readable explanation of why this tool/rule was skipped or failed.
+    pub message: String,
+}
+
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
@@ -252,6 +275,11 @@ pub struct ScanReport {
     /// (#62); the tier carries its own honesty disclaimer.
     #[serde(default)]
     pub deep: Option<crate::ai_audit::DeepReport>,
+    /// Coverage notes from the scan-time preview pass: tools that were skipped or
+    /// unavailable. These are scan-COVERAGE information, not violations — they must
+    /// not appear in the findings/violations table. Use [`CoverageNote`] entries.
+    #[serde(default)]
+    pub coverage_notes: Vec<CoverageNote>,
 }
 
 impl ScanReport {
@@ -273,6 +301,7 @@ impl ScanReport {
                 "Connect GitHub (set CAMERATA_GITHUB_TOKEN) so Camerata can read the repo(s)."
                     .to_string(),
             ),
+            coverage_notes: Vec::new(),
         }
     }
 }
@@ -351,6 +380,200 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
     false
 }
 
+/// Compute the 1-based inclusive line ranges that are test code in a Rust file.
+/// Returns an empty vec for non-`.rs` files.
+///
+/// Detects `#[cfg(test)]`, `#[test]`, and `#[tokio::test]` attribute lines and
+/// tracks the brace-delimited block that follows, skipping braces inside `//` line
+/// comments, `/* */` block comments, `"..."` string literals, `r#"..."#` raw strings,
+/// and `'{'` char literals. The span from the attribute line to the closing `}` is a
+/// test scope.
+///
+/// # Limitation
+/// Simple brace counter that skips strings/comments. Does not handle all edge cases
+/// (e.g. nested raw strings with mismatched hashes), but correct for the overwhelming
+/// majority of Rust test code.
+pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> {
+    // Only applicable to Rust files.
+    if !path.ends_with(".rs") {
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        StringLit,
+        RawString(usize), // number of leading hashes
+        CharLit,
+    }
+
+    let mut ranges = Vec::new();
+    let mut state = State::Normal;
+    let mut brace_depth: i32 = 0;
+    // When Some((attr_line, scope_start_depth)), we are inside a test scope that
+    // started at attr_line and whose opening brace raised depth to scope_start_depth.
+    let mut scope: Option<(usize, i32)> = None;
+    // The line of the most-recently-seen test attribute (before the opening brace).
+    let mut pending_attr_line: Option<usize> = None;
+    let mut current_line: usize = 1;
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Track line numbers.
+        if ch == '\n' {
+            current_line += 1;
+            if state == State::LineComment {
+                state = State::Normal;
+            }
+            i += 1;
+            continue;
+        }
+
+        match state {
+            State::LineComment => {
+                // Already handled newline above; anything else is inside the comment.
+                i += 1;
+                continue;
+            }
+            State::BlockComment => {
+                if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                    state = State::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::StringLit => {
+                if ch == '\\' {
+                    // Skip escaped character.
+                    i += 2;
+                } else if ch == '"' {
+                    state = State::Normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::RawString(hashes) => {
+                // Look for `"` followed by exactly `hashes` `#` chars.
+                if ch == '"' {
+                    let end_hashes = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
+                    if end_hashes >= hashes {
+                        state = State::Normal;
+                        i += 1 + hashes;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::CharLit => {
+                if ch == '\\' {
+                    i += 2;
+                } else if ch == '\'' {
+                    state = State::Normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::Normal => {}
+        }
+
+        // --- Normal state ---
+        // Detect transitions OUT of Normal.
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            state = State::LineComment;
+            i += 2;
+            continue;
+        }
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            state = State::BlockComment;
+            i += 2;
+            continue;
+        }
+        if ch == '"' {
+            state = State::StringLit;
+            i += 1;
+            continue;
+        }
+        // Raw string: r#"..."#  (variable hashes)
+        if ch == 'r' {
+            let hash_count = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
+            if i + 1 + hash_count < chars.len() && chars[i + 1 + hash_count] == '"' {
+                state = State::RawString(hash_count);
+                i += 2 + hash_count; // skip r + hashes + opening "
+                continue;
+            }
+        }
+        if ch == '\'' {
+            // Simple char literal `'x'` or `'\n'` — single-char (or escape).
+            // If the next char is `\`, skip escape + closing quote; else skip char + closing quote.
+            if i + 2 < chars.len() && chars[i + 1] == '\\' && i + 3 < chars.len() && chars[i + 3] == '\'' {
+                // '\x'
+                i += 4;
+                continue;
+            }
+            if i + 2 < chars.len() && chars[i + 2] == '\'' {
+                // 'x'
+                i += 3;
+                continue;
+            }
+            // Not a char literal (e.g. lifetime 'a or complex case) — pass through.
+        }
+
+        // Detect test attribute lines (only when not inside a scope).
+        // We look for the attribute prefix at the start of a token on the current line.
+        if scope.is_none() && ch == '#' {
+            // Peek ahead for [cfg(test)], [test], or [tokio::test].
+            let rest: String = chars[i..].iter().take(30).collect();
+            if rest.starts_with("#[cfg(test)]")
+                || rest.starts_with("#[test]")
+                || rest.starts_with("#[tokio::test]")
+            {
+                pending_attr_line = Some(current_line);
+            }
+        }
+
+        // Track brace depth.
+        if ch == '{' {
+            brace_depth += 1;
+            if let Some(attr_line) = pending_attr_line.take() {
+                // The first `{` after a test attribute opens the scope.
+                scope = Some((attr_line, brace_depth));
+            }
+        } else if ch == '}' {
+            if let Some((attr_line, scope_depth)) = scope {
+                if brace_depth == scope_depth {
+                    // Closing brace at the scope's depth — scope ends.
+                    ranges.push((attr_line, current_line));
+                    scope = None;
+                }
+            }
+            brace_depth -= 1;
+        }
+
+        i += 1;
+    }
+
+    ranges
+}
+
+/// Returns `true` if `line` (1-based) falls in any of the given ranges (inclusive on both ends).
+pub fn is_in_test_scope(line: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|&(start, end)| line >= start && line <= end)
+}
+
 /// The note appended to floor findings whose path is in test/fixture code.
 const TEST_PATH_NOTE: &str =
     " (in test/fixture code — likely a non-exploitable test value; verify)";
@@ -378,6 +601,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
     let in_test_path = is_test_or_fixture_path(path);
+    let test_ranges = test_scope_line_ranges(path, content);
     // Whole-content matching (not line-by-line) so MULTI-LINE constructs are caught —
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
@@ -387,16 +611,25 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 .get(line_no.saturating_sub(1))
                 .map(|l| l.trim().chars().take(160).collect())
                 .unwrap_or_default();
-            // Down-rank floor findings in test/fixture paths: they almost always flag
-            // synthetic credentials or SQL used to verify the detection logic itself.
-            // Production paths keep the full `critical` rating.
-            let (severity, detail) = if in_test_path {
+            // Per-finding classification: in_test_path covers whole test-path files;
+            // is_in_test_scope covers inline #[cfg(test)] blocks in production-path files.
+            // This is per-finding-by-line: a production secret in a file that also has a
+            // test block stays Critical; only findings inside a test scope are downgraded.
+            let is_test = in_test_path || is_in_test_scope(line_no, &test_ranges);
+            let (severity, detail, in_test, needs_review) = if is_test {
                 (
                     TEST_PATH_SEVERITY.to_string(),
                     format!("{}{}", title_for(rule_id), TEST_PATH_NOTE),
+                    true,
+                    true,
                 )
             } else {
-                (severity_for(rule_id).to_string(), title_for(rule_id))
+                (
+                    severity_for(rule_id).to_string(),
+                    title_for(rule_id),
+                    false,
+                    false,
+                )
             };
             findings.push(Finding {
                 repo: repo.to_string(),
@@ -410,6 +643,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 also_matches: Vec::new(),
                 preview: false,
                 preview_tool: None,
+                in_test,
+                needs_review,
             });
         }
     }
@@ -1052,6 +1287,7 @@ pub fn build_report(
         message: None,
         actual_usage: None,
         deep: None,
+        coverage_notes: Vec::new(),
     }
 }
 
@@ -1528,6 +1764,8 @@ fn classify_repo_findings(findings: &mut Vec<Finding>, repo: &str, files: &[(Str
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         });
     }
 }
@@ -2636,6 +2874,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -2663,8 +2903,10 @@ mod tests {
                 detail: "d".into(),
                 status: "active".into(),
                 also_matches: Vec::new(),
-            preview: false,
-            preview_tool: None,
+                preview: false,
+                preview_tool: None,
+                in_test: false,
+                needs_review: false,
             },
             Finding {
                 repo: "me/web".into(),
@@ -2676,8 +2918,10 @@ mod tests {
                 detail: "d".into(),
                 status: "active".into(),
                 also_matches: Vec::new(),
-            preview: false,
-            preview_tool: None,
+                preview: false,
+                preview_tool: None,
+                in_test: false,
+                needs_review: false,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -2712,6 +2956,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         }
     }
 
@@ -2849,6 +3095,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
@@ -3318,5 +3566,160 @@ mod tests {
             findings.iter().all(|f| f.severity == TEST_PATH_SEVERITY),
             "all findings in fixture subdir must be down-ranked: {findings:?}"
         );
+    }
+
+    #[test]
+    fn test_scope_line_ranges_finds_cfg_test_mod() {
+        let content = r#"
+fn production_fn() {
+    // normal code
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        let secret = "fake-secret";
+    }
+}
+"#;
+        let ranges = test_scope_line_ranges("src/foo.rs", content);
+        assert!(!ranges.is_empty(), "should find at least one test scope");
+        // The #[cfg(test)] mod must be in a range
+        let cfg_line = content
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("#[cfg(test)]"))
+            .map(|(i, _)| i + 1)
+            .unwrap();
+        assert!(
+            is_in_test_scope(cfg_line, &ranges),
+            "cfg(test) line must be in scope"
+        );
+        // Production fn lines must NOT be in any test scope
+        let prod_line = content
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("production_fn"))
+            .map(|(i, _)| i + 1)
+            .unwrap();
+        assert!(
+            !is_in_test_scope(prod_line, &ranges),
+            "production fn must not be in test scope"
+        );
+    }
+
+    #[test]
+    fn test_scope_line_ranges_not_fooled_by_braces_in_strings_comments() {
+        let content = r#"
+fn production() {
+    let s = "{ this brace is in a string }";
+    // { this is in a comment }
+}
+
+#[cfg(test)]
+mod tests {
+    fn fake() {
+        let x = 1;
+    }
+}
+"#;
+        let ranges = test_scope_line_ranges("src/foo.rs", content);
+        // The production function must NOT be in any test scope
+        let prod_line = content
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("production()"))
+            .map(|(i, _)| i + 1)
+            .unwrap();
+        assert!(
+            !is_in_test_scope(prod_line, &ranges),
+            "production must not be in test scope"
+        );
+    }
+
+    #[test]
+    fn audit_content_production_secret_stays_critical_beside_inline_test_block() {
+        let content = concat!(
+            "// production code\n",
+            "const REAL_TOKEN: &str = \"ghp_0123456789012345678901234567890123456\";\n", // line 2
+            "\n",
+            "fn do_thing() {}\n",
+            "\n",
+            "#[cfg(test)]\n",   // line 6
+            "mod tests {\n",
+            "    #[test]\n",
+            "    fn test_detection() {\n",
+            "        // This fake token must be low/in_test\n",
+            "        let fake = \"ghp_9999999999999999999999999999999999999999\";\n", // line 11
+            "        assert!(fake.len() > 10);\n",
+            "    }\n",
+            "}\n",
+        );
+        let findings = audit_content("me/repo", "src/auth.rs", content);
+        assert!(!findings.is_empty(), "must find something");
+
+        let prod_findings: Vec<_> = findings.iter().filter(|f| !f.in_test).collect();
+        let test_findings: Vec<_> = findings.iter().filter(|f| f.in_test).collect();
+
+        assert!(!prod_findings.is_empty(), "must find the production secret");
+        assert!(!test_findings.is_empty(), "must find the test-block secret");
+
+        for f in &prod_findings {
+            assert_eq!(
+                f.severity, "critical",
+                "production secret must be critical: {:?}",
+                f
+            );
+            assert!(!f.in_test, "production finding must have in_test=false: {:?}", f);
+            assert!(
+                !f.needs_review,
+                "production finding must have needs_review=false: {:?}",
+                f
+            );
+        }
+        for f in &test_findings {
+            assert_eq!(
+                f.severity,
+                TEST_PATH_SEVERITY,
+                "test finding must be low: {:?}",
+                f
+            );
+            assert!(f.in_test, "test finding must have in_test=true: {:?}", f);
+            assert!(
+                f.needs_review,
+                "test finding must have needs_review=true: {:?}",
+                f
+            );
+        }
+    }
+
+    #[test]
+    fn finding_flags_serialize_and_production_has_false_defaults() {
+        let f = Finding {
+            repo: "me/repo".to_string(),
+            path: "src/main.rs".to_string(),
+            line: 5,
+            rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+            severity: "critical".to_string(),
+            snippet: "secret".to_string(),
+            detail: "Hardcoded secret".to_string(),
+            in_test: false,
+            needs_review: false,
+            ..Finding::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Finding = serde_json::from_str(&json).unwrap();
+        assert!(!back.in_test, "production finding: in_test must be false");
+        assert!(
+            !back.needs_review,
+            "production finding: needs_review must be false"
+        );
+
+        // Back-compat: old serialized finding without the new fields deserializes with false defaults
+        let legacy = r#"{"repo":"r","path":"p","line":1,"rule_id":"X","severity":"high","snippet":"s","detail":"d","status":"active"}"#;
+        let f2: Finding = serde_json::from_str(legacy).unwrap();
+        assert!(!f2.in_test);
+        assert!(!f2.needs_review);
     }
 }

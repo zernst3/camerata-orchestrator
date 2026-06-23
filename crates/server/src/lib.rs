@@ -2324,9 +2324,10 @@ async fn merge_scan_preview(
         if for_repo.is_empty() {
             continue;
         }
-        let mut previews =
+        let (mut previews, mut notes) =
             crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, job).await;
         report.findings.append(&mut previews);
+        report.coverage_notes.append(&mut notes);
     }
 }
 

@@ -358,6 +358,8 @@ pub fn parse_ai_findings(
                 // AI-audit findings are advisory, never scan-time tool previews.
                 preview: false,
                 preview_tool: None,
+                in_test: false,
+                needs_review: false,
             });
         }
     }
@@ -2807,6 +2809,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         }
     }
 
@@ -3189,6 +3193,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         }
     }
 
@@ -3732,6 +3738,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![

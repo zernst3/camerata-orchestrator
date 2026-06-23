@@ -338,6 +338,8 @@ mod tests {
             also_matches: Vec::new(),
             preview: false,
             preview_tool: None,
+            in_test: false,
+            needs_review: false,
         }
     }
 
