@@ -2295,6 +2295,108 @@ async fn onboard_audit(
     Json(report)
 }
 
+/// Map a semgrep rule id to the FLOOR rule id whose security category it overlaps,
+/// or `None` when the semgrep rule has no floor twin (net-new coverage that must pass
+/// through untouched).
+///
+/// The floor (`crate::onboard::AUDIT_RULES`) runs at the Layer-1 gate AND at scan
+/// preview. Semgrep runs at scan preview AND CI (Layer-2 / Layer-3). Two semgrep rules
+/// overlap the floor on the same (repo, path, line) axis:
+///
+/// | Semgrep rule id                           | Floor rule id              |
+/// |-------------------------------------------|----------------------------|
+/// | `camerata.security.hardcoded-secret`       | `SEC-NO-HARDCODED-SECRETS-1` |
+/// | `camerata.security.sql-string-concat-python` | `SEC-NO-RAW-SQL-CONCAT-1` |
+/// | `camerata.security.sql-string-concat-js`   | `SEC-NO-RAW-SQL-CONCAT-1` |
+///
+/// The remaining 7 semgrep rules (`exec-injection`, `exec-injection-js`,
+/// `weak-hash-python`, `weak-hash-js`, `path-traversal-python`,
+/// `subprocess-shell-true`, `yaml-unsafe-load`) have no floor twin and map to `None`.
+///
+/// IMPORTANT: do NOT remove rules from either ruleset to fix overlap. The floor enforces
+/// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
+/// a hole in CI coverage. The fix is presentation-time dedup at scan preview only (see
+/// `dedup_preview_against_floor`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
+fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
+    match semgrep_rule_id {
+        "camerata.security.hardcoded-secret" => Some("SEC-NO-HARDCODED-SECRETS-1"),
+        "camerata.security.sql-string-concat-python" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        "camerata.security.sql-string-concat-js" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        _ => None,
+    }
+}
+
+/// Merge a batch of scan-preview tool findings into the existing floor findings,
+/// deduplicating at the scan preview layer only. This is the presentation-time
+/// dedup described in docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md.
+///
+/// ## Dedup rule
+///
+/// A preview finding is a DUPLICATE if ALL of the following hold:
+///   1. It comes from the semgrep tool (`preview_tool == Some("semgrep")`).
+///   2. Its semgrep rule id maps to a floor rule via `semgrep_floor_category`.
+///   3. A floor finding already exists in `existing` with the SAME `repo`, `path`,
+///      and `line` AND the SAME floor rule id as the mapping returns.
+///
+/// When a duplicate is detected: the floor finding is CANONICAL (its `SEC-*` rule_id
+/// is what `eval.rs` scores and what the Layer-1 gate enforces). The semgrep rule_id
+/// is appended to `also_matches` on the kept floor finding so the provenance is honest
+/// (the row reads "violates SEC-NO-HARDCODED-SECRETS-1, also flagged by
+/// camerata.security.hardcoded-secret"). The semgrep finding is dropped.
+///
+/// When NOT a duplicate (line mismatch, no floor twin, non-semgrep tool, non-overlapping
+/// semgrep rule): the preview finding passes through to `out` untouched.
+///
+/// ## Why floor is canonical
+///
+/// The `SEC-*` floor rule ids are the ones `eval.rs` scores and the Layer-1 gate
+/// enforces. Swapping them out for semgrep rule ids would silently break gate scoring.
+///
+/// ## Line matching
+///
+/// Exact line equality (`usize ==`). No fuzzy proximity: a semgrep finding on line 5
+/// and a floor finding on line 6 are NOT duplicates — they must be independent (adjacent
+/// lines can legitimately both have a problem).
+pub(crate) fn dedup_preview_against_floor(
+    existing: &mut Vec<crate::onboard::Finding>,
+    previews: Vec<crate::onboard::Finding>,
+) -> Vec<crate::onboard::Finding> {
+    let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
+
+    for preview in previews {
+        // Only semgrep findings from overlapping rules are candidates for dedup.
+        let is_semgrep = preview.preview_tool.as_deref() == Some("semgrep");
+        let floor_rule = is_semgrep
+            .then(|| semgrep_floor_category(&preview.rule_id))
+            .flatten();
+
+        if let Some(floor_rule_id) = floor_rule {
+            // Look for an existing floor finding at the same (repo, path, line, category).
+            // The floor finding has `preview == false` (it is enforced, not advisory).
+            let twin = existing.iter_mut().find(|f| {
+                !f.preview
+                    && f.repo == preview.repo
+                    && f.path == preview.path
+                    && f.line == preview.line
+                    && f.rule_id == floor_rule_id
+            });
+
+            if let Some(floor_finding) = twin {
+                // Duplicate: record the semgrep rule_id as a corroborating source on
+                // the canonical floor finding and drop the semgrep copy.
+                floor_finding.also_matches.push(preview.rule_id.clone());
+                continue; // drop the semgrep finding
+            }
+            // No floor twin at this exact (repo, path, line): semgrep caught something
+            // the regex missed. Net-new coverage — keep it.
+        }
+
+        out.push(preview);
+    }
+
+    out
+}
+
 /// Run the scan-time deterministic preview pass over each local repo source and append
 /// its preview findings to the report. A no-op when there are no preview-runnable rules
 /// (or the corpus is unavailable). Preview findings are ADVISORY-but-deterministic — they
@@ -2325,9 +2427,15 @@ async fn merge_scan_preview(
         if for_repo.is_empty() {
             continue;
         }
-        let (mut previews, mut notes) =
+        let (previews, mut notes) =
             crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, job).await;
-        report.findings.append(&mut previews);
+        // Dedup semgrep findings that overlap the deterministic floor BEFORE appending.
+        // When a semgrep rule fires on the same (repo, path, line) as a floor rule it
+        // mirrors, the floor finding is kept as canonical and the semgrep rule_id is
+        // folded into `also_matches`. Net-new semgrep findings (no floor twin at that
+        // exact line) pass through untouched. See `dedup_preview_against_floor`.
+        let deduped = dedup_preview_against_floor(&mut report.findings, previews);
+        report.findings.extend(deduped);
         report.coverage_notes.append(&mut notes);
     }
 }
@@ -8314,6 +8422,285 @@ mod tests {
             assert!(
                 result.contains(&format!("msg-{i}")),
                 "turn {i} must not be dropped when at the cap limit"
+            );
+        }
+    }
+
+    // ── scan floor / semgrep dedup tests ─────────────────────────────────────
+    //
+    // These tests exercise `dedup_preview_against_floor` and `semgrep_floor_category`
+    // directly, without standing up an HTTP server or hitting the file system.
+    // See docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md for the full rationale.
+
+    /// Helper: build a floor finding (preview = false, enforced).
+    fn floor_finding(
+        repo: &str,
+        path: &str,
+        line: usize,
+        rule_id: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "critical".to_string(),
+            snippet: "let secret = \"ghp_xxx\";".to_string(),
+            detail: "floor detail".to_string(),
+            preview: false,
+            preview_tool: None,
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// Helper: build a semgrep preview finding (preview = true, preview_tool = "semgrep").
+    fn semgrep_finding(
+        repo: &str,
+        path: &str,
+        line: usize,
+        semgrep_rule_id: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: semgrep_rule_id.to_string(),
+            severity: "critical".to_string(),
+            snippet: "let secret = \"ghp_xxx\";".to_string(),
+            detail: "semgrep detail".to_string(),
+            preview: true,
+            preview_tool: Some("semgrep".to_string()),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// (a) A floor hardcoded-secret finding and a semgrep hardcoded-secret finding on the
+    /// SAME file:line collapse to ONE finding. The floor's rule_id is kept canonical; the
+    /// semgrep rule_id is recorded in `also_matches`.
+    #[test]
+    fn dedup_secret_same_line_keeps_floor_and_records_semgrep_in_also_matches() {
+        let mut existing = vec![floor_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "camerata.security.hardcoded-secret",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        // The semgrep finding must be dropped (deduped).
+        assert!(
+            out.is_empty(),
+            "deduped semgrep finding must not appear in output: {out:?}"
+        );
+        // The floor finding is still there and now carries the semgrep rule in also_matches.
+        assert_eq!(existing.len(), 1);
+        let floor = &existing[0];
+        assert_eq!(floor.rule_id, "SEC-NO-HARDCODED-SECRETS-1", "floor rule_id is canonical");
+        assert_eq!(
+            floor.also_matches,
+            vec!["camerata.security.hardcoded-secret"],
+            "semgrep rule must be recorded in also_matches on the floor finding"
+        );
+    }
+
+    /// (a) SQL-concat variant: floor SEC-NO-RAW-SQL-CONCAT-1 + semgrep sql-string-concat-python
+    /// on the same (repo, path, line) collapse to one floor finding.
+    #[test]
+    fn dedup_sql_concat_python_same_line_keeps_floor() {
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "app/db.py",
+            15,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "app/db.py",
+            15,
+            "camerata.security.sql-string-concat-python",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        assert!(out.is_empty(), "SQL-concat python semgrep finding must be deduped: {out:?}");
+        assert_eq!(
+            existing[0].also_matches,
+            vec!["camerata.security.sql-string-concat-python"],
+        );
+    }
+
+    /// (a) SQL-concat JS variant maps to the same floor rule.
+    #[test]
+    fn dedup_sql_concat_js_same_line_keeps_floor() {
+        let mut existing = vec![floor_finding(
+            "me/web",
+            "src/db.ts",
+            42,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/web",
+            "src/db.ts",
+            42,
+            "camerata.security.sql-string-concat-js",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        assert!(out.is_empty(), "SQL-concat JS semgrep finding must be deduped: {out:?}");
+        assert_eq!(
+            existing[0].also_matches,
+            vec!["camerata.security.sql-string-concat-js"],
+        );
+    }
+
+    /// (b) Semgrep catches a secret on a DIFFERENT line than any floor finding. That semgrep
+    /// finding is NET-NEW coverage (the regex missed it) and must pass through untouched.
+    #[test]
+    fn dedup_secret_different_line_is_kept_as_net_new() {
+        let mut existing = vec![floor_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        )];
+        // Semgrep fires on line 12 — a different line, not a duplicate.
+        let previews = vec![semgrep_finding(
+            "me/api",
+            "src/config.rs",
+            12,
+            "camerata.security.hardcoded-secret",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        assert_eq!(out.len(), 1, "net-new semgrep finding (different line) must be kept");
+        assert_eq!(out[0].line, 12);
+        assert_eq!(out[0].rule_id, "camerata.security.hardcoded-secret");
+        // The existing floor finding must NOT have been mutated.
+        assert!(existing[0].also_matches.is_empty(), "floor finding must not be touched");
+    }
+
+    /// (c) The 5 non-overlapping semgrep rules (exec-injection, weak-hash, path-traversal,
+    /// subprocess-shell-true, yaml-unsafe-load) have no floor twin and must pass through
+    /// untouched even when a floor finding exists at the same path:line.
+    #[test]
+    fn dedup_non_overlapping_semgrep_rules_pass_through_untouched() {
+        let non_overlapping = &[
+            "camerata.security.exec-injection",
+            "camerata.security.exec-injection-js",
+            "camerata.security.weak-hash-python",
+            "camerata.security.weak-hash-js",
+            "camerata.security.path-traversal-python",
+            "camerata.security.subprocess-shell-true",
+            "camerata.security.yaml-unsafe-load",
+        ];
+
+        for rule_id in non_overlapping {
+            // Put a floor finding at the same coordinate just to prove it doesn't cross-dedup.
+            let mut existing = vec![floor_finding("me/api", "src/app.py", 5, "SEC-NO-HARDCODED-SECRETS-1")];
+            let previews = vec![semgrep_finding("me/api", "src/app.py", 5, rule_id)];
+
+            let out = dedup_preview_against_floor(&mut existing, previews);
+
+            assert_eq!(
+                out.len(),
+                1,
+                "non-overlapping semgrep rule '{rule_id}' must not be deduped even at same path:line"
+            );
+            assert_eq!(out[0].rule_id, *rule_id);
+            assert!(
+                existing[0].also_matches.is_empty(),
+                "floor finding must not be mutated for non-overlapping rule '{rule_id}'"
+            );
+        }
+    }
+
+    /// (e) Two findings at the SAME path:line but in DIFFERENT repos must NEVER cross-dedup.
+    #[test]
+    fn dedup_different_repos_never_cross_dedup() {
+        // Floor in repo "me/api"; semgrep in "me/web" — same path and line, different repo.
+        let mut existing = vec![floor_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/web", // different repo
+            "src/config.rs",
+            7,
+            "camerata.security.hardcoded-secret",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        assert_eq!(out.len(), 1, "different-repo finding must not be deduped");
+        assert!(
+            existing[0].also_matches.is_empty(),
+            "floor finding in a different repo must not be mutated"
+        );
+    }
+
+    /// (e) Two findings at the same (repo, line) but DIFFERENT files must never cross-dedup.
+    #[test]
+    fn dedup_different_paths_never_cross_dedup() {
+        let mut existing = vec![floor_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/api",
+            "src/other.rs", // different file
+            7,
+            "camerata.security.hardcoded-secret",
+        )];
+
+        let out = dedup_preview_against_floor(&mut existing, previews);
+
+        assert_eq!(out.len(), 1, "different-file finding must not be deduped");
+        assert!(existing[0].also_matches.is_empty());
+    }
+
+    /// `semgrep_floor_category` mapping table: verify the exact pairs and confirm
+    /// non-overlapping rules return `None`.
+    #[test]
+    fn semgrep_floor_category_returns_correct_mapping() {
+        assert_eq!(
+            semgrep_floor_category("camerata.security.hardcoded-secret"),
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        );
+        assert_eq!(
+            semgrep_floor_category("camerata.security.sql-string-concat-python"),
+            Some("SEC-NO-RAW-SQL-CONCAT-1")
+        );
+        assert_eq!(
+            semgrep_floor_category("camerata.security.sql-string-concat-js"),
+            Some("SEC-NO-RAW-SQL-CONCAT-1")
+        );
+        // Non-overlapping rules return None.
+        for rule in &[
+            "camerata.security.exec-injection",
+            "camerata.security.exec-injection-js",
+            "camerata.security.weak-hash-python",
+            "camerata.security.weak-hash-js",
+            "camerata.security.path-traversal-python",
+            "camerata.security.subprocess-shell-true",
+            "camerata.security.yaml-unsafe-load",
+        ] {
+            assert_eq!(
+                semgrep_floor_category(rule),
+                None,
+                "rule '{rule}' must map to None (no floor twin)"
             );
         }
     }
