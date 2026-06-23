@@ -107,9 +107,18 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 2. **Scan + propose per-repo rules** — Camerata reads each repo's **local working tree** (it never
    downloads code from GitHub) and detects its stack: languages from extensions, frameworks from
    manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and **CI/CD** (GitHub
-   Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone, Jenkins). Build/dependency/
-   generated dirs (`node_modules`, `target`, `.git`, lockfiles, …) are pruned. It proposes a starter
-   ruleset **per repo**.
+   Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone, Jenkins). It proposes a
+   starter ruleset **per repo**.
+
+   **The scan follows your `.gitignore`** (gitignore-aware walking). For git repos, Camerata walks
+   the working tree with ripgrep's gitignore engine, which honours `.gitignore` at the root and in
+   subdirectories, `.git/info/exclude`, and your global gitignore. A file that is gitignored is
+   **skipped** — no findings are generated for it. A file that is **committed to the repo** (not
+   gitignored) is **still scanned**, even if it has a sensitive name like `.env`. This is deliberate:
+   a committed `.env` with real credentials is an actual leak because it is version-controlled and
+   visible to anyone with repo access. The scan is enforcing what git sees, not what the filename
+   suggests. For directories without `.git`, Camerata falls back to its built-in noise denylist
+   (`node_modules`, `target`, build/cache/generated dirs, lockfiles, …).
 3. **Pick rules** — each repo has its **own** recommended-rule table; a repo single-select switches
    which repo you're editing. Selection is **per repo**: a rule ticked for repo A is bound to A only.
    **Project-level rules** apply to every repo. Click any rule to read its decision question, the
@@ -163,13 +172,28 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    The triage table's **Authority** column shows these three tiers and is **filterable** (enforced /
    preview / advisory); the CSV export carries the `preview` / `preview_tool` columns.
 
-   **Test badge and Needs-review state.** Two extra flags appear in the finding table:
+   **Test badge, Needs-review state, and Self-referential findings.** Three extra flags appear in the
+   finding table:
    - **Test badge** (yellow) — the finding is in test code (a test file path, or a line inside a
      `#[cfg(test)]` block). Test-scope violations are down-ranked to low severity. The nuance: a real
      secret in production code in the same file stays Critical even if the file also contains a test
      block — classification is per-finding-by-line, not per-file.
    - **Needs review** (orange) — the calibration pass flagged this finding as uncertain; read the
      reason and decide yourself.
+   - **Self-referential** (gray badge, status `suppressed-self-reference`) — Camerata's own rule
+     descriptions contain the very patterns it looks for. When the scanner reads a governed repo's
+     `CONVENTIONS.md` or `AGENTS.md` and encounters a rule directive such as "Do not set
+     `verify=False` in TLS configuration," it would otherwise flag that line as a TLS-verification
+     finding. Findings like this are marked Self-referential and do NOT count toward the active
+     violation tally. They are visible in the report so you can confirm they are noise — but they do
+     not drive the gate, and they do not contribute to the CI gate count.
+
+     **The safety property:** this suppression applies ONLY when BOTH the file is a Camerata-emitted
+     governance artifact (`AGENTS.md`/`CONVENTIONS.md` with the Camerata header, a `.camerata/` file,
+     or a corpus TOML) AND the matched snippet is traceable to a rule's description text. A real
+     credential pasted into `CONVENTIONS.md` that is not part of any rule description still flags as
+     `active`. Ordinary source files (`app/config.py`, `src/main.rs`, etc.) are never suppressed
+     by this mechanism regardless of what text appears in them.
 
    **Scan coverage section.** Below the violations table, a separate **"Scan coverage"** section
    lists tools that didn't run (missing binary, unrouted rule, etc.) as informational notes. These
@@ -240,11 +264,23 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
-   files: `AGENTS.md` (prose rules), `CONVENTIONS.md` (structured/mechanical rules), a CI workflow (for
-   mechanical rules), and `.camerata/baseline.json` (accepted pre-existing debt). The branch is
-   Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit the working
-   copy freely, then click **Open governance PR** (a separate, optional button) when ready —
-   **Camerata never opens a PR automatically.** **Applying marks the repo onboarded.**
+   branch is Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit
+   the working copy freely, then click **Open governance PR** (a separate, optional button) when ready
+   — **Camerata never opens a PR automatically.** **Applying marks the repo onboarded.**
+
+   The files written on apply:
+
+   | File | What it contains |
+   |---|---|
+   | `AGENTS.md` | Prose rules — the agent's in-context directives. |
+   | `CONVENTIONS.md` | Structured, mechanical, and architectural rules — conventions + CI conformance notes. |
+   | `.camerata/rules.json` | Armed rule ids — the gate config read by Layer 1. |
+   | `.camerata/baseline.json` | Accepted pre-existing debt (the full active-finding set at apply time). |
+   | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 3 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file you edit to add, remove, or change a custom gate check — one edit covers both the dev loop and CI. |
+   | **`.github/workflows/camerata-gates.yml`** | **The generated CI workflow** — the real Layer-3 CI gate, not a placeholder. It is derived directly from `.camerata/checks.toml`, so it is always consistent with the manifest. Regenerate it any time by clicking **Regenerate CI workflow** in the Rules view. |
+
+   The apply loop is now closed end-to-end: apply writes `.camerata/checks.toml` → Layer 2 reads it →
+   Layer 3 is generated from it, all from the same file. See §14 for the full SSOT picture.
 
 6. **Wire CI rules (two separate stories)** — the final step files **two GitHub-issue stories** per
    repo, one per CI enforcement tier:
@@ -900,6 +936,35 @@ is the most common architectural check pattern.
 
 Scope each architectural rule as its own sub-task; do not block the mechanical story on this design
 phase.
+
+### What apply writes — the closed loop
+
+When you click **Add rules to repo(s)** (§3 step 5), the apply step is now the upstream source for
+everything Layer 2 and Layer 3 consume. The loop that was previously open is now closed:
+
+```
+Apply (Camerata UI)
+  └─ writes  .camerata/checks.toml   (the SSOT manifest)
+                 |
+       +---------+---------+
+       |                   |
+  Layer 2               Layer 3
+  (dev loop)             (CI)
+  ManifestCheckRunner    camerata-gates.yml
+  reads checks.toml      generated from checks.toml
+```
+
+Before this was wired, the apply step wrote a `.camerata/ci-checks.json` file and a placeholder
+`camerata-governance.yml` that nothing in the runtime consumed. Those are gone. Now apply emits the
+real `.camerata/checks.toml` (the exact format `load_manifest` parses) and the real
+`.github/workflows/camerata-gates.yml` (identical to what the Regenerate CI workflow button
+produces). There is no "wire it twice" step and no divergence between what the apply step wrote and
+what the runtime executes.
+
+**`.camerata/checks.toml` is the single file you edit to manage custom gate checks.** One change
+there is automatically reflected in both Layer 2 (next dev run) and Layer 3 (next CI run after
+commit). The `camerata-gates.yml` workflow is regenerated from it on demand — it is never the
+authoritative source, only the derived output.
 
 ### Regenerating the CI workflow
 

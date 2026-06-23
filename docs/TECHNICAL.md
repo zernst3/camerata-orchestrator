@@ -829,16 +829,50 @@ repo — rule changes go through the Rules view, not a re-scan).
 ### File source — local-first (never GitHub)
 
 Onboarding reads code from the repo's **local working tree on disk**, never from GitHub.
-`read_local_repo_files(dir)` (`onboard.rs`) walks the directory, pruning noise dirs during
-descent (`.git`, `node_modules`, `target`, build/cache/generated dirs, lockfiles, minified/codegen
-files) and applying the code-extension filter, per-file size cap, and `HARD_CAP_FILES` safety net —
-returning the same `ExtractedRepo { files, truncated, excluded_noise }` shape the whole pipeline
-consumes. (The old GitHub-tarball reader was removed.) The HTTP handlers resolve each repo's local
+`read_local_repo_files(dir)` (`onboard.rs`) walks the directory and returns the same
+`ExtractedRepo { files, truncated, excluded_noise }` shape the whole pipeline consumes.
+(The old GitHub-tarball reader was removed.) The HTTP handlers resolve each repo's local
 dir with `resolve_local_sources(state, repos)` → `workspace::resolve_repo_dir` (per-repo path
 override, else `<workspace_root>/<owner>/<repo>`); a repo with no local clone surfaces a
 "browse to the repo's folder" note instead of being scanned. `scan_repos` and `audit_repos` take the
 resolved `(spec, dir)` sources and need **no GitHub token** — the token is only used later for
 arm-push and PR.
+
+### Gitignore-aware file walking
+
+`read_local_repo_files` is a dispatcher. When the target directory is a git repo (`.git` is present),
+it delegates to `read_local_repo_files_gitignore`, which uses **`ignore::WalkBuilder`** from the
+`ignore` crate (the same gitignore engine ripgrep uses). The walker is configured with
+`hidden(false)` so dotfiles like `.env`, `.camerata/`, and `.env.local` are still visited — without
+this, the crate's default behaviour would silently skip them. The walker respects, in priority order:
+`.gitignore` at the repo root, nested `.gitignore` files in subdirectories, `.git/info/exclude`, and
+the user's global gitignore (`core.excludesFile`). The existing noise denylist (`is_noise_path`) is
+applied on top as belt-and-suspenders for repos whose build artefacts are not yet gitignored.
+
+When the target directory is NOT a git repo (`.git` absent), `read_local_repo_files` falls back to
+the original `read_local_repo_files_noise_denylist` — an iterative DFS that prunes `.git`,
+`node_modules`, `target`, build/cache/generated dirs, lockfiles, and minified/codegen files. This
+preserves the original behaviour for non-git directories and avoids breaking callers that pass a
+temporary scratch directory during tests.
+
+**The critical semantic — gitignored vs. committed files:**
+
+A **gitignored** file is **skipped** — the developer explicitly opted it out via `.gitignore` and the
+walker honours that. A **committed** (tracked) file that is NOT listed in `.gitignore` is **still
+scanned and flagged** even if it has a sensitive name like `.env`. This is the correct behaviour: a
+committed `.env` containing real credentials IS a leak — it is in the repo, version-controlled, and
+visible to anyone with read access. The walker honours the gitignore file, not the git index, so the
+rule is purely "is this file gitignored?" not "is it staged?" or "is its filename dangerous?" This is
+NOT a name-based `.env` exception; it is pure gitignore respect.
+
+Example: if `.env` appears in `.gitignore` the file is skipped, and no finding is generated. If `.env`
+is tracked (absent from `.gitignore`), it is walked, and any hardcoded credential inside fires
+`SEC-NO-HARDCODED-SECRETS-1` as normal.
+
+Implementation note: `is_governance_or_corpus_artifact`, `is_self_referential_snippet`,
+`corpus_texts_from_ruleset`, and `suppress_self_referential` are also new public functions in
+`crates/server/src/onboard.rs`; the gitignore walker is `read_local_repo_files_gitignore`. The
+`ignore = "0.4"` crate is a workspace dependency; `crates/server/Cargo.toml` depends on it.
 
 ### `onboard.rs` — deterministic scan
 
@@ -974,7 +1008,50 @@ computes a finding's status:
   - It **ratchets on edit**: changing the offending code changes the fingerprint, so the
     baseline entry no longer matches and the finding **re-surfaces as `Active`**. Touch the
     debt and you own it.
+- **`suppressed-self-reference`** — the finding is the detector reading a rule's OWN
+  description text inside a governance or corpus artifact. Details in the section below.
 - Otherwise **`Active`** — the gate enforces it.
+
+**Self-referential finding suppression (`suppressed-self-reference`).** Camerata-emitted governance
+files (`AGENTS.md`, `CONVENTIONS.md`) and corpus TOML files contain the very directive text that the
+content scanner matches (e.g., `CONVENTIONS.md` may include "Do not set `verify=False` in TLS
+configuration" in a rule block). Without suppression, the scanner fires on that description string
+and produces a spurious finding. The same applies to `.camerata/` config files and `principles/*.toml`
+corpus files.
+
+`suppress_self_referential` (`crates/server/src/onboard.rs`) applies AFTER the baseline/inline pass.
+It only operates on findings whose `status == "active"` — already-suppressed findings are never
+downgraded. A finding is marked `suppressed-self-reference` when BOTH conditions hold:
+
+1. **The file is a governance or corpus artifact.** One of:
+   - The file content contains the `<!-- Generated by Camerata` marker (standard header written into
+     every `AGENTS.md` and `CONVENTIONS.md` Camerata emits).
+   - The file path is under `.camerata/` (project-level governance config).
+   - The file is a `.toml` file whose path contains a `principles/` segment (a rule corpus TOML).
+
+2. **The matched snippet appears in corpus descriptive text** — collected from rule titles, summaries,
+   `decision_why` fields, and option `directive`/`why` strings via `corpus_texts_from_ruleset`.
+   Matching is case-insensitive substring. An empty snippet never matches.
+
+**Safety properties (all three must hold simultaneously):**
+
+- **Ordinary source code is never suppressed.** A real `verify=False` in `app/config.py` stays
+  `active` because Condition 1 fails for non-governance files. The rule-description text in
+  `CONVENTIONS.md` matches Condition 2, but Condition 1 fails for `app/config.py` so no suppression
+  occurs.
+- **Real secrets pasted into governance files still flag.** A developer who pastes a real token
+  (e.g., `ghp_…`) into `CONVENTIONS.md` produces a finding whose snippet is not in any rule
+  description. Condition 2 fails, so the finding stays `active`. The file is still scanned;
+  only provably-self-referential matches are downranked.
+- **The gateway source (`crates/gateway/src/lib.rs`) is out of scope.** It is application source
+  unique to Camerata's own repo; it is handled by repo-level scan exclusion or a `camerata:allow`
+  annotation, not by this mechanism.
+
+**UI.** The cockpit findings table maps `suppressed-self-reference` to the label `"self-ref"` with a
+gray `BadgeVariant` ("Self-referential"). It sits alongside "Baseline debt" (gray) and "Waived"
+(yellow). The enforced-count computation filters on `status == "active"`, so
+`suppressed-self-reference` findings are correctly excluded from the count — they are visible in the
+report but do not contribute to the gate's active-violation tally.
 
 **Where the baseline comes from:** the onboarding **Apply** step (writes the governance
 files to the `camerata/onboard-governance` branch, `arm::ARM_BRANCH`) snapshots EVERY
@@ -1255,6 +1332,51 @@ surface.
 Scope partitioning: only `scope = "repo-local"` rules are emitted into repo
 files. Cross-repo and process rules live in the project store and are read by the
 integration/VCS-action gates directly.
+
+### SSOT emit reconciliation — what apply writes to the repo
+
+The `arm_files_for_repo` function is the single entry point for everything the Apply step commits
+to the `camerata/onboard-governance` branch. The complete set of emitted files is:
+
+| File | What it is |
+|---|---|
+| `AGENTS.md` | Prose rules — the agent's in-context directives. |
+| `CONVENTIONS.md` | Structured, mechanical, and architectural rules — citable conventions + CI conformance notes. |
+| `.camerata/rules.json` | Gate config: the list of armed rule ids. A separate concern from the executable check manifest. |
+| `.camerata/baseline.json` | Accepted pre-existing debt snapshot (written once at first apply). |
+| **`.camerata/checks.toml`** | **The real `CheckManifest` / `ManifestCheck` TOML** that `manifest::load_manifest` (`crates/checks/src/manifest.rs`) round-trips. Each applied CI-tier rule (mechanical or architectural) becomes one `[[check]]` entry. Mechanical rules populate the `command` field from the rule's conformance hint; architectural rules emit a commented TODO placeholder for the team to fill in. |
+| **`.github/workflows/camerata-gates.yml`** | **The real CI workflow**, generated by `workflow_gen::generate_gates_workflow(&manifest, stack)` — the same function the `/api/projects/active/generate-ci-workflow` endpoint uses. Not a stub; this is the actual Layer-3 CI gate. |
+
+**What was removed.** An earlier version of `arm_files_for_repo` emitted `.camerata/ci-checks.json`
+(a JSON array of CI-tier rule metadata consumed by nothing in the runtime) and
+`.github/workflows/camerata-governance.yml` (a placeholder scaffold that printed rule names with
+the message "wire each rule's enforcement manually"). Neither was consumed by Layer 2 or Layer 3;
+they are replaced by the files above and are no longer emitted.
+
+**The closed loop.** Before this change, the apply step and the runtime consumed different files in
+different formats, so the governance apply loop was never closed end-to-end. Now:
+
+```
+arm_files_for_repo()   produces   .camerata/checks.toml
+                                          |
+                     +-----------+--------+
+                     |                    |
+            Layer 2 (in-loop)      Layer 3 (CI)
+       manifest::load_manifest()  generate_gates_workflow()
+          ManifestCheckRunner       camerata-gates.yml
+```
+
+Both consumers read from the same `ManifestCheck` structs that `arm_files_for_repo` serialized via
+`toml::to_string`. Round-trip fidelity is structural: `ManifestCheck` and `CheckManifest` both
+`#[derive(Serialize)]` (added to `crates/checks/src/manifest.rs`), so a serialization error is a
+compile-time or immediate runtime error rather than a silently malformed TOML that `load_manifest`
+would reject. Any rule an architect applies in the UI is immediately reflected in the Layer-2 dev-loop
+gate and the Layer-3 CI backstop without a manual wiring step. The architect still fills in real
+commands for TODO placeholders, but the manifest entry exists and is registered from the moment of
+apply.
+
+See `docs/decisions/2026-06-23_ssot_emit_reconciliation.md` for the full rationale and
+alternatives considered.
 
 ### `workspace.rs` — local checkout and git controls
 
