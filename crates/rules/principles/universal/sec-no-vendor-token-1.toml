@@ -1,0 +1,29 @@
+id = "SEC-NO-VENDOR-TOKEN-1"
+title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic) are never hardcoded; they live in a secrets manager or environment variables"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/ENFORCEMENT.md"
+title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-VENDOR-TOKEN-1 (enforced gate rule)"
+
+[decision]
+question = "Where do vendor API tokens and credentials live?"
+default = "env-or-secrets-manager"
+why = "Vendor tokens (AWS AKIA/ASIA access key IDs, GitHub personal access tokens, Slack bot/app tokens, Stripe live secret keys, Google API keys, Anthropic API keys) are high-value credentials that grant access to production systems. The token shapes covered have near-zero false-positive rates: each is anchored to a known vendor-specific prefix plus a fixed-length alphanumeric body. A hardcoded vendor token is a publicly-accessible credential the moment the file is pushed; automated credential scanners index GitHub continuously. The only correct location is a secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) or environment variable injected at runtime."
+
+[[option]]
+id = "env-or-secrets-manager"
+label = "Vendor tokens in env vars or a secrets manager, never source"
+directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Google API keys, and Anthropic API keys are never written into source files, config files, or any file committed to the repository. Tests that require a vendor token use a test-doubles pattern (recorded cassettes, mocked HTTP, stub services) or retrieve a short-lived token from the secrets manager at test startup. The gate enforces this by matching known vendor token shapes and denying any write that includes them."
+why = "Vendor tokens in source are immediately exposed on push. Automated scanning services index public GitHub in near-real time; rotations after an exposure are slower than the attacker's first request."
+
+[[option]]
+id = "commit-vendor-tokens-as-test-fixtures"
+label = "Commit vendor token shapes as test fixtures"
+directive = "Vendor token shapes that match real prefixes are committed for test assertions, clearly documented as non-functional fixtures"
+why = "Rejected: the gate cannot verify a token is non-functional without calling the vendor API. A 'non-functional fixture' that is accidentally a real token is undetectable at commit time. Use a dedicated fake-token shape (e.g. a prefix not used by any vendor) for unit-test assertions."

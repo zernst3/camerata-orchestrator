@@ -1,0 +1,29 @@
+id = "SEC-NO-DISABLED-TLS-1"
+title = "TLS certificate verification is never disabled in production code; tests that disable it use a suppression with a reason"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/ENFORCEMENT.md"
+title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-DISABLED-TLS-1 (enforced gate rule)"
+
+[decision]
+question = "When is it acceptable to disable TLS certificate verification?"
+default = "never-in-production"
+why = "Disabling TLS verification (verify=False in Python requests, rejectUnauthorized:false in Node.js, InsecureSkipVerify:true in Go, NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false) removes the cryptographic guarantee that the remote endpoint is who it claims to be. This opens every HTTPS call to a man-in-the-middle attack that is completely invisible to the application. The most common justification is 'self-signed cert in dev/test' — the correct fix is to add the test CA certificate to the trust store, not to disable verification globally. The gate applies a Waive policy in test scope so test infrastructure that legitimately configures a local TLS-terminating proxy does not block."
+
+[[option]]
+id = "never-in-production"
+label = "TLS verification is always enabled in production; test code uses a suppression"
+directive = "TLS certificate verification flags are never set to disabled/false/0 in production code paths. When a test or local-dev setup requires connecting to a service with a self-signed certificate, the correct remedy is to add the CA certificate to the trust store for the test environment, not to disable verification globally. If disabling verification in a test is truly unavoidable (e.g. a third-party library provides no other way), the code must carry a camerata:allow suppression with a comment explaining the reason. The gate waives this rule inside #[cfg(test)] blocks and test-path files."
+why = "A disabled TLS verification flag is binary: it either protects the connection or it does not. There is no partial verification. Code that disables it 'just for development' is routinely copied into production deployments. The gate enforces the secure default and pushes the justification burden onto the code author via the suppression comment."
+
+[[option]]
+id = "disable-for-dev-convenience"
+label = "Disable TLS verification in dev/test for convenience"
+directive = "TLS verification is disabled in development and test environments for convenience; a TODO comment notes that it should be re-enabled before production"
+why = "Rejected: TODO comments are not enforced. Dev code reaches production. The suppression-with-reason pattern gives the same development flexibility with an auditable paper trail and no risk of silent promotion to production."

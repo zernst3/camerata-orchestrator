@@ -79,6 +79,52 @@ pub fn sec_no_secret_files_1_rule() -> RuleId {
     RuleId("SEC-NO-SECRET-FILES-1".to_string())
 }
 
+/// The id for the PEM private-key block rule.
+pub fn sec_no_private_key_1_rule() -> RuleId {
+    RuleId("SEC-NO-PRIVATE-KEY-1".to_string())
+}
+
+/// The id for the vendor credential token rule.
+pub fn sec_no_vendor_token_1_rule() -> RuleId {
+    RuleId("SEC-NO-VENDOR-TOKEN-1".to_string())
+}
+
+/// The id for the secret-bearing file path rule (brownfield audit companion).
+pub fn sec_no_secret_file_1_rule() -> RuleId {
+    RuleId("SEC-NO-SECRET-FILE-1".to_string())
+}
+
+/// The id for the disabled-TLS-verification rule.
+pub fn sec_no_disabled_tls_1_rule() -> RuleId {
+    RuleId("SEC-NO-DISABLED-TLS-1".to_string())
+}
+
+// ─── test-scope policy ────────────────────────────────────────────────────────
+
+/// Gate-layer policy when a matched line falls inside a test scope.
+///
+/// - [`TestScopePolicy::Waive`] — the rule does not apply in test scope. Used
+///   for rules where test code legitimately triggers the pattern (e.g. raw SQL in
+///   migration fixtures, TLS disabled for a local test proxy).
+/// - [`TestScopePolicy::Downgrade`] — the rule fires in test scope but the
+///   brownfield audit down-ranks the finding. Used for all secret/credential rules:
+///   a real private key in a test file is still a real private key.
+pub enum TestScopePolicy {
+    Waive,
+    Downgrade,
+}
+
+/// Returns the test-scope policy for a given rule id.
+///
+/// Default is [`TestScopePolicy::Downgrade`] (conservative: unknown rules remain
+/// enforced in test scope so they cannot be evaded by placing content in a test file).
+pub fn test_scope_policy(rule_id: &str) -> TestScopePolicy {
+    match rule_id {
+        "SEC-NO-RAW-SQL-CONCAT-1" | "SEC-NO-DISABLED-TLS-1" => TestScopePolicy::Waive,
+        _ => TestScopePolicy::Downgrade,
+    }
+}
+
 // ─── public rule registry ─────────────────────────────────────────────────────
 
 /// A pure rule-arm function: `Ok(())` = allow, `Err(reason)` = deny.
@@ -148,6 +194,36 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
                       keystore. Secrets belong in a secret manager, never the repo.",
         arm: arm_sec_no_secret_files_1,
     },
+    RuleEntry {
+        id: "SEC-NO-PRIVATE-KEY-1",
+        description: "Deny file content containing a PEM private-key block header (RSA, EC, \
+                      DSA, OPENSSH, PGP, PKCS#8). A committed private key is a catastrophic \
+                      secret leak.",
+        arm: arm_sec_no_private_key_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-VENDOR-TOKEN-1",
+        description: "Deny file content containing a high-precision vendor credential token \
+                      shape (AWS AKIA/ASIA, GitHub gh*_, Slack xox*-, Stripe live sk_live_, \
+                      Google AIza*, Anthropic sk-ant-). Near-zero FP rate: each alternative \
+                      is tightly anchored to a known vendor prefix + fixed-length body.",
+        arm: arm_sec_no_vendor_token_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-SECRET-FILE-1",
+        description: "Deny writing a file whose path marks it as secret-bearing (.pem, .p12, \
+                      .pfx, .key, .jks, .keystore, id_rsa/dsa/ecdsa/ed25519, real .env files). \
+                      Companion to SEC-NO-SECRET-FILES-1 for the brownfield audit rules.",
+        arm: arm_sec_no_secret_file_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-DISABLED-TLS-1",
+        description: "Deny content that disables TLS/certificate verification in production \
+                      code (verify=False, rejectUnauthorized:false, InsecureSkipVerify:true, \
+                      NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false/0). \
+                      Waive policy in test scope.",
+        arm: arm_sec_no_disabled_tls_1,
+    },
 ];
 
 /// For a CONTENT rule, return the 1-based line numbers where it matches in `content`,
@@ -160,6 +236,9 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
         "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
         "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
         "ARCH-NO-SECRETS-IN-URL-1" => arch_url_secret_regex(),
+        "SEC-NO-PRIVATE-KEY-1" => sec_private_key_regex(),
+        "SEC-NO-VENDOR-TOKEN-1" => sec_vendor_token_regex(),
+        "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
         _ => return Vec::new(),
     };
     let mut lines: Vec<usize> = re
@@ -261,6 +340,273 @@ fn is_write_tool(tool: &str) -> bool {
 }
 
 // ─── rule arm implementations ─────────────────────────────────────────────────
+
+// ── test-scope primitives (single source of truth — onboard.rs delegates here) ──
+
+/// Returns `true` when `path` is in a test, fixture, or example context where a
+/// flagged secret/SQL pattern is almost certainly a non-exploitable test value.
+///
+/// Matching rules (all comparisons are case-insensitive):
+/// - Any **path segment** (directory component) equals one of:
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `examples`, `benches`
+/// - The **filename** (last segment) matches one of:
+///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
+///
+/// Production paths are unchanged — only test/fixture paths are down-ranked.
+pub fn is_test_or_fixture_path(path: &str) -> bool {
+    use std::path::Path;
+
+    // Normalise to forward-slash components (handles both Unix and Windows paths).
+    let p = Path::new(path);
+    let segments: Vec<String> = p
+        .components()
+        .filter_map(|c| {
+            c.as_os_str().to_str().map(|s| s.to_ascii_lowercase())
+        })
+        .collect();
+
+    // Check every directory segment (all but the last, which is the filename).
+    let dir_segments = if segments.len() > 1 {
+        &segments[..segments.len() - 1]
+    } else {
+        &[][..]
+    };
+    for seg in dir_segments {
+        match seg.as_str() {
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "examples" | "benches" => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    // Check the filename against test-file naming conventions.
+    if let Some(filename) = segments.last() {
+        // conftest.py
+        if filename == "conftest.py" {
+            return true;
+        }
+        // test_*.py  (Python unittest convention)
+        if filename.starts_with("test_") && filename.ends_with(".py") {
+            return true;
+        }
+        // *_test.<ext>  (Go / Rust convention: foo_test.go, auth_test.rs)
+        // *.test.<ext>  (JS/TS convention: auth.test.ts)
+        // *.spec.<ext>  (JS/TS convention: auth.spec.ts)
+        //
+        // Strategy: strip the final extension to get the stem, then check whether
+        // the stem ends with "_test", ".test", or ".spec".
+        if let Some(dot_pos) = filename.rfind('.') {
+            let stem = &filename[..dot_pos];
+            if stem.ends_with("_test") || stem.ends_with(".test") || stem.ends_with(".spec") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Compute the 1-based inclusive line ranges that are test code in a Rust file.
+/// Returns an empty vec for non-`.rs` files.
+///
+/// Detects `#[cfg(test)]`, `#[test]`, and `#[tokio::test]` attribute lines and
+/// tracks the brace-delimited block that follows, skipping braces inside `//` line
+/// comments, `/* */` block comments, `"..."` string literals, `r#"..."#` raw strings,
+/// and `'{'` char literals. The span from the attribute line to the closing `}` is a
+/// test scope.
+///
+/// # Limitation
+/// Simple brace counter that skips strings/comments. Does not handle all edge cases
+/// (e.g. nested raw strings with mismatched hashes), but correct for the overwhelming
+/// majority of Rust test code.
+pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> {
+    // Only applicable to Rust files.
+    if !path.ends_with(".rs") {
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        StringLit,
+        RawString(usize), // number of leading hashes
+        CharLit,
+    }
+
+    let mut ranges = Vec::new();
+    let mut state = State::Normal;
+    let mut brace_depth: i32 = 0;
+    // When Some((attr_line, scope_start_depth)), we are inside a test scope that
+    // started at attr_line and whose opening brace raised depth to scope_start_depth.
+    let mut scope: Option<(usize, i32)> = None;
+    // The line of the most-recently-seen test attribute (before the opening brace).
+    let mut pending_attr_line: Option<usize> = None;
+    let mut current_line: usize = 1;
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Track line numbers.
+        if ch == '\n' {
+            current_line += 1;
+            if state == State::LineComment {
+                state = State::Normal;
+            }
+            i += 1;
+            continue;
+        }
+
+        match state {
+            State::LineComment => {
+                // Already handled newline above; anything else is inside the comment.
+                i += 1;
+                continue;
+            }
+            State::BlockComment => {
+                if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                    state = State::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::StringLit => {
+                if ch == '\\' {
+                    // Skip escaped character.
+                    i += 2;
+                } else if ch == '"' {
+                    state = State::Normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::RawString(hashes) => {
+                // Look for `"` followed by exactly `hashes` `#` chars.
+                if ch == '"' {
+                    let end_hashes = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
+                    if end_hashes >= hashes {
+                        state = State::Normal;
+                        i += 1 + hashes;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::CharLit => {
+                if ch == '\\' {
+                    i += 2;
+                } else if ch == '\'' {
+                    state = State::Normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            State::Normal => {}
+        }
+
+        // --- Normal state ---
+        // Detect transitions OUT of Normal.
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+            state = State::LineComment;
+            i += 2;
+            continue;
+        }
+        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            state = State::BlockComment;
+            i += 2;
+            continue;
+        }
+        if ch == '"' {
+            state = State::StringLit;
+            i += 1;
+            continue;
+        }
+        // Raw string: r#"..."#  (variable hashes)
+        if ch == 'r' {
+            let hash_count = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
+            if i + 1 + hash_count < chars.len() && chars[i + 1 + hash_count] == '"' {
+                state = State::RawString(hash_count);
+                i += 2 + hash_count; // skip r + hashes + opening "
+                continue;
+            }
+        }
+        if ch == '\'' {
+            // Simple char literal `'x'` or `'\n'` — single-char (or escape).
+            // If the next char is `\`, skip escape + closing quote; else skip char + closing quote.
+            if i + 2 < chars.len() && chars[i + 1] == '\\' && i + 3 < chars.len() && chars[i + 3] == '\'' {
+                // '\x'
+                i += 4;
+                continue;
+            }
+            if i + 2 < chars.len() && chars[i + 2] == '\'' {
+                // 'x'
+                i += 3;
+                continue;
+            }
+            // Not a char literal (e.g. lifetime 'a or complex case) — pass through.
+        }
+
+        // Detect test attribute lines (only when not inside a scope).
+        // We look for the attribute prefix at the start of a token on the current line.
+        if scope.is_none() && ch == '#' {
+            // Peek ahead for [cfg(test)], [test], or [tokio::test].
+            let rest: String = chars[i..].iter().take(30).collect();
+            if rest.starts_with("#[cfg(test)]")
+                || rest.starts_with("#[test]")
+                || rest.starts_with("#[tokio::test]")
+            {
+                pending_attr_line = Some(current_line);
+            }
+        }
+
+        // Track brace depth.
+        if ch == '{' {
+            brace_depth += 1;
+            if let Some(attr_line) = pending_attr_line.take() {
+                // The first `{` after a test attribute opens the scope.
+                scope = Some((attr_line, brace_depth));
+            }
+        } else if ch == '}' {
+            if let Some((attr_line, scope_depth)) = scope {
+                if brace_depth == scope_depth {
+                    // Closing brace at the scope's depth — scope ends.
+                    ranges.push((attr_line, current_line));
+                    scope = None;
+                }
+            }
+            brace_depth -= 1;
+        }
+
+        i += 1;
+    }
+
+    ranges
+}
+
+/// Returns `true` if `line` (1-based) falls in any of the given ranges (inclusive on both ends).
+pub fn is_in_test_scope(line: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|&(start, end)| line >= start && line <= end)
+}
+
+/// The note appended to floor findings whose path is in test/fixture code.
+pub const TEST_PATH_NOTE: &str =
+    " (in test/fixture code — likely a non-exploitable test value; verify)";
+
+/// The down-ranked severity used for floor findings in test/fixture paths.
+pub const TEST_PATH_SEVERITY: &str = "low";
 
 // ── GOV-1 ────────────────────────────────────────────────────────────────────
 
@@ -440,8 +786,17 @@ fn sec_secrets_regex() -> &'static Regex {
 }
 
 /// SEC-NO-HARDCODED-SECRETS-1: deny content containing a credential literal.
-fn arm_sec_no_hardcoded_secrets_1(_path: &str, content: &str) -> Result<(), String> {
+fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), String> {
     if let Some(m) = sec_secrets_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-HARDCODED-SECRETS-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
         // Redact all but the first 6 chars so the denial message is useful
         // without echoing the full secret.
         let matched = m.as_str();
@@ -512,8 +867,17 @@ fn sec_sql_concat_regex() -> &'static Regex {
 
 /// SEC-NO-RAW-SQL-CONCAT-1: deny content that builds SQL by string
 /// concatenation or format-string interpolation.
-fn arm_sec_no_raw_sql_concat_1(_path: &str, content: &str) -> Result<(), String> {
-    if sec_sql_concat_regex().is_match(content) {
+fn arm_sec_no_raw_sql_concat_1(path: &str, content: &str) -> Result<(), String> {
+    if let Some(m) = sec_sql_concat_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
         Err(
             "SEC-NO-RAW-SQL-CONCAT-1: content appears to build a SQL query via \
              string concatenation or format interpolation; use parameterised \
@@ -574,12 +938,173 @@ fn arch_url_secret_regex() -> &'static Regex {
 
 /// ARCH-NO-SECRETS-IN-URL-1: deny content that embeds a URL with a secret in
 /// its query string.
-fn arm_arch_no_secrets_in_url_1(_path: &str, content: &str) -> Result<(), String> {
-    if arch_url_secret_regex().is_match(content) {
+fn arm_arch_no_secrets_in_url_1(path: &str, content: &str) -> Result<(), String> {
+    if let Some(m) = arch_url_secret_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("ARCH-NO-SECRETS-IN-URL-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
         Err(
             "ARCH-NO-SECRETS-IN-URL-1: content contains a URL with a secret in its \
              query string (api_key, token, secret, password, or access_token); \
              transmit credentials in headers or the request body instead"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+// ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
+
+static SEC_PRIVATE_KEY_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn sec_private_key_regex() -> &'static Regex {
+    SEC_PRIVATE_KEY_REGEX.get_or_init(|| {
+        Regex::new(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?:\s+BLOCK)?-----",
+        )
+        .expect("SEC-NO-PRIVATE-KEY-1 regex must compile")
+    })
+}
+
+fn arm_sec_no_private_key_1(path: &str, content: &str) -> Result<(), String> {
+    if let Some(m) = sec_private_key_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-PRIVATE-KEY-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
+        Err(
+            "SEC-NO-PRIVATE-KEY-1: content contains a PEM private-key block; \
+             private keys must never be committed to the repo — use a secrets manager \
+             or generate ephemeral keys at test runtime"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
+// ── SEC-NO-VENDOR-TOKEN-1 ────────────────────────────────────────────────────
+
+static SEC_VENDOR_TOKEN_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn sec_vendor_token_regex() -> &'static Regex {
+    SEC_VENDOR_TOKEN_REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?x)
+            (?:AKIA|ASIA)[0-9A-Z]{16}
+            | gh[poursh]_[A-Za-z0-9_]{36}
+            | github_pat_[A-Za-z0-9_]{82}
+            | xox[baprs]-[A-Za-z0-9\-]{10,}
+            | sk_live_[A-Za-z0-9]{24,}
+            | AIza[0-9A-Za-z_\-]{35}
+            | sk-ant-[A-Za-z0-9_\-]{20,}
+            ",
+        )
+        .expect("SEC-NO-VENDOR-TOKEN-1 regex must compile")
+    })
+}
+
+fn arm_sec_no_vendor_token_1(path: &str, content: &str) -> Result<(), String> {
+    if let Some(m) = sec_vendor_token_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-VENDOR-TOKEN-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
+        let matched = m.as_str();
+        let preview: String = matched.chars().take(8).collect();
+        Err(format!(
+            "SEC-NO-VENDOR-TOKEN-1: content contains a vendor credential token \
+             (matched `{preview}...`); tokens must live in a secrets manager or \
+             environment variables, never in source code"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// ── SEC-NO-SECRET-FILE-1 ─────────────────────────────────────────────────────
+
+fn arm_sec_no_secret_file_1(path: &str, _content: &str) -> Result<(), String> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+
+    const ENV_TEMPLATE_SUFFIXES: &[&str] =
+        &["example", "sample", "template", "dist", "defaults", "tpl"];
+    let is_env = lower == ".env"
+        || (lower.starts_with(".env.")
+            && !ENV_TEMPLATE_SUFFIXES.iter().any(|suf| lower.ends_with(suf)));
+
+    const KEY_EXTS: &[&str] = &[".pem", ".p12", ".pfx", ".key", ".jks", ".keystore"];
+    let is_key_ext = KEY_EXTS.iter().any(|ext| lower.ends_with(ext));
+
+    let is_private_key_file = matches!(
+        lower.as_str(),
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
+    );
+
+    if is_env || is_key_ext || is_private_key_file {
+        Err(format!(
+            "SEC-NO-SECRET-FILE-1: path `{path}` is a secret-bearing file type; \
+             keep secrets out of the repo — use a secret manager and commit a \
+             `.env.example` template instead"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// ── SEC-NO-DISABLED-TLS-1 ────────────────────────────────────────────────────
+
+static SEC_DISABLED_TLS_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn sec_disabled_tls_regex() -> &'static Regex {
+    SEC_DISABLED_TLS_REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            verify\s*=\s*[Ff]alse
+            | rejectUnauthorized\s*:\s*false
+            | InsecureSkipVerify\s*:\s*true
+            | NODE_TLS_REJECT_UNAUTHORIZED\s*[=:]\s*['"]?0
+            | CURLOPT_SSL_VERIFYPEER\s*,\s*(?:[Ff]alse|0|FALSE)
+            "#,
+        )
+        .expect("SEC-NO-DISABLED-TLS-1 regex must compile")
+    })
+}
+
+fn arm_sec_no_disabled_tls_1(path: &str, content: &str) -> Result<(), String> {
+    if let Some(m) = sec_disabled_tls_regex().find(content) {
+        let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-DISABLED-TLS-1") {
+                TestScopePolicy::Waive => return Ok(()),
+                TestScopePolicy::Downgrade => {}
+            }
+        }
+        Err(
+            "SEC-NO-DISABLED-TLS-1: content disables TLS/certificate verification; \
+             never skip TLS verification in production — use proper certificates or \
+             a test-only CA. If this is test code, add a `camerata:allow` suppression \
+             with a reason explaining why."
                 .to_string(),
         )
     } else {
@@ -1307,6 +1832,311 @@ mod tests {
         gw.bind(s.clone(), role_with(&["GOV-1"]));
         assert_eq!(gw.session_count(), 1);
         assert_eq!(gw.role_for(&s).unwrap().name, "Backend");
+    }
+
+    // ── test-scope primitives (hoisted from onboard.rs) ──────────────────────────
+
+    #[test]
+    fn is_test_or_fixture_path_detects_tests_dir() {
+        assert!(is_test_or_fixture_path("src/tests/util.rs"));
+        assert!(is_test_or_fixture_path("fixtures/data.json"));
+        assert!(is_test_or_fixture_path("__tests__/auth.test.ts"));
+        assert!(is_test_or_fixture_path("src/auth_test.rs"));
+        assert!(is_test_or_fixture_path("src/auth.test.ts"));
+        assert!(is_test_or_fixture_path("src/auth.spec.ts"));
+        assert!(is_test_or_fixture_path("test_helper.py"));
+        assert!(is_test_or_fixture_path("conftest.py"));
+    }
+
+    #[test]
+    fn is_test_or_fixture_path_allows_production_paths() {
+        assert!(!is_test_or_fixture_path("src/auth.rs"));
+        assert!(!is_test_or_fixture_path("crates/gateway/src/lib.rs"));
+        assert!(!is_test_or_fixture_path("src/testing_utils.rs")); // "testing" is not "tests"
+    }
+
+    #[test]
+    fn test_scope_line_ranges_finds_cfg_test_mod() {
+        let content = "\nfn production_code() {}\n\n#[cfg(test)]\nmod tests {\n    fn helper() { let x = \"ghp_secret\"; }\n}\n";
+        let ranges = test_scope_line_ranges("src/lib.rs", content);
+        assert!(!ranges.is_empty(), "should detect #[cfg(test)] scope");
+        // The secret on line 6 should be inside the test scope
+        assert!(is_in_test_scope(6, &ranges), "line 6 should be in test scope");
+        // Line 2 (production_code) should NOT be in test scope
+        assert!(!is_in_test_scope(2, &ranges), "line 2 should not be in test scope");
+    }
+
+    #[test]
+    fn test_scope_line_ranges_not_fooled_by_braces_in_strings() {
+        let content = "\nfn foo() {\n    let s = \"{ not a brace }\";\n}\n";
+        // No test attributes, so no ranges
+        let ranges = test_scope_line_ranges("src/lib.rs", content);
+        assert!(ranges.is_empty(), "no test scopes in production-only code");
+    }
+
+    // ── TestScopePolicy ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scope_policy_waive_rules() {
+        assert!(matches!(test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"), TestScopePolicy::Waive));
+        assert!(matches!(test_scope_policy("SEC-NO-DISABLED-TLS-1"), TestScopePolicy::Waive));
+    }
+
+    #[test]
+    fn test_scope_policy_downgrade_rules() {
+        assert!(matches!(test_scope_policy("SEC-NO-HARDCODED-SECRETS-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(test_scope_policy("ARCH-NO-SECRETS-IN-URL-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(test_scope_policy("SEC-NO-PRIVATE-KEY-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(test_scope_policy("SEC-NO-VENDOR-TOKEN-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(test_scope_policy("SEC-NO-SECRET-FILE-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(test_scope_policy("UNKNOWN-RULE-99"), TestScopePolicy::Downgrade));
+    }
+
+    // ── SEC-NO-PRIVATE-KEY-1 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn private_key_detects_rsa() {
+        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAK\n-----END RSA PRIVATE KEY-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn private_key_detects_ec() {
+        let content = "-----BEGIN EC PRIVATE KEY-----\nabc\n-----END EC PRIVATE KEY-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn private_key_detects_openssh() {
+        let content = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC\n-----END OPENSSH PRIVATE KEY-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn private_key_detects_bare_pkcs8() {
+        let content = "-----BEGIN PRIVATE KEY-----\nMIIEvQ\n-----END PRIVATE KEY-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn private_key_detects_pgp_block() {
+        let content = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF...\n-----END PGP PRIVATE KEY BLOCK-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn private_key_allows_certificate() {
+        let content = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkW\n-----END CERTIFICATE-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_ok());
+    }
+
+    #[test]
+    fn private_key_allows_public_key() {
+        let content = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_ok());
+    }
+
+    #[test]
+    fn private_key_in_test_scope_still_denied() {
+        // Downgrade policy: still deny even in test scope
+        let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"-----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----\";\n}\n";
+        let result = arm_sec_no_private_key_1("src/lib.rs", content);
+        assert!(result.is_err(), "private key in test scope must still be denied (Downgrade policy)");
+    }
+
+    #[test]
+    fn private_key_in_production_denied() {
+        let content = "let key = \"-----BEGIN RSA PRIVATE KEY-----\";";
+        assert!(arm_sec_no_private_key_1("src/config.rs", content).is_err());
+    }
+
+    // ── SEC-NO-VENDOR-TOKEN-1 ────────────────────────────────────────────────────
+
+    #[test]
+    fn vendor_token_detects_aws_akia() {
+        // AKIA + 16 uppercase alphanumeric
+        let content = "key = \"AKIAIOSFODNN7EXAMPLE\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_aws_asia() {
+        let content = "key = \"ASIAIOSFODNN7EXAMPLE\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_github_pat() {
+        // ghp_ + 36 alphanumeric
+        let content = "token = \"ghp_ABCDEFGHIJ1234567890abcdefghij123456\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_stripe_live() {
+        // `sk_live_` split across concat! so the fixture isn't a contiguous literal
+        // (GitHub push protection); the assembled string still matches at runtime.
+        let content = concat!("key = \"sk_li", "ve_ABCDEFGHIJKLMNOPQRSTUVWX\"");
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_google_api_key() {
+        // AIza + 35 alphanumeric/underscore/dash
+        let content = "key = \"AIzaSyB1234567890abcdefghijklmnopqrstuv\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_anthropic() {
+        // sk-ant- + 20+ alphanumeric/underscore/dash
+        let content = "key = \"sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_ignores_akia_too_short() {
+        // AKIA + only 15 chars (needs 16)
+        let content = "key = \"AKIAIOSFODNN7EXAMPL\""; // 15 chars after AKIA
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_ok());
+    }
+
+    #[test]
+    fn vendor_token_ignores_ghp_too_short() {
+        // ghp_ + only 9 chars (needs 36)
+        let content = "key = \"ghp_ABCDEFGHI\"";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_ok());
+    }
+
+    #[test]
+    fn vendor_token_ignores_stripe_test_key() {
+        // sk_test_ is excluded (not a production credential). Prefix split across
+        // concat! so the fixture isn't a contiguous literal (GitHub push protection).
+        let content = concat!("key = \"sk_te", "st_ABCDEFGHIJKLMNOPQRSTUVWX\"");
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_ok());
+    }
+
+    #[test]
+    fn vendor_token_in_test_scope_still_denied() {
+        // Downgrade policy
+        let content = "\n#[cfg(test)]\nmod tests {\n    const KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";\n}\n";
+        assert!(arm_sec_no_vendor_token_1("src/lib.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_in_production_denied() {
+        let content = "const AWS_KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";";
+        assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    // ── SEC-NO-SECRET-FILE-1 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_file_1_denies_env_and_key_paths() {
+        let subset = vec![sec_no_secret_file_1_rule()];
+        for p in [
+            ".env",
+            ".env.production",
+            "server.pem",
+            "key.p12",
+            "config.key",
+            "keystore.jks",
+            "id_rsa",
+            "id_ed25519",
+        ] {
+            assert!(
+                matches!(evaluate_call(&subset, &write_call(p)), Decision::Deny { .. }),
+                "expected DENY for {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_file_1_allows_templates_and_source_files() {
+        let subset = vec![sec_no_secret_file_1_rule()];
+        for p in [
+            ".env.example",
+            ".env.sample",
+            ".env.template",
+            ".env.dist",
+            "keys.rs",
+            "key_handler.py",
+        ] {
+            assert!(
+                matches!(evaluate_call(&subset, &write_call(p)), Decision::Allow),
+                "expected ALLOW for {p}"
+            );
+        }
+    }
+
+    // ── SEC-NO-DISABLED-TLS-1 ────────────────────────────────────────────────────
+
+    #[test]
+    fn disabled_tls_detects_python_verify_false() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=False)").is_err());
+    }
+
+    #[test]
+    fn disabled_tls_detects_node_reject_unauthorized() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: false }").is_err());
+    }
+
+    #[test]
+    fn disabled_tls_detects_go_insecure_skip_verify() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.go", "InsecureSkipVerify: true").is_err());
+    }
+
+    #[test]
+    fn disabled_tls_detects_node_env_var() {
+        assert!(arm_sec_no_disabled_tls_1("src/config.js", "NODE_TLS_REJECT_UNAUTHORIZED=0").is_err());
+    }
+
+    #[test]
+    fn disabled_tls_detects_curl_option() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.php", "CURLOPT_SSL_VERIFYPEER, false").is_err());
+    }
+
+    #[test]
+    fn disabled_tls_allows_verify_true() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.py", "requests.get(url, verify=True)").is_ok());
+    }
+
+    #[test]
+    fn disabled_tls_allows_reject_authorized_true() {
+        assert!(arm_sec_no_disabled_tls_1("src/client.js", "{ rejectUnauthorized: true }").is_ok());
+    }
+
+    #[test]
+    fn disabled_tls_in_test_scope_is_waived() {
+        // Waive policy: test code legitimately disables TLS
+        let content = "\n#[cfg(test)]\nmod tests {\n    fn test_http() {\n        let cfg = TlsConfig { InsecureSkipVerify: true };\n    }\n}\n";
+        let result = arm_sec_no_disabled_tls_1("src/lib.rs", content);
+        assert!(result.is_ok(), "TLS disable in test scope should be ALLOWED (Waive policy)");
+    }
+
+    #[test]
+    fn disabled_tls_in_production_denied() {
+        let content = "let cfg = TlsConfig { InsecureSkipVerify: true };";
+        assert!(arm_sec_no_disabled_tls_1("src/client.go", content).is_err());
+    }
+
+    // ── registry coverage for new rules ──────────────────────────────────────────
+
+    #[test]
+    fn registry_covers_new_floor_rules() {
+        let ids: Vec<&str> = RULE_REGISTRY.iter().map(|e| e.id).collect();
+        assert!(ids.contains(&"SEC-NO-PRIVATE-KEY-1"));
+        assert!(ids.contains(&"SEC-NO-VENDOR-TOKEN-1"));
+        assert!(ids.contains(&"SEC-NO-SECRET-FILE-1"));
+        assert!(ids.contains(&"SEC-NO-DISABLED-TLS-1"));
+    }
+
+    #[test]
+    fn sql_concat_waived_in_test_scope() {
+        // SEC-NO-RAW-SQL-CONCAT-1 has Waive policy: test files writing raw SQL are allowed
+        let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let q = format!(\"INSERT INTO test_table VALUES ('{}')\", val);\n    }\n}\n";
+        let result = arm_sec_no_raw_sql_concat_1("src/repo.rs", content);
+        assert!(result.is_ok(), "SQL concat in test scope should be ALLOWED (Waive policy)");
     }
 }
 

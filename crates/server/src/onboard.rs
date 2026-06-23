@@ -21,6 +21,13 @@ pub const AUDIT_RULES: &[&str] = &[
     "SEC-NO-HARDCODED-SECRETS-1",
     "SEC-NO-RAW-SQL-CONCAT-1",
     "ARCH-NO-SECRETS-IN-URL-1",
+    "SEC-NO-PRIVATE-KEY-1",
+    "SEC-NO-VENDOR-TOKEN-1",
+    // SEC-NO-SECRET-FILE-1 is path-based (not content-based). content_match_lines returns
+    // empty for it, so it produces no line-numbered scan finding. It is included here for
+    // completeness (brownfield path-level audit visibility) — its primary home is the gate.
+    "SEC-NO-SECRET-FILE-1",
+    "SEC-NO-DISABLED-TLS-1",
 ];
 
 /// One violation already present in the repo.
@@ -316,270 +323,13 @@ fn severity_for(_rule_id: &str) -> &'static str {
     "critical"
 }
 
-/// Returns `true` when `path` is in a test, fixture, or example context where a
-/// flagged secret/SQL pattern is almost certainly a non-exploitable test value.
-///
-/// Matching rules (all comparisons are case-insensitive):
-/// - Any **path segment** (directory component) equals one of:
-///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `examples`, `benches`
-/// - The **filename** (last segment) matches one of:
-///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
-///
-/// Production paths are unchanged — only test/fixture paths are down-ranked.
-pub fn is_test_or_fixture_path(path: &str) -> bool {
-    use std::path::Path;
-
-    // Normalise to forward-slash components (handles both Unix and Windows paths).
-    let p = Path::new(path);
-    let segments: Vec<String> = p
-        .components()
-        .filter_map(|c| {
-            c.as_os_str().to_str().map(|s| s.to_ascii_lowercase())
-        })
-        .collect();
-
-    // Check every directory segment (all but the last, which is the filename).
-    let dir_segments = if segments.len() > 1 {
-        &segments[..segments.len() - 1]
-    } else {
-        &[][..]
-    };
-    for seg in dir_segments {
-        match seg.as_str() {
-            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "examples" | "benches" => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    // Check the filename against test-file naming conventions.
-    if let Some(filename) = segments.last() {
-        // conftest.py
-        if filename == "conftest.py" {
-            return true;
-        }
-        // test_*.py  (Python unittest convention)
-        if filename.starts_with("test_") && filename.ends_with(".py") {
-            return true;
-        }
-        // *_test.<ext>  (Go / Rust convention: foo_test.go, auth_test.rs)
-        // *.test.<ext>  (JS/TS convention: auth.test.ts)
-        // *.spec.<ext>  (JS/TS convention: auth.spec.ts)
-        //
-        // Strategy: strip the final extension to get the stem, then check whether
-        // the stem ends with "_test", ".test", or ".spec".
-        if let Some(dot_pos) = filename.rfind('.') {
-            let stem = &filename[..dot_pos];
-            if stem.ends_with("_test") || stem.ends_with(".test") || stem.ends_with(".spec") {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// Compute the 1-based inclusive line ranges that are test code in a Rust file.
-/// Returns an empty vec for non-`.rs` files.
-///
-/// Detects `#[cfg(test)]`, `#[test]`, and `#[tokio::test]` attribute lines and
-/// tracks the brace-delimited block that follows, skipping braces inside `//` line
-/// comments, `/* */` block comments, `"..."` string literals, `r#"..."#` raw strings,
-/// and `'{'` char literals. The span from the attribute line to the closing `}` is a
-/// test scope.
-///
-/// # Limitation
-/// Simple brace counter that skips strings/comments. Does not handle all edge cases
-/// (e.g. nested raw strings with mismatched hashes), but correct for the overwhelming
-/// majority of Rust test code.
-pub fn test_scope_line_ranges(path: &str, content: &str) -> Vec<(usize, usize)> {
-    // Only applicable to Rust files.
-    if !path.ends_with(".rs") {
-        return Vec::new();
-    }
-
-    #[derive(Clone, Copy, PartialEq)]
-    enum State {
-        Normal,
-        LineComment,
-        BlockComment,
-        StringLit,
-        RawString(usize), // number of leading hashes
-        CharLit,
-    }
-
-    let mut ranges = Vec::new();
-    let mut state = State::Normal;
-    let mut brace_depth: i32 = 0;
-    // When Some((attr_line, scope_start_depth)), we are inside a test scope that
-    // started at attr_line and whose opening brace raised depth to scope_start_depth.
-    let mut scope: Option<(usize, i32)> = None;
-    // The line of the most-recently-seen test attribute (before the opening brace).
-    let mut pending_attr_line: Option<usize> = None;
-    let mut current_line: usize = 1;
-    let chars: Vec<char> = content.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // Track line numbers.
-        if ch == '\n' {
-            current_line += 1;
-            if state == State::LineComment {
-                state = State::Normal;
-            }
-            i += 1;
-            continue;
-        }
-
-        match state {
-            State::LineComment => {
-                // Already handled newline above; anything else is inside the comment.
-                i += 1;
-                continue;
-            }
-            State::BlockComment => {
-                if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                    state = State::Normal;
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            State::StringLit => {
-                if ch == '\\' {
-                    // Skip escaped character.
-                    i += 2;
-                } else if ch == '"' {
-                    state = State::Normal;
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            State::RawString(hashes) => {
-                // Look for `"` followed by exactly `hashes` `#` chars.
-                if ch == '"' {
-                    let end_hashes = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
-                    if end_hashes >= hashes {
-                        state = State::Normal;
-                        i += 1 + hashes;
-                    } else {
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            State::CharLit => {
-                if ch == '\\' {
-                    i += 2;
-                } else if ch == '\'' {
-                    state = State::Normal;
-                    i += 1;
-                } else {
-                    i += 1;
-                }
-                continue;
-            }
-            State::Normal => {}
-        }
-
-        // --- Normal state ---
-        // Detect transitions OUT of Normal.
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            state = State::LineComment;
-            i += 2;
-            continue;
-        }
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            state = State::BlockComment;
-            i += 2;
-            continue;
-        }
-        if ch == '"' {
-            state = State::StringLit;
-            i += 1;
-            continue;
-        }
-        // Raw string: r#"..."#  (variable hashes)
-        if ch == 'r' {
-            let hash_count = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
-            if i + 1 + hash_count < chars.len() && chars[i + 1 + hash_count] == '"' {
-                state = State::RawString(hash_count);
-                i += 2 + hash_count; // skip r + hashes + opening "
-                continue;
-            }
-        }
-        if ch == '\'' {
-            // Simple char literal `'x'` or `'\n'` — single-char (or escape).
-            // If the next char is `\`, skip escape + closing quote; else skip char + closing quote.
-            if i + 2 < chars.len() && chars[i + 1] == '\\' && i + 3 < chars.len() && chars[i + 3] == '\'' {
-                // '\x'
-                i += 4;
-                continue;
-            }
-            if i + 2 < chars.len() && chars[i + 2] == '\'' {
-                // 'x'
-                i += 3;
-                continue;
-            }
-            // Not a char literal (e.g. lifetime 'a or complex case) — pass through.
-        }
-
-        // Detect test attribute lines (only when not inside a scope).
-        // We look for the attribute prefix at the start of a token on the current line.
-        if scope.is_none() && ch == '#' {
-            // Peek ahead for [cfg(test)], [test], or [tokio::test].
-            let rest: String = chars[i..].iter().take(30).collect();
-            if rest.starts_with("#[cfg(test)]")
-                || rest.starts_with("#[test]")
-                || rest.starts_with("#[tokio::test]")
-            {
-                pending_attr_line = Some(current_line);
-            }
-        }
-
-        // Track brace depth.
-        if ch == '{' {
-            brace_depth += 1;
-            if let Some(attr_line) = pending_attr_line.take() {
-                // The first `{` after a test attribute opens the scope.
-                scope = Some((attr_line, brace_depth));
-            }
-        } else if ch == '}' {
-            if let Some((attr_line, scope_depth)) = scope {
-                if brace_depth == scope_depth {
-                    // Closing brace at the scope's depth — scope ends.
-                    ranges.push((attr_line, current_line));
-                    scope = None;
-                }
-            }
-            brace_depth -= 1;
-        }
-
-        i += 1;
-    }
-
-    ranges
-}
-
-/// Returns `true` if `line` (1-based) falls in any of the given ranges (inclusive on both ends).
-pub fn is_in_test_scope(line: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges.iter().any(|&(start, end)| line >= start && line <= end)
-}
-
-/// The note appended to floor findings whose path is in test/fixture code.
-const TEST_PATH_NOTE: &str =
-    " (in test/fixture code — likely a non-exploitable test value; verify)";
-
-/// The down-ranked severity used for floor findings in test/fixture paths.
-const TEST_PATH_SEVERITY: &str = "low";
+// Test-scope primitives live in camerata-gateway (single source of truth).
+// onboard.rs delegates to them via camerata_gateway::* so the gate and the
+// brownfield audit share exactly one implementation.
+use camerata_gateway::{
+    is_in_test_scope, is_test_or_fixture_path, test_scope_line_ranges, TEST_PATH_NOTE,
+    TEST_PATH_SEVERITY,
+};
 
 /// The gate's description for a rule id, or the id if unknown.
 fn title_for(rule_id: &str) -> String {
@@ -606,7 +356,39 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
     // e.g. a `format!` SQL whose keyword and interpolation are on different lines. Each
     // match is attributed to the line where it starts.
     for rule_id in AUDIT_RULES {
-        for line_no in camerata_gateway::content_match_lines(rule_id, content) {
+        let content_lines = camerata_gateway::content_match_lines(rule_id, content);
+        if content_lines.is_empty() {
+            // Path-based rule: fire the arm with the real path and empty content to
+            // check whether this file's PATH marks it as secret-bearing. A path-based
+            // finding is attributed to line 0 (no line-numbered content match). This is
+            // intentional and documented (SEC-NO-SECRET-FILE-1's primary home is the gate;
+            // the scan entry is informational at the path level).
+            if let Some(arm) = camerata_gateway::lookup_arm(rule_id) {
+                if arm(path, "").is_err() {
+                    let detail = format!(
+                        "{} (path-based: the file path itself marks this as a secret-bearing file)",
+                        title_for(rule_id)
+                    );
+                    findings.push(Finding {
+                        repo: repo.to_string(),
+                        path: path.to_string(),
+                        line: 0,
+                        rule_id: rule_id.to_string(),
+                        severity: severity_for(rule_id).to_string(),
+                        snippet: path.to_string(),
+                        detail,
+                        status: default_status(),
+                        also_matches: Vec::new(),
+                        preview: false,
+                        preview_tool: None,
+                        in_test: false,
+                        needs_review: false,
+                    });
+                }
+            }
+            continue;
+        }
+        for line_no in content_lines {
             let snippet: String = lines
                 .get(line_no.saturating_sub(1))
                 .map(|l| l.trim().chars().take(160).collect())
@@ -2595,11 +2377,14 @@ mod tests {
 
     #[test]
     fn audit_flags_a_hardcoded_secret_with_line_severity_and_repo() {
-        // A GitHub PAT literal is exactly what SEC-NO-HARDCODED-SECRETS-1 denies.
+        // A GitHub PAT literal fires SEC-NO-HARDCODED-SECRETS-1 and SEC-NO-VENDOR-TOKEN-1.
         let content = "let cfg = load();\nconst TOKEN = \"ghp_0123456789012345678901234567890123456\";\nok();";
         let findings = audit_content("me/api", "src/config.rs", content);
-        assert_eq!(findings.len(), 1, "one secret -> one finding: {findings:?}");
-        let f = &findings[0];
+        // The ghp_ token matches both the generic secrets rule and the vendor-token rule.
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("SEC-NO-HARDCODED-SECRETS-1 must fire: {findings:?}");
         assert_eq!(f.repo, "me/api", "finding tagged with its repo");
         assert_eq!(f.line, 2, "finding on the right line");
         assert_eq!(f.rule_id, "SEC-NO-HARDCODED-SECRETS-1");
@@ -2647,7 +2432,13 @@ mod tests {
             .iter()
             .find(|r| r.id == "SEC-NO-HARDCODED-SECRETS-1")
             .unwrap();
-        assert_eq!(secrets.finding_count, findings.len());
+        // finding_count is per-rule (2 ghp_ tokens → 2 SEC-NO-HARDCODED-SECRETS-1 findings);
+        // findings.len() is total across all rules (same tokens also fire SEC-NO-VENDOR-TOKEN-1).
+        let secrets_finding_count = findings
+            .iter()
+            .filter(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .count();
+        assert_eq!(secrets.finding_count, secrets_finding_count);
         assert_eq!(secrets.scope, "repo-local");
         assert_eq!(secrets.enforcement_point, "content");
         assert_eq!(
@@ -2674,7 +2465,8 @@ mod tests {
 
     #[test]
     fn build_report_aggregates_findings_across_repos() {
-        // Two repos: a secret in one, clean in the other -> one finding, tagged.
+        // Two repos: a secret in one, clean in the other. The ghp_ token fires both
+        // SEC-NO-HARDCODED-SECRETS-1 and SEC-NO-VENDOR-TOKEN-1, so we get 2 findings.
         let mut findings = audit_files(
             "me/api",
             &[(
@@ -2696,8 +2488,9 @@ mod tests {
             findings,
         );
         assert_eq!(report.repos.len(), 2);
-        assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].repo, "me/api");
+        // All findings are from the me/api repo (the ghp_ token fires 2 rules).
+        assert!(!report.findings.is_empty());
+        assert!(report.findings.iter().all(|f| f.repo == "me/api"));
         assert!(!report.gated);
     }
 
@@ -3518,10 +3311,16 @@ mod tests {
     fn floor_finding_on_test_path_is_low_with_note() {
         // A GitHub PAT inside a tests/ directory must be down-ranked to "low" and
         // annotated, not critical — it's overwhelmingly a detection-fixture value.
+        // The ghp_ token fires both SEC-NO-HARDCODED-SECRETS-1 and SEC-NO-VENDOR-TOKEN-1;
+        // check the SEC-NO-HARDCODED-SECRETS-1 finding specifically.
         let secret = "const TOKEN = \"ghp_0123456789012345678901234567890123456\";";
         let findings = audit_content("me/api", "tests/auth_test.rs", secret);
-        assert_eq!(findings.len(), 1, "finding still visible: {findings:?}");
-        let f = &findings[0];
+        assert!(!findings.is_empty(), "finding still visible: {findings:?}");
+        // All findings in a test path must be down-ranked.
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("SEC-NO-HARDCODED-SECRETS-1 must fire");
         assert_eq!(
             f.severity, TEST_PATH_SEVERITY,
             "test-path finding must be down-ranked to {TEST_PATH_SEVERITY}"
@@ -3541,10 +3340,14 @@ mod tests {
     #[test]
     fn floor_finding_on_production_path_stays_critical() {
         // The SAME secret on a production path must remain critical — no down-rank.
+        // The ghp_ token fires both SEC-NO-HARDCODED-SECRETS-1 and SEC-NO-VENDOR-TOKEN-1.
         let secret = "const TOKEN = \"ghp_0123456789012345678901234567890123456\";";
         let findings = audit_content("me/api", "src/config.rs", secret);
-        assert_eq!(findings.len(), 1, "finding still visible: {findings:?}");
-        let f = &findings[0];
+        assert!(!findings.is_empty(), "finding still visible: {findings:?}");
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("SEC-NO-HARDCODED-SECRETS-1 must fire");
         assert_eq!(
             f.severity, "critical",
             "production-path finding must stay critical"

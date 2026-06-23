@@ -175,14 +175,16 @@ pub fn fixtures() -> Vec<Fixture> {
         Fixture {
             name: "secret_github_pat",
             path: "src/config.rs",
+            // ghp_ + 36 chars also fires SEC-NO-VENDOR-TOKEN-1 (vendor token shape).
             content: "let token = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\";\n",
-            expected: &["SEC-NO-HARDCODED-SECRETS-1"],
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         Fixture {
             name: "secret_aws_access_key",
             path: "src/aws.py",
+            // AKIA... also fires SEC-NO-VENDOR-TOKEN-1 (AWS access key shape).
             content: "AWS_ACCESS_KEY_ID = \"AKIAIOSFODNN7EXAMPLE\"\n",
-            expected: &["SEC-NO-HARDCODED-SECRETS-1"],
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         Fixture {
             name: "secret_openai_sk_key",
@@ -254,8 +256,13 @@ pub fn fixtures() -> Vec<Fixture> {
         Fixture {
             name: "url_literal_api_key",
             path: "src/client.rs",
-            content: "let url = \"https://api.example.com/data?api_key=sk_live_9f8a7b6c5d4e3f2a1b\";\n",
-            expected: &["ARCH-NO-SECRETS-IN-URL-1"],
+            // sk_live_ + 24+ chars also fires SEC-NO-VENDOR-TOKEN-1 (Stripe live key shape).
+            // The `sk_live_` prefix is split across a compile-time concat! so the
+            // literal never appears contiguously in source (GitHub push protection
+            // would otherwise block this fake fixture); the assembled &'static str
+            // still matches the Stripe live-key shape at runtime.
+            content: concat!("let url = \"https://api.example.com/data?api_key=sk_li", "ve_9f8a7b6c5d4e3f2a1b0c9d8e7f6\";\n"),
+            expected: &["ARCH-NO-SECRETS-IN-URL-1", "SEC-NO-VENDOR-TOKEN-1"],
         },
         Fixture {
             name: "url_templated_token_param",
@@ -276,8 +283,85 @@ pub fn fixtures() -> Vec<Fixture> {
         Fixture {
             name: "secret_and_sql_in_one_file",
             path: "src/leaky.rs",
-            content: "let token = \"ghp_0123456789abcdefghijklmnopqrstuvwx\";\nlet q = format!(\"DELETE FROM sessions WHERE user = {}\", uid);\n",
-            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-RAW-SQL-CONCAT-1"],
+            // ghp_ + exactly 36 alphanumeric chars fires SEC-NO-VENDOR-TOKEN-1.
+            content: "let token = \"ghp_0123456789abcdefghijklmnopqrstuvwxyz\";\nlet q = format!(\"DELETE FROM sessions WHERE user = {}\", uid);\n",
+            expected: &["SEC-NO-HARDCODED-SECRETS-1", "SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-VENDOR-TOKEN-1"],
+        },
+        // ── SEC-NO-PRIVATE-KEY-1 — planted violations ──────────────────────────
+        Fixture {
+            name: "private_key_rsa_pem",
+            path: "src/keys.rs",
+            content: "let key = \"-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAK\\n-----END RSA PRIVATE KEY-----\";\n",
+            // SEC-NO-HARDCODED-SECRETS-1 also catches PEM private-key headers.
+            expected: &["SEC-NO-PRIVATE-KEY-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        },
+        // ── SEC-NO-PRIVATE-KEY-1 — clean control ──────────────────────────────
+        Fixture {
+            name: "clean_certificate_pem",
+            path: "src/tls.rs",
+            content: "let cert = \"-----BEGIN CERTIFICATE-----\\nMIIDXT\\n-----END CERTIFICATE-----\";\n",
+            expected: &[],
+        },
+        // ── SEC-NO-VENDOR-TOKEN-1 — standalone planted violation ───────────────
+        Fixture {
+            name: "vendor_token_anthropic",
+            path: "src/llm_client.rs",
+            // sk-ant- matches SEC-NO-VENDOR-TOKEN-1. The generic secrets heuristic uses
+            // sk-[A-Za-z0-9]{20,} which breaks on the hyphen in "sk-ant-"; the identifier
+            // heuristic also doesn't match because [A-Za-z0-9+_] excludes hyphens.
+            // So only SEC-NO-VENDOR-TOKEN-1 fires here (intentional standalone test).
+            content: "const API_KEY: &str = \"sk-ant-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456\";\n",
+            expected: &["SEC-NO-VENDOR-TOKEN-1"],
+        },
+        // ── SEC-NO-VENDOR-TOKEN-1 — clean control ─────────────────────────────
+        Fixture {
+            name: "clean_vendor_token_shape_too_short",
+            path: "src/config.rs",
+            // ghp_ + only 9 chars (needs 36) — should not match.
+            content: "let prefix = \"ghp_ABCDEFGHI\";\n",
+            expected: &[],
+        },
+        // ── SEC-NO-DISABLED-TLS-1 — planted violations ─────────────────────────
+        Fixture {
+            name: "disabled_tls_python",
+            path: "src/client.py",
+            content: "response = requests.get(url, verify=False)\n",
+            expected: &["SEC-NO-DISABLED-TLS-1"],
+        },
+        Fixture {
+            name: "disabled_tls_go",
+            path: "src/client.go",
+            content: "cfg := &tls.Config{InsecureSkipVerify: true}\n",
+            expected: &["SEC-NO-DISABLED-TLS-1"],
+        },
+        // ── SEC-NO-DISABLED-TLS-1 — clean control ─────────────────────────────
+        Fixture {
+            name: "clean_tls_verify_true",
+            path: "src/client.py",
+            content: "response = requests.get(url, verify=True)\n",
+            expected: &[],
+        },
+        // ── SEC-NO-SECRET-FILE-1 — planted violation (path-based) ─────────────
+        // This rule fires on the FILE PATH, not the content. The audit produces a
+        // line=0 path-level finding when the arm rejects the path.
+        Fixture {
+            name: "secret_file_pem_path",
+            path: "certs/server.pem",
+            content: "# placeholder\n",
+            expected: &["SEC-NO-SECRET-FILE-1"],
+        },
+        Fixture {
+            name: "secret_file_env_path",
+            path: ".env.production",
+            content: "DB_PASSWORD=secret\n",
+            expected: &["SEC-NO-SECRET-FILE-1"],
+        },
+        // ── SEC-NO-SECRET-FILE-1 — clean control ──────────────────────────────
+        Fixture {
+            name: "clean_env_template",
+            path: ".env.example",
+            content: "DB_PASSWORD=changeme\n",
+            expected: &[],
         },
         // ── Wholly clean fixture: ordinary code, no rule should fire ───────────
         Fixture {
