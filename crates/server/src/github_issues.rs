@@ -338,6 +338,112 @@ pub async fn get_assignees(repo: &str, token: &str) -> anyhow::Result<Vec<String
     parse_assignees(&resp.body)
 }
 
+/// Normalize a user-supplied parent issue identifier to a bare number string.
+/// Accepts `"42"` and `"#42"` (strips the leading `#`). Returns `None` when the
+/// result is empty or non-numeric. Pure (no I/O), so it is unit-testable.
+pub fn normalize_parent_number(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_start_matches('#');
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+/// Minimal raw shape read from a GitHub create-issue response. We need both the
+/// `html_url` (already used upstream) and the node-level `id` (the large integer
+/// database id, distinct from the per-repo `number`) required by the sub-issue API.
+#[derive(Debug, Deserialize)]
+struct RawCreatedIssue {
+    html_url: String,
+    /// GitHub's internal database id for the issue (a large u64, e.g. 2847112345).
+    /// Required by the sub-issue endpoint as `sub_issue_id`.
+    id: u64,
+}
+
+/// Create a GitHub issue and return BOTH the `html_url` AND the GitHub database id
+/// (`id`, the large integer used by the sub-issue API). Identical to
+/// `crate::onboard::create_issue` except the response carries both fields.
+pub async fn create_issue_returning_id(
+    owner: &str,
+    repo: &str,
+    token: &str,
+    title: &str,
+    body: &str,
+) -> anyhow::Result<(String, u64)> {
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues");
+    let payload = serde_json::to_string(&serde_json::json!({
+        "title": title,
+        "body": body,
+    }))?;
+    let resp = transport.post(&url, &payload).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub create issue: HTTP {} {}", resp.status, resp.body);
+    }
+    let raw: RawCreatedIssue = serde_json::from_str(&resp.body)
+        .map_err(|e| anyhow::anyhow!("parse create-issue response: {e}"))?;
+    Ok((raw.html_url, raw.id))
+}
+
+/// Fetch the GitHub database id (`id`) for an issue identified by its per-repo
+/// number. Used to resolve the parent issue's id before creating a sub-issue link.
+/// Returns an error when the HTTP call fails or the issue is actually a PR.
+pub async fn fetch_issue_db_id(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    token: &str,
+) -> anyhow::Result<u64> {
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
+    let resp = transport.get(&url).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub fetch issue #{number}: HTTP {}", resp.status);
+    }
+    #[derive(Deserialize)]
+    struct IdOnly {
+        id: u64,
+        #[serde(default)]
+        pull_request: Option<serde_json::Value>,
+    }
+    let raw: IdOnly = serde_json::from_str(&resp.body)
+        .map_err(|e| anyhow::anyhow!("parse issue #{number} response: {e}"))?;
+    if raw.pull_request.is_some() {
+        anyhow::bail!("issue #{number} is a pull request, not an issue");
+    }
+    Ok(raw.id)
+}
+
+/// Create a native GitHub sub-issue link: makes `child_issue_id` a sub-issue of
+/// `parent_number`. `child_issue_id` is the large database id (returned by
+/// `create_issue_returning_id`); `parent_number` is the per-repo issue number.
+///
+/// Endpoint: `POST /repos/{owner}/{repo}/issues/{parent_number}/sub_issues`
+/// with body `{ "sub_issue_id": <child_db_id> }`.
+///
+/// Returns the raw response body on success so callers can log it. The caller is
+/// responsible for fail-soft handling (not propagating errors to the publish response).
+pub async fn link_sub_issue(
+    owner: &str,
+    repo: &str,
+    parent_number: u64,
+    child_issue_id: u64,
+    token: &str,
+) -> anyhow::Result<()> {
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url =
+        format!("https://api.github.com/repos/{owner}/{repo}/issues/{parent_number}/sub_issues");
+    let payload = serde_json::to_string(&serde_json::json!({ "sub_issue_id": child_issue_id }))?;
+    let resp = transport.post(&url, &payload).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!(
+            "GitHub link sub-issue (parent #{parent_number}, child id {child_issue_id}): HTTP {}",
+            resp.status
+        );
+    }
+    Ok(())
+}
+
 /// Build a `CanonicalStory` from an adopted GitHub issue. The canonical id is
 /// namespaced by repo (`<owner>/<repo>#<number>`) so adopting issue #20 from two
 /// different repos produces two distinct spine rows instead of colliding on the

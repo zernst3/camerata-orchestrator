@@ -3547,12 +3547,17 @@ struct AuthoringUowView {
     work_item: Option<String>,
 }
 
-/// Create a blank draft UoW to author a story (`POST /api/uow/blank`). Returns the new
-/// draft id on success.
-async fn create_blank_uow() -> Option<String> {
+/// Create a blank draft UoW to author a story (`POST /api/uow/blank`). When
+/// `parent_id` is `Some` and non-empty, it is sent as the `parent_id` field so the
+/// server can create a native GitHub sub-issue link at publish time. An empty string
+/// or `None` both produce `{ "parent_id": null }` (no parent). Returns the new draft
+/// id on success.
+async fn create_blank_uow(parent_id: Option<String>) -> Option<String> {
+    // Normalize empty → None so the server receives null (not "").
+    let pid = parent_id.filter(|s| !s.trim().is_empty());
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/uow/blank", crate::BFF_URL))
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({ "parent_id": pid }))
         .send()
         .await
         .ok()?
@@ -5494,40 +5499,68 @@ fn CreateOrOpenUow(
 /// The "New Unit of Work — author a story" action in the left nav. Creates a blank draft
 /// UoW (`POST /api/uow/blank`) and selects it so the authoring panel opens. The inverse of
 /// "create from issue": author the story first, then publish it to the board.
+///
+/// An optional "Parent ID" text input allows the architect to set a parent GitHub issue
+/// number (e.g. "42" or "#42"). When set, the draft UoW carries it through to publish
+/// time, where a native GitHub sub-issue link is created. Empty → no parent.
 #[component]
 fn NewAuthoredUowButton(uows_refresh: Signal<u32>, sel: Signal<GovDevSel>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut working = use_signal(|| false);
+    // The parent issue number typed by the architect before hitting "New Unit of Work".
+    let mut parent_id = use_signal(String::new);
     rsx! {
-        button {
-            class: "govdev-nav-top",
-            disabled: working(),
-            onclick: move |_| {
-                let mut sel = sel;
-                let mut uows_refresh = uows_refresh;
-                let toasts = toasts;
-                working.set(true);
-                spawn(async move {
-                    match create_blank_uow().await {
-                        Some(id) => {
-                            uows_refresh += 1;
-                            sel.set(GovDevSel::Uow(id));
-                        }
-                        None => {
-                            crate::toast::push_toast(
-                                toasts,
-                                crate::toast::ToastKind::Warning,
-                                "Could not create a new draft Unit of Work.".to_string(),
-                            );
-                        }
-                    }
-                    working.set(false);
-                });
-            },
-            span { class: "govdev-nav-top-title",
-                if working() { "Creating…" } else { "\u{2728} New Unit of Work — author a story" }
+        div { class: "govdev-new-uow-area",
+            // Parent ID input: optional, sits just above the action button.
+            div { class: "govdev-parent-id-row",
+                label {
+                    r#for: "new-uow-parent-id",
+                    class: "govdev-parent-id-label",
+                    "Parent ID (optional)"
+                }
+                input {
+                    id: "new-uow-parent-id",
+                    class: "govdev-parent-id-input",
+                    r#type: "text",
+                    placeholder: "e.g. 42 or #42",
+                    disabled: working(),
+                    value: "{parent_id}",
+                    oninput: move |e| parent_id.set(e.value()),
+                }
             }
-            span { class: "govdev-nav-top-sub", "Draft a story with AI · push to the board" }
+            button {
+                class: "govdev-nav-top",
+                disabled: working(),
+                onclick: move |_| {
+                    let mut sel = sel;
+                    let mut uows_refresh = uows_refresh;
+                    let toasts = toasts;
+                    // Capture the current parent_id value before entering the async block.
+                    let pid_val = parent_id().trim().to_string();
+                    let pid = if pid_val.is_empty() { None } else { Some(pid_val) };
+                    working.set(true);
+                    spawn(async move {
+                        match create_blank_uow(pid).await {
+                            Some(id) => {
+                                uows_refresh += 1;
+                                sel.set(GovDevSel::Uow(id));
+                            }
+                            None => {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not create a new draft Unit of Work.".to_string(),
+                                );
+                            }
+                        }
+                        working.set(false);
+                    });
+                },
+                span { class: "govdev-nav-top-title",
+                    if working() { "Creating…" } else { "\u{2728} New Unit of Work — author a story" }
+                }
+                span { class: "govdev-nav-top-sub", "Draft a story with AI · push to the board" }
+            }
         }
     }
 }

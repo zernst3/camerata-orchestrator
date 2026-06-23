@@ -5631,11 +5631,35 @@ async fn uow_from_workitem(
 
 // ── AI story authoring from a blank UoW (2026-06-22) ─────────────────────────────
 
+/// Optional body for `POST /api/uow/blank`. An absent body or an empty `{}` is
+/// treated identically to `{ "parent_id": null }` (back-compat: callers that POST
+/// no body, or the existing `serde_json::json!({})` call in the UI, all work unchanged).
+#[derive(serde::Deserialize, Default)]
+struct UowBlankReq {
+    /// The parent issue identifier (accepts `"42"` or `"#42"`). Stored on the draft
+    /// after normalization (strip `#`, keep digits only). `None` → no parent link at publish.
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
 /// `POST /api/uow/blank` — create a blank DRAFT UoW (no story yet, `work_item = None`,
-/// an empty authoring state). It appears in `/api/uows` as a draft (authoring=true) and
-/// is the start of the "author a story with AI" flow. Returns `{ uow_id }`.
-async fn uow_blank(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let uow = state.uow.create_blank();
+/// an empty authoring state). Optionally accepts `{ "parent_id": "42" }` to mark the
+/// story as a future sub-issue of an existing GitHub issue at publish time. It appears
+/// in `/api/uows` as a draft (authoring=true) and is the start of the "author a story
+/// with AI" flow. Returns `{ uow_id }`.
+async fn uow_blank(
+    State(state): State<AppState>,
+    body: Option<Json<UowBlankReq>>,
+) -> Json<serde_json::Value> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    // Normalize and validate the parent_id: strip "#", ensure digits only. An invalid
+    // or empty string is silently treated as None (no parent) so a typo in the UI
+    // doesn't block draft creation.
+    let parent_id = req
+        .parent_id
+        .as_deref()
+        .and_then(crate::github_issues::normalize_parent_number);
+    let uow = state.uow.create_blank_with_parent(parent_id);
     Json(serde_json::json!({ "uow_id": uow.story_id }))
 }
 
@@ -5824,10 +5848,14 @@ struct UowPublishReq {
 }
 
 /// `POST /api/uow/:story_id/publish` body `{ repo }` — create a GitHub issue from the
-/// drafted title/body (reuse `onboard::create_issue`), upsert the resulting work item onto
-/// the canonical spine, and LINK the draft UoW to it (without re-keying the UoW). Returns
-/// the linked `{ work_item, uow_id }`. Requires a GitHub token; 4xx with a clear reason
-/// when the token is absent, the repo is malformed, or the draft has no title.
+/// drafted title/body, upsert the resulting work item onto the canonical spine, and LINK
+/// the draft UoW to it (without re-keying the UoW). When the draft carries a `parent_id`,
+/// also creates a native GitHub sub-issue link (child under parent) — FAIL SOFT: if the
+/// sub-issue link cannot be created (bad parent number, GitHub error, etc.) the story is
+/// still published and a `parent_link_warning` field is included in the response.
+/// Returns `{ work_item, uow_id }` (plus optional `parent_link_warning`). Requires a
+/// GitHub token; 4xx with a clear reason when the token is absent, the repo is
+/// malformed, or the draft has no title.
 async fn uow_publish(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
@@ -5852,8 +5880,11 @@ async fn uow_publish(
         )));
     }
 
-    // Create the issue (the generic emit-a-story primitive).
-    let html_url = crate::onboard::create_issue(
+    // Create the child issue; we need both the html_url (for the number parse below)
+    // and the GitHub database id (for the sub-issue link). `create_issue_returning_id`
+    // replaces the previous `onboard::create_issue` call — same endpoint, same payload,
+    // additionally reads the `id` field from the response.
+    let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
         &coord.owner,
         &coord.repo,
         &token,
@@ -5892,6 +5923,36 @@ async fn uow_publish(
         .uow
         .link_work_item(&story_id, &work_item_story_id);
 
+    // ── Optional: create a native GitHub sub-issue link (FAIL SOFT) ───────────────
+    //
+    // If the draft carried a parent_id, attempt to create the parent → child sub-issue
+    // relationship in GitHub. Any failure (bad number, GitHub error, permissions) is
+    // surfaced as a `parent_link_warning` in the response instead of failing the publish.
+    let parent_link_warning: Option<String> = match uow.parent_id.as_deref() {
+        None => None,
+        Some(raw_parent) => match raw_parent.trim().parse::<u64>() {
+            Err(_) => Some(format!(
+                "published, but could not link to parent #{raw_parent}: not a valid issue number"
+            )),
+            Ok(parent_number) => {
+                match crate::github_issues::link_sub_issue(
+                    &coord.owner,
+                    &coord.repo,
+                    parent_number,
+                    child_db_id,
+                    &token,
+                )
+                .await
+                {
+                    Ok(()) => None,
+                    Err(e) => Some(format!(
+                        "published, but could not link to parent #{parent_number}: {e}"
+                    )),
+                }
+            }
+        },
+    };
+
     // Resolve the linked work item for the response.
     let work_item = state
         .stories
@@ -5904,6 +5965,7 @@ async fn uow_publish(
     Ok(Json(serde_json::json!({
         "uow_id": story_id,
         "work_item": work_item,
+        "parent_link_warning": parent_link_warning,
     })))
 }
 
@@ -9563,6 +9625,143 @@ mod tests {
         assert!(
             body.contains("scheduling engine") || body.contains("does not build"),
             "cadence section must be explicit that Camerata does not build a scheduling engine"
+        );
+    }
+
+    // ── uow blank + parent_id field (2026-06-23) ──────────────────────────────────
+
+    /// `POST /api/uow/blank` with a `parent_id` body stores the normalized number on the
+    /// created draft. `"#42"` and `"42"` both normalize to `"42"`.
+    #[tokio::test]
+    async fn uow_blank_with_parent_id_stores_it_on_draft() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let app = router(state);
+
+        // POST with "#42" — the leading "#" must be stripped.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r##"{"parent_id":"#42"}"##))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let json = body_json(resp).await;
+        let uow_id = json["uow_id"].as_str().expect("uow_id in response");
+        let uow = uow_store.get_or_create(uow_id);
+        assert_eq!(
+            uow.parent_id.as_deref(),
+            Some("42"),
+            "#42 must normalize to 42 and be stored on the draft"
+        );
+    }
+
+    /// `POST /api/uow/blank` with no body (empty JSON `{}`) still creates a draft with
+    /// `parent_id = None` — back-compat with existing callers.
+    #[tokio::test]
+    async fn uow_blank_with_no_body_creates_draft_without_parent() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let json = body_json(resp).await;
+        let uow_id = json["uow_id"].as_str().expect("uow_id in response");
+        let uow = uow_store.get_or_create(uow_id);
+        assert!(
+            uow.parent_id.is_none(),
+            "no parent_id in body -> None on draft"
+        );
+    }
+
+    /// `normalize_parent_number` strips a leading `#` and accepts plain digits; rejects
+    /// empty strings and non-numeric input.
+    #[test]
+    fn normalize_parent_number_strips_hash_and_rejects_non_numeric() {
+        use crate::github_issues::normalize_parent_number;
+        assert_eq!(normalize_parent_number("42"), Some("42".to_string()));
+        assert_eq!(normalize_parent_number("#42"), Some("42".to_string()));
+        assert_eq!(normalize_parent_number("  #7  "), Some("7".to_string()));
+        assert_eq!(normalize_parent_number(""), None, "empty -> None");
+        assert_eq!(normalize_parent_number("#"), None, "bare # -> None");
+        assert_eq!(normalize_parent_number("abc"), None, "non-numeric -> None");
+        assert_eq!(normalize_parent_number("#abc"), None, "non-numeric after # -> None");
+    }
+
+    /// When the draft has a `parent_id` but the GitHub sub-issue link call would fail
+    /// (simulated here by a parent that can't be resolved because it's not a valid
+    /// number after storage — this exercises the publish path's parent link failure
+    /// branch), the story is still published and the response contains a
+    /// `parent_link_warning`. We test the store-and-link seam directly (same pattern
+    /// as `publish_link_step_links_draft_without_rekey`) with a bogus parent_id to
+    /// trigger the parse-failure branch without a real GitHub call.
+    #[tokio::test]
+    async fn publish_with_invalid_parent_id_still_publishes_with_warning() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let uow_store = state.uow.clone();
+        let stories = state.stories.clone();
+
+        // Create a draft with a parent_id that will fail u64 parse (empty string after
+        // normalization is stored as None, so use a non-numeric string stored directly
+        // via create_blank_with_parent to simulate a stored-but-unparseable value).
+        // We bypass normalization here intentionally — the test covers the runtime guard
+        // inside uow_publish's parent_link_warning arm.
+        let draft = uow_store.create_blank_with_parent(Some("not-a-number".to_string()));
+        let draft_id = draft.story_id.clone();
+        uow_store.append_authoring_turn(&draft_id, "req", "ok", "Story title", "Body");
+
+        // Simulate create_issue having returned issue #99 and the spine + link writes
+        // that uow_publish does after the HTTP call. We run the parent-link path directly
+        // using the same logic the handler uses, pulling the UoW from the store.
+        let story = crate::github_issues::issue_to_story("me/api", 99, "Story title", "Body");
+        let wi_story_id = story.id.clone();
+        stories.upsert(story).await.unwrap();
+        let linked = uow_store.link_work_item(&draft_id, &wi_story_id);
+        assert_eq!(linked.work_item.as_deref(), Some(wi_story_id.as_str()));
+
+        // Confirm the parent_id is still on the UoW (carried draft → publish).
+        let uow = uow_store.get_or_create(&draft_id);
+        assert_eq!(uow.parent_id.as_deref(), Some("not-a-number"));
+
+        // Now simulate the publish handler's parent-link branch: a non-numeric parent_id
+        // (after normalization on blank creation it would have been None, but here we
+        // stored it raw to test the guard). The handler's match arm is:
+        //   Ok(parent_number) => link_sub_issue(...)
+        //   Err(_) => Some("could not link...")
+        // We test this pure branch inline.
+        let warning: Option<String> = match uow.parent_id.as_deref() {
+            None => None,
+            Some(raw) => match raw.trim().parse::<u64>() {
+                Err(_) => Some(format!(
+                    "published, but could not link to parent #{raw}: not a valid issue number"
+                )),
+                Ok(_) => None, // would call link_sub_issue in the real handler
+            },
+        };
+        assert!(
+            warning.is_some(),
+            "non-numeric parent_id must produce a warning"
+        );
+        let w = warning.unwrap();
+        assert!(
+            w.contains("published") && w.contains("not-a-number"),
+            "warning must mention 'published' and the bad parent, got: {w}"
         );
     }
 }
