@@ -4,20 +4,28 @@ This is the "I have a repo new to Camerata — where do I start, and how do I ta
 the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status (updated 2026-06-22): the brownfield **onboarding flow is built and live** — per-repo
+> Status (updated 2026-06-23): the brownfield **onboarding flow is built and live** — per-repo
 > stack detection + rule selection, **custom rules** (per-repo + project-global), an optional code
 > audit you can scope with a **scan-type selector** (AI review and/or deterministic scans), four scan
 > modes, an opt-in **thorough-calibration** consensus pass, a **scan-time deterministic preview** that
 > runs your selected mechanical linters during the scan, a three-table finding triage, and an **Apply**
 > step that writes governance onto a local branch and pushes it (no PR until you ask). Two opt-in
-> **CI/CD security rules** (Semgrep, CodeQL) are available but never auto-recommended. Re-onboarding an
-> already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos resolve to
-> **local folders** with a health check, and onboarding state **auto-saves**. Governed Development adds
-> a project-settings **gear popup**, **blank UoWs you author with AI**, an **AI-assisted Update-branch**
-> control, a work-item modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap
-> bypass** for installing tooling, and a one-click **Gate self-check** (go/no-go) that proves the
-> deny-before-execute floor + bounce-and-revise loop are wired. The two things you connect are a
-> **GitHub token** and **Claude** (the `claude` CLI).
+> **CI/CD security rules** (Semgrep, CodeQL) are available but **never auto-recommended or pre-checked**.
+> Re-onboarding an already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos
+> resolve to **local folders** with a health check, and onboarding state **auto-saves**. Governed
+> Development adds a project-settings **gear popup** (loop guard + tier-map + per-project step-model
+> config), **blank UoWs you author with AI**, an **AI-assisted Update-branch** control, a work-item
+> modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap bypass** for installing
+> tooling, a one-click **Gate self-check** (go/no-go), **multiple concurrent UoWs** (each runs in its
+> own isolated git worktree), **PR lifecycle buttons** per UoW (push, open PR, pull PR info, resolve
+> with agent), and **structured clarifications** that auto-save at pause points. Scan findings now
+> include a **Test badge** for test-scope violations, a separate **Scan coverage** section (tools that
+> didn't run), and scan tools (Semgrep/ESLint) **auto-install on first use**. The in-app assistant
+> retains **conversation context** across messages and is grounded on your active project and pulled
+> issues. A persistent **token usage meter** tracks 5-hour and session-wide spend. The **check
+> manifest** (`.camerata/checks.toml`) is the single source of truth for custom deterministic gates:
+> one entry wires a check into BOTH the in-loop dev gate and the generated CI workflow. The two things
+> you connect are a **GitHub token** and **Claude** (the `claude` CLI).
 
 ---
 
@@ -72,7 +80,7 @@ Repository Workspace · Docs**.
 - **Governed Development** — the work control surface: pull work items from a tracker (or author a new
   story from a blank UoW with AI), create a Unit of Work (UoW) from one, then run governed development
   on it with the human↔AI clarify loop, comment back, and sign off (§6). A project-settings **gear
-  popup** at the top holds the loop guard + default tier-map.
+  popup** at the top holds the loop guard + default tier-map + per-step model config.
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
 - **Routines** — schedule governed runs.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
@@ -109,9 +117,16 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    are also per repo** — adopting an alternative for a rule while viewing one repo does not change
    another repo's choice. A recommended rule that still needs an alternative chosen is **highlighted
    amber and blocks Audit / Add-rules** until you pick one (or deselect it).
+
+   **Opt-in CI security rules are never pre-checked.** The two security-scan rules
+   (`CICD-SEMGREP-SECURITY-SCAN-1`, `CICD-CODEQL-SECURITY-SCAN-1`) appear in the list as
+   **"Available"** (no recommended badge, no pre-checked checkbox). You opt in deliberately. See §3
+   step 6 for details.
+
 4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
    is scanned only against **its own selected rules** plus the always-on **deterministic security
-   floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs — ranked Critical, free +
+   floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs, private-key blocks, vendor
+   credential tokens, secret-bearing file paths, TLS verification disabled — ranked Critical, free +
    instant).
 
    **Scan-type selector — what to run.** At audit-start two checkboxes decide which passes run, both
@@ -129,10 +144,11 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 
    **Three kinds of finding, and the difference matters:**
    - **Deterministic floor** (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`,
-     `ARCH-NO-SECRETS-IN-URL-1`) — pure regex/logic, no LLM. **Repeatable** (same code → same result,
-     same rule-id, same line), and these are the exact checks the layer-1 gate enforces on new writes.
-     Treat their rule-ids as **stable/canonical**. In the triage table they carry a green
-     **"Rule · enforced"** badge.
+     `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`,
+     `SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`) — pure regex/logic, no LLM. **Repeatable**
+     (same code → same result, same rule-id, same line), and these are the exact checks the layer-1
+     gate enforces on new writes. Treat their rule-ids as **stable/canonical**. In the triage table
+     they carry a green **"Rule · enforced"** badge.
    - **Deterministic preview** — findings from the **scan-time preview** (below): your selected
      mechanical rules' own linters, run by Camerata during the scan. **Deterministic** (stable
      tool rule-ids) but **advisory** — they are **not enforced until the CI story wires them**. They
@@ -146,6 +162,26 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
 
    The triage table's **Authority** column shows these three tiers and is **filterable** (enforced /
    preview / advisory); the CSV export carries the `preview` / `preview_tool` columns.
+
+   **Test badge and Needs-review state.** Two extra flags appear in the finding table:
+   - **Test badge** (yellow) — the finding is in test code (a test file path, or a line inside a
+     `#[cfg(test)]` block). Test-scope violations are down-ranked to low severity. The nuance: a real
+     secret in production code in the same file stays Critical even if the file also contains a test
+     block — classification is per-finding-by-line, not per-file.
+   - **Needs review** (orange) — the calibration pass flagged this finding as uncertain; read the
+     reason and decide yourself.
+
+   **Scan coverage section.** Below the violations table, a separate **"Scan coverage"** section
+   lists tools that didn't run (missing binary, unrouted rule, etc.) as informational notes. These
+   are **not violations** — they tell you where coverage has a gap, so you know what the scan did
+   and didn't check.
+
+   **Scan tools auto-install on first use.** Camerata auto-provisions Semgrep and ESLint into its
+   own cache directory (`~/Library/Application Support/camerata/tooling/` on macOS;
+   `~/.local/share/camerata/tooling/` on Linux) the first time a scan needs them. The bundled
+   Semgrep ruleset runs fully offline after the one-time install. If `python3` or `npm` is not on
+   your PATH, Camerata degrades gracefully — you get a coverage note explaining the gap, and the
+   rest of the scan continues unaffected.
 
    Pick the **model** and the **scan mode** (four options; Camerata auto-selects a recommended one by
    the codebase's size):
@@ -172,12 +208,13 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    findings either way — it only re-ranks and flags.
    Findings land in three tables you switch between: **Unresolved · Ignored · Tech debt** — select and
    **Ignore (with reason)** or **Save as tech debt**, re-bucket freely. A **Needs-review** column shows
-   the calibration pass's flag + reason. In the Tech-debt table mark items **resolve later** or
-   **resolve now**, then **Process**: ignores become baseline waivers, and **every tech-debt item is
-   filed as a GitHub issue** (the story). Resolve-now issues are titled for pickup by the dev engine
-   (the actual dev work is Pillar 2; onboarding only *writes the story*). There is no separate "fix the
-   findings" button — fixing a finding is just its resolve-now story flowing into the dev layer.
-   Triage/Process is **not required** to finish onboarding.
+   the calibration pass's flag + reason (and the Test badge for test-scope findings). In the Tech-debt
+   table mark items **resolve later** or **resolve now**, then **Process**: ignores become baseline
+   waivers, and **every tech-debt item is filed as a GitHub issue** (the story). Resolve-now issues
+   are titled for pickup by the dev engine (the actual dev work is Pillar 2; onboarding only *writes
+   the story*). There is no separate "fix the findings" button — fixing a finding is just its
+   resolve-now story flowing into the dev layer. Triage/Process is **not required** to finish
+   onboarding.
 
    **Scan-time deterministic preview.** For each **mechanical** rule you selected that maps to a tool
    Camerata can drive (clippy, ruff, eslint, semgrep), the deterministic scan **runs that tool itself**
@@ -186,18 +223,20 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    not enforcement**: it uses Camerata's tool version (which may differ from what the repo eventually
    pins), and the CI story still has to wire the rule for the gate to block on it. Honest stance: a
    missing tool, an unparseable result, or a linter Camerata doesn't drive end-to-end
-   (golangci-lint, rubocop, Checkstyle, Roslyn, …) yields a benign note ("could not preview X —
-   enforces once wired"), never a false clean. Mechanical rules **stay out of the AI/LLM review** — a
-   deterministic tool runs them instead, which saves tokens.
+   (golangci-lint, rubocop, Checkstyle, Roslyn, …) yields a note in the **Scan coverage** section,
+   never a false clean. Mechanical rules **stay out of the AI/LLM review** — a deterministic tool
+   runs them instead, which saves tokens. **Architectural rules are never attempted in the preview**;
+   they need a bespoke checker and are covered by the AI review instead.
 
-   **Excluded from the preview by design:** **CodeQL** and the **paid cloud tiers** (`layer3_only` — too
-   heavy a whole-program build to run locally) never preview; they are CI-story-only (step 6). The scan
-   header still shows how many rules were excluded from the AI scan for being mechanical.
+   **Excluded from the preview by design:** **CodeQL** and the **paid cloud tiers** (`layer3_only` —
+   too heavy a whole-program build to run locally) never preview; they are CI-story-only (step 6).
+   The scan header still shows how many rules were excluded from the AI scan for being mechanical.
 
-   **Deterministic-scan progress.** A **"Deterministic scan" progress indicator** renders **above the AI
-   agent-activity drawer**, with an overall done/total bar plus a per-tool row (the floor and each
-   preview linter: starting → running → done, with a findings count). It's the primary progress view in
-   deterministic-only mode, where the AI drawer is empty.
+   **Deterministic-scan progress.** A **"Deterministic scan" progress indicator** renders **above the
+   AI agent-activity drawer**, with an overall done/total bar plus a per-tool row (the floor and each
+   preview linter: starting → running → done, with a findings count). It's the primary progress view
+   in deterministic-only mode, where the AI drawer is empty.
+
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
@@ -206,41 +245,43 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    Camerata-managed and regenerated each run (force-pushed), so re-applying is safe. Edit the working
    copy freely, then click **Open governance PR** (a separate, optional button) when ready —
    **Camerata never opens a PR automatically.** **Applying marks the repo onboarded.**
-6. **Add CI-enforced rules** — the final step files **two GitHub-issue stories** per repo, one per
-   deterministic CI-tier track:
+
+6. **Wire CI rules (two separate stories)** — the final step files **two GitHub-issue stories** per
+   repo, one per CI enforcement tier:
    - **Create mechanical-rules CI story** — wire the selected **mechanical** rules into that repo's CI
-     as enforced lint gates. Mechanical rules map to an existing off-the-shelf linter, so this is the
-     simpler track to wire.
+     as enforced lint gates. Mechanical rules map to an existing off-the-shelf linter, so the
+     implementation is straightforward: fill in a manifest entry for each rule and you're done.
    - **Create architectural-rules CI story** — wire the selected **architectural** rules into CI.
-     Architectural rules need a **custom checker** (no off-the-shelf linter expresses them) plus team
-     refinement before implementing.
+     Architectural rules need a **custom checker** (no off-the-shelf linter expresses them, e.g.
+     "handlers never touch the DB directly") plus team design and scoping before implementing.
 
-   Each story carries a preamble explaining that both tracks are deterministic (mechanical = off-the-
-   shelf linter; architectural = bespoke custom checker), and the two are filed as separate issues so
-   they can be scheduled independently. Like resolve-now, onboarding *writes the story*; the dev layer
-   (Pillar 2) does the work. Separate from the tech-debt issues above.
+   Each story body is **self-sufficient**: it carries a full explanation of the `.camerata/checks.toml`
+   single source of truth, the manifest schema with all fields, and (for architectural rules) a
+   step-by-step how-to with a worked example. A developer picking up either story has everything they
+   need with no additional hand-holding. See §14 for the full SSOT picture.
 
-   **CI-wiring covers both gate layers, not just CI.** Each story instructs wiring the check into the
-   repo's **canonical check command** (the lint/test command **layer 2** runs in the dev loop) **and**
-   the CI workflow (**layer 3**, on every PR) — one wiring serves both. They run the *same* checks and
-   differ only in where/when, so wiring CI-only on a repo with no pre-existing lint script would have
-   left a step layer 2 never invokes.
+   Both stories are filed separately so the mechanical track (easy, done in a single sprint) is never
+   blocked on the architectural design phase.
 
-   **Optional CI security rules (opt-in, never auto-recommended).** Two CI/CD-domain rules can generate
-   their own security-scan CI stories. They are **never pre-checked** during onboarding (you opt in
-   deliberately) and have **no default option** — selecting one forces a conscious tier choice (the
-   amber "must choose" state):
+   **CI-wiring covers both gate layers, not just CI.** Each story instructs wiring the check into
+   `.camerata/checks.toml`, which the Layer-2 dev-loop runner AND the Layer-3 CI workflow both read.
+   One entry serves both; there is no "wire it twice" step.
+
+   **Optional CI security rules (opt-in, never auto-recommended).** Two CI/CD-domain rules can
+   generate their own security-scan CI stories. They are **never pre-checked and never badged as
+   recommended** during onboarding — you opt in deliberately:
    - **`CICD-SEMGREP-SECURITY-SCAN-1`** — **Community Edition** (free, LGPL-2.1 OSS CLI; runs on any
      repo public or private; single-file, light enough for the scan preview, layer-2, and CI) **vs.**
-     **AppSec Platform / Pro** (paid, cross-file taint analysis + the Pro rule set; CI / platform tier).
+     **AppSec Platform / Pro** (paid, cross-file taint analysis + the Pro rule set; CI / platform
+     tier).
    - **`CICD-CODEQL-SECURITY-SCAN-1`** — **public-repo (free)** **vs.** **GitHub Advanced Security
-     (paid, per active committer, for private repos)**. CodeQL's free entitlement is **public/open-source
-     repos only**; private code requires the paid GHAS license. Either way its whole-program database
-     build is heavy, so CodeQL is **CI / layer-3 ONLY** — it never runs at the scan preview or in the
-     dev loop (which is also why CodeQL never appears in the scan-time preview, §3 step 4).
+     (paid, per active committer, for private repos)**. CodeQL's free entitlement is **public/open-
+     source repos only**; private code requires the paid GHAS license. Either way its whole-program
+     database build is heavy, so CodeQL is **CI / layer-3 ONLY** — it never runs at the scan preview
+     or in the dev loop (which is also why CodeQL never appears in the scan-time preview).
 
-   These rules wrap mature engines rather than re-implementing them: Camerata composes CodeQL/Semgrep
-   as deterministic check sources and enforces their findings at the points they don't cover.
+   Both rules have **no default option** — selecting one immediately shows the amber "must choose"
+   state until you pick a tier explicitly.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.
@@ -260,6 +301,10 @@ Two tables:
   jump to the project-rules table for editing.
 
 The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
+
+**Opt-in rules are not pre-checked.** Rules with the `opt_in_only` flag (currently the two security-
+scan rules) appear in rule tables as **"Available"** only — no pre-checked checkbox, no recommended
+badge. You opt in deliberately by checking them.
 
 **Custom rules.** Beyond the built-in corpus you can author your own rules in two scopes:
 - **Custom** — a rule that applies to a single repo (it joins that repo's selected set).
@@ -301,11 +346,15 @@ The **Governed Development** view is built around two objects:
 
 ### Project settings (the gear popup)
 
-A small **⚙ Settings** button sits at the top of the Governed Development left nav and is always
-visible regardless of which UoW is selected. It opens a popup holding the two **project-wide** settings
-that used to live elsewhere:
+A small **Settings** button (gear icon) sits at the top of the Governed Development left nav and is
+always visible regardless of which UoW is selected. It opens a popup holding the **project-wide**
+settings:
 - **Loop guard** — the maximum number of revise iterations a governed run may take before it stops.
 - **Default tier-map** — the project's default Fast / Balanced / Strongest model ids.
+- **Step models** — the AI model to use for each non-fleet step (audit, calibration, research chat,
+  story authoring, decomposition, escalation, clarification). Each step has its own model selector;
+  they default to `claude-sonnet-4-6` when a project is created. Per-project isolation: a change to
+  project A never touches project B's step models. See §16 for more detail.
 
 These are project defaults, not per-UoW knobs. (The tier-map is also still editable in the Rules view
 for discoverability; both surfaces save to the same project row.) Per-run model overrides stay on the
@@ -330,7 +379,8 @@ and selects the existing one instead of making a duplicate.
 You don't have to start from an existing issue. The left nav's **New authored story** button creates a
 **blank draft UoW** and opens an **authoring panel**:
 - A **clarification chat** — describe what you want; the AI drafts an issue title + body and, when the
-  requirements are ambiguous, **asks one clarifying question** back. Keep chatting to refine it.
+  requirements are ambiguous, **asks one clarifying question** back (as a structured question with
+  options and benefits/drawbacks — see Structured clarifications below). Keep chatting to refine it.
 - A **live draft preview** of the title and body as they take shape.
 - A **target-repo picker** (the active project's repos) and a **Push to board & link** button.
 
@@ -341,6 +391,40 @@ the governance gate isn't involved here (same class as the chat assistant); the 
 governed dev run after the UoW is linked. Pushing to the board needs a GitHub token; without a token
 (or with Claude unavailable) the chat still saves your turns and tells you AI drafting is unavailable
 rather than failing.
+
+### Multiple concurrent Units of Work
+
+You can run **multiple Units of Work at once** — even on the same repo. Each UoW operates in its own
+**isolated git worktree** (a separate working directory off the repo's shared `.git` object store),
+keyed by its branch. Worktrees live at `<clone>/.camerata-worktrees/<branch-name>`.
+
+What this means in practice: two UoWs on the same repo can run development, update-branch, and ship
+operations simultaneously without git checkout conflicts. The gate and all governance rules are
+unchanged — worktrees change WHERE the agent works, not WHETHER it's gated. Two UoWs editing the
+same lines still produce a normal merge conflict at PR/merge time (expected, resolved at merge).
+
+Worktrees are cleaned up automatically on sign-off. A startup sweep reclaims any that leaked through
+crashes. A **disk headroom guard** (default: requires 10 GB free; override with
+`CAMERATA_MIN_DISK_HEADROOM_GB`) refuses to create a new worktree if disk space is low — this
+protects against the `target/` multiplier when developing a large Rust project with several concurrent
+UoWs.
+
+### Structured clarifications (auto-saved, resumable)
+
+Whenever Camerata or the AI needs input from you — during story authoring, investigation, and other
+lifecycle phases — it presents a **structured question**: multiple options each with a short
+benefit/drawback description, an "Other" free-text escape, and optional multi-select. This mirrors
+the `AskUserQuestion` design: you pick from concrete options rather than typing free-text into a chat
+box.
+
+Everything is **auto-saved**: open questions and your answers survive a restart. You can close the
+app, come back later, and resume exactly where you left off. The cross-UoW **"Needs you" queue** in
+the Governed Development view lists every open question across all stories, so you never miss a
+waiting pause point.
+
+The investigation phase can **pause mid-run** when the agent raises a question, park the run at
+"Awaiting clarification," and **resume** (re-spawn the gated agent with the Q+A in context) once you
+answer. Dev-phase mid-write pause/resume is planned but not yet shipped.
 
 ### The UoW dev controls
 
@@ -363,7 +447,6 @@ At the **Intake** stage, a single **model select** and a **▶ Begin investigati
 - Clicking the button runs a **single gated investigation agent** that reads the issue/story,
   surfaces decisions and tradeoffs, and records an investigation note onto the UoW. The stage
   advances to **Investigating** as the run begins.
-  (`POST /api/uow/:id/begin-investigation { "model": "<id>" }` → `{ "run_id", "story_id" }`.)
 - Without `CAMERATA_LIVE_BUILD=1`, the investigation run completes with a placeholder note; with
   it set and `claude` connected, a real `claude -p` investigation agent runs.
 
@@ -379,6 +462,12 @@ every decision record is marked approved (a `409` is returned if you try to skip
 At the **Decisions Approved** stage, three per-tier model selects appear — **Strongest**, **Balanced**,
 and **Fast** — each defaulting from the active project's tier map and editable for this run without
 changing the saved project defaults. Click **▶ Run development (governed)** to start the build.
+
+**Brownfield vs. greenfield.** When the UoW's repo has a local clone (the normal case for a real
+story), the agent edits the **existing codebase in-place on the UoW's branch** in its isolated
+worktree. When there is no local clone yet, the runner scaffolds a new app from the plan in a
+temporary directory (greenfield). Camerata picks the path automatically — you see the same controls
+either way.
 
 **How the tiered run works:** the **Strongest-tier agent is the orchestrator and lead.** It does the
 complex, one-way-door work itself. For well-scoped simpler subtasks it can use the governed
@@ -409,6 +498,17 @@ Once a development run starts, the remaining stage transitions are engine-driven
 
 **Other controls on every UoW card:**
 
+- **PR lifecycle** — a dedicated panel on each UoW card for the push/PR/feedback loop:
+  - **Push & open PR** — pushes the UoW branch and opens a PR with a **user-selected base branch**
+    (picker in the console). The resulting PR number + URL are stored on the UoW.
+  - **Pull PR info** — fetches current PR state, CI check status (passed/failed/pending), and
+    comments. Camerata first checks its stored PR number; if none is stored, it searches by head
+    branch — so a PR opened directly in GitHub is found automatically and its number is backfilled.
+  - **Resolve with agent (gated)** — feeds open review comments and failing CI check names to a
+    gated agent that edits the worktree to address the feedback. Same gate as the dev run; the
+    agent cannot commit or push itself.
+  - **Comment** — posts a comment on the PR/issue from the console.
+
 - **Open work item** — opens the full work-item modal right from inside the UoW (next to the
   retained **Open issue ↗** link). The modal shows the title, body, and a **Comments** section that
   fetches and renders every comment on the source issue (author + timestamp + body). The
@@ -428,7 +528,8 @@ Once a development run starts, the remaining stage transitions are engine-driven
   merge (`git merge --abort`), so a model claiming success without resolving is caught.
 - **Pull latest work item** — re-pull just this one item from the tracker (a full refresh, no cache).
 - **Sign off this run** — review the run's diff + gate results (rules in force, deny/allow tallies,
-  total bounces) and **✓ Sign off this run**; provenance is written back.
+  total bounces) and **✓ Sign off this run**; provenance is written back. Sign-off also triggers
+  worktree cleanup.
 
 ### Gate self-check (GO / NO-GO)
 
@@ -440,6 +541,10 @@ isn't deny-all), and confirms **Layer 2 bounces once on a planted violation and 
 revise pass**. It reports a single **GO / NO-GO** verdict with the floor count (e.g. "6/6 floor rules
 enforced"). GO means deny-before-execute + bounce-and-revise are both live. The same probe runs in CI
 and as `camerata gate-probe` on the CLI.
+
+> **Note on enforcement transparency:** today the gate blocks and bounces the agent without a
+> human-visible audit log of each denial. A visible enforcement record (showing which rule fired, on
+> which file, during which run) is planned but not yet built.
 
 ---
 
@@ -477,6 +582,8 @@ Rule scopes: **corpus-global**, **repo-local** (from onboarding), **cross-repo**
 ## 8. The in-app assistant
 
 The floating chat bubble is a single, context-rich assistant. There are no modes to pick. Every turn it is grounded in all of its sources at once, and your prompt decides which it leans on: ask "how do I onboard a repo" and it draws on the docs; ask "what did my last audit find" and it draws on the live project state; ask "where are we at" and it draws on the development state across every Unit of Work.
+
+**Conversation context is retained** across messages — you can ask follow-up questions in the same session and the assistant remembers what was said earlier in the thread. The assistant is also **grounded on your active project** (its repos, ruleset, onboarded state) and on **any issues you've pulled in** via the Issue Management panel.
 
 ### What the assistant can see
 
@@ -650,11 +757,18 @@ Flags let us:
 
 ## 13. Understanding rule types
 
-Every rule in Camerata's corpus carries an `enforcement` field that answers one question: **how objectively can conformance be checked?** That single property decides where the rule is written and how it's enforced. Five buckets are useful for everyday work; the first is special.
+Every rule in Camerata's corpus carries an `enforcement` field that answers one question: **how objectively can conformance be checked?** That single property decides where the rule is written and how it's enforced.
 
-### The five buckets
+### The four-layer model
 
-**Security gate rules** are not a corpus category you author into. They are a small, hardwired set of rule-ids built directly into the MCP gate (see §7). They run before any write touches disk, require no build, and are always on. You do not select them; they cannot be turned off per-repo. The audit surface them as "deterministic floor" findings because they are the same checks the gate enforces on new writes. There are currently six gate rules; only one of them (`ARCH-NO-SECRETS-IN-URL-1`) also lives in the corpus as a `structured` rule — the rest are gate-internal primitives.
+| Rule tier | Blocks the agent's write (gate) | In-loop dev checks | Your repo's CI | Scan report |
+|---|---|---|---|---|
+| **Deterministic floor** (built-in secret/key/SQL/TLS checks) | Yes | No | No dedicated job | Yes |
+| **Mechanical** (off-the-shelf linter, e.g. ESLint rule, Clippy lint) | Some | Yes (built-ins + your manifest checks) | Yes (generated) | Yes |
+| **Architectural** (you build a custom checker, e.g. API layering via dependency-cruiser) | No | Once you register your checker in `.camerata/checks.toml` | Yes, once you build it | AI review only |
+| **Prose / Structured** (advisory) | No | No | No | AI review |
+
+**Security gate rules** are not a corpus category you author into. They are a small, hardwired set of rule-ids built directly into the MCP gate (see §7). They run before any write touches disk, require no build, and are always on. You do not select them; they cannot be turned off per-repo. The audit surfaces them as "deterministic floor" findings because they are the exact same checks the gate enforces on new writes. There are currently seven gate rules (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1`, `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`, `SEC-NO-SECRET-FILE-1`, `SEC-NO-DISABLED-TLS-1`).
 
 The remaining four are the corpus enforcement modalities, from most human-judgment to most automated:
 
@@ -723,15 +837,205 @@ The mechanical rules in the current corpus are grounded (each maps to a real, na
 
 ---
 
+## 14. Wiring CI gates: the check manifest (SSOT)
+
+When you click the onboarding buttons to create CI stories (§3 step 6), the stories teach a single
+wiring model: **one entry in `.camerata/checks.toml` enforces a check at BOTH the in-loop dev gate
+(Layer 2) and the generated CI workflow (Layer 3).** There is no "wire it twice" step.
+
+### Why a single source of truth matters
+
+Without a shared definition, Layer 2 and Layer 3 can drift: a custom linter you add to CI never
+reaches the dev loop, so the agent gets no early feedback and can produce code that passes locally
+but fails in CI. The manifest eliminates this structurally — both consumers read the same file.
+
+### The manifest schema
+
+```toml
+# .camerata/checks.toml
+[[check]]
+id       = "ARCH-API-LAYERING-1"         # stable rule id; used as the violation id on nonzero exit
+name     = "API layering"                 # short human label shown in bounce-back messages
+command  = "scripts/check_layering.sh"   # shell command, runs from the repo root (sh -c)
+severity = "high"                         # "high" | "medium" | "low" — informational; all severities block
+in_loop  = true                           # true = run at Layer 2 AND Layer 3; false = CI-only
+```
+
+All five fields are required. A missing field is a parse error, not a silent misconfiguration. A
+missing manifest is never fatal — the built-in language runners (cargo/clippy/eslint/ruff/etc.)
+are always unaffected.
+
+**`in_loop` decides when the check runs:**
+
+| `in_loop` | Runs at | Use when |
+|---|---|---|
+| `true` | Layer 2 (dev loop) AND Layer 3 (CI) | Check is fast (under 30s), needs no external secrets or services. The agent gets early feedback. |
+| `false` | Layer 3 (CI) only | Check needs secrets, an external service, or takes too long to run mid-loop. CI is always the authoritative backstop. |
+
+**The manifest is agent-protected.** The gate rule `SEC-NO-CAMERATA-CONFIG-1` blocks any agent write
+to the `.camerata/` directory. Editing the manifest is always a human/operator commit. This prevents
+the canonical gate-weakening attack: an agent cannot disable the rules that govern it.
+
+### Mechanical vs. architectural: two different paths
+
+The onboarding flow files **two separate CI stories** — one per enforcement tier — because the
+implementation work is fundamentally different:
+
+**Mechanical CI story** ("Wire mechanical rules"): each selected mechanical rule maps to an
+off-the-shelf linter. The story shows a per-rule manifest entry template. The implementation is:
+fill in the correct command + pinned version, commit the manifest, done. No custom checker design
+needed.
+
+**Architectural CI story** ("Wire architectural rules"): there is NO off-the-shelf linter for
+architectural rules (e.g. "service layer never touches the DB directly"). The story walks through
+a four-step process:
+1. Design a deterministic checker (options: a shell script, a custom Semgrep rule, an AST pass,
+   a dependency-cruiser config — anything that exits 0 for clean and nonzero for a violation).
+2. Add the manifest entry with pinned tool + version + install command.
+3. Regenerate the CI workflow.
+4. Verify the check at both Layer 2 and Layer 3.
+
+The story includes a worked example for API-layering enforcement via `dependency-cruiser`, as this
+is the most common architectural check pattern.
+
+Scope each architectural rule as its own sub-task; do not block the mechanical story on this design
+phase.
+
+### Regenerating the CI workflow
+
+After editing `.camerata/checks.toml`, regenerate the CI workflow by clicking the **Regenerate CI
+workflow** button in the Rules view (or calling `POST /api/projects/active/generate-ci-workflow`).
+The workflow is derived entirely from the manifest, so regenerating it is always safe to repeat.
+
+---
+
+## 15. Tool-version pinning and the drift error
+
+Even with a single manifest definition, a check can still disagree between Layer 2 and Layer 3 if
+the two environments run **different versions of the same tool**. For example, a `dependency-cruiser`
+rule that was valid under version 5.x may emit different findings under 6.x. The manifest solves
+this with three optional pinning fields:
+
+```toml
+[[check]]
+id       = "DEP-CRUISER-LAYERING-1"
+name     = "dependency-cruiser layering"
+tool     = "dependency-cruiser"                        # the binary name
+version  = "6.3.0"                                     # EXACT version — no ranges or carets
+install  = "npm install -g dependency-cruiser@6.3.0"   # the exact install command
+command  = "depcruise --config .dependency-cruiser.cjs src"
+severity = "high"
+in_loop  = true
+```
+
+**`version` must be an exact version string, not a range (`^6.3.0` or `>=6`) .** Ranges allow the
+two environments to land on different patch releases and disagree. Pinning an exact version is what
+makes the SSOT property hold end-to-end.
+
+### What happens at Layer 3 (CI)
+
+The generated CI workflow emits a **dedicated install step immediately before the check step**:
+
+```yaml
+- name: "install dependency-cruiser (6.3.0)"
+  run: npm install -g dependency-cruiser@6.3.0
+
+- name: "dependency-cruiser layering (DEP-CRUISER-LAYERING-1)"
+  run: depcruise --config .dependency-cruiser.cjs src
+```
+
+CI always installs the pinned version, so the check runs against the exact tool version you declared.
+
+### What happens at Layer 2 (your machine)
+
+Layer 2 does NOT install tools — installing in the dev loop is too heavy. Instead, before running a
+pinned check, Camerata verifies that your local tool version matches the pinned version. If it does,
+the check runs. If it doesn't, you get a clear error like:
+
+```
+local dependency-cruiser is 5.1.0 but manifest pins 6.3.0 —
+install the pinned version: npm install -g dependency-cruiser@6.3.0
+```
+
+The check is **skipped** (not silently run on the wrong version) until you reconcile. This is a
+violation, not a warning — a warning would still let the loop complete "green" on the wrong tool,
+which defeats the whole point.
+
+**To fix a drift error:** run the `install` command shown in the error message (it's always the exact
+command from your manifest's `install` field), then re-run your dev loop. This protects you from the
+"passes locally, fails in CI" class of surprises.
+
+**Checks without pinning fields** run normally at both layers with no version check — you get the
+system-installed version at each environment. Add pinning when your check's output is sensitive to
+the exact tool version.
+
+---
+
+## 16. Token usage meter
+
+A compact, persistent **usage meter** is pinned to the right of the cockpit nav row. It shows your
+cumulative token and dollar spend for the current session: `<tokens> tok · $<cost> · <calls> calls`.
+Click it to expand a by-model breakdown table.
+
+When the provider is rate-limiting requests, the meter swaps to an amber pulsing **"Rate-limited —
+retrying"** badge instead of the normal readout. This clears automatically when the next request
+succeeds.
+
+The meter accumulates spend across ALL model calls — the audit, calibration, research chat, story
+authoring, decomposition, clarification, and fleet runs — not just the last audit. It is purely
+observational: it does not change model selection, retry behavior, or the gate.
+
+---
+
+## 17. Per-project model settings
+
+Every AI step in Camerata has a configurable model, set **per project** via the **Step models**
+section in the project-settings gear popup (§6). One labeled selector per step; the available options
+come from the connected provider.
+
+**Steps you can configure per project:**
+
+| Step | When it runs |
+|---|---|
+| Audit | The onboarding code audit scan |
+| Calibration | The severity-calibration pass during the audit |
+| Research chat | The in-app assistant |
+| Story authoring | Drafting an issue from a blank UoW |
+| Decomposition | Breaking a story into sub-tasks |
+| Escalation | Translating escalation decisions into prose |
+| Clarification | Generating structured clarification questions |
+
+All steps default to `claude-sonnet-4-6` when a project is created. The defaults are seeded at
+creation time — there is no "unset" state. A change to one project never touches another project's
+step models.
+
+For steps where you also pick a model per run (audit, calibration, research chat), your per-run
+choice wins over the project default for that run only. The project default is what you see when you
+open a fresh run.
+
+The governed development fleet (investigation, dev run, update-branch, PR resolve) is configured
+separately via the **tier-map** (Strongest / Balanced / Fast) in the same gear popup — those runs
+are orchestrated differently and belong to a different configuration axis.
+
+---
+
 ## The whole loop, in one line
 
-**Create/open a project → onboard each repo (browse to its local folder → scan the local code, choosing
-AI review and/or deterministic scans → pick per-repo rules → Add rules to repo(s): local branch+push →
-optionally audit + triage + wire CI) → manage the ruleset in the Rules view → in Governed Development,
-pull work items (or author a new story from a blank UoW with AI), create a Unit of Work from one →
-Begin investigation (Intake, single-model run) → Approve decisions (Investigating) → Run development
-governed (Decisions Approved, three-tier orchestrator-led run) → review → sign off.**
+**Create/open a project → onboard each repo (browse to its local folder → scan the local code,
+choosing AI review and/or deterministic scans → pick per-repo rules (opt-in rules are never
+pre-checked) → Add rules to repo(s): local branch+push → optionally audit + triage (check Test
+badge + Scan coverage section) + wire CI via two separate stories (mechanical and architectural)) →
+manage the ruleset in the Rules view → in Governed Development, pull work items (or author a new
+story from a blank UoW with AI), create a Unit of Work from one → Begin investigation (Intake,
+single-model run; may pause for structured clarifications) → Approve decisions (Investigating) →
+Run development governed (Decisions Approved, three-tier orchestrator-led run, brownfield in-place
+or greenfield scaffold) → use PR lifecycle buttons to push, open PR, pull CI status, and resolve
+feedback with a gated agent → review → sign off.**
+
 Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the push/PR and the AI
 audit + governed dev. Export/import a project (config only; UoWs stay local) to move it between
-machines; resolve local repo paths on the receiving side. Use the chat bubble to ask data-driven
-questions about your active project.
+machines; resolve local repo paths on the receiving side. Multiple UoWs can run concurrently, each
+in its own isolated git worktree. Wire custom checks via `.camerata/checks.toml` (the SSOT for
+both the dev loop and CI); pin exact tool versions to prevent drift. Watch the token usage meter in
+the nav for cumulative spend. Use the chat bubble to ask data-driven questions about your active
+project — it retains context across messages.
