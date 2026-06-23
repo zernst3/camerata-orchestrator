@@ -17,6 +17,7 @@
 //!   the gateway + `--add-dir`; the tool list enforces *which* tools at all.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use camerata_core::{AgentDriver, AgentOutcome, Role};
 use thiserror::Error;
@@ -45,6 +46,143 @@ pub enum AgentError {
 
     #[error("could not parse `claude -p` JSON output: {0}")]
     ParseOutput(#[source] serde_json::Error),
+
+    #[error("agent subprocess stalled: no output for {idle_secs}s (last line: {last_line:?})")]
+    Stalled { idle_secs: u64, last_line: Option<String> },
+}
+
+// ─── heartbeat + timeout constants ───────────────────────────────────────────
+
+/// Inactivity window: if the subprocess emits no stdout line for this duration, it is
+/// considered stalled and killed. Overridable via `CAMERATA_AGENT_INACTIVITY_SECS`.
+pub const DEFAULT_AGENT_INACTIVITY_SECS: u64 = 120;
+
+/// Hard-ceiling: absolute maximum wall-clock time a subprocess may run. A backstop
+/// against runaway processes that keep trickling output. Overridable via
+/// `CAMERATA_AGENT_TOTAL_TIMEOUT_SECS`.
+pub const DEFAULT_AGENT_TOTAL_TIMEOUT_SECS: u64 = 3600; // 1 hour
+
+/// Read the inactivity window from the environment, falling back to the default.
+pub fn agent_inactivity_window() -> std::time::Duration {
+    let secs = std::env::var("CAMERATA_AGENT_INACTIVITY_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AGENT_INACTIVITY_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Read the total hard-ceiling from the environment, falling back to the default.
+pub fn agent_total_timeout() -> std::time::Duration {
+    let secs = std::env::var("CAMERATA_AGENT_TOTAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_AGENT_TOTAL_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Callback type: fired once per stdout line received from the agent subprocess.
+/// Callers that track run activity update `last_activity_ms` here. `None` = no callback.
+pub type HeartbeatFn = Arc<dyn Fn() + Send + Sync>;
+
+// ─── streaming subprocess helper ─────────────────────────────────────────────
+
+/// Drive a subprocess to completion, reading stdout line-by-line with an inactivity
+/// timeout on each line. Fires `on_activity` on every line received (heartbeat).
+///
+/// Returns the full accumulated stdout on success, or:
+/// - `AgentError::NonZeroExit` when the process exits non-zero.
+/// - `AgentError::Stalled` when no line arrives within `inactivity_window`.
+/// - Propagates `AgentError::Spawn` if the process can't be started.
+///
+/// The total hard-ceiling (`total_timeout`) is enforced via `tokio::time::timeout`
+/// wrapping the whole streaming loop, so a runaway process that keeps trickling
+/// output is still killed eventually.
+pub(crate) async fn stream_subprocess(
+    mut cmd: tokio::process::Command,
+    on_activity: Option<HeartbeatFn>,
+    inactivity_window: std::time::Duration,
+    total_timeout: std::time::Duration,
+) -> Result<(String, std::process::ExitStatus), AgentError> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(AgentError::Spawn)?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr_handle = child.stderr.take().expect("stderr is piped");
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut accumulated = String::new();
+    let mut last_line: Option<String> = None;
+    let inactivity_secs = inactivity_window.as_secs();
+
+    let stream_result = tokio::time::timeout(total_timeout, async {
+        loop {
+            match tokio::time::timeout(inactivity_window, lines.next_line()).await {
+                Ok(Ok(Some(line))) => {
+                    // A line arrived: fire the heartbeat and accumulate.
+                    if let Some(cb) = &on_activity {
+                        cb();
+                    }
+                    last_line = Some(line.clone());
+                    accumulated.push_str(&line);
+                    accumulated.push('\n');
+                }
+                Ok(Ok(None)) => {
+                    // EOF: the process closed its stdout.
+                    break;
+                }
+                Ok(Err(e)) => {
+                    // I/O error reading the pipe.
+                    let _ = child.kill().await;
+                    return Err(AgentError::Spawn(e));
+                }
+                Err(_) => {
+                    // Inactivity timeout: no line within the window — stalled.
+                    let _ = child.kill().await;
+                    return Err(AgentError::Stalled {
+                        idle_secs: inactivity_secs,
+                        last_line: last_line.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    })
+    .await;
+
+    match stream_result {
+        Err(_) => {
+            // Total hard-ceiling hit: kill and return Stalled with the total secs.
+            let _ = child.kill().await;
+            return Err(AgentError::Stalled {
+                idle_secs: total_timeout.as_secs(),
+                last_line: last_line.clone(),
+            });
+        }
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(())) => {}
+    }
+
+    // Collect stderr for error reporting.
+    let mut stderr_buf = Vec::new();
+    {
+        use tokio::io::AsyncReadExt;
+        let mut stderr_reader = BufReader::new(stderr_handle);
+        let _ = stderr_reader.read_to_end(&mut stderr_buf).await;
+    }
+
+    let status = child.wait().await.map_err(AgentError::Spawn)?;
+
+    if !status.success() {
+        return Err(AgentError::NonZeroExit {
+            status: status.to_string(),
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+        });
+    }
+
+    Ok((accumulated, status))
 }
 
 // ─── the MCP-exposed governed write tool name ────────────────────────────────
@@ -146,6 +284,10 @@ pub struct ClaudeCliDriver {
     /// does not write to the repo), so the deny-before-write gate is unchanged; the
     /// disallowed-builtins denylist (`Task`/`Write`/`Bash`/…) is unchanged either way.
     pub clarification: bool,
+    /// Optional heartbeat callback fired once per stdout line received from the subprocess.
+    /// Callers that track run activity (e.g. the server's RunStore) wire this to update
+    /// `last_activity_ms`. `None` = no callback (all existing callers that don't set it).
+    pub on_activity: Option<HeartbeatFn>,
 }
 
 impl ClaudeCliDriver {
@@ -161,7 +303,15 @@ impl ClaudeCliDriver {
             resume_session_id: None,
             orchestrator: false,
             clarification: false,
+            on_activity: None,
         }
+    }
+
+    /// Set the heartbeat callback fired once per stdout line from the subprocess.
+    /// Callers that track run activity wire this to `RunStore::touch_activity`. Builder.
+    pub fn with_on_activity(mut self, cb: HeartbeatFn) -> Self {
+        self.on_activity = Some(cb);
+        self
     }
 
     /// Mark this driver as the orchestrator (the lead). Its `--allowedTools` will
@@ -284,19 +434,17 @@ fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 #[async_trait::async_trait]
 impl AgentDriver for ClaudeCliDriver {
     async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome> {
-        let mut cmd = self.build_command(role, task);
-
-        let out = cmd.output().await.map_err(AgentError::Spawn)?;
-        if !out.status.success() {
-            return Err(AgentError::NonZeroExit {
-                status: out.status.to_string(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            }
-            .into());
-        }
+        let cmd = self.build_command(role, task);
+        let (stdout, _status) = stream_subprocess(
+            cmd,
+            self.on_activity.clone(),
+            agent_inactivity_window(),
+            agent_total_timeout(),
+        )
+        .await?;
 
         let v: serde_json::Value =
-            serde_json::from_slice(&out.stdout).map_err(AgentError::ParseOutput)?;
+            serde_json::from_str(&stdout).map_err(AgentError::ParseOutput)?;
         Ok(AgentOutcome {
             session_id: v["session_id"].as_str().unwrap_or_default().to_string(),
             result: v["result"].as_str().unwrap_or_default().to_string(),
@@ -562,5 +710,110 @@ mod tests {
         let dis_idx = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert!(args[dis_idx + 1].contains("Write"));
         assert!(args[dis_idx + 1].contains("Bash"));
+    }
+
+    // ── stall detection tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn stalled_error_formats_correctly() {
+        let e = AgentError::Stalled {
+            idle_secs: 120,
+            last_line: Some("partial output...".to_string()),
+        };
+        let s = e.to_string();
+        assert!(s.contains("120"), "idle_secs in message");
+        assert!(s.contains("partial output"), "last_line in message");
+    }
+
+    #[test]
+    fn stalled_error_with_no_last_line() {
+        let e = AgentError::Stalled {
+            idle_secs: 60,
+            last_line: None,
+        };
+        assert!(e.to_string().contains("60"));
+    }
+
+    #[tokio::test]
+    async fn stream_subprocess_returns_full_output_for_normal_program() {
+        // A program that immediately prints three lines and exits.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo line1; echo line2; echo line3"]);
+        let (out, _) = stream_subprocess(
+            cmd,
+            None,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("should succeed");
+        assert!(out.contains("line1"));
+        assert!(out.contains("line2"));
+        assert!(out.contains("line3"));
+    }
+
+    #[tokio::test]
+    async fn stream_subprocess_fires_heartbeat_per_line() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter2 = counter.clone();
+        let cb: HeartbeatFn = Arc::new(move || {
+            counter2.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo a; echo b; echo c"]);
+        let (out, _) = stream_subprocess(
+            cmd,
+            Some(cb),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("should succeed");
+        // 3 lines → 3 heartbeats.
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        assert!(out.contains("a"));
+    }
+
+    #[tokio::test]
+    async fn stream_subprocess_stalls_when_program_goes_silent() {
+        // A program that sleeps longer than the inactivity window without producing output.
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.args(["-c", "echo started; sleep 10"]);
+        let result = stream_subprocess(
+            cmd,
+            None,
+            std::time::Duration::from_millis(200), // very short for test
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        match result {
+            Err(AgentError::Stalled { idle_secs: _, last_line }) => {
+                // last_line is Some("started") because we got that before the sleep.
+                assert_eq!(last_line.as_deref(), Some("started"));
+            }
+            other => panic!("expected Stalled, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_subprocess_total_timeout_kills_trickler() {
+        // A program that prints one line per second indefinitely.
+        // Total timeout is shorter than how long it would run.
+        let mut cmd = tokio::process::Command::new("sh");
+        // Each line resets the inactivity window, but the total ceiling fires.
+        cmd.args(["-c", "while true; do echo tick; sleep 0.1; done"]);
+        let result = stream_subprocess(
+            cmd,
+            None,
+            std::time::Duration::from_secs(10),   // inactivity: long
+            std::time::Duration::from_millis(300), // total: short for test
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AgentError::Stalled { .. })),
+            "total timeout must produce Stalled"
+        );
     }
 }

@@ -67,6 +67,14 @@ pub struct Run {
     pub done: bool,
     /// "scripted" (token-free, real-gate verdicts) or "live" (a real claude -p fleet).
     pub mode: String,
+    /// Epoch-ms of the last activity recorded for this run: a live event was pushed OR the
+    /// agent subprocess fired a heartbeat. Initialized to run-creation time. Used to derive
+    /// `idle_ms` and `stalled` without a separate clock call on the write path.
+    pub last_activity_ms: u128,
+    /// A short human-readable label of the most recent progress point (the kind/summary of
+    /// the last gate event, or `"agent: <last line truncated>"` from a heartbeat). For
+    /// operator diagnosis when a run stalls.
+    pub last_progress_label: String,
 }
 
 /// The provenance summary for a run (issue #21): which rules were in force, the
@@ -189,6 +197,11 @@ impl RunStore {
             events: Vec::new(),
             done: false,
             mode: mode.to_string(),
+            last_activity_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            last_progress_label: "created".to_string(),
         };
         if let Ok(mut guard) = self.runs.lock() {
             guard.insert(id.clone(), run);
@@ -212,10 +225,60 @@ impl RunStore {
     pub(crate) fn push_event(&self, id: &str, event: GateEvent) {
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
+                let label = format!("{} {}", event.layer, event.verdict);
+                run.last_progress_label = label;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                run.last_activity_ms = now;
                 run.events.push(event);
             }
         }
     }
+
+    /// Update the run's last-activity timestamp to now and optionally set the progress label.
+    /// Called by `push_event` (automatic) and by the agent heartbeat callback (live runs).
+    pub(crate) fn touch_activity(&self, id: &str, label: Option<String>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if let Ok(mut guard) = self.runs.lock() {
+            if let Some(run) = guard.get_mut(id) {
+                run.last_activity_ms = now;
+                if let Some(l) = label {
+                    run.last_progress_label = l;
+                }
+            }
+        }
+    }
+}
+
+// ── stall detection pure functions ───────────────────────────────────────────
+
+/// Threshold for declaring a run stalled: how long (in ms) `last_activity_ms` may be
+/// idle before `is_stalled` returns `true`. Overridable via
+/// `CAMERATA_RUN_STALL_THRESHOLD_SECS` (default: 120s = 120_000ms).
+pub const DEFAULT_RUN_STALL_THRESHOLD_MS: u128 = 120_000;
+
+/// Read the run stall threshold from the environment, returning milliseconds.
+pub fn run_stall_threshold_ms() -> u128 {
+    std::env::var("CAMERATA_RUN_STALL_THRESHOLD_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|s| s as u128 * 1_000)
+        .unwrap_or(DEFAULT_RUN_STALL_THRESHOLD_MS)
+}
+
+/// Compute how many milliseconds have elapsed since `last_activity_ms`. Pure.
+pub fn idle_ms(last_activity_ms: u128, now_ms: u128) -> u128 {
+    now_ms.saturating_sub(last_activity_ms)
+}
+
+/// A run is stalled when it has been idle longer than the threshold. Pure.
+pub fn is_stalled(idle_ms: u128, threshold_ms: u128) -> bool {
+    idle_ms > threshold_ms
 }
 
 // ── the deterministic, real-gate run script ─────────────────────────────────
@@ -514,6 +577,68 @@ mod tests {
         assert_eq!(run.status, RunStatus::Planned);
         assert!(run.events.is_empty());
         assert!(store.get("nope").is_none());
+    }
+
+    // ── stall detection tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn idle_ms_computes_elapsed() {
+        assert_eq!(idle_ms(1000, 2500), 1500);
+        assert_eq!(idle_ms(1000, 1000), 0); // no time passed
+        assert_eq!(idle_ms(2000, 1000), 0); // saturating_sub: no underflow
+    }
+
+    #[test]
+    fn is_stalled_threshold_boundary() {
+        let threshold = 120_000u128;
+        assert!(!is_stalled(0, threshold));
+        assert!(!is_stalled(120_000, threshold)); // equal is NOT stalled
+        assert!(is_stalled(120_001, threshold));  // strictly greater = stalled
+    }
+
+    #[test]
+    fn push_event_updates_last_activity_ms() {
+        let store = RunStore::new();
+        let id = store.create("CAM-X", "scripted");
+        let before = store.get(&id).unwrap().last_activity_ms;
+
+        // Tiny sleep to ensure time advances.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        store.push_event(&id, GateEvent {
+            seq: 1,
+            layer: "layer-1".to_string(),
+            verdict: "allow".to_string(),
+            rule: None,
+            detail: "test".to_string(),
+        });
+        let after = store.get(&id).unwrap().last_activity_ms;
+        assert!(after >= before, "last_activity_ms must advance after push_event");
+    }
+
+    #[test]
+    fn create_initializes_last_activity_ms() {
+        let store = RunStore::new();
+        let id = store.create("CAM-Y", "scripted");
+        let run = store.get(&id).unwrap();
+        assert!(run.last_activity_ms > 0, "last_activity_ms must be initialized");
+        assert_eq!(run.last_progress_label, "created");
+    }
+
+    #[test]
+    fn push_event_updates_last_progress_label() {
+        let store = RunStore::new();
+        let id = store.create("CAM-Z", "scripted");
+        store.push_event(&id, GateEvent {
+            seq: 1,
+            layer: "delegate".to_string(),
+            verdict: "dispatch".to_string(),
+            rule: None,
+            detail: "dispatching".to_string(),
+        });
+        let run = store.get(&id).unwrap();
+        assert!(run.last_progress_label.contains("delegate"));
+        assert!(run.last_progress_label.contains("dispatch"));
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
