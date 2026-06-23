@@ -12,15 +12,46 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use camerata_core::{Decision, RuleId, ToolCall};
 use camerata_gateway::{enforced_gate_rules, evaluate_call};
 
 use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
 
+/// Whether a run is interactive (watched by the architect) or autonomous (walk-away/routine).
+/// Determines which stall threshold and policy apply.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    Watched,
+    Autonomous,
+}
+
+impl Default for RunKind {
+    fn default() -> Self {
+        RunKind::Watched
+    }
+}
+
+/// What the server does when a run stalls (exceeds its idle threshold).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StallPolicy {
+    /// Surface a stall alert to the UI; do NOT cancel the run.
+    Alert,
+    /// Automatically cancel the run when the stall threshold is exceeded.
+    Cancel,
+}
+
+impl Default for StallPolicy {
+    fn default() -> Self {
+        StallPolicy::Alert
+    }
+}
+
 /// The lifecycle status of a run, in Camerata's vocabulary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Planned,
@@ -32,6 +63,10 @@ pub enum RunStatus {
     /// not `done`: it is parked, waiting on the human.
     AwaitingClarification,
     AwaitingQa,
+    /// The run failed with a human-readable reason (e.g. stall timeout, infra error).
+    Failed { reason: String },
+    /// The run was explicitly cancelled (by the architect or by automatic stall policy).
+    Cancelled,
 }
 
 /// One real gate verdict recorded during a run.
@@ -75,6 +110,13 @@ pub struct Run {
     /// the last gate event, or `"agent: <last line truncated>"` from a heartbeat). For
     /// operator diagnosis when a run stalls.
     pub last_progress_label: String,
+    /// Whether this run is interactive (Watched) or autonomous (Autonomous).
+    pub kind: RunKind,
+    /// What the server does when this run stalls.
+    pub stall_policy: StallPolicy,
+    /// Human-readable reason for a `Failed` status (mirrors `RunStatus::Failed.reason`
+    /// for convenience — the UI reads this field without matching the enum variant).
+    pub failure_reason: Option<String>,
 }
 
 /// The provenance summary for a run (issue #21): which rules were in force, the
@@ -128,7 +170,7 @@ pub fn run_provenance(run: &Run, rules_in_force: &[RuleId]) -> RunProvenance {
         run_id: run.id.clone(),
         story_id: run.story_id.clone(),
         mode: run.mode.clone(),
-        status: run.status,
+        status: run.status.clone(),
         rules_in_force: rules_in_force.iter().map(|r| r.0.clone()).collect(),
         deny_count,
         allow_count,
@@ -178,18 +220,27 @@ pub fn live_mode_enabled() -> bool {
 pub struct RunStore {
     runs: Arc<Mutex<HashMap<String, Run>>>,
     counter: Arc<AtomicUsize>,
+    cancel_signals: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
 }
 
 impl RunStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            counter: Arc::new(AtomicUsize::new(0)),
+            cancel_signals: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Create a Planned run for `story_id` in the given mode ("scripted" | "live") and
     /// return its id.
-    pub fn create(&self, story_id: &str, mode: &str) -> String {
+    pub fn create(&self, story_id: &str, mode: &str, kind: RunKind) -> String {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("run-{n}");
+        let stall_policy = match kind {
+            RunKind::Autonomous => StallPolicy::Cancel,
+            RunKind::Watched => StallPolicy::Alert,
+        };
         let run = Run {
             id: id.clone(),
             story_id: story_id.to_string(),
@@ -202,9 +253,19 @@ impl RunStore {
                 .unwrap_or_default()
                 .as_millis(),
             last_progress_label: "created".to_string(),
+            kind: kind.clone(),
+            stall_policy,
+            failure_reason: None,
         };
         if let Ok(mut guard) = self.runs.lock() {
             guard.insert(id.clone(), run);
+        }
+        // Register a cancel signal for this run.
+        if let Ok(mut signals) = self.cancel_signals.lock() {
+            signals.insert(
+                id.clone(),
+                Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
         }
         id
     }
@@ -253,6 +314,43 @@ impl RunStore {
             }
         }
     }
+
+    /// Mark a run as failed with a human-readable reason. Sets `done = true`.
+    pub fn fail_with_reason(&self, id: &str, reason: String) {
+        let mut runs = self.runs.lock().unwrap();
+        if let Some(run) = runs.get_mut(id) {
+            run.status = RunStatus::Failed { reason: reason.clone() };
+            run.failure_reason = Some(reason);
+            run.done = true;
+        }
+    }
+
+    /// Cancel a run: set the atomic cancel signal, update status to Cancelled, and
+    /// mark `done = true`. The live-fleet executor checks `is_cancelled` to stop early.
+    pub fn cancel(&self, id: &str) {
+        // Set the atomic cancel signal first.
+        {
+            let signals = self.cancel_signals.lock().unwrap();
+            if let Some(sig) = signals.get(id) {
+                sig.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // Update the run record.
+        let mut runs = self.runs.lock().unwrap();
+        if let Some(run) = runs.get_mut(id) {
+            run.status = RunStatus::Cancelled;
+            run.done = true;
+        }
+    }
+
+    /// Return `true` when a cancel signal has been set for this run.
+    pub fn is_cancelled(&self, id: &str) -> bool {
+        let signals = self.cancel_signals.lock().unwrap();
+        signals
+            .get(id)
+            .map(|sig| sig.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
 }
 
 // ── stall detection pure functions ───────────────────────────────────────────
@@ -279,6 +377,30 @@ pub fn idle_ms(last_activity_ms: u128, now_ms: u128) -> u128 {
 /// A run is stalled when it has been idle longer than the threshold. Pure.
 pub fn is_stalled(idle_ms: u128, threshold_ms: u128) -> bool {
     idle_ms > threshold_ms
+}
+
+/// The outcome of a stall check: no action needed, alert the operator, or cancel the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StallDecision {
+    /// The run is not stalled; no action needed.
+    Ok,
+    /// The run is stalled and its policy says to alert (but not cancel).
+    Alert,
+    /// The run is stalled and its policy says to cancel it automatically.
+    Cancel,
+}
+
+/// Determine what action to take given a run's current idle time and stall policy. Pure.
+pub fn stall_decision(run: &Run, threshold_ms: u128, now_ms: u128) -> StallDecision {
+    let idle = now_ms.saturating_sub(run.last_activity_ms);
+    if idle < threshold_ms {
+        StallDecision::Ok
+    } else {
+        match run.stall_policy {
+            StallPolicy::Alert => StallDecision::Alert,
+            StallPolicy::Cancel => StallDecision::Cancel,
+        }
+    }
 }
 
 // ── the deterministic, real-gate run script ─────────────────────────────────
@@ -502,7 +624,7 @@ mod tests {
         // Build a run whose verdicts are the REAL gate's over the planted script:
         // two denies (path-escape, hardcoded-secret) and one allow.
         let store = RunStore::new();
-        let id = store.create("CAM-7", "scripted");
+        let id = store.create("CAM-7", "scripted", RunKind::Watched);
         for ev in run_event_script() {
             store.push_event(&id, ev);
         }
@@ -548,7 +670,7 @@ mod tests {
     #[test]
     fn provenance_with_no_denies_reports_zero_bounces() {
         let store = RunStore::new();
-        let id = store.create("CAM-8", "scripted");
+        let id = store.create("CAM-8", "scripted", RunKind::Watched);
         store.push_event(
             &id,
             GateEvent {
@@ -571,7 +693,7 @@ mod tests {
     #[test]
     fn run_store_create_and_get() {
         let store = RunStore::new();
-        let id = store.create("CAM-1", "scripted");
+        let id = store.create("CAM-1", "scripted", RunKind::Watched);
         let run = store.get(&id).expect("run exists");
         assert_eq!(run.story_id, "CAM-1");
         assert_eq!(run.status, RunStatus::Planned);
@@ -599,7 +721,7 @@ mod tests {
     #[test]
     fn push_event_updates_last_activity_ms() {
         let store = RunStore::new();
-        let id = store.create("CAM-X", "scripted");
+        let id = store.create("CAM-X", "scripted", RunKind::Watched);
         let before = store.get(&id).unwrap().last_activity_ms;
 
         // Tiny sleep to ensure time advances.
@@ -619,7 +741,7 @@ mod tests {
     #[test]
     fn create_initializes_last_activity_ms() {
         let store = RunStore::new();
-        let id = store.create("CAM-Y", "scripted");
+        let id = store.create("CAM-Y", "scripted", RunKind::Watched);
         let run = store.get(&id).unwrap();
         assert!(run.last_activity_ms > 0, "last_activity_ms must be initialized");
         assert_eq!(run.last_progress_label, "created");
@@ -628,7 +750,7 @@ mod tests {
     #[test]
     fn push_event_updates_last_progress_label() {
         let store = RunStore::new();
-        let id = store.create("CAM-Z", "scripted");
+        let id = store.create("CAM-Z", "scripted", RunKind::Watched);
         store.push_event(&id, GateEvent {
             seq: 1,
             layer: "delegate".to_string(),
@@ -645,7 +767,7 @@ mod tests {
     async fn execute_run_walks_to_awaiting_qa_with_real_denies() {
         let store = RunStore::new();
         let transcripts = TranscriptStore::new();
-        let id = store.create("CAM-1", "scripted");
+        let id = store.create("CAM-1", "scripted", RunKind::Watched);
         // start_paused auto-advances tokio time, so the sleeps resolve instantly.
         execute_run(store.clone(), transcripts.clone(), id.clone()).await;
 
@@ -669,5 +791,72 @@ mod tests {
         assert_eq!(fe.status, "blocked");
         let be = agents.iter().find(|a| a.session_id == "backend-1").unwrap();
         assert_eq!(be.status, "done");
+    }
+
+    #[test]
+    fn watched_run_gets_alert_stall_policy() {
+        let store = RunStore::new();
+        let id = store.create("S-1", "live", RunKind::Watched);
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.stall_policy, StallPolicy::Alert);
+        assert_eq!(run.kind, RunKind::Watched);
+    }
+
+    #[test]
+    fn autonomous_run_gets_cancel_stall_policy() {
+        let store = RunStore::new();
+        let id = store.create("S-2", "scripted", RunKind::Autonomous);
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.stall_policy, StallPolicy::Cancel);
+        assert_eq!(run.kind, RunKind::Autonomous);
+    }
+
+    #[test]
+    fn cancel_sets_status_and_done() {
+        let store = RunStore::new();
+        let id = store.create("S-3", "live", RunKind::Watched);
+        store.cancel(&id);
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.done);
+        assert!(store.is_cancelled(&id));
+    }
+
+    #[test]
+    fn fail_with_reason_sets_status_and_reason() {
+        let store = RunStore::new();
+        let id = store.create("S-4", "live", RunKind::Watched);
+        store.fail_with_reason(&id, "timeout".to_string());
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Failed { reason: "timeout".to_string() });
+        assert_eq!(run.failure_reason.as_deref(), Some("timeout"));
+        assert!(run.done);
+    }
+
+    #[test]
+    fn stall_decision_ok_below_threshold() {
+        let store = RunStore::new();
+        let id = store.create("S-5", "live", RunKind::Watched);
+        let run = store.get(&id).unwrap();
+        let now_ms = run.last_activity_ms + 50_000;
+        assert_eq!(stall_decision(&run, 120_000, now_ms), StallDecision::Ok);
+    }
+
+    #[test]
+    fn stall_decision_alert_for_watched_run() {
+        let store = RunStore::new();
+        let id = store.create("S-6", "live", RunKind::Watched);
+        let run = store.get(&id).unwrap();
+        let now_ms = run.last_activity_ms + 200_000;
+        assert_eq!(stall_decision(&run, 120_000, now_ms), StallDecision::Alert);
+    }
+
+    #[test]
+    fn stall_decision_cancel_for_autonomous_run() {
+        let store = RunStore::new();
+        let id = store.create("S-7", "scripted", RunKind::Autonomous);
+        let run = store.get(&id).unwrap();
+        let now_ms = run.last_activity_ms + 700_000;
+        assert_eq!(stall_decision(&run, 600_000, now_ms), StallDecision::Cancel);
     }
 }

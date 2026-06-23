@@ -261,6 +261,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stories", get(stories))
         .route("/api/stories/:id/run", post(start_run))
         .route("/api/runs/:id", get(get_run))
+        .route("/api/runs/:id/cancel", post(cancel_run))
         .route("/api/runs/:id/agents", get(get_run_agents))
         .route("/api/runs/:id/provenance", get(get_run_provenance))
         .route("/api/runs/:id/sign-off", post(sign_off_run))
@@ -314,6 +315,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit", post(onboard_audit))
         .route("/api/onboard/audit/start", post(onboard_audit_start))
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
+        .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
@@ -752,7 +754,7 @@ async fn start_governed_run(
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
-    let run_id = state.runs.create(story_id, mode);
+    let run_id = state.runs.create(story_id, mode, crate::run::RunKind::Watched);
     let store = state.runs.clone();
     let rid = run_id.clone();
 
@@ -1099,6 +1101,8 @@ fn assemble_evidence_for_run(
 /// - `idle_ms` — milliseconds since last activity (now − last_activity_ms).
 /// - `stalled` — true when idle_ms > stall_threshold_ms.
 /// - `stall_threshold_ms` — the active threshold (env-overridable, default 120 000ms).
+/// - `stall_policy` — whether the run's policy is to alert or auto-cancel on stall.
+/// - `failure_reason` — human-readable failure reason when the run failed.
 #[derive(serde::Serialize)]
 struct RunStatusResponse {
     #[serde(flatten)]
@@ -1106,6 +1110,8 @@ struct RunStatusResponse {
     idle_ms: u128,
     stalled: bool,
     stall_threshold_ms: u128,
+    stall_policy: crate::run::StallPolicy,
+    failure_reason: Option<String>,
 }
 
 /// `GET /api/runs/:id` — the current state of a run: status, gate verdicts, and
@@ -1126,12 +1132,26 @@ async fn get_run(
         .as_millis();
     let idle = crate::run::idle_ms(run.last_activity_ms, now_ms);
     let stalled = crate::run::is_stalled(idle, threshold_ms);
+    let stall_policy = run.stall_policy.clone();
+    let failure_reason = run.failure_reason.clone();
     Ok(Json(RunStatusResponse {
         run,
         idle_ms: idle,
         stalled,
         stall_threshold_ms: threshold_ms,
+        stall_policy,
+        failure_reason,
     }))
+}
+
+/// `POST /api/runs/:id/cancel` — cancel a run immediately. Idempotent; a run that is
+/// already done or cancelled is unaffected. Always returns 204.
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    state.runs.cancel(&id);
+    StatusCode::NO_CONTENT
 }
 
 /// The per-agent transcripts for a run: the GENERATED prompt each agent was handed and
@@ -2568,7 +2588,7 @@ async fn onboard_audit_start(
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
-    let job_id = state.jobs.create();
+    let job_id = state.jobs.create("audit");
     state.transcripts.clear(SCAN_AUDIT_KEY);
 
     let jobs = state.jobs.clone();
@@ -2639,11 +2659,39 @@ async fn onboard_audit_start(
 
 /// Poll an async audit job: status, progress (done/total passes), incremental findings, and
 /// the final report once done. `null` for an unknown id.
+/// Enriched job status response: the job state plus idle time and cancel flag.
+#[derive(Debug, serde::Serialize)]
+struct JobStatusResponse {
+    job: crate::jobs::JobState,
+    idle_ms: Option<u128>,
+    cancel_requested: bool,
+}
+
 async fn onboard_audit_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Json<Option<crate::jobs::JobState>> {
-    Json(state.jobs.get(&id))
+) -> impl IntoResponse {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    match state.jobs.get(&id) {
+        Some(job) => {
+            let idle_ms = state.jobs.idle_ms(&id, now_ms);
+            let cancel_requested = state.jobs.is_cancel_requested(&id);
+            Json(Some(JobStatusResponse { job, idle_ms, cancel_requested })).into_response()
+        }
+        None => Json::<Option<JobStatusResponse>>(None).into_response(),
+    }
+}
+
+/// `POST /api/onboard/audit/job/:id/cancel` — cancel an in-flight audit job.
+async fn cancel_audit_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    state.jobs.cancel(&id);
+    StatusCode::NO_CONTENT
 }
 
 #[derive(serde::Deserialize)]
@@ -6364,7 +6412,7 @@ async fn uow_begin_investigation(
     };
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
-    let run_id = state.runs.create(&story_id, "investigation");
+    let run_id = state.runs.create(&story_id, "investigation", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
@@ -6522,7 +6570,7 @@ async fn uow_update_branch(
                 .unwrap_or_else(crate::model_tier::default_strongest_model)
         });
 
-    let run_id = state.runs.create(&story_id, "update-branch");
+    let run_id = state.runs.create(&story_id, "update-branch", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -6789,7 +6837,7 @@ async fn uow_pr_resolve(
             .unwrap_or_else(crate::model_tier::default_strongest_model)
     });
 
-    let run_id = state.runs.create(&story_id, "pr-resolve");
+    let run_id = state.runs.create(&story_id, "pr-resolve", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow_store = state.uow.clone();
@@ -8133,7 +8181,7 @@ mod tests {
     /// Build a synthetic run with `n_denies` deny events and `n_allows` allow events,
     /// store it in the given `RunStore`, and return the run id.
     fn make_run(store: &RunStore, story: &str, n_allows: usize, n_denies: usize) -> String {
-        let id = store.create(story, "scripted");
+        let id = store.create(story, "scripted", crate::run::RunKind::Watched);
         for i in 0..n_denies {
             store.push_event(
                 &id,
@@ -8220,7 +8268,7 @@ mod tests {
     #[test]
     fn assemble_evidence_info_events_recorded_as_notes() {
         let run_store = RunStore::new();
-        let id = run_store.create("CAM-ev-3", "live");
+        let id = run_store.create("CAM-ev-3", "live", crate::run::RunKind::Watched);
         run_store.push_event(&id, crate::run::GateEvent {
             seq: 1, layer: "fleet".to_string(), verdict: "info".to_string(),
             rule: None, detail: "Scaffolding the worktree.".to_string(),
@@ -8242,7 +8290,7 @@ mod tests {
     async fn sign_off_blocked_by_critical_finding_without_waiver() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Seed a run at AwaitingQa.
-        let run_id = state.runs.create("S-gate-1", "scripted");
+        let run_id = state.runs.create("S-gate-1", "scripted", crate::run::RunKind::Watched);
         state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach an evidence record with a critical finding.
@@ -8276,7 +8324,7 @@ mod tests {
     #[tokio::test]
     async fn sign_off_unblocked_by_waive_with_reason() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-2", "scripted");
+        let run_id = state.runs.create("S-gate-2", "scripted", crate::run::RunKind::Watched);
         state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach critical evidence.
@@ -8318,7 +8366,7 @@ mod tests {
     #[tokio::test]
     async fn sign_off_not_blocked_when_no_evidence_attached() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-3", "scripted");
+        let run_id = state.runs.create("S-gate-3", "scripted", crate::run::RunKind::Watched);
         state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
         // No evidence attached: sign-off must succeed without a waiver.
 
@@ -8342,7 +8390,7 @@ mod tests {
     #[tokio::test]
     async fn sign_off_non_critical_evidence_not_blocked() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let run_id = state.runs.create("S-gate-4", "scripted");
+        let run_id = state.runs.create("S-gate-4", "scripted", crate::run::RunKind::Watched);
         state.runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
 
         // Attach evidence WITHOUT a critical finding.

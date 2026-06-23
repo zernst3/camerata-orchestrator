@@ -19,6 +19,15 @@ use serde::Serialize;
 
 use crate::onboard::{Finding, ScanReport};
 
+/// Per-job activity metadata for stall detection and cancel signalling.
+#[derive(Debug, Clone)]
+pub struct JobMeta {
+    /// Epoch-ms of the last recorded activity (tool start/done, or creation).
+    pub last_activity_ms: u128,
+    /// Set to `true` when a cancel has been requested; checked by the job worker.
+    pub cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// The lifecycle status of one deterministic scan tool, mirroring how the AI passes stream
 /// `running` → `done` into the transcript. Stable wire strings so the UI can style each state.
 pub mod det_status {
@@ -91,16 +100,21 @@ pub struct JobState {
 pub struct JobStore {
     inner: Arc<Mutex<HashMap<String, JobState>>>,
     counter: Arc<AtomicU64>,
+    job_meta: Arc<Mutex<HashMap<String, JobMeta>>>,
 }
 
 impl JobStore {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            counter: Arc::new(AtomicU64::new(0)),
+            job_meta: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Create a fresh `running` job and return its id.
-    pub fn create(&self) -> String {
+    pub fn create(&self, _label: &str) -> String {
         let id = format!("job-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1);
         if let Ok(mut g) = self.inner.lock() {
             g.insert(
@@ -111,6 +125,17 @@ impl JobStore {
                 },
             );
         }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let meta = JobMeta {
+            last_activity_ms: now_ms,
+            cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        if let Ok(mut m) = self.job_meta.lock() {
+            m.insert(id.clone(), meta);
+        }
         id
     }
 
@@ -119,6 +144,18 @@ impl JobStore {
             if let Some(j) = g.get_mut(id) {
                 f(j);
             }
+        }
+    }
+
+    /// Update the job's last-activity timestamp to now. Called by `det_tool_running` and
+    /// `det_tool_done` so idle time can be tracked across deterministic-scan tool transitions.
+    fn touch_activity(&self, id: &str) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if let Some(meta) = self.job_meta.lock().unwrap().get_mut(id) {
+            meta.last_activity_ms = now_ms;
         }
     }
 
@@ -166,6 +203,7 @@ impl JobStore {
                 t.status = det_status::RUNNING.to_string();
             }
         });
+        self.touch_activity(id);
     }
 
     /// Mark a deterministic tool `done` with its final findings count, incrementing the
@@ -183,6 +221,7 @@ impl JobStore {
                 }
             }
         });
+        self.touch_activity(id);
     }
 
     /// Snapshot the deterministic progress (test/poll helper).
@@ -200,6 +239,42 @@ impl JobStore {
     /// longer informative).
     pub fn set_batch_id(&self, id: &str, batch_id: impl Into<String>) {
         self.with(id, |j| j.batch_id = Some(batch_id.into()));
+    }
+
+    /// Request cancellation of a job by setting its cancel flag. The background worker is
+    /// expected to check `is_cancel_requested` periodically and stop early.
+    pub fn request_cancel(&self, id: &str) {
+        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
+            meta.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Return `true` when a cancel has been requested for this job.
+    pub fn is_cancel_requested(&self, id: &str) -> bool {
+        self.job_meta
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|m| m.cancel_requested.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// How many milliseconds has this job been idle (no tool activity) relative to `now_ms`?
+    /// Returns `None` for an unknown job id.
+    pub fn idle_ms(&self, id: &str, now_ms: u128) -> Option<u128> {
+        self.job_meta
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|m| now_ms.saturating_sub(m.last_activity_ms))
+    }
+
+    /// Cancel a job: set the cancel flag and update the job status to `"cancelled"`.
+    pub fn cancel(&self, id: &str) {
+        self.request_cancel(id);
+        self.with(id, |job| {
+            job.status = "cancelled".to_string();
+        });
     }
 
     /// Finish the job with the authoritative report.
@@ -264,7 +339,7 @@ mod tests {
     #[test]
     fn lifecycle_create_progress_findings_finish() {
         let store = JobStore::new();
-        let id = store.create();
+        let id = store.create("audit");
         assert_eq!(store.get(&id).unwrap().status, "running");
 
         store.add_total(&id, 4);
@@ -288,8 +363,8 @@ mod tests {
     #[test]
     fn unique_ids_and_fail_path() {
         let store = JobStore::new();
-        let a = store.create();
-        let b = store.create();
+        let a = store.create("audit");
+        let b = store.create("audit");
         assert_ne!(a, b);
         store.fail(&a, "no token");
         assert_eq!(store.get(&a).unwrap().status, "failed");
@@ -302,7 +377,7 @@ mod tests {
     #[test]
     fn deterministic_progress_lifecycle() {
         let store = JobStore::new();
-        let id = store.create();
+        let id = store.create("audit");
 
         // Nothing yet.
         let p = store.det_progress(&id).unwrap();
@@ -344,7 +419,7 @@ mod tests {
     #[test]
     fn deterministic_progress_serializes() {
         let store = JobStore::new();
-        let id = store.create();
+        let id = store.create("audit");
         store.det_tool_done(&id, "floor", 2);
         let js = store.get(&id).unwrap();
         let json = serde_json::to_string(&js).unwrap();
@@ -363,7 +438,7 @@ mod tests {
     #[test]
     fn batch_id_lifecycle() {
         let store = JobStore::new();
-        let id = store.create();
+        let id = store.create("audit");
 
         // Initially absent.
         assert!(store.get(&id).unwrap().batch_id.is_none());
@@ -382,5 +457,43 @@ mod tests {
             store.get(&id).unwrap().batch_id.is_none(),
             "batch_id cleared on finish"
         );
+    }
+
+    #[test]
+    fn job_cancel_marks_done_and_sets_flag() {
+        let store = JobStore::new();
+        let id = store.create("audit");
+        assert!(!store.is_cancel_requested(&id));
+        store.cancel(&id);
+        assert!(store.is_cancel_requested(&id));
+        let job = store.get(&id).unwrap();
+        assert_eq!(job.status, "cancelled");
+    }
+
+    #[test]
+    fn idle_ms_returns_none_for_unknown_job() {
+        let store = JobStore::new();
+        assert!(store.idle_ms("nonexistent", 99999).is_none());
+    }
+
+    #[test]
+    fn det_tool_running_touches_activity() {
+        let store = JobStore::new();
+        let id = store.create("audit");
+        // Record activity time just before
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        // Small sleep to ensure time advances
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.det_tool_running(&id, "bash");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let idle = store.idle_ms(&id, after_ms).unwrap();
+        // idle should be very small (just updated)
+        assert!(idle < after_ms - before_ms + 10, "idle should be near 0 after touch");
     }
 }

@@ -450,7 +450,7 @@ mod tests {
 
         let runs = RunStore::new();
         let uow = UowStore::new();
-        let run_id = runs.create("o/r#1", "update-branch");
+        let run_id = runs.create("o/r#1", "update-branch", crate::run::RunKind::Watched);
         execute_update_branch_run(
             runs.clone(),
             uow.clone(),
@@ -509,7 +509,7 @@ mod tests {
 
         let runs = RunStore::new();
         let uow = UowStore::new();
-        let run_id = runs.create("o/r#2", "update-branch");
+        let run_id = runs.create("o/r#2", "update-branch", crate::run::RunKind::Watched);
         execute_update_branch_run(
             runs.clone(),
             uow.clone(),

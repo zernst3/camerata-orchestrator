@@ -54,6 +54,40 @@ pub fn default_model() -> String {
     DEFAULT_MODEL.to_string()
 }
 
+pub fn default_watched_secs() -> u64 {
+    std::env::var("CAMERATA_RUN_STALL_THRESHOLD_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
+pub fn default_routine_secs() -> u64 {
+    std::env::var("CAMERATA_RUN_STALL_THRESHOLD_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|s| s.max(120) * 5)
+        .unwrap_or(600)
+}
+
+/// Per-project stall detection thresholds, split by context (watched = interactive,
+/// routine = autonomous/walk-away). Mirrors the `StepModels` pattern.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StallThresholds {
+    #[serde(default = "default_watched_secs")]
+    pub watched_secs: u64,
+    #[serde(default = "default_routine_secs")]
+    pub routine_secs: u64,
+}
+
+impl Default for StallThresholds {
+    fn default() -> Self {
+        Self {
+            watched_secs: default_watched_secs(),
+            routine_secs: default_routine_secs(),
+        }
+    }
+}
+
 /// Per-project, per-step model configuration for every NON-FLEET AI step.
 ///
 /// One model-id slot per [`StepKind`]. This mirrors [`TierMap`] exactly: `serde(default)`
@@ -200,6 +234,10 @@ pub struct Project {
     /// [`ProjectStore::set_step_model`].
     #[serde(default)]
     pub step_models: StepModels,
+    /// Per-project stall detection thresholds split by run context (watched = interactive,
+    /// routine = autonomous/walk-away). Defaults to 120s watched / 600s routine.
+    #[serde(default)]
+    pub stall_thresholds: StallThresholds,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -309,6 +347,22 @@ impl Project {
         let before = self.ruleset.custom.len();
         self.ruleset.custom.retain(|c| c.name != name);
         self.ruleset.custom.len() != before
+    }
+
+    /// Return the stall threshold in milliseconds for this project, keyed by whether
+    /// the run is autonomous (walk-away/routine) or watched (interactive).
+    pub fn stall_threshold_ms(&self, autonomous: bool) -> u128 {
+        let secs = if autonomous {
+            self.stall_thresholds.routine_secs
+        } else {
+            self.stall_thresholds.watched_secs
+        };
+        secs as u128 * 1_000
+    }
+
+    /// Replace this project's stall thresholds in place.
+    pub fn set_stall_thresholds(&mut self, thresholds: StallThresholds) {
+        self.stall_thresholds = thresholds;
     }
 }
 
@@ -434,6 +488,7 @@ impl ProjectStore {
                 tier_map: TierMap::default(),
                 process_rule_config: ProcessRuleConfig::default(),
                 step_models: StepModels::default(),
+                stall_thresholds: StallThresholds::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -498,6 +553,7 @@ impl ProjectStore {
                     tier_map: TierMap::default(),
                     process_rule_config: ProcessRuleConfig::default(),
                     step_models: StepModels::default(),
+                    stall_thresholds: StallThresholds::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -564,6 +620,16 @@ impl ProjectStore {
         self.update(id, |p| p.set_model_for_step(step, model))
     }
 
+    /// Set the stall thresholds for a single project by id. Returns the updated project,
+    /// or `None` when no project has that id.
+    pub fn set_stall_thresholds(
+        &self,
+        id: &str,
+        thresholds: StallThresholds,
+    ) -> Option<Project> {
+        self.update(id, |p| p.set_stall_thresholds(thresholds))
+    }
+
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
         let updated = {
@@ -612,6 +678,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -651,6 +718,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -684,6 +752,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -720,6 +789,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -768,6 +838,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1050,6 +1121,7 @@ mod tests {
             tier_map: crate::model_tier::TierMap::default(),
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());
@@ -1058,5 +1130,42 @@ mod tests {
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.step_models, original.step_models);
         assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-4-8");
+    }
+
+    #[test]
+    fn new_project_seeds_stall_thresholds_to_defaults() {
+        let store = ProjectStore::new();
+        let p = store.create("T", vec![]).unwrap();
+        assert_eq!(p.stall_thresholds.watched_secs, 120);
+        assert_eq!(p.stall_thresholds.routine_secs, 600);
+    }
+
+    #[test]
+    fn stall_threshold_ms_returns_correct_value_by_kind() {
+        let store = ProjectStore::new();
+        let p = store.create("T2", vec![]).unwrap();
+        assert_eq!(p.stall_threshold_ms(false), 120_000);
+        assert_eq!(p.stall_threshold_ms(true), 600_000);
+    }
+
+    #[test]
+    fn set_stall_thresholds_is_per_project_isolated() {
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+        use crate::project::StallThresholds;
+        store.set_stall_thresholds(&a.id, StallThresholds { watched_secs: 300, routine_secs: 1800 }).unwrap();
+        let updated_a = store.get(&a.id).unwrap();
+        let unchanged_b = store.get(&b.id).unwrap();
+        assert_eq!(updated_a.stall_thresholds.watched_secs, 300);
+        assert_eq!(unchanged_b.stall_thresholds.watched_secs, 120, "B must be untouched");
+    }
+
+    #[test]
+    fn stall_thresholds_default_when_absent_from_legacy_json() {
+        let json = r#"{"id":"p","name":"P","repos":[],"ruleset":{},"onboarded":[]}"#;
+        let p: crate::project::Project = serde_json::from_str(json).unwrap();
+        assert_eq!(p.stall_thresholds.watched_secs, 120);
+        assert_eq!(p.stall_thresholds.routine_secs, 600);
     }
 }

@@ -673,7 +673,7 @@ mod tests {
 
         let runs = RunStore::new();
         let uow = UowStore::new();
-        let run_id = runs.create("acme/api#42", "dev-implement");
+        let run_id = runs.create("acme/api#42", "dev-implement", crate::run::RunKind::Watched);
 
         execute_dev_implement_run(
             runs.clone(),

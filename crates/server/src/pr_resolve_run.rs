@@ -297,7 +297,7 @@ mod tests {
 
         let runs = RunStore::new();
         let uow = UowStore::new();
-        let run_id = runs.create("o/r#1", "pr-resolve");
+        let run_id = runs.create("o/r#1", "pr-resolve", crate::run::RunKind::Watched);
         execute_pr_resolve_run(
             runs.clone(),
             uow.clone(),

@@ -698,7 +698,7 @@ mod tests {
 
         let runs = RunStore::new();
         let uow = UowStore::new();
-        let run_id = runs.create("CAM-7", "investigation");
+        let run_id = runs.create("CAM-7", "investigation", crate::run::RunKind::Watched);
 
         let parked_clar_id;
         {
@@ -800,7 +800,7 @@ mod tests {
         let uow = UowStore::new();
         let clarifications = ClarificationStore::new();
         let resume = ClarifyResumeStore::new();
-        let run_id = runs.create("CAM-INV-1", "live");
+        let run_id = runs.create("CAM-INV-1", "live", crate::run::RunKind::Watched);
         execute_investigation_run(
             runs.clone(),
             uow.clone(),
