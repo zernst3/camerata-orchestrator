@@ -284,6 +284,14 @@ pub struct UnitOfWork {
     /// without needing the in-memory run.
     #[serde(default)]
     pub evidence: Option<crate::evidence::UowEvidenceRecord>,
+    /// The parent issue number (normalized: digits only, e.g. `"42"` not `"#42"`), when
+    /// this draft UoW should be published as a GitHub sub-issue of an existing issue. Set
+    /// at blank-UoW creation time and carried through to the publish step, where the
+    /// native GitHub sub-issue link is created. `None` for a normal UoW with no parent.
+    /// `#[serde(default)]` for back-compat: existing `uow.json` records without this
+    /// field round-trip unchanged.
+    #[serde(default)]
+    pub parent_id: Option<String>,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
@@ -648,6 +656,14 @@ impl UowStore {
     /// reference is carried on the spine story, so the key is never re-mapped (see the
     /// build decision doc). Persists immediately. Returns the created UoW.
     pub fn create_blank(&self) -> UnitOfWork {
+        self.create_blank_with_parent(None)
+    }
+
+    /// Create a blank DRAFT UoW with an optional `parent_id`. When `parent_id` is
+    /// `Some`, the normalized number string is stored on the UoW and carried through to
+    /// the publish step, where a native GitHub sub-issue link is created. Otherwise
+    /// identical to [`Self::create_blank`].
+    pub fn create_blank_with_parent(&self, parent_id: Option<String>) -> UnitOfWork {
         let id = format!("draft-{}", Self::next_draft_token());
         let now = Self::now_rfc3339();
         let uow = {
@@ -655,6 +671,7 @@ impl UowStore {
             let uow = UnitOfWork {
                 story_id: id.clone(),
                 authoring: Some(AuthoringState::default()),
+                parent_id,
                 updated: now,
                 ..Default::default()
             };
