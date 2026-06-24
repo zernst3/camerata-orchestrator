@@ -17,6 +17,8 @@ camerata-gateway = { path = "../gateway" }
 camerata-intake = { path = "../intake" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+# RAII temp-dir cleanup for per-session and per-run scaffold dirs (ARCH-RESOURCE-LIFECYCLE-1).
+tempfile = "3"
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

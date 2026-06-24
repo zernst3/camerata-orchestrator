@@ -80,12 +80,11 @@ pub async fn run_build_demo() -> anyhow::Result<()> {
     // ── Per-session governed drivers (each agent its own session) ────────────
     // Each session gets its own rules.json + mcp-config (per-session delivery),
     // and the driver is bound to the shared worktree (cwd + --add-dir scope).
-    let impl_session_dir = root.join("implementer-session");
-    let impl_spawn = prepare_session(&impl_session_dir, &gateway_bin, &implementer_role, None)?;
+    // prepare_session creates its own TempDir per session (ARCH-RESOURCE-LIFECYCLE-1).
+    let impl_spawn = prepare_session(&gateway_bin, &implementer_role, None)?;
     let impl_driver = impl_spawn.driver.with_worktree(&worktree);
 
-    let tester_session_dir = root.join("tester-session");
-    let tester_spawn = prepare_session(&tester_session_dir, &gateway_bin, &tester_role, None)?;
+    let tester_spawn = prepare_session(&gateway_bin, &tester_role, None)?;
     let tester_driver = tester_spawn.driver.with_worktree(&worktree);
 
     eprintln!(

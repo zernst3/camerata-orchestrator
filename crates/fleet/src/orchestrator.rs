@@ -91,21 +91,25 @@ pub struct OrchestratorSession {
     pub rules_file: PathBuf,
     /// Path to the orchestrator mcp-config (delegate env enabled).
     pub mcp_config: PathBuf,
+    /// RAII handle: the temp dir is deleted when this field is dropped.
+    /// ARCH-RESOURCE-LIFECYCLE-1: every temp artifact must be RAII-cleaned.
+    pub _dir: tempfile::TempDir,
 }
 
 /// Prepare the lead stage's session with the orchestrator mcp-config on disk.
 ///
-/// Writes `<session_dir>/rules.json` (the role's subset) and
-/// `<session_dir>/gateway.json` (the orchestrator-mode mcp-config). Returns the
-/// paths; the caller builds a `ClaudeCliDriver::new(mcp_config).as_orchestrator(true)`.
+/// Creates a fresh `TempDir` (removed automatically when [`OrchestratorSession`]
+/// is dropped), writes `rules.json` (the role's subset) and `gateway.json` (the
+/// orchestrator-mode mcp-config) into it. Returns the paths; the caller builds a
+/// `ClaudeCliDriver::new(mcp_config).as_orchestrator(true)`.
 pub fn prepare_orchestrator_session(
-    session_dir: &Path,
     gateway_bin: &Path,
     role: &Role,
     worktree: &Path,
     tier_map: &TierMap,
 ) -> anyhow::Result<OrchestratorSession> {
-    std::fs::create_dir_all(session_dir)?;
+    let dir = tempfile::TempDir::new()?;
+    let session_dir = dir.path();
 
     let rules_file = session_dir.join("rules.json");
     std::fs::write(&rules_file, render_rules_file(role)?)?;
@@ -117,6 +121,7 @@ pub fn prepare_orchestrator_session(
     Ok(OrchestratorSession {
         rules_file,
         mcp_config,
+        _dir: dir,
     })
 }
 
@@ -207,13 +212,8 @@ mod tests {
 
     #[test]
     fn prepare_orchestrator_session_writes_both_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "camerata-orch-session-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        // prepare_orchestrator_session now manages its own TempDir (ARCH-RESOURCE-LIFECYCLE-1).
         let s = prepare_orchestrator_session(
-            &dir,
             Path::new("/bin/camerata-gateway"),
             &role(),
             Path::new("/work/crate"),
@@ -224,7 +224,7 @@ mod tests {
         assert!(s.mcp_config.exists());
         let cfg = std::fs::read_to_string(&s.mcp_config).unwrap();
         assert!(cfg.contains(DELEGATE_ENABLED_ENV));
-        let _ = std::fs::remove_dir_all(&dir);
+        // s._dir (TempDir) cleans up on drop — no manual remove_dir_all needed.
     }
 
     #[test]

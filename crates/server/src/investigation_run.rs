@@ -432,19 +432,13 @@ async fn run_one_investigation_pass(
         }
     };
 
-    // A unique session dir per pass so a resume's sink does not collide with the prior
-    // pass's clarify-requests.jsonl.
-    let session_dir = std::env::temp_dir().join(format!(
-        "camerata-investigation-{}-{}-{}",
-        std::process::id(),
-        run_id,
-        next_seq()
-    ));
     // No worktree jail: investigation is read-oriented. The agent's write path is still
     // the gateway only (Task/Write/Bash disallowed by the driver). prepare_session wires
     // the gated MCP config; with no worktree the agent inherits the orchestrator cwd for
     // read scope.
-    let spawn = match prepare_session(&session_dir, &gateway_bin, &role, None) {
+    // The session temp dir is RAII-managed inside SessionSpawn._dir (ARCH-RESOURCE-LIFECYCLE-1);
+    // a unique dir is created per prepare_session call so a resume's sink never collides.
+    let spawn = match prepare_session(&gateway_bin, &role, None) {
         Ok(s) => s,
         Err(e) => {
             runs.push_event(
@@ -467,11 +461,13 @@ async fn run_one_investigation_pass(
     // This adds NO write path: the gate (gated_write only) and the disallowed-builtins
     // denylist (Task/Write/Bash/…) are unchanged.
     // Wire the activity heartbeat so streamed agent output keeps last_activity_ms fresh.
+    // Destructure spawn so the _dir (TempDir RAII guard) is held independently while
+    // the driver is consumed. The dir stays alive until `_session_dir` is dropped.
+    let camerata_agent::SessionSpawn { driver: raw_driver, _dir: _session_dir, .. } = spawn;
     let store_hb = runs.clone();
     let rid_hb = run_id.clone();
     let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
-    let driver = spawn
-        .driver
+    let driver = raw_driver
         .with_model(&model)
         .with_clarification(true)
         .with_on_activity(on_activity);
@@ -501,7 +497,7 @@ async fn run_one_investigation_pass(
             // — post the question into the 3a store (auto-saved), persist the resume
             // context, and park the run at AwaitingClarification. The agent already STOPped
             // (the question was its last act), so there is no hung process to long-poll.
-            if let Some(req) = read_first_clarify_request(&session_dir) {
+            if let Some(req) = read_first_clarify_request(_session_dir.path()) {
                 pause_run_on_clarification(
                     &runs,
                     &uow,
@@ -516,7 +512,7 @@ async fn run_one_investigation_pass(
                     req,
                     next_seq(),
                 );
-                let _ = std::fs::remove_dir_all(&session_dir);
+                // spawn is dropped here; _dir (TempDir) removes the session dir automatically.
                 return;
             }
 
@@ -564,7 +560,8 @@ async fn run_one_investigation_pass(
         }
     }
 
-    let _ = std::fs::remove_dir_all(&session_dir);
+    // _session_dir (TempDir) removes the session dir automatically on drop here.
+    drop(_session_dir);
     runs.set_status(&run_id, RunStatus::AwaitingQa, true);
 }
 
@@ -658,16 +655,8 @@ mod tests {
             rule_subset: vec![RuleId("GOV-1".to_string())],
             allowed_paths: vec!["crates/".to_string()],
         };
-        let dir = std::env::temp_dir().join(format!(
-            "cam-gate-posture-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        // Build the gated session exactly as the runner does, then opt into clarification.
-        let spawn = prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role, None)
+        // prepare_session now creates its own RAII TempDir internally (ARCH-RESOURCE-LIFECYCLE-1).
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None)
             .expect("session prepares");
         let driver = spawn.driver.with_clarification(true);
         let args = driver.build_args(&role, "analyze");
@@ -694,7 +683,7 @@ mod tests {
                 "{tool} must never be on the allowlist with clarification on"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
+        // spawn._dir (TempDir) is dropped here, cleaning up the session dir automatically.
     }
 
     #[test]

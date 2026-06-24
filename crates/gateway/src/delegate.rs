@@ -251,23 +251,17 @@ pub async fn run_delegated(
     let child_depth = config.depth + 1;
 
     // 3) Materialize a per-child session dir (rules + child mcp-config).
-    let session_dir = std::env::temp_dir().join(format!(
-        "camerata-delegate-{}-{}",
-        std::process::id(),
-        // Cheap unique-ish suffix: monotonic-ish nanos.
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    if let Err(e) = std::fs::create_dir_all(&session_dir) {
-        // Surface as a normal (non-Err) tool result string would be cleaner, but
-        // the handler maps Result -> String; encode the IO failure as output.
-        return Ok(format!(
-            "DELEGATE could not start: failed to create session dir {}: {e}",
-            session_dir.display()
-        ));
-    }
+    //    ARCH-RESOURCE-LIFECYCLE-1: use a TempDir so the dir is removed on every exit
+    //    path (normal return, early error return, or future panic) without a manual cleanup.
+    let session_tmp = match tempfile::TempDir::new() {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(format!(
+                "DELEGATE could not start: failed to create session temp dir: {e}"
+            ));
+        }
+    };
+    let session_dir = session_tmp.path();
 
     let rules_file = session_dir.join("rules.json");
     let rules_json = match serde_json::to_string_pretty(&rule_subset) {

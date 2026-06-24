@@ -489,12 +489,12 @@ pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     }
 
     // ── Per-session governed drivers (each agent its own session) ────────────
+    // prepare_session creates its own TempDir per session (ARCH-RESOURCE-LIFECYCLE-1).
     let mut spawns = Vec::with_capacity(total);
-    for (i, role) in roles.iter().enumerate() {
-        let session_dir = root.join(format!("session-{}", i + 1));
+    for role in roles.iter() {
         // Pass the worktree so the gateway is jailed to it (CAMERATA_WORKTREE_ROOT):
         // gated_write refuses any target outside the worktree, in code.
-        let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
+        let spawn = prepare_session(gateway_bin, role, Some(&worktree))?;
         spawns.push(spawn);
     }
     let drivers: Vec<_> = spawns
@@ -740,13 +740,16 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     // ── Per-session governed drivers ─────────────────────────────────────────
     // The lead's session carries an orchestrator mcp-config (delegate ON, tier
     // map + gateway bin + worktree + depth=0); every other session is ordinary.
+    // prepare_session / prepare_orchestrator_session each create their own TempDir
+    // (ARCH-RESOURCE-LIFECYCLE-1); the _dir fields keep the session alive for the run.
     let mut mcp_config_paths: Vec<String> = Vec::with_capacity(total);
     let mut is_orchestrator: Vec<bool> = Vec::with_capacity(total);
+    // Hold all session spawns so their _dir TempDirs remain alive for the full run.
+    let mut tiered_spawns: Vec<camerata_agent::SessionSpawn> = Vec::with_capacity(total);
+    let mut orch_spawns: Vec<orchestrator::OrchestratorSession> = Vec::with_capacity(total);
     for (i, role) in roles.iter().enumerate() {
-        let session_dir = root.join(format!("session-{}", i + 1));
         if Some(i) == lead_idx {
             let orch = orchestrator::prepare_orchestrator_session(
-                &session_dir,
                 gateway_bin,
                 role,
                 &worktree,
@@ -754,10 +757,12 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
             )?;
             mcp_config_paths.push(orch.mcp_config.display().to_string());
             is_orchestrator.push(true);
+            orch_spawns.push(orch);
         } else {
-            let spawn = prepare_session(&session_dir, gateway_bin, role, Some(&worktree))?;
+            let spawn = prepare_session(gateway_bin, role, Some(&worktree))?;
             mcp_config_paths.push(spawn.mcp_config.display().to_string());
             is_orchestrator.push(false);
+            tiered_spawns.push(spawn);
         }
     }
 

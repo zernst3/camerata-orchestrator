@@ -39,3 +39,5 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 regex = "1"
 sha2 = { workspace = true }
+# RAII temp-dir cleanup for per-delegate session dirs (ARCH-RESOURCE-LIFECYCLE-1).
+tempfile = "3"

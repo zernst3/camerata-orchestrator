@@ -80,6 +80,8 @@ camerata-checks = { path = "../checks" }
 # investigation notes are persisted here (ROUTE-A) for queryable, provenance-tracked
 # history instead of living inline on the UoW JSON.
 camerata-persistence = { path = "../persistence" }
+# RAII temp-dir cleanup for per-run scaffold dirs and session dirs (ARCH-RESOURCE-LIFECYCLE-1).
+tempfile = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

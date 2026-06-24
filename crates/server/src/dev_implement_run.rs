@@ -246,14 +246,10 @@ pub async fn execute_dev_implement_run(
             return;
         }
     };
-    let session_dir = std::env::temp_dir().join(format!(
-        "camerata-devimpl-{}-{}",
-        std::process::id(),
-        run_id
-    ));
     // Jail the agent's writes to the worktree via the session worktree: gated_write
     // (layer-1) is its ONLY mutation path, confined to this UoW's worktree.
-    let spawn = match prepare_session(&session_dir, &gateway_bin, &role, Some(dir.as_path())) {
+    // The session temp dir is RAII-managed inside SessionSpawn._dir (ARCH-RESOURCE-LIFECYCLE-1).
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path())) {
         Ok(s) => s,
         Err(e) => {
             fail(

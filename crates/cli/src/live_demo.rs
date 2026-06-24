@@ -119,14 +119,14 @@ struct LiveRun {
 async fn run_one(
     label: &'static str,
     role: &Role,
-    root: &Path,
     gateway_bin: &Path,
     session_name: &str,
     target_path: &Path,
     task: &str,
 ) -> anyhow::Result<LiveRun> {
-    let session_dir = root.join(session_name);
-    let spawn = prepare_session(&session_dir, gateway_bin, role, None)?;
+    // prepare_session creates its own TempDir (ARCH-RESOURCE-LIFECYCLE-1); no manual
+    // session_dir needed.
+    let spawn = prepare_session(gateway_bin, role, None)?;
 
     eprintln!(
         "[live-demo] session={} rules_file={} mcp_config={}",
@@ -203,7 +203,6 @@ pub async fn run_live_demo() -> anyhow::Result<()> {
     let deny_run = run_one(
         "FORBIDDEN write",
         &role,
-        &root,
         &gateway_bin,
         "deny-session",
         &forbidden_path,
@@ -229,7 +228,6 @@ pub async fn run_live_demo() -> anyhow::Result<()> {
     let secret_run = run_one(
         "SECRET write",
         &role,
-        &root,
         &gateway_bin,
         "secret-session",
         &secret_path,
@@ -249,7 +247,6 @@ pub async fn run_live_demo() -> anyhow::Result<()> {
     let allow_run = run_one(
         "CLEAN write",
         &role,
-        &root,
         &gateway_bin,
         "allow-session",
         &clean_path,

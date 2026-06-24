@@ -127,27 +127,40 @@ pub struct SessionSpawn {
     pub mcp_config: PathBuf,
     /// Driver wired to the generated mcp-config, ready to `.run(role, task)`.
     pub driver: ClaudeCliDriver,
+    /// RAII handle: the temp dir is deleted when this field is dropped (i.e. when
+    /// the run function returns — normal, error, or panic path alike).
+    /// ARCH-RESOURCE-LIFECYCLE-1: every temp artifact must be RAII-cleaned.
+    pub _dir: tempfile::TempDir,
 }
 
-/// Prepare one governed agent session on disk under `session_dir`.
+/// Prepare one governed agent session on disk.
 ///
-/// Writes `<session_dir>/rules.json` (the role's rule-subset) and
-/// `<session_dir>/gateway.json` (an mcp-config launching `gateway_bin` with
-/// `CAMERATA_RULES_FILE` pointed at `rules.json`), and returns a
-/// [`ClaudeCliDriver`] bound to that config. Does NOT spawn `claude` — the
-/// caller does that via [`ClaudeCliDriver::run`], so latency/output capture
-/// stay in the caller's hands.
+/// Creates a fresh `TempDir` (removed automatically when [`SessionSpawn`] is
+/// dropped), writes `rules.json` (the role's rule-subset) and `gateway.json`
+/// (an mcp-config launching `gateway_bin` with `CAMERATA_RULES_FILE` pointed
+/// at `rules.json`) into it, and returns a [`ClaudeCliDriver`] bound to that
+/// config.  Does NOT spawn `claude` — the caller does that via
+/// [`ClaudeCliDriver::run`], so latency/output capture stay in the caller's
+/// hands.
+///
+/// The caller-supplied `session_dir` parameter is **no longer accepted**; the
+/// directory is created internally so its lifetime is tracked by
+/// `SessionSpawn::_dir`.  Callers that previously constructed and passed a
+/// manual temp path should simply remove that construction — `prepare_session`
+/// handles it.
 pub fn prepare_session(
-    session_dir: &Path,
     gateway_bin: &Path,
     role: &Role,
     worktree: Option<&Path>,
 ) -> Result<SessionSpawn, SessionError> {
-    std::fs::create_dir_all(session_dir).map_err(|source| SessionError::Write {
-        what: "session dir",
-        path: session_dir.to_path_buf(),
+    // Create a RAII temp dir.  Dropped (and thus removed from disk) when the
+    // returned SessionSpawn goes out of scope.
+    let dir = tempfile::TempDir::new().map_err(|source| SessionError::Write {
+        what: "session temp dir",
+        path: std::env::temp_dir(),
         source,
     })?;
+    let session_dir = dir.path();
 
     let rules_file = session_dir.join("rules.json");
     let rules_json = render_rules_file(role)?;
@@ -167,8 +180,8 @@ pub fn prepare_session(
 
     let driver = ClaudeCliDriver::new(mcp_config.display().to_string());
 
-    // A deterministic session id derived from the role + dir; the live session
-    // id reported by `claude` is captured separately in the AgentOutcome.
+    // A deterministic session id derived from the role + tempdir name; the live
+    // session id reported by `claude` is captured separately in the AgentOutcome.
     let session_id = SessionId(format!(
         "{}-{}",
         role.name.to_lowercase(),
@@ -183,6 +196,7 @@ pub fn prepare_session(
         rules_file,
         mcp_config,
         driver,
+        _dir: dir,
     })
 }
 
@@ -258,10 +272,9 @@ mod tests {
 
     #[test]
     fn prepare_session_writes_both_files_and_wires_driver() {
-        let dir =
-            std::env::temp_dir().join(format!("camerata-session-test-{}", std::process::id()));
+        // prepare_session now creates its own TempDir; no caller-supplied path needed.
         let spawn =
-            prepare_session(&dir, Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
+            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(
@@ -272,7 +285,6 @@ mod tests {
         let args = spawn.driver.build_args(&role(), "task");
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert!(args[allowed_idx + 1].contains(GATED_WRITE_TOOL));
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // spawn._dir (TempDir) cleans up on drop — no manual remove_dir_all needed.
     }
 }

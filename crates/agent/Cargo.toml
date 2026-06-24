@@ -19,6 +19,8 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
+# RAII temp-dir cleanup for per-session scratch dirs (ARCH-RESOURCE-LIFECYCLE-1).
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
