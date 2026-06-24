@@ -39,12 +39,21 @@ fn main() {
     // and install an explicit menu bar with a proper App menu + full Edit menu so
     // copy/cut/paste/select-all (and their Cmd-key equivalents) are wired through the
     // macOS responder chain to the webview's text fields. See `app_menu_bar`.
-    use dioxus::desktop::{Config, WindowBuilder};
+    use dioxus::desktop::{Config, WindowBuilder, WindowCloseBehaviour};
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             Config::new()
                 .with_menu(app_menu_bar())
-                .with_window(WindowBuilder::new().with_title("Camerata Orchestrator")),
+                .with_window(WindowBuilder::new().with_title("Camerata Orchestrator"))
+                // Ensure closing the window CLOSES it (does not hide it — the macOS
+                // default for Dioxus when not set explicitly is WindowHides, which
+                // keeps the process alive and the embedded BFF bound on :8787).
+                .with_close_behaviour(WindowCloseBehaviour::WindowCloses)
+                // Ensure the process exits when the last window closes.  The background
+                // BFF thread is NOT detached, so process exit drops it; the :8787 bind
+                // is released immediately.  Without this, a stale server shadows the
+                // freshly-built one on the next `cargo run`.
+                .with_exits_when_last_window_closes(true),
         )
         .launch(App);
 }
@@ -109,7 +118,31 @@ fn App() -> Element {
         std::thread::spawn(|| match tokio::runtime::Runtime::new() {
             Ok(rt) => rt.block_on(async {
                 if let Err(e) = camerata_server::serve(BFF_ADDR).await {
-                    eprintln!("[camerata-ui] embedded BFF exited: {e}");
+                    // Check whether the error looks like a port-already-in-use failure.
+                    // `AddrInUse` surfaces as an `std::io::Error` whose kind is
+                    // `AddrInUse`; the Display string always contains "address already
+                    // in use" (Linux) or "Address already in use" (macOS) or the OS
+                    // equivalent.  We match on the lowercase string to be portable.
+                    let msg = e.to_string();
+                    if msg.to_lowercase().contains("address already in use")
+                        || msg.to_lowercase().contains("addr in use")
+                    {
+                        eprintln!(
+                            "\n\
+                             ╔══════════════════════════════════════════════════════════════╗\n\
+                             ║  [camerata-ui] WARNING: :{} ALREADY IN USE               ║\n\
+                             ║                                                              ║\n\
+                             ║  A stale Camerata server from a previous run is still        ║\n\
+                             ║  holding the port.  This build's code is NOT running —       ║\n\
+                             ║  the cockpit is talking to the OLD server.                   ║\n\
+                             ║                                                              ║\n\
+                             ║  Fix: quit ALL Camerata instances, then relaunch.            ║\n\
+                             ╚══════════════════════════════════════════════════════════════╝\n",
+                            BFF_ADDR
+                        );
+                    } else {
+                        eprintln!("[camerata-ui] embedded BFF exited: {e}");
+                    }
                 }
             }),
             Err(e) => eprintln!("[camerata-ui] could not start BFF runtime: {e}"),
