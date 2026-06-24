@@ -586,7 +586,23 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             // Pass 1: remove worktrees for terminal-state (SignedOff) UoWs.
-            for uow in uow_store.list() {
+            //
+            // ISOLATION: only sweep UoWs whose repo belongs to a known project. The
+            // global `list()` would resolve and act on every project's UoWs even when
+            // none is active/onboarded; scope to the union of all projects' in-scope
+            // repos via `list_for_project`, and skip the pass entirely when there are
+            // no project repos to sweep.
+            let project_repos: Vec<String> = projects
+                .list()
+                .into_iter()
+                .flat_map(|p| p.repos)
+                .collect();
+            let scoped_uows = if project_repos.is_empty() {
+                Vec::new()
+            } else {
+                uow_store.list_for_project(&project_repos)
+            };
+            for uow in scoped_uows {
                 if uow.stage != crate::lifecycle::UowStage::SignedOff {
                     continue;
                 }
