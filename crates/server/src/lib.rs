@@ -6594,6 +6594,10 @@ pub struct ProjectContextResponse {
     pub ok: bool,
     /// Onboarding phase determines which grounding fields are populated.
     pub phase: ProjectPhase,
+    /// The active project's stable id (present when `ok=true`). Lets the client confirm
+    /// which project this grounding belongs to, closing the cross-project leak surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// The active project's name (present when `ok=true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
@@ -7037,6 +7041,7 @@ async fn active_project_context(
         return Json(ProjectContextResponse {
             ok: false,
             phase: ProjectPhase::Blank,
+            project_id: None,
             project_name: None,
             repos: Vec::new(),
             onboarded: Vec::new(),
@@ -7081,6 +7086,7 @@ async fn active_project_context(
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: project.onboarded.clone(),
@@ -7113,6 +7119,7 @@ async fn active_project_context(
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: Vec::new(),
@@ -7138,6 +7145,7 @@ async fn active_project_context(
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: Vec::new(),
