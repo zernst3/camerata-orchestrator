@@ -2236,7 +2236,16 @@ async fn onboard_scan(
 
     // Local-first: scan reads the repos' local working trees, not GitHub. No token needed.
     let (sources, notes) = resolve_local_sources(&state, &repos);
-    Json(crate::onboard::scan_repos(&sources, notes).await)
+    let report = crate::onboard::scan_repos(&sources, notes).await;
+    // Populate the per-project last-scan store so the chat assistant sees deterministic
+    // results immediately. The async audit path (`onboard_audit_start`) and the sync audit
+    // (`onboard_audit`) already do this; without it here, a floor-only `/api/onboard/scan`
+    // leaves `last_scan` empty and the chat shows "no scan results yet". Fail-soft, keyed by
+    // the active project (the same id `active_project_context` reads).
+    if let Some(id) = state.projects.active().map(|p| p.id) {
+        state.set_last_scan(id, report.clone());
+    }
+    Json(report)
 }
 
 /// One selected rule the Phase-2 audit runs against, with its per-repo binding. An empty
