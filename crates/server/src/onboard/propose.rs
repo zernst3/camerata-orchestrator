@@ -501,7 +501,7 @@ pub async fn propose_corpus_rules(
     let mut proposed = set
         .iter()
         .map(|r| {
-            let matched_repos: Vec<String> = if r.domain == "*" {
+            let matched_repos: Vec<String> = if r.domain == "universal" {
                 all_repos.clone()
             } else {
                 repo_domains

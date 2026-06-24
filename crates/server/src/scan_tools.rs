@@ -1053,7 +1053,7 @@ mod tests {
             id: RuleId(id.to_string()),
             title: id.to_string(),
             enforcement,
-            domain: "*".to_string(),
+            domain: "universal".to_string(),
             summary: String::new(),
             decision_question: None,
             decision_why: None,
