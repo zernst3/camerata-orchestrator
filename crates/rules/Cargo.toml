@@ -16,5 +16,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 toml = "0.8"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+tracing = "0.1"
 
 [dev-dependencies]

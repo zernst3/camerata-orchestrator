@@ -302,7 +302,10 @@ struct RuleToml {
     id: String,
     title: String,
     enforcement: EnforcementKind,
-    domain: String,
+    /// Optional in-file domain field. When present, a warning is logged if it
+    /// disagrees with the folder-derived value — the derived value always wins.
+    #[serde(default)]
+    domain: Option<String>,
     /// Optional short summary. We derive it from the `decision.why` field when
     /// `qualifies` is absent, or fall back to the title.
     #[serde(default)]
@@ -392,7 +395,8 @@ pub struct Rule {
     pub title: String,
     /// Enforcement tier for this rule.
     pub enforcement: EnforcementKind,
-    /// Domain tag from the TOML file (e.g. `"rust"`, `"agentic"`, `"*"`).
+    /// Category domain derived from the corpus folder path
+    /// (e.g. `"rust"`, `"agentic"`, `"universal"`).
     pub domain: String,
     /// A one-paragraph summary — sourced from `qualifies`, then
     /// `decision.why`, then `title` as a final fallback.
@@ -534,9 +538,9 @@ impl RuleSet {
 
     /// All rules whose `domain` field matches `domain` exactly.
     ///
-    /// Note: the corpus uses `"*"` for universal rules. Pass `"*"` to retrieve
-    /// them, or use [`RuleSet::select`] with [`Filter::AllDomains`] to include
-    /// universals automatically.
+    /// Note: the corpus uses `"universal"` for universal rules (derived from the
+    /// `universal/` corpus folder). Pass `"universal"` to retrieve them, or use
+    /// [`select_for_domains`] to include universals automatically.
     pub fn get_by_domain(&self, domain: &str) -> Vec<&Rule> {
         match self.by_domain.get(domain) {
             Some(indices) => indices.iter().map(|&i| &self.rules[i]).collect(),
@@ -549,7 +553,7 @@ impl RuleSet {
         self.rules.iter()
     }
 
-    /// All distinct domain strings present in the set (including `"*"`).
+    /// All distinct domain strings present in the set.
     pub fn domains(&self) -> impl Iterator<Item = &str> {
         self.by_domain.keys().map(String::as_str)
     }
@@ -595,7 +599,7 @@ pub async fn load_corpus(corpus_dir: &Path) -> Result<RuleSet, RulesError> {
     let paths = collect_toml_paths(corpus_dir).await?;
     let mut set = RuleSet::default();
     for path in paths {
-        let rule = load_one(&path).await?;
+        let rule = load_one(&path, corpus_dir).await?;
         set.push(rule);
     }
     Ok(set)
@@ -616,7 +620,7 @@ pub async fn load_corpus_lenient(corpus_dir: &Path) -> (RuleSet, Vec<(PathBuf, R
     let mut errors = Vec::new();
 
     for path in paths {
-        match load_one(&path).await {
+        match load_one(&path, corpus_dir).await {
             Ok(rule) => set.push(rule),
             Err(e) => errors.push((path, e)),
         }
@@ -667,7 +671,14 @@ fn collect_toml_paths_sync(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Rul
 }
 
 /// Parse a single TOML file into a [`Rule`].
-async fn load_one(path: &Path) -> Result<Rule, RulesError> {
+///
+/// `corpus_dir` is the root of the corpus; `path` must be inside it.
+/// The `domain` field on the resulting [`Rule`] is derived from the TOML
+/// file's parent folder path relative to `corpus_dir` — folder components
+/// are joined with `:` (e.g. `corpus_dir/rust/dioxus/x.toml` → `"rust:dioxus"`).
+/// An in-file `domain` field is optional; when present it is compared against
+/// the derived value and a warning is logged on disagreement.
+async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
     let bytes = tokio::fs::read(path).await.map_err(|e| RulesError::Io {
         path: path.to_path_buf(),
         source: e,
@@ -684,6 +695,50 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
             path: path.to_path_buf(),
             field: "id",
         });
+    }
+
+    // Derive the category domain from the TOML's folder path relative to corpus_dir.
+    // e.g. corpus_dir/rust/dioxus/x.toml → "rust:dioxus"
+    //      corpus_dir/universal/x.toml   → "universal"
+    let derived_domain: String = {
+        let parent = path
+            .parent()
+            .unwrap_or(corpus_dir);
+        let rel = parent
+            .strip_prefix(corpus_dir)
+            .unwrap_or(parent);
+        let components: Vec<&str> = rel
+            .components()
+            .filter_map(|c| {
+                if let std::path::Component::Normal(s) = c {
+                    s.to_str()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if components.is_empty() {
+            // File is directly in corpus_dir (no subfolder) — should not happen
+            // in a well-formed corpus, but fall back gracefully.
+            "universal".to_string()
+        } else {
+            components.join(":")
+        }
+    };
+
+    // If the TOML specifies an explicit domain, warn if it disagrees with the
+    // derived value (this catches stale/mismatched fields). The derived value
+    // always wins.
+    if let Some(ref explicit) = raw.domain {
+        let normalised = if explicit == "*" { "universal" } else { explicit.as_str() };
+        if normalised != derived_domain {
+            tracing::warn!(
+                path = %path.display(),
+                explicit = %explicit,
+                derived = %derived_domain,
+                "corpus rule TOML domain field disagrees with folder path — derived value wins"
+            );
+        }
     }
 
     // Derive summary: qualifies > decision.why > title.
@@ -737,7 +792,7 @@ async fn load_one(path: &Path) -> Result<Rule, RulesError> {
         id: RuleId(raw.id),
         title: raw.title,
         enforcement: raw.enforcement,
-        domain: raw.domain,
+        domain: derived_domain,
         summary,
         decision_question,
         decision_why,
@@ -816,10 +871,11 @@ pub fn select_by_ids<'a>(rule_set: &'a RuleSet, ids: &[RuleId]) -> Vec<&'a Rule>
     select(rule_set, &Filter::ByIds(ids))
 }
 
-/// Select rules for the given domains (including universal `"*"` rules).
+/// Select rules for the given domains (including `"universal"` rules).
 ///
-/// The `"*"` wildcard domain is always included so callers get universal
-/// rules automatically without needing to mention `"*"` explicitly.
+/// The `"universal"` domain (derived from the `universal/` corpus folder) is
+/// always included so callers get universal rules automatically without needing
+/// to mention `"universal"` explicitly.
 pub fn select_for_domains<'a>(rule_set: &'a RuleSet, domains: &[&str]) -> Vec<&'a Rule> {
     rule_set
         .iter()
