@@ -5832,7 +5832,10 @@ async fn git_cherry_pick(
 
 /// All known UoWs across every story.
 async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfWork>> {
-    Json(state.uow.list())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.uow.list_for_project(&p.repos))
 }
 
 /// The UoW for a story. Creates a default one if the story has no UoW yet.
@@ -6048,8 +6051,11 @@ struct UowView {
 /// (resolved from the story spine) and its lifecycle stage. A draft UoW's work item is
 /// resolved by its explicit `work_item` link (set at publish), falling back to the key.
 async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    let Some(p) = state.projects.active() else {
+        return Ok(Json(serde_json::json!({ "uows": [] })));
+    };
     let stories = state.stories.list().await.map_err(AppError)?;
-    let uows = state.uow.list();
+    let uows = state.uow.list_for_project(&p.repos);
     let views: Vec<UowView> = uows
         .into_iter()
         .map(|u| {
@@ -7763,7 +7769,13 @@ struct StoryDevContext {
 async fn development_context(State(state): State<AppState>) -> Json<serde_json::Value> {
     use camerata_worktracker::investigation::decisions_approved_for_development;
 
-    let uow_list = state.uow.list();
+    let Some(p) = state.projects.active() else {
+        return Json(serde_json::json!({
+            "ok": true,
+            "units_of_work": [],
+        }));
+    };
+    let uow_list = state.uow.list_for_project(&p.repos);
     let items: Vec<StoryDevContext> = uow_list
         .into_iter()
         .map(|uow| {
