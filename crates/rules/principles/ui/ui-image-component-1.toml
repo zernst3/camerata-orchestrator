@@ -3,9 +3,9 @@ title = "Images render through a single project-level component, not framework p
 tag = "stack"
 domain = "ui"
 layer = "universal"
-enforcement = "mechanical"
+enforcement = "architectural"
 default = true
-qualifies = "Enforced by the eslint-plugin-next rule @next/next/no-img-element, an off-the-shelf rule that fails the lint step on any raw <img> element in feature code and steers it to the framework image component. Conformance holds when that rule runs at error severity in CI and a feature file using a raw <img> fails the build; it fails when the rule is absent or only warns. The off-the-shelf rule covers the raw-<img> case; banning the framework primitive itself (forcing every image through a single project-level wrapper rather than next/image directly) is a project-specific extension layered on top via a no-restricted-imports config."
+qualifies = "Deterministic (a feature file either routes images through the single project-level component or reaches for a primitive directly), but there is NO universal off-the-shelf linter across frameworks. Next.js offers eslint-plugin-next/@next/next/no-img-element for the raw-<img> case, but enforcing 'every image flows through the one project component' for an arbitrary stack (Dioxus, Flutter, Vue, native, etc.) requires a project-specific AST/static-analysis checker the team builds — there is no single shippable mechanical rule. So this is architectural, not mechanical: it must NOT be tagged to a preview linter (doing so fires eslint on non-JS repos), and is enforced via the AI review plus a custom CI checker per framework (the Next.js eslint rule being one such instantiation)."
 
 [[sources]]
 url = "https://nextjs.org/docs/messages/no-img-element"
