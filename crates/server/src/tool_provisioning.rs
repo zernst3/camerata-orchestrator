@@ -117,6 +117,7 @@ pub async fn semgrep_is_provisioned(venv: &Path) -> bool {
     // Version probe: a broken venv / corrupted binary would fail here.
     match tokio::process::Command::new(&bin)
         .arg("--version")
+        .kill_on_drop(true)
         .output()
         .await
     {
@@ -155,6 +156,7 @@ pub async fn ensure_semgrep(tooling: &Path) -> Result<PathBuf, ProvisionError> {
     let venv_out = tokio::process::Command::new("python3")
         .args(["-m", "venv"])
         .arg(&venv)
+        .kill_on_drop(true)
         .output()
         .await?;
     if !venv_out.status.success() {
@@ -175,6 +177,7 @@ pub async fn ensure_semgrep(tooling: &Path) -> Result<PathBuf, ProvisionError> {
 
     let pip_out = tokio::process::Command::new(&pip)
         .args(["install", "--quiet", "semgrep"])
+        .kill_on_drop(true)
         .output()
         .await?;
     if !pip_out.status.success() {
@@ -239,6 +242,7 @@ pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
     }
     match tokio::process::Command::new(&bin)
         .arg("--version")
+        .kill_on_drop(true)
         .output()
         .await
     {
@@ -298,6 +302,7 @@ pub async fn ensure_eslint(tooling: &Path) -> Result<PathBuf, ProvisionError> {
     let npm_out = tokio::process::Command::new("npm")
         .args(&npm_args)
         .current_dir(&workspace)
+        .kill_on_drop(true)
         .output()
         .await?;
     if !npm_out.status.success() {
@@ -378,6 +383,7 @@ pub async fn osv_scanner_is_provisioned(bin: &Path) -> bool {
     }
     match tokio::process::Command::new(bin)
         .arg("--version")
+        .kill_on_drop(true)
         .output()
         .await
     {
@@ -494,6 +500,7 @@ async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
         Duration::from_secs(10),
         tokio::process::Command::new("go")
             .args(["env", "GOPATH"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -529,6 +536,7 @@ async fn go_install_osv_scanner() -> Result<PathBuf, ProvisionError> {
         Duration::from_secs(60),
         tokio::process::Command::new("go")
             .args(["install", &pkg])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -647,6 +655,7 @@ pub async fn ensure_osv_scanner(tooling: &Path) -> Result<PathBuf, ProvisionErro
 async fn interpreter_available(program: &str) -> bool {
     tokio::process::Command::new(program)
         .arg("--version")
+        .kill_on_drop(true)
         .output()
         .await
         .map(|o| o.status.success())

@@ -342,6 +342,7 @@ async fn run_dep_audit_with_tooling(
         tokio::process::Command::new(&bin_str)
             .args(["--format", "json", "-r"])
             .arg(repo_dir)
+            .kill_on_drop(true)
             .output(),
     )
     .await;

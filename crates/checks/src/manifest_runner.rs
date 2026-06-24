@@ -207,6 +207,7 @@ async fn run_manifest_check(worktree: &Path, command: &str) -> std::io::Result<b
     let status = Command::new("sh")
         .args(["-c", command])
         .current_dir(worktree)
+        .kill_on_drop(true)
         .status()
         .await?;
     Ok(status.success())
@@ -242,7 +243,7 @@ pub enum VersionCheckOutcome {
 pub async fn check_tool_version(tool: &str, pinned: &str) -> VersionCheckOutcome {
     // Spawn `<tool> --version` directly (no sh -c) so we query the tool that
     // would be found on PATH — the same one the check command would invoke.
-    let output = match Command::new(tool).arg("--version").output().await {
+    let output = match Command::new(tool).arg("--version").kill_on_drop(true).output().await {
         Ok(o) => o,
         Err(e) => {
             return VersionCheckOutcome::ToolAbsent {

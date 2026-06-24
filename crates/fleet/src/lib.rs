@@ -164,6 +164,7 @@ pub async fn run_cargo(dir: &Path, subcommand: &str) -> anyhow::Result<CargoOutc
     let out = tokio::process::Command::new("cargo")
         .arg(subcommand)
         .current_dir(dir)
+        .kill_on_drop(true)
         .output()
         .await?;
     Ok(CargoOutcome {

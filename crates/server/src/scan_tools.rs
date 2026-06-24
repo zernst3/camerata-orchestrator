@@ -719,6 +719,7 @@ async fn run_capture_stdout(
             let out = tokio::process::Command::new(program)
                 .args(args)
                 .current_dir(dir)
+                .kill_on_drop(true)
                 .output()
                 .await?;
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -731,6 +732,7 @@ async fn run_capture_stdout(
             let mut child = tokio::process::Command::new(program)
                 .args(args)
                 .current_dir(dir)
+                .kill_on_drop(true)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()?;

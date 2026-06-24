@@ -106,7 +106,8 @@ pub(crate) async fn stream_subprocess(
 ) -> Result<(String, std::process::ExitStatus), AgentError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    cmd.stdout(std::process::Stdio::piped())
+    cmd.kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     let mut child = cmd.spawn().map_err(AgentError::Spawn)?;

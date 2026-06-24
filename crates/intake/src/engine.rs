@@ -734,6 +734,7 @@ impl LeadEngineer for ClaudeLeadEngineer {
             .arg("--dangerously-skip-permissions")
             .arg("--output-format")
             .arg("json")
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(LeadEngineerError::Spawn)?;

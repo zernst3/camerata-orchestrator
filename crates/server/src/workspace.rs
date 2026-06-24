@@ -86,6 +86,8 @@ async fn git(cwd: Option<&Path>, args: &[&str]) -> std::io::Result<std::process:
         cmd.current_dir(dir);
     }
     cmd.args(args);
+    // ARCH-RESOURCE-LIFECYCLE-1: reap git if our future is dropped.
+    cmd.kill_on_drop(true);
     cmd.output().await
 }
 

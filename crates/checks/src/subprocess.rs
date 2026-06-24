@@ -99,6 +99,11 @@ async fn run_with_heartbeat(
 ) -> std::io::Result<(String, bool)> {
     use tokio::io::{AsyncBufReadExt, BufReader};
 
+    // ARCH-RESOURCE-LIFECYCLE-1: reap the child when our future is dropped
+    // (timeout / cancel). On normal completion the child has already exited
+    // so this is a no-op.
+    cmd.kill_on_drop(true);
+
     match on_progress {
         None => {
             let out = cmd.current_dir(worktree).output().await?;

@@ -410,6 +410,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
             .arg("--dangerously-skip-permissions")
             .arg("--output-format")
             .arg("json")
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(ReviewError::Spawn)?;
