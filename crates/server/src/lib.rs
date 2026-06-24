@@ -119,6 +119,17 @@ pub struct AppState {
     /// UI-round-tripped draft as a first-priority fallback. In-memory only (v1); does not
     /// survive a process restart (a v2 concern).
     last_scan: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>>,
+    /// Project-agnostic fallback: the single most-recently completed scan, regardless of which
+    /// project was active at scan time.  Mirrors `last_scan` but keyed only on recency.
+    ///
+    /// Motivation: if the active project changed between scan submission and scan completion
+    /// (or no project was active at scan time), `last_scan` has nothing under the CURRENT
+    /// active project's key and `active_project_context` would return "none yet."  This field
+    /// is the last-resort fallback so a completed scan always surfaces in the chat context.
+    ///
+    /// Priority chain in `active_project_context`:
+    ///   draft extract  →  get_last_scan(project.id)  →  get_recent_scan()
+    recent_scan: std::sync::Arc<std::sync::Mutex<Option<crate::onboard::ScanReport>>>,
     /// The central, version-tracked SQLite artifact store (ROUTE-A). Backs the per-story
     /// decision-record + investigation-note history that used to live inline on the UoW.
     /// `None` until a data-dir-backed store is opened in [`AppState::from_env`]; tests
@@ -165,6 +176,7 @@ impl AppState {
             escalations: crate::escalation::EscalationStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
             artifacts: None,
             feature_flags: crate::feature_flags::FeatureFlags::default(),
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
@@ -184,12 +196,21 @@ impl AppState {
     /// Store the last completed scan report for the given project. Called the instant a
     /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
     /// poisoning: recovers the inner value rather than panicking the handler.
+    ///
+    /// Also updates [`Self::recent_scan`] so the project-agnostic fallback always reflects
+    /// the most recently completed scan, regardless of which project was active.
     pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
         let mut guard = self
             .last_scan
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        guard.insert(project_id, report);
+        guard.insert(project_id, report.clone());
+        drop(guard); // release per-project lock before acquiring recent_scan lock
+        let mut recent = self
+            .recent_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *recent = Some(report);
     }
 
     /// Retrieve the last completed scan report for the given project, if any.
@@ -201,6 +222,19 @@ impl AppState {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.get(project_id).cloned()
+    }
+
+    /// Retrieve the most recently completed scan, regardless of which project it belonged to.
+    /// Used as a last-resort fallback in `active_project_context` when neither the draft nor
+    /// the per-project `last_scan` entry holds results for the currently active project.
+    /// Returns a clone so callers do not hold the lock across await points.
+    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
+        let guard = self
+            .recent_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.clone()
     }
 
     /// Build state seeded with the representative spine + seeded open clarifications,
@@ -2888,6 +2922,8 @@ async fn onboard_audit_start(
     let usage_ledger = state.usage_ledger.clone();
     // Captured so the async path can write to last_scan the instant the report is final.
     let last_scan = state.last_scan.clone();
+    // Also capture recent_scan so the project-agnostic fallback is kept in sync.
+    let recent_scan = state.recent_scan.clone();
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -3028,12 +3064,19 @@ async fn onboard_audit_start(
         // handler. If you add ledger capture here in the future, follow the same
         // background-spawn pattern used there.)
 
-        // ── Write last_scan (async job path) ────────────────────────────────────────
+        // ── Write last_scan + recent_scan (async job path) ──────────────────────────
         // Store the completed report before finishing the job so any concurrent chat
         // request landing immediately after sees the full results. Fail-soft.
+        // Also update the project-agnostic `recent_scan` fallback so the active-project
+        // context can surface this scan even if the active project changed since the
+        // scan was submitted (or no project was active at submission time).
         if let Some(id) = &project_id {
             let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
             guard.insert(id.clone(), report.clone());
+        }
+        {
+            let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+            *recent = Some(report.clone());
         }
 
         jobs.finish(&jid, report);
@@ -6846,6 +6889,15 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                // Last-resort fallback: use the most-recently-completed scan regardless of
+                // which project it belongs to.  Covers the case where the active project
+                // changed between scan submission and scan completion.
+                state
+                    .get_recent_scan()
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
             });
         Json(ProjectContextResponse {
             ok: true,
@@ -6876,6 +6928,15 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                // Last-resort fallback: use the most-recently-completed scan regardless of
+                // which project it belongs to.  Covers the case where the active project
+                // changed between scan submission and scan completion.
+                state
+                    .get_recent_scan()
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
             });
         Json(ProjectContextResponse {
             ok: true,
@@ -6900,7 +6961,17 @@ async fn active_project_context(
         let scan_results_section = state
             .get_last_scan(&project.id)
             .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                // Last-resort fallback: use the most-recently-completed scan regardless of
+                // which project it belongs to.  Covers the case where the active project
+                // changed between scan submission and scan completion (the root cause of
+                // "Scan results (none yet)" showing after a successful scan).
+                state
+                    .get_recent_scan()
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
+            });
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
@@ -11157,6 +11228,134 @@ mod tests {
         assert!(
             !section_str.contains("LAST-SCAN-RULE"),
             "last_scan rule must NOT appear when draft takes precedence, got: {section_str}"
+        );
+    }
+
+    // ── recent_scan fallback tests ────────────────────────────────────────────────────────
+
+    /// set_last_scan also populates recent_scan; get_recent_scan returns the report.
+    #[test]
+    fn set_last_scan_populates_recent_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // Before any write: recent_scan is None.
+        assert!(
+            state.get_recent_scan().is_none(),
+            "get_recent_scan must return None before any scan is stored"
+        );
+
+        state.set_last_scan("proj-1".to_string(), make_scan_report("RULE-X"));
+
+        let recent = state.get_recent_scan();
+        assert!(recent.is_some(), "get_recent_scan must be Some after set_last_scan");
+        assert_eq!(
+            recent.unwrap().findings[0].rule_id,
+            "RULE-X",
+            "recent_scan must mirror the report passed to set_last_scan"
+        );
+    }
+
+    /// When two projects are scanned in sequence, recent_scan reflects the LATEST one.
+    #[test]
+    fn recent_scan_tracks_most_recent_write() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.set_last_scan("proj-A".to_string(), make_scan_report("RULE-FIRST"));
+        state.set_last_scan("proj-B".to_string(), make_scan_report("RULE-SECOND"));
+
+        let recent = state.get_recent_scan().unwrap();
+        assert_eq!(
+            recent.findings[0].rule_id,
+            "RULE-SECOND",
+            "recent_scan must track the most recent set_last_scan call"
+        );
+
+        // Per-project last_scan must still be independent.
+        assert_eq!(
+            state.get_last_scan("proj-A").unwrap().findings[0].rule_id,
+            "RULE-FIRST"
+        );
+    }
+
+    /// active_project_context surfaces recent_scan when the active project has no
+    /// per-project last_scan entry (simulates the active-project-changed-between-submit-
+    /// and-complete race that caused "Scan results (none yet)").
+    #[tokio::test]
+    async fn active_project_context_falls_back_to_recent_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Create and activate a project.
+        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // Simulate a scan that was stored under a DIFFERENT project id (the project that was
+        // active at scan submission time) — NOT under `project.id`.
+        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+
+        // Confirm: per-project lookup for the ACTIVE project is empty.
+        assert!(
+            state.get_last_scan(&project.id).is_none(),
+            "test setup: active project must have no per-project last_scan entry"
+        );
+        // Confirm: recent_scan was populated by the set_last_scan call above.
+        assert!(
+            state.get_recent_scan().is_some(),
+            "test setup: recent_scan must be populated"
+        );
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section = body.get("scan_results_section");
+        assert!(
+            section.is_some() && section.unwrap() != &serde_json::Value::Null,
+            "scan_results_section must be populated via the recent_scan fallback, got: {body:?}"
+        );
+        let section_str = section.unwrap().as_str().unwrap_or("");
+        assert!(
+            section_str.contains("RECENT-RULE"),
+            "recent_scan fallback must surface the rule_id from the mismatched-project scan, \
+             got: {section_str}"
+        );
+    }
+
+    /// Per-project last_scan takes precedence over recent_scan when both are present.
+    #[tokio::test]
+    async fn per_project_last_scan_wins_over_recent_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // Store a recent_scan for a DIFFERENT project (written second, so it is "more recent").
+        state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
+
+        // Now store a per-project entry for the ACTIVE project.  Even though recent_scan
+        // was written after this, the per-project entry must win.
+        state.set_last_scan(project.id.clone(), make_scan_report("PROJECT-RULE"));
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section_str = body
+            .get("scan_results_section")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert!(
+            section_str.contains("PROJECT-RULE"),
+            "per-project last_scan must take precedence over recent_scan, got: {section_str}"
+        );
+        assert!(
+            !section_str.contains("RECENT-RULE"),
+            "recent_scan must NOT appear when per-project last_scan is present, got: {section_str}"
         );
     }
 }
