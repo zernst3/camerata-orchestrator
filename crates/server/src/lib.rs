@@ -9695,9 +9695,12 @@ mod tests {
         assert!(existing[0].also_matches.is_empty(), "floor finding must not be touched");
     }
 
-    /// (c) The 5 non-overlapping semgrep rules (exec-injection, weak-hash, path-traversal,
-    /// subprocess-shell-true, yaml-unsafe-load) have no floor twin and must pass through
-    /// untouched even when a floor finding exists at the same path:line.
+    /// (c) The non-overlapping semgrep rules (exec-injection, weak-hash, path-traversal,
+    /// subprocess-shell-true) have no floor twin and must pass through untouched even when
+    /// a floor finding exists at the same path:line.
+    ///
+    /// NOTE: yaml-unsafe-load was previously in this list but was moved to the overlapping
+    /// group when SEC-NO-UNSAFE-DESERIALIZATION-1 was added to the floor (maps to "deser").
     #[test]
     fn dedup_non_overlapping_semgrep_rules_pass_through_untouched() {
         let non_overlapping = &[
@@ -9707,7 +9710,6 @@ mod tests {
             "camerata.security.weak-hash-js",
             "camerata.security.path-traversal-python",
             "camerata.security.subprocess-shell-true",
-            "camerata.security.yaml-unsafe-load",
         ];
 
         for rule_id in non_overlapping {
@@ -9782,27 +9784,35 @@ mod tests {
     /// non-overlapping rules return `None`.
     #[test]
     fn semgrep_floor_category_returns_correct_mapping() {
-        assert_eq!(
-            semgrep_floor_category("camerata.security.hardcoded-secret"),
-            Some("SEC-NO-HARDCODED-SECRETS-1")
-        );
-        assert_eq!(
-            semgrep_floor_category("camerata.security.sql-string-concat-python"),
-            Some("SEC-NO-RAW-SQL-CONCAT-1")
-        );
-        assert_eq!(
-            semgrep_floor_category("camerata.security.sql-string-concat-js"),
-            Some("SEC-NO-RAW-SQL-CONCAT-1")
-        );
-        // Non-overlapping rules return None.
+        // Overlapping rules: must return the floor rule id they duplicate.
+        let overlapping: &[(&str, &str)] = &[
+            ("camerata.security.hardcoded-secret", "SEC-NO-HARDCODED-SECRETS-1"),
+            ("camerata.security.hardcoded-secret-dquote", "SEC-NO-HARDCODED-SECRETS-1"),
+            ("camerata.security.sql-string-concat-python", "SEC-NO-RAW-SQL-CONCAT-1"),
+            ("camerata.security.sql-string-concat-js", "SEC-NO-RAW-SQL-CONCAT-1"),
+            ("camerata.security.sql-string-concat-rust", "SEC-NO-RAW-SQL-CONCAT-1"),
+            ("camerata.security.sql-string-concat-csharp", "SEC-NO-RAW-SQL-CONCAT-1"),
+            ("camerata.security.disabled-tls-rust", "SEC-NO-DISABLED-TLS-1"),
+            ("camerata.security.disabled-tls-csharp", "SEC-NO-DISABLED-TLS-1"),
+            ("camerata.security.yaml-unsafe-load", "SEC-NO-UNSAFE-DESERIALIZATION-1"),
+        ];
+        for (rule, expected_floor) in overlapping {
+            assert_eq!(
+                semgrep_floor_category(rule),
+                Some(*expected_floor),
+                "overlapping rule '{rule}' must map to floor '{expected_floor}'"
+            );
+        }
+        // Non-overlapping rules: no floor twin, return None.
         for rule in &[
             "camerata.security.exec-injection",
             "camerata.security.exec-injection-js",
             "camerata.security.weak-hash-python",
             "camerata.security.weak-hash-js",
+            "camerata.security.weak-hash-rust",
+            "camerata.security.weak-hash-csharp",
             "camerata.security.path-traversal-python",
             "camerata.security.subprocess-shell-true",
-            "camerata.security.yaml-unsafe-load",
         ] {
             assert_eq!(
                 semgrep_floor_category(rule),
