@@ -183,3 +183,90 @@ The following were explicitly out of scope for Phase 1 per the task brief:
 
 7. **`StallThresholds` unification bug** — `get_run` at `lib.rs:1166` reads the env
    threshold, ignoring the stored per-project value. Not fixed here. Deferred.
+
+---
+
+## Implemented (Phase 1b) — 2026-06-24
+
+Branch: `feat/liveness-phase1b`. Four commits on top of Phase 1.
+
+### Step 1 — `camerata-liveness` micro-crate extracted
+
+New leaf crate `crates/liveness` (package `camerata-liveness`). Zero camerata-crate
+deps; depends only on `tokio` (with `time` feature for `sleep`/`Instant`) and `std`.
+
+Contents moved into it:
+- `LivenessTracker` — from `crates/core/src/liveness.rs` (now `crates/liveness/src/tracker.rs`).
+  Same API, same 5 unit tests. `camerata-core` no longer owns it; the `pub mod liveness; pub
+  use liveness::LivenessTracker` re-exports are gone — `core` is back to zero tokio/async deps.
+- `HeartbeatFn`, `newest_mtime`, `spawn_mtime_probe`, `MTIME_PROBE_INTERVAL`,
+  `MTIME_PROBE_MAX_DURATION` — from `crates/agent/src/liveness.rs`
+  (now `crates/liveness/src/probe.rs`). `MTIME_PROBE_MAX_DURATION` inlined as 3600s (no
+  longer derived from `camerata_agent::DEFAULT_AGENT_TOTAL_TIMEOUT_SECS`).
+
+`camerata-agent`: now depends on `camerata-liveness`. `src/liveness.rs` reduced to a thin
+`pub use camerata_liveness::{...}` re-export so all existing `camerata_agent::HeartbeatFn`
+import paths continue to resolve. `HeartbeatFn` type alias removed from `agent/src/lib.rs`.
+
+10 new tests in `camerata-liveness`; 56 agent tests pass.
+
+**Dependency graph after Step 1:**
+
+```
+camerata-liveness  (leaf — no camerata deps)
+    └── tokio (time feature)
+
+camerata-core      (zero tokio dep; pub mod liveness removed)
+camerata-agent     ──> camerata-liveness (re-exports HeartbeatFn etc.)
+```
+
+### Step 2 — `camerata-checks` adopts liveness
+
+`camerata-checks` → `camerata-liveness` dep added.
+
+All four subprocess runners (`run_command`, `run_fmt_check`, `run_clippy`, `run_test`) gained
+`on_progress: Option<&HeartbeatFn>` as an additional parameter:
+- With `Some(cb)`: streams stdout line-by-line via `AsyncBufReadExt`, firing `cb()` per line;
+  also starts a `spawn_mtime_probe` against the cargo target dir for cold-compile coverage.
+  Stderr is piped and appended after stdout drains.
+- With `None`: falls back to `.output().await` (buffered, unchanged behaviour).
+
+17 call sites in `multilang.rs` + 3 in `lib.rs` updated to pass `None` (backwards-compatible).
+`tokio` dep in `camerata-checks` gained the `io-util` feature for `AsyncBufReadExt`/`BufReader`.
+
+2 new tests: streaming path fires heartbeat per line; None path still works.
+201 camerata-checks tests pass.
+
+### Step 3 — store unification onto `LivenessTracker`
+
+`camerata-server` → `camerata-liveness` dep added.
+
+**`jobs.rs`**: `JobMeta.last_activity_ms: u128` replaced by `JobMeta.tracker: LivenessTracker`.
+- `JobStore::touch_activity` → `tracker.tick()` (no more manual `SystemTime` call).
+- `JobStore::idle_ms(id, now_ms: u128) -> Option<u128>` preserved; bridges via
+  `u128::from(tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX)))`.
+- `JobStore::create` initialises `LivenessTracker::new()` (not stalled by design).
+
+**`run.rs`**: `Run.last_activity_ms: u128` removed; `Run.tracker: LivenessTracker` added
+with `#[serde(skip)]` (not wire-visible — `RunStatusResponse` carries `idle_ms`/`stalled`).
+`Run.last_progress_label: String` kept as a real serialized field (updated alongside the
+tracker's `record_progress(label)` call so both stay in sync).
+- `RunStore::push_event` → `tracker.record_progress(label)` + updates `last_progress_label`.
+- `RunStore::touch_activity` → `tracker.tick()` or `tracker.record_progress(l)`.
+- `stall_decision()` reads `run.tracker.idle_ms(now_ms as u64)` instead of
+  `run.last_activity_ms`.
+- `lib.rs get_run` reads `run.tracker.last_activity_ms() as u128`; passes to `idle_ms()`.
+
+**`RunStatusResponse` wire fields unchanged**: `idle_ms: u128`, `stalled: bool`,
+`stall_threshold_ms: u128`. No UI change required.
+
+780 camerata-server tests pass; 1808 total workspace lib tests pass.
+
+### What was explicitly declined (out of scope per task brief)
+
+- `sysinfo` / CPU probe — not added (no new dep).
+- `camerata-core` still has NO `camerata-liveness` dep — the tracker home moved to
+  `camerata-liveness`, not re-imported into core.
+- No API changes to any HTTP endpoint.
+- `StallThresholds` unification bug deferred (still tracked in deferred list above).
+- Dep-audit and tool-provisioning liveness signals deferred (still `HIGH`/`MEDIUM` backlog).
