@@ -1,0 +1,30 @@
+id = "ARCH-RESOURCE-LIFECYCLE-1"
+title = "The app reaps every subprocess it spawns and cleans every temp artifact it writes"
+tag = "stack"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Deterministically checkable, but no single off-the-shelf linter enforces the whole rule. The mechanical signal is that every child-process spawn carries a kill-on-drop / kill-on-cancel disposition (in Rust/tokio, `Command::kill_on_drop(true)`; the stack equivalent elsewhere) so a dropped, timed-out, or cancelled future terminates the child rather than orphaning it — that part is greppable per spawn site. The rest is a design predicate verified by review: children that outlive a single await (or the host process) are tracked and killed on shutdown, and every temporary file or directory uses RAII auto-cleanup (e.g. `tempfile`'s `TempDir`) or is explicitly removed when its operation ends. Conformance holds when, after a timeout or an app close, no spawned child survives and no scratch accumulates on disk; it fails when processes orphan (reparented to init/launchd) or temp paths leak."
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-24_runtime_resource_hygiene.md"
+title = "Decision: runtime resource hygiene is required app behavior (52 orphaned osv-scanner processes + leaked temp scratch from un-reaped dep-audits)"
+
+[decision]
+question = "What position does the project take on: the app reaps every subprocess it spawns and cleans every temp artifact it writes?"
+default = "the-app-owns-the-lifecycle-of-its-subprocesses-a"
+why = "An app that spawns helper processes (scanners, linters, build tools, CLIs) and writes temporary scratch owns their lifecycle — the OS will not clean up for it. A child whose spawning future is dropped on timeout or cancel keeps running unless the spawn opted into kill-on-drop, so without an explicit disposition the default outcome is orphaned processes that accumulate across runs. Temporary files and directories that are not RAII-cleaned accumulate on disk for the same reason. Leaving subprocess and temp lifecycle implicit makes the failure invisible until processes pile up or the disk fills, and reclaiming them then needs manual intervention."
+
+[[option]]
+id = "the-app-owns-the-lifecycle-of-its-subprocesses-a"
+label = "The app owns the lifecycle of its subprocesses and temp artifacts — reaped and RAII-cleaned"
+directive = "Every spawned subprocess carries a kill-on-drop / kill-on-cancel disposition (Rust/tokio: `Command::kill_on_drop(true)`, or the stack equivalent) so a dropped, timed-out, or cancelled operation terminates the child instead of orphaning it. Children that outlive a single await, or the host process itself, are tracked and killed on shutdown. Every temporary file or directory uses RAII auto-cleanup (e.g. `tempfile`'s `TempDir`/`NamedTempFile`) or is explicitly removed when its operation ends. After a timeout or an app close, no spawned child survives and no scratch is left on disk."
+why = "The app, not the OS, owns what it spawns and writes; reaping on drop/cancel/shutdown and RAII-cleaning temp artifacts is the only way orphaned processes and leaked scratch do not accumulate across runs."
+
+[[option]]
+id = "subprocess-and-temp-lifecycle-are-left-implicit"
+label = "Subprocess and temp lifecycle are left implicit — children and scratch are not explicitly reaped or cleaned"
+directive = "subprocesses are spawned without a kill-on-drop disposition and are not tracked for shutdown, and temporary files or directories are created without RAII cleanup, relying on the OS or manual intervention to reclaim them"
+why = "A child whose future is dropped on timeout or cancel keeps running, reparented to init/launchd, and accumulates across runs; un-cleaned temp paths pile up on disk. The failure is invisible until processes or scratch accumulate, and reclaiming them needs a manual `pkill`/`rm`."
