@@ -31,7 +31,8 @@ pub mod architectural;
 /// `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 pub mod multilang;
 pub use multilang::{
-    detect_language, runner_for_worktree, CombinedCheckRunner, CSharpCheckRunner, GoCheckRunner,
+    detect_language, runner_for_worktree, runner_for_worktree_with_heartbeat,
+    CombinedCheckRunner, CSharpCheckRunner, GoCheckRunner,
     JavaCheckRunner, JsCheckRunner, PythonCheckRunner, RubyCheckRunner, WorktreeLanguage,
 };
 
@@ -67,6 +68,7 @@ pub mod verification_gate;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use camerata_liveness::HeartbeatFn;
 use camerata_core::{CheckRunner, Role, RuleId};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -176,7 +178,35 @@ fn disk_headroom_threshold_bytes() -> u64 {
 
 /// Runs `cargo fmt --check` and returns `[RUST-FMT]` if the worktree has
 /// unformatted files.
-pub struct FmtCheckRunner;
+///
+/// Carries an optional `on_progress` heartbeat callback (Phase 1b). When
+/// `Some`, each stdout line from the cargo subprocess fires the callback so
+/// the parent tracked run's `last_activity_ms` stays fresh during the check.
+/// Construct with [`FmtCheckRunner::new`] for no heartbeat, or
+/// [`FmtCheckRunner::with_heartbeat`] for an active-run context.
+pub struct FmtCheckRunner {
+    on_progress: Option<HeartbeatFn>,
+}
+
+impl FmtCheckRunner {
+    /// Create a `FmtCheckRunner` with no heartbeat (backwards-compatible).
+    pub fn new() -> Self {
+        Self { on_progress: None }
+    }
+
+    /// Create a `FmtCheckRunner` that fires `cb` on every stdout line from
+    /// the cargo subprocess. Use this at call sites where a `RunStore` run id
+    /// is in scope (dev-cycle checks inside a tracked run).
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self { on_progress: Some(cb) }
+    }
+}
+
+impl Default for FmtCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl CheckRunner for FmtCheckRunner {
@@ -184,7 +214,7 @@ impl CheckRunner for FmtCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref(), None)
+        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref(), self.on_progress.as_ref())
             .await
             .context("running cargo fmt --check")?;
 
@@ -196,7 +226,30 @@ impl CheckRunner for FmtCheckRunner {
 
 /// Runs `cargo clippy -- -D warnings` and returns `[RUST-CLIPPY]` if any lint
 /// fires.
-pub struct ClippyCheckRunner;
+///
+/// Carries an optional `on_progress` heartbeat callback (Phase 1b). See
+/// [`FmtCheckRunner`] for the pattern.
+pub struct ClippyCheckRunner {
+    on_progress: Option<HeartbeatFn>,
+}
+
+impl ClippyCheckRunner {
+    /// Create a `ClippyCheckRunner` with no heartbeat (backwards-compatible).
+    pub fn new() -> Self {
+        Self { on_progress: None }
+    }
+
+    /// Create a `ClippyCheckRunner` that fires `cb` on every stdout line.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self { on_progress: Some(cb) }
+    }
+}
+
+impl Default for ClippyCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl CheckRunner for ClippyCheckRunner {
@@ -204,7 +257,7 @@ impl CheckRunner for ClippyCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_clippy(worktree, target_dir.as_deref(), None)
+        let output = subprocess::run_clippy(worktree, target_dir.as_deref(), self.on_progress.as_ref())
             .await
             .context("running cargo clippy")?;
 
@@ -216,7 +269,30 @@ impl CheckRunner for ClippyCheckRunner {
 
 /// Runs `cargo test --no-fail-fast` and returns `[RUST-TEST]` if any test fails
 /// or the crate does not compile.
-pub struct TestCheckRunner;
+///
+/// Carries an optional `on_progress` heartbeat callback (Phase 1b). See
+/// [`FmtCheckRunner`] for the pattern.
+pub struct TestCheckRunner {
+    on_progress: Option<HeartbeatFn>,
+}
+
+impl TestCheckRunner {
+    /// Create a `TestCheckRunner` with no heartbeat (backwards-compatible).
+    pub fn new() -> Self {
+        Self { on_progress: None }
+    }
+
+    /// Create a `TestCheckRunner` that fires `cb` on every stdout line.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self { on_progress: Some(cb) }
+    }
+}
+
+impl Default for TestCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl CheckRunner for TestCheckRunner {
@@ -224,7 +300,7 @@ impl CheckRunner for TestCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_test(worktree, target_dir.as_deref(), None)
+        let output = subprocess::run_test(worktree, target_dir.as_deref(), self.on_progress.as_ref())
             .await
             .context("running cargo test")?;
 
@@ -238,6 +314,9 @@ impl CheckRunner for TestCheckRunner {
 /// coordinator uses this as its default Rust gate, so generated code that
 /// compiles and lints clean but fails its own tests is still bounced back for
 /// revision (the failure mode that otherwise becomes silent debt).
+///
+/// When constructed via [`RustCheckRunner::with_heartbeat`], the callback is
+/// baked into all three sub-runners so every cargo subprocess fires heartbeats.
 pub struct RustCheckRunner {
     fmt: FmtCheckRunner,
     clippy: ClippyCheckRunner,
@@ -245,11 +324,22 @@ pub struct RustCheckRunner {
 }
 
 impl RustCheckRunner {
+    /// Create a `RustCheckRunner` with no heartbeat (backwards-compatible).
     pub fn new() -> Self {
         Self {
-            fmt: FmtCheckRunner,
-            clippy: ClippyCheckRunner,
-            test: TestCheckRunner,
+            fmt: FmtCheckRunner::new(),
+            clippy: ClippyCheckRunner::new(),
+            test: TestCheckRunner::new(),
+        }
+    }
+
+    /// Create a `RustCheckRunner` whose sub-runners all fire `cb` on each
+    /// cargo stdout line. Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            fmt: FmtCheckRunner::with_heartbeat(cb.clone()),
+            clippy: ClippyCheckRunner::with_heartbeat(cb.clone()),
+            test: TestCheckRunner::with_heartbeat(cb),
         }
     }
 }

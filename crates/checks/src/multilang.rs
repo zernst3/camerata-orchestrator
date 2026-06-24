@@ -60,6 +60,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use camerata_liveness::HeartbeatFn;
 use camerata_core::{CheckRunner, Role, RuleId};
 
 use crate::subprocess::{run_command, CommandOutput};
@@ -1176,11 +1177,32 @@ impl PolyglotCheckRunner {
     /// matching runner for each. `Unknown` pairs are skipped (they never appear
     /// from [`detect_languages`], but the match stays exhaustive).
     pub fn from_detected(detected: Vec<(WorktreeLanguage, PathBuf)>) -> Self {
+        Self::from_detected_impl(detected, None)
+    }
+
+    /// Like [`from_detected`], but wires `cb` into every Rust sub-runner so
+    /// cargo subprocess output fires heartbeats during a tracked dev run.
+    /// Non-Rust runners receive no heartbeat (their subprocess calls are fast
+    /// enough that stall detection would not false-positive on them).
+    pub fn from_detected_with_heartbeat(
+        detected: Vec<(WorktreeLanguage, PathBuf)>,
+        cb: HeartbeatFn,
+    ) -> Self {
+        Self::from_detected_impl(detected, Some(cb))
+    }
+
+    fn from_detected_impl(
+        detected: Vec<(WorktreeLanguage, PathBuf)>,
+        on_progress: Option<HeartbeatFn>,
+    ) -> Self {
         let sub = detected
             .into_iter()
             .filter_map(|(lang, dir)| {
                 let runner: Box<dyn CheckRunner> = match lang {
-                    WorktreeLanguage::Rust => Box::new(crate::RustCheckRunner::new()),
+                    WorktreeLanguage::Rust => match &on_progress {
+                        Some(cb) => Box::new(crate::RustCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(crate::RustCheckRunner::new()),
+                    },
                     WorktreeLanguage::JavaScript => Box::new(JsCheckRunner::new()),
                     WorktreeLanguage::Python => Box::new(PythonCheckRunner::new()),
                     WorktreeLanguage::Go => Box::new(GoCheckRunner),
@@ -1280,6 +1302,22 @@ impl CheckRunner for CombinedCheckRunner {
 ///
 /// The fleet wiring is untouched: this still returns `Box<dyn CheckRunner>`.
 pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
+    runner_for_worktree_impl(worktree, None)
+}
+
+/// Like [`runner_for_worktree`], but wires a heartbeat callback into every Rust
+/// [`crate::RustCheckRunner`] sub-runner so cargo subprocess output fires
+/// `cb()` on each stdout line during a tracked dev run. Use this at call sites
+/// where a [`camerata_server::run::RunStore`] run id is in scope (i.e. the
+/// `_and_activity` fleet functions).
+///
+/// Non-Rust language runners receive no heartbeat — their subprocess calls
+/// are bounded and fast enough that stall detection would not false-positive.
+pub fn runner_for_worktree_with_heartbeat(worktree: &Path, cb: HeartbeatFn) -> Box<dyn CheckRunner> {
+    runner_for_worktree_impl(worktree, Some(cb))
+}
+
+fn runner_for_worktree_impl(worktree: &Path, on_progress: Option<HeartbeatFn>) -> Box<dyn CheckRunner> {
     let detected = detect_languages(worktree);
     let language: Box<dyn CheckRunner> = if detected.is_empty() {
         eprintln!(
@@ -1303,7 +1341,10 @@ pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        Box::new(PolyglotCheckRunner::from_detected(detected))
+        match on_progress {
+            Some(cb) => Box::new(PolyglotCheckRunner::from_detected_with_heartbeat(detected, cb)),
+            None => Box::new(PolyglotCheckRunner::from_detected(detected)),
+        }
     };
 
     let manifest = crate::manifest_runner::ManifestCheckRunner::load_from(worktree);

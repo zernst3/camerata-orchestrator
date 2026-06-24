@@ -262,6 +262,19 @@ tracker's `record_progress(label)` call so both stay in sync).
 
 780 camerata-server tests pass; 1808 total workspace lib tests pass.
 
+### Step 4b — dev-cycle check runners activated (follow-up commit, 2026-06-24)
+
+`FmtCheckRunner`, `ClippyCheckRunner`, `TestCheckRunner`, and `RustCheckRunner` in
+`camerata-checks` gained `with_heartbeat(cb: HeartbeatFn)` constructors that bake the
+callback in; `PolyglotCheckRunner::from_detected_with_heartbeat` and
+`runner_for_worktree_with_heartbeat` propagate it to Rust sub-runners only (non-Rust
+runners are unaffected). `layer2_runner_with_activity` in `camerata-fleet` (replacing the
+now-removed `layer2_runner`) uses the new path when `on_activity` is `Some`, so the
+existing `execute_live_run` / `execute_live_run_tiered` wiring in `live_fleet.rs` (which
+already passes `Some(on_activity)`) now fires heartbeats during cargo fmt/clippy/test
+without any server-side change. All non-`_and_activity` callers continue to receive
+`None` and are unaffected. 1 new fleet test (`layer2_runner_with_activity_forwards_heartbeat_to_rust_runner`) verifies end-to-end forwarding.
+
 ### What was explicitly declined (out of scope per task brief)
 
 - `sysinfo` / CPU probe — not added (no new dep).
