@@ -6446,6 +6446,13 @@ pub struct ProjectContextResponse {
     /// Only populated in the PreOnboard phase so the Post-onboard prompt is not cluttered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub draft_json: Option<serde_json::Value>,
+    /// A compact, queryable summary of the active scan results — severity/status totals,
+    /// by-rule breakdown, and a capped finding list. Populated from the onboarding draft
+    /// when a scan has been run. The snippet field is NEVER included to avoid leaking
+    /// credential-shaped values into the context. Present when a scan report is found in
+    /// the draft; absent when no scan has been run yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_results_section: Option<String>,
     /// A human-readable message explaining why the context is limited (e.g., no active
     /// project, or the project has not been onboarded).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6480,6 +6487,178 @@ fn build_ruleset_summary(ruleset: &crate::project::ProjectRuleset) -> String {
         lines.push(format!("CUSTOM-{}: custom rule ({})", c.name, dom));
     }
     lines.join("\n")
+}
+
+/// Build a compact, queryable scan-results section for the chat system prompt.
+///
+/// Includes:
+/// - Totals: total findings, counts by severity (critical/high/medium/low), counts by
+///   status (active / suppressed-* / preview vs floor).
+/// - By-rule breakdown: top rules by finding count.
+/// - A capped list of the most severe findings (up to `CAP`), each as a single line:
+///   `severity · rule_id · repo/path:line · status`.
+/// - Coverage notes (tools skipped / not available during the scan).
+///
+/// The `snippet` field is NEVER included — snippets may contain credential-shaped values
+/// and must not be injected into the LLM context. Only rule id, location, severity, status,
+/// and the gate `detail` (which is gate-authored prose, not the raw secret) are surfaced.
+/// The `detail` is capped at 120 chars per finding.
+///
+/// Returns an empty string when `findings` is empty (no scan yet — caller should treat as
+/// absent and skip the section rather than injecting an empty/misleading block).
+pub(crate) fn render_scan_results_for_chat(
+    findings: &[crate::onboard::Finding],
+    coverage_notes: &[crate::onboard::CoverageNote],
+) -> String {
+    const CAP: usize = 40;
+
+    if findings.is_empty() && coverage_notes.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    // ── Totals ────────────────────────────────────────────────────────────────
+    let total = findings.len();
+    let mut by_severity: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    let mut active_count: usize = 0;
+    let mut suppressed_count: usize = 0;
+    let mut preview_count: usize = 0;
+
+    for f in findings {
+        *by_severity
+            .entry(f.severity.as_str())
+            .or_insert(0) += 1;
+        if f.status == "active" {
+            active_count += 1;
+        } else if f.status.starts_with("suppressed") {
+            suppressed_count += 1;
+        }
+        if f.preview {
+            preview_count += 1;
+        }
+    }
+    let floor_count = total - preview_count;
+
+    out.push_str(&format!("Total findings: {total}\n"));
+    // Severity breakdown — emit in fixed order (critical first)
+    for sev in &["critical", "high", "medium", "low"] {
+        if let Some(&n) = by_severity.get(sev) {
+            out.push_str(&format!("  {sev}: {n}\n"));
+        }
+    }
+    // Any unexpected severity values
+    for (sev, &n) in &by_severity {
+        if !matches!(*sev, "critical" | "high" | "medium" | "low") {
+            out.push_str(&format!("  {sev}: {n}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "Status: {active_count} active (enforced), {suppressed_count} suppressed\n"
+    ));
+    out.push_str(&format!(
+        "Preview (not yet wired into CI gate): {preview_count} | Floor (enforced): {floor_count}\n"
+    ));
+
+    // ── By-rule breakdown ─────────────────────────────────────────────────────
+    let mut by_rule: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for f in findings {
+        *by_rule.entry(f.rule_id.as_str()).or_insert(0) += 1;
+    }
+    let mut rule_counts: Vec<(&str, usize)> = by_rule.into_iter().collect();
+    // Sort by count descending, then rule_id ascending for determinism
+    rule_counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    out.push_str("By rule (top hits):\n");
+    for (rule_id, count) in rule_counts.iter().take(20) {
+        out.push_str(&format!("  {rule_id}: {count}\n"));
+    }
+
+    // ── Capped finding list (severity-ordered, no snippet) ────────────────────
+    // Sort: active before suppressed, severity (critical→high→medium→low), then rule_id.
+    let sev_rank = |s: &str| match s {
+        "critical" => 0u8,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    };
+    let mut sorted: Vec<&crate::onboard::Finding> = findings.iter().collect();
+    sorted.sort_by(|a, b| {
+        // Active before suppressed
+        let a_active = a.status == "active";
+        let b_active = b.status == "active";
+        b_active
+            .cmp(&a_active)
+            .then_with(|| sev_rank(&a.severity).cmp(&sev_rank(&b.severity)))
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
+            .then_with(|| a.repo.cmp(&b.repo))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+
+    let shown = sorted.len().min(CAP);
+    out.push_str(&format!(
+        "Top {shown} findings (of {total}, severity-ordered; snippet omitted):\n"
+    ));
+    for f in sorted.iter().take(CAP) {
+        // NEVER include f.snippet — it may contain a credential.
+        let detail_preview: String = f.detail.chars().take(120).collect();
+        let preview_tag = if f.preview { " [preview]" } else { "" };
+        out.push_str(&format!(
+            "  {} · {} · {}/{}:{} · {}{}\n",
+            f.severity, f.rule_id, f.repo, f.path, f.line, f.status, preview_tag
+        ));
+        if !detail_preview.is_empty() {
+            out.push_str(&format!("    {detail_preview}\n"));
+        }
+    }
+
+    // ── Coverage notes ────────────────────────────────────────────────────────
+    if !coverage_notes.is_empty() {
+        out.push_str("Coverage notes (tools skipped / unavailable):\n");
+        for note in coverage_notes {
+            out.push_str(&format!("  [{}] {}\n", note.tool, note.message));
+        }
+    }
+
+    out
+}
+
+/// Extract a compact, queryable scan-results section from the UI-owned onboarding draft blob.
+///
+/// Looks for findings in `draft["scan"]["findings"]` or `draft["audit"]["findings"]`,
+/// deserializes them as `Vec<Finding>` (the struct that owns the canonical field names),
+/// and delegates to `render_scan_results_for_chat`. Returns `None` when no findings section
+/// is found, when deserialization fails, or when the findings list is empty.
+fn extract_scan_results_from_draft(draft: &serde_json::Value) -> Option<String> {
+    // Prefer the scan section (which contains the deterministic floor + Phase-1 findings)
+    // but fall back to the audit section (Phase-2 AI findings live there in some draft shapes).
+    let findings_val = draft
+        .get("scan")
+        .and_then(|s| s.get("findings"))
+        .or_else(|| draft.get("audit").and_then(|a| a.get("findings")))?;
+
+    let findings: Vec<crate::onboard::Finding> =
+        serde_json::from_value(findings_val.clone()).ok()?;
+
+    if findings.is_empty() {
+        return None;
+    }
+
+    // Coverage notes are at scan.coverage_notes; absent in audit-only drafts.
+    let coverage_notes: Vec<crate::onboard::CoverageNote> = draft
+        .get("scan")
+        .and_then(|s| s.get("coverage_notes"))
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let rendered = render_scan_results_for_chat(&findings, &coverage_notes);
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
 }
 
 /// Extract a compact findings summary from a draft JSON blob (the UI-owned onboarding draft).
@@ -6540,6 +6719,7 @@ async fn active_project_context(
             ruleset_summary: None,
             finding_count: None,
             findings_summary: None,
+            scan_results_section: None,
             draft_json: None,
             message: Some(
                 "No active project — create one to use project-aware chat.".to_string(),
@@ -6563,6 +6743,9 @@ async fn active_project_context(
             .and_then(|d| extract_findings_from_draft(d))
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
+        let scan_results_section = draft
+            .as_ref()
+            .and_then(|d| extract_scan_results_from_draft(d));
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
@@ -6572,6 +6755,7 @@ async fn active_project_context(
             ruleset_summary,
             finding_count,
             findings_summary,
+            scan_results_section,
             draft_json: None, // Don't inject the full draft post-onboard (noisy).
             message: None,
         })
@@ -6583,6 +6767,9 @@ async fn active_project_context(
             .and_then(|d| extract_findings_from_draft(d))
             .map(|(n, s)| (Some(n), Some(s)))
             .unwrap_or((None, None));
+        let scan_results_section = draft
+            .as_ref()
+            .and_then(|d| extract_scan_results_from_draft(d));
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
@@ -6592,6 +6779,7 @@ async fn active_project_context(
             ruleset_summary: None, // No committed ruleset yet.
             finding_count,
             findings_summary,
+            scan_results_section,
             draft_json: draft,
             message: Some(format!(
                 "Project '{}' has an in-progress onboarding (scan/audit) that has not been applied yet.",
@@ -6609,6 +6797,7 @@ async fn active_project_context(
             ruleset_summary: None,
             finding_count: None,
             findings_summary: None,
+            scan_results_section: None,
             draft_json: None,
             message: Some(format!(
                 "Project '{}' has no scan or onboarding data yet — start an onboarding scan to populate the project context.",
@@ -10353,5 +10542,262 @@ mod tests {
             w.contains("published") && w.contains("not-a-number"),
             "warning must mention 'published' and the bad parent, got: {w}"
         );
+    }
+
+    // ── render_scan_results_for_chat ─────────────────────────────────────────
+
+    fn make_finding(
+        severity: &str,
+        rule_id: &str,
+        repo: &str,
+        path: &str,
+        line: usize,
+        status: &str,
+        preview: bool,
+        snippet: &str,
+        detail: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            severity: severity.to_string(),
+            rule_id: rule_id.to_string(),
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            status: status.to_string(),
+            preview,
+            snippet: snippet.to_string(),
+            detail: detail.to_string(),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// Empty findings + empty coverage notes returns an empty string (caller skips the section).
+    #[test]
+    fn render_scan_results_empty_report_returns_empty_string() {
+        let result = render_scan_results_for_chat(&[], &[]);
+        assert!(
+            result.is_empty(),
+            "empty findings + empty coverage must produce empty string, got: {result:?}"
+        );
+    }
+
+    /// Severity counts appear in the output and are correct.
+    #[test]
+    fn render_scan_results_counts_by_severity() {
+        let findings = vec![
+            make_finding("critical", "SEC-1", "o/r", "a.rs", 1, "active", false, "", ""),
+            make_finding("critical", "SEC-1", "o/r", "b.rs", 2, "active", false, "", ""),
+            make_finding("high", "ARCH-1", "o/r", "c.rs", 3, "active", false, "", ""),
+            make_finding("medium", "ARCH-2", "o/r", "d.rs", 4, "suppressed-baseline", false, "", ""),
+            make_finding("low", "STYLE-1", "o/r", "e.rs", 5, "active", false, "", ""),
+        ];
+        let out = render_scan_results_for_chat(&findings, &[]);
+        assert!(out.contains("Total findings: 5"), "must report total, got: {out}");
+        assert!(out.contains("critical: 2"), "must count critical, got: {out}");
+        assert!(out.contains("high: 1"), "must count high, got: {out}");
+        assert!(out.contains("medium: 1"), "must count medium, got: {out}");
+        assert!(out.contains("low: 1"), "must count low, got: {out}");
+    }
+
+    /// Active vs suppressed status counts are present.
+    #[test]
+    fn render_scan_results_counts_by_status() {
+        let findings = vec![
+            make_finding("high", "R1", "o/r", "f1.rs", 1, "active", false, "", ""),
+            make_finding("high", "R1", "o/r", "f2.rs", 2, "active", false, "", ""),
+            make_finding("medium", "R2", "o/r", "f3.rs", 3, "suppressed-baseline", false, "", ""),
+            make_finding("low", "R3", "o/r", "f4.rs", 4, "suppressed-inline", false, "", ""),
+        ];
+        let out = render_scan_results_for_chat(&findings, &[]);
+        assert!(out.contains("2 active"), "must report 2 active, got: {out}");
+        assert!(out.contains("2 suppressed"), "must report 2 suppressed, got: {out}");
+    }
+
+    /// Preview vs floor counts appear.
+    #[test]
+    fn render_scan_results_preview_vs_floor() {
+        let findings = vec![
+            make_finding("high", "R1", "o/r", "a.rs", 1, "active", true, "", ""),
+            make_finding("high", "R1", "o/r", "b.rs", 2, "active", false, "", ""),
+            make_finding("high", "R1", "o/r", "c.rs", 3, "active", false, "", ""),
+        ];
+        let out = render_scan_results_for_chat(&findings, &[]);
+        assert!(
+            out.contains("Preview (not yet wired into CI gate): 1"),
+            "must show 1 preview, got: {out}"
+        );
+        assert!(
+            out.contains("Floor (enforced): 2"),
+            "must show 2 floor, got: {out}"
+        );
+    }
+
+    /// By-rule breakdown contains the correct counts.
+    #[test]
+    fn render_scan_results_by_rule_breakdown() {
+        let findings = vec![
+            make_finding("high", "RULE-A", "o/r", "a.rs", 1, "active", false, "", ""),
+            make_finding("high", "RULE-A", "o/r", "b.rs", 2, "active", false, "", ""),
+            make_finding("medium", "RULE-A", "o/r", "c.rs", 3, "active", false, "", ""),
+            make_finding("low", "RULE-B", "o/r", "d.rs", 4, "active", false, "", ""),
+        ];
+        let out = render_scan_results_for_chat(&findings, &[]);
+        // RULE-A should appear with count 3 (highest); RULE-B with 1.
+        assert!(out.contains("RULE-A: 3"), "must show RULE-A count 3, got: {out}");
+        assert!(out.contains("RULE-B: 1"), "must show RULE-B count 1, got: {out}");
+    }
+
+    /// The top-N finding list is capped at 40 (CAP).
+    #[test]
+    fn render_scan_results_capped_at_40() {
+        let findings: Vec<_> = (0..60)
+            .map(|i| make_finding("high", "R1", "o/r", &format!("f{i}.rs"), i, "active", false, "", ""))
+            .collect();
+        let out = render_scan_results_for_chat(&findings, &[]);
+        // Must say "Top 40 of 60"
+        assert!(
+            out.contains("Top 40 findings (of 60"),
+            "must cap at 40 and report total 60, got: {out}"
+        );
+    }
+
+    /// CRITICAL: snippet must NEVER appear in the output, even when it contains a
+    /// credential-shaped value. Rule + location + detail are ok; raw snippet is not.
+    #[test]
+    fn render_scan_results_never_leaks_snippet() {
+        // Split the credential-shaped literal so it is not itself a credential in this
+        // public source file.
+        let fake_secret = concat!("ghp_", "ABCdef1234567890XYZ");
+        let findings = vec![make_finding(
+            "critical",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "owner/repo",
+            "src/config.rs",
+            42,
+            "active",
+            false,
+            fake_secret,   // snippet — must NOT appear in output
+            "hardcoded token found", // detail — may appear
+        )];
+        let out = render_scan_results_for_chat(&findings, &[]);
+        assert!(
+            !out.contains(fake_secret),
+            "snippet must NOT appear in chat grounding, got: {out}"
+        );
+        assert!(
+            out.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "rule_id must appear, got: {out}"
+        );
+        assert!(
+            out.contains("src/config.rs:42"),
+            "location must appear, got: {out}"
+        );
+        assert!(
+            out.contains("hardcoded token found"),
+            "gate detail (not snippet) may appear, got: {out}"
+        );
+    }
+
+    /// Coverage notes appear in the output.
+    #[test]
+    fn render_scan_results_includes_coverage_notes() {
+        let notes = vec![
+            crate::onboard::CoverageNote {
+                tool: "ruff".to_string(),
+                message: "ruff not installed; Python rules skipped".to_string(),
+            },
+        ];
+        let out = render_scan_results_for_chat(&[], &notes);
+        // Even with empty findings, coverage notes are surfaced.
+        assert!(
+            out.contains("ruff"),
+            "coverage note tool must appear, got: {out}"
+        );
+        assert!(
+            out.contains("Python rules skipped"),
+            "coverage note message must appear, got: {out}"
+        );
+    }
+
+    /// extract_scan_results_from_draft returns None for an empty draft blob.
+    #[test]
+    fn extract_scan_results_from_draft_none_on_empty() {
+        let draft = serde_json::json!({});
+        assert!(
+            extract_scan_results_from_draft(&draft).is_none(),
+            "empty draft must return None"
+        );
+    }
+
+    /// extract_scan_results_from_draft returns None when findings is empty array.
+    #[test]
+    fn extract_scan_results_from_draft_none_on_empty_findings() {
+        let draft = serde_json::json!({"scan": {"findings": []}});
+        assert!(
+            extract_scan_results_from_draft(&draft).is_none(),
+            "empty findings array must return None"
+        );
+    }
+
+    /// extract_scan_results_from_draft finds findings in scan.findings and produces
+    /// a non-empty section with the expected content.
+    #[test]
+    fn extract_scan_results_from_draft_scan_findings() {
+        let draft = serde_json::json!({
+            "scan": {
+                "findings": [
+                    {
+                        "repo": "owner/repo",
+                        "path": "src/lib.rs",
+                        "line": 10,
+                        "rule_id": "ARCH-LAYERING-1",
+                        "severity": "high",
+                        "status": "active",
+                        "snippet": "some code here",  // must NOT leak
+                        "detail": "layering violation detected"
+                    }
+                ],
+                "coverage_notes": [
+                    {"tool": "eslint", "message": "no JS found"}
+                ]
+            }
+        });
+        let result = extract_scan_results_from_draft(&draft);
+        assert!(result.is_some(), "must return Some for non-empty findings");
+        let out = result.unwrap();
+        assert!(out.contains("ARCH-LAYERING-1"), "must contain rule_id");
+        assert!(out.contains("src/lib.rs:10"), "must contain location");
+        // Snippet must not appear
+        assert!(
+            !out.contains("some code here"),
+            "snippet must not appear in output, got: {out}"
+        );
+        assert!(out.contains("eslint"), "coverage note must appear");
+    }
+
+    /// extract_scan_results_from_draft falls back to audit.findings when scan is absent.
+    #[test]
+    fn extract_scan_results_from_draft_audit_fallback() {
+        let draft = serde_json::json!({
+            "audit": {
+                "findings": [
+                    {
+                        "repo": "owner/repo",
+                        "path": "src/api.rs",
+                        "line": 5,
+                        "rule_id": "DI-1",
+                        "severity": "medium",
+                        "status": "active",
+                        "snippet": "secret-value-here",
+                        "detail": "dependency injection violated"
+                    }
+                ]
+            }
+        });
+        let result = extract_scan_results_from_draft(&draft);
+        assert!(result.is_some(), "audit.findings fallback must work");
+        let out = result.unwrap();
+        assert!(out.contains("DI-1"), "must contain rule_id from audit section");
+        assert!(!out.contains("secret-value-here"), "snippet must not leak via audit path");
     }
 }
