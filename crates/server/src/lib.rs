@@ -2507,18 +2507,27 @@ async fn onboard_audit(
 /// through untouched).
 ///
 /// The floor (`crate::onboard::AUDIT_RULES`) runs at the Layer-1 gate AND at scan
-/// preview. Semgrep runs at scan preview AND CI (Layer-2 / Layer-3). Two semgrep rules
-/// overlap the floor on the same (repo, path, line) axis:
+/// preview. Semgrep runs at scan preview AND CI (Layer-2 / Layer-3). Semgrep rules
+/// that overlap the floor on the same (repo, path, line) axis:
 ///
-/// | Semgrep rule id                           | Floor rule id              |
-/// |-------------------------------------------|----------------------------|
-/// | `camerata.security.hardcoded-secret`       | `SEC-NO-HARDCODED-SECRETS-1` |
-/// | `camerata.security.sql-string-concat-python` | `SEC-NO-RAW-SQL-CONCAT-1` |
-/// | `camerata.security.sql-string-concat-js`   | `SEC-NO-RAW-SQL-CONCAT-1` |
+/// | Semgrep rule id                                  | Floor rule id                    |
+/// |--------------------------------------------------|----------------------------------|
+/// | `camerata.security.hardcoded-secret`             | `SEC-NO-HARDCODED-SECRETS-1`     |
+/// | `camerata.security.hardcoded-secret-dquote`      | `SEC-NO-HARDCODED-SECRETS-1`     |
+/// | `camerata.security.sql-string-concat-python`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
+/// | `camerata.security.sql-string-concat-js`         | `SEC-NO-RAW-SQL-CONCAT-1`        |
+/// | `camerata.security.sql-string-concat-rust`       | `SEC-NO-RAW-SQL-CONCAT-1`        |
+/// | `camerata.security.sql-string-concat-csharp`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
+/// | `camerata.security.disabled-tls-rust`            | `SEC-NO-DISABLED-TLS-1`          |
+/// | `camerata.security.disabled-tls-csharp`          | `SEC-NO-DISABLED-TLS-1`          |
+/// | `camerata.security.yaml-unsafe-load`             | `SEC-NO-UNSAFE-DESERIALIZATION-1` |
 ///
-/// The remaining 7 semgrep rules (`exec-injection`, `exec-injection-js`,
-/// `weak-hash-python`, `weak-hash-js`, `path-traversal-python`,
-/// `subprocess-shell-true`, `yaml-unsafe-load`) have no floor twin and map to `None`.
+/// The remaining semgrep rules (`exec-injection`, `exec-injection-js`,
+/// `weak-hash-*`, `path-traversal-python`, `subprocess-shell-true`) have no
+/// floor twin and map to `None`.
+///
+/// NOTE: rule ids here must be the NORMALIZED (clean) form — `normalize_semgrep_rule_id`
+/// in `scan_tools` strips any absolute-path prefix before findings reach this function.
 ///
 /// IMPORTANT: do NOT remove rules from either ruleset to fix overlap. The floor enforces
 /// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
@@ -2527,9 +2536,15 @@ async fn onboard_audit(
 #[cfg_attr(not(test), allow(dead_code))]
 fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     match semgrep_rule_id {
-        "camerata.security.hardcoded-secret" => Some("SEC-NO-HARDCODED-SECRETS-1"),
-        "camerata.security.sql-string-concat-python" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
-        "camerata.security.sql-string-concat-js" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        "camerata.security.hardcoded-secret"
+        | "camerata.security.hardcoded-secret-dquote" => Some("SEC-NO-HARDCODED-SECRETS-1"),
+        "camerata.security.sql-string-concat-python"
+        | "camerata.security.sql-string-concat-js"
+        | "camerata.security.sql-string-concat-rust"
+        | "camerata.security.sql-string-concat-csharp" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        "camerata.security.disabled-tls-rust"
+        | "camerata.security.disabled-tls-csharp" => Some("SEC-NO-DISABLED-TLS-1"),
+        "camerata.security.yaml-unsafe-load" => Some("SEC-NO-UNSAFE-DESERIALIZATION-1"),
         _ => None,
     }
 }

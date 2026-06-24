@@ -347,6 +347,40 @@ fn norm_severity(s: &str) -> String {
     .to_string()
 }
 
+/// Normalize a raw semgrep rule id emitted by `semgrep --sarif` into the clean,
+/// portable id stored in security.yml.
+///
+/// When semgrep is invoked with an absolute `--config` path (as Camerata does when
+/// scanning an external repository), it prefixes every rule id with the config path,
+/// dotted. For example, scanning `/repos/myrepo` with
+/// `--config /Users/alice/camerata/tooling/semgrep-rules` produces:
+///
+/// ```text
+/// Users.alice.camerata.tooling.semgrep-rules.camerata.security.sql-string-concat-rust
+/// ```
+///
+/// The portable id we register in `finding_security_category` and display in the UI is
+/// `camerata.security.sql-string-concat-rust` — the suffix starting at `camerata.security.`.
+///
+/// This function strips the path prefix: if the raw id contains the sentinel
+/// `camerata.security.` it returns everything from that sentinel onward. Otherwise the id
+/// is returned unchanged (non-Camerata semgrep rules, already-clean ids).
+///
+/// # Examples (as unit tests — see `#[cfg(test)]` block below)
+///
+/// - `"Users.alice.camerata.tooling.semgrep-rules.camerata.security.sql-string-concat-rust"`
+///   → `"camerata.security.sql-string-concat-rust"`
+/// - `"camerata.security.hardcoded-secret"` → unchanged
+/// - `"python.lang.security.audit.exec-detected"` → unchanged
+pub fn normalize_semgrep_rule_id(raw: &str) -> String {
+    const SENTINEL: &str = "camerata.security.";
+    if let Some(pos) = raw.find(SENTINEL) {
+        raw[pos..].to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 /// Parse a SARIF 2.x document (semgrep `--sarif`, eslint via a SARIF formatter)
 /// into preview [`Finding`]s. SARIF is the preferred format: stable rule ids in
 /// `result.ruleId`, location in `physicalLocation.region.startLine`.
@@ -364,11 +398,20 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
             continue;
         };
         for res in results {
-            let rule_id = res
+            let rule_id_raw = res
                 .get("ruleId")
                 .and_then(|r| r.as_str())
-                .unwrap_or("(unknown)")
-                .to_string();
+                .unwrap_or("(unknown)");
+            // Semgrep prefixes rule ids with the (absolute) --config path when
+            // the config is given as an absolute directory.  Strip the prefix so
+            // the stored id is always the clean portable form
+            // (`camerata.security.<name>`). Non-semgrep tools and already-clean
+            // ids are returned unchanged.
+            let rule_id = if matches!(tool, ScanTool::Semgrep) {
+                normalize_semgrep_rule_id(rule_id_raw)
+            } else {
+                rule_id_raw.to_string()
+            };
             let message = res
                 .get("message")
                 .and_then(|m| m.get("text"))
@@ -1020,6 +1063,65 @@ mod tests {
 
     // ── SARIF + per-tool JSON parsing ────────────────────────────────────────
 
+    // ── normalize_semgrep_rule_id ─────────────────────────────────────────────
+
+    #[test]
+    fn normalize_strips_absolute_path_prefix() {
+        // Real example from scanning an external repo with an absolute --config path.
+        let raw = "Users.zacharyernst.Documents.Repos.camerata-orchestrator.crates.server.assets.semgrep-rules.camerata.security.sql-string-concat-rust";
+        assert_eq!(
+            normalize_semgrep_rule_id(raw),
+            "camerata.security.sql-string-concat-rust"
+        );
+    }
+
+    #[test]
+    fn normalize_already_clean_id_unchanged() {
+        let clean = "camerata.security.hardcoded-secret";
+        assert_eq!(normalize_semgrep_rule_id(clean), clean);
+    }
+
+    #[test]
+    fn normalize_non_camerata_id_unchanged() {
+        let other = "python.lang.security.audit.exec-detected";
+        assert_eq!(normalize_semgrep_rule_id(other), other);
+    }
+
+    #[test]
+    fn normalize_all_camerata_rule_ids() {
+        // All rule ids that appear in security.yml: confirm they survive normalization
+        // unchanged (already clean) and that path-prefixed variants strip correctly.
+        let clean_ids = [
+            "camerata.security.hardcoded-secret",
+            "camerata.security.hardcoded-secret-dquote",
+            "camerata.security.exec-injection",
+            "camerata.security.exec-injection-js",
+            "camerata.security.sql-string-concat-python",
+            "camerata.security.sql-string-concat-js",
+            "camerata.security.sql-string-concat-rust",
+            "camerata.security.sql-string-concat-csharp",
+            "camerata.security.weak-hash-python",
+            "camerata.security.weak-hash-js",
+            "camerata.security.weak-hash-rust",
+            "camerata.security.weak-hash-csharp",
+            "camerata.security.path-traversal-python",
+            "camerata.security.subprocess-shell-true",
+            "camerata.security.yaml-unsafe-load",
+            "camerata.security.disabled-tls-rust",
+            "camerata.security.disabled-tls-csharp",
+        ];
+        for id in &clean_ids {
+            assert_eq!(normalize_semgrep_rule_id(id), *id, "clean id mutated: {id}");
+            // Simulate path-prefixed form (mimics absolute --config path).
+            let prefixed = format!("some.path.prefix.{id}");
+            assert_eq!(
+                normalize_semgrep_rule_id(&prefixed),
+                *id,
+                "path-prefixed form not stripped for: {id}"
+            );
+        }
+    }
+
     #[test]
     fn parse_sarif_into_findings() {
         let sarif = r#"{
@@ -1046,6 +1148,32 @@ mod tests {
         assert_eq!(f[0].severity, "high");
         assert!(f[0].preview);
         assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
+    }
+
+    #[test]
+    fn parse_sarif_normalizes_path_prefixed_semgrep_rule_id() {
+        // When semgrep is invoked with an absolute --config path, it prefixes
+        // the rule id with the dotted path.  parse_sarif must strip this prefix.
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [{
+              "ruleId": "Users.alice.camerata.tooling.semgrep-rules.camerata.security.sql-string-concat-rust",
+              "level": "error",
+              "message": { "text": "Possible SQL injection" },
+              "locations": [{
+                "physicalLocation": {
+                  "artifactLocation": { "uri": "src/db.rs" },
+                  "region": { "startLine": 17 }
+                }
+              }]
+            }]
+          }]
+        }"#;
+        let f = parse_sarif("owner/repo", ScanTool::Semgrep, sarif).unwrap();
+        assert_eq!(f.len(), 1);
+        // Must be the clean id, NOT the path-prefixed form.
+        assert_eq!(f[0].rule_id, "camerata.security.sql-string-concat-rust");
     }
 
     #[test]
