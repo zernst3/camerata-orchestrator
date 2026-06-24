@@ -225,10 +225,15 @@ impl AppState {
     }
 
     /// Retrieve the most recently completed scan, regardless of which project it belonged to.
-    /// Used as a last-resort fallback in `active_project_context` when neither the draft nor
-    /// the per-project `last_scan` entry holds results for the currently active project.
+    ///
+    /// ISOLATION (A5): this was a last-resort fallback in `active_project_context`, but it
+    /// leaked one project's scan into another's chat grounding, so all production call sites
+    /// were removed. The `recent_scan` field is still written on scan completion and this
+    /// accessor is retained for the isolation regression tests (which assert the data exists
+    /// yet does NOT surface cross-project). Not called from production code by design.
     /// Returns a clone so callers do not hold the lock across await points.
     /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    #[allow(dead_code)]
     pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
         let guard = self
             .recent_scan
@@ -7071,15 +7076,6 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion.
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
             });
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
@@ -7112,15 +7108,6 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion.
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
             });
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
@@ -7147,17 +7134,7 @@ async fn active_project_context(
         let scan_results_section = state
             .get_last_scan(&project.id)
             .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion (the root cause of
-                // "Scan results (none yet)" showing after a successful scan).
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
-            });
+            .filter(|s| !s.is_empty());
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
@@ -11473,13 +11450,15 @@ mod tests {
     /// per-project last_scan entry (simulates the active-project-changed-between-submit-
     /// and-complete race that caused "Scan results (none yet)").
     #[tokio::test]
-    async fn active_project_context_falls_back_to_recent_scan() {
+    async fn active_project_context_does_not_leak_recent_scan_across_projects() {
+        // ISOLATION (A5): the recent_scan global fallback was REMOVED. A scan stored under
+        // a different project's id must NEVER surface in the active project's chat grounding.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create and activate a project.
         let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
 
-        // Simulate a scan that was stored under a DIFFERENT project id (the project that was
-        // active at scan submission time) — NOT under `project.id`.
+        // Simulate a scan stored under a DIFFERENT project id (the project that was active at
+        // scan submission time) — NOT under `project.id`. This also populates recent_scan.
         state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
 
         // Confirm: per-project lookup for the ACTIVE project is empty.
@@ -11487,7 +11466,8 @@ mod tests {
             state.get_last_scan(&project.id).is_none(),
             "test setup: active project must have no per-project last_scan entry"
         );
-        // Confirm: recent_scan was populated by the set_last_scan call above.
+        // Confirm: recent_scan was populated by the set_last_scan call above (so the
+        // assertion below proves the fallback is gone, not that the data is absent).
         assert!(
             state.get_recent_scan().is_some(),
             "test setup: recent_scan must be populated"
@@ -11503,15 +11483,13 @@ mod tests {
 
         let body = body_json(resp).await;
         let section = body.get("scan_results_section");
+        // The fallback is gone: with no per-project scan for the active project, the section
+        // must be absent/null and must NOT contain the OTHER project's rule id.
+        let section_str = section.and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            section.is_some() && section.unwrap() != &serde_json::Value::Null,
-            "scan_results_section must be populated via the recent_scan fallback, got: {body:?}"
-        );
-        let section_str = section.unwrap().as_str().unwrap_or("");
-        assert!(
-            section_str.contains("RECENT-RULE"),
-            "recent_scan fallback must surface the rule_id from the mismatched-project scan, \
-             got: {section_str}"
+            !section_str.contains("RECENT-RULE"),
+            "cross-project recent_scan must NOT leak into the active project's chat grounding, \
+             got: {body:?}"
         );
     }
 
