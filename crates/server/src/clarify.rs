@@ -249,6 +249,29 @@ impl ClarificationStore {
         v
     }
 
+    /// Open clarifications whose `story_id` resolves to a repo in `repos` (the active
+    /// project's repos). ISOLATION (A9): the global [`Self::all_open`] leaks every
+    /// project's NEEDS-YOU queue. Clarifications whose story_id has no resolvable repo
+    /// (drafts) are EXCLUDED.
+    pub fn all_open_for_project(&self, repos: &[String]) -> Vec<Clarification> {
+        let mut v: Vec<Clarification> = self
+            .items
+            .lock()
+            .map(|g| {
+                g.values()
+                    .filter(|c| c.is_open())
+                    .filter(|c| {
+                        crate::repo_from_story_id(&c.story_id)
+                            .is_some_and(|r| repos.iter().any(|p| p == &r))
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
+    }
+
     /// Post a new (open) free-text clarification for a story; returns it. This is the
     /// back-compat shim: it delegates to [`Self::post_structured`] with no options and
     /// the free-text escape on.

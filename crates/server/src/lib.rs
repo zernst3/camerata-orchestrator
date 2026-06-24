@@ -1491,9 +1491,13 @@ async fn sign_off_run(
     Ok(Json(uow).into_response())
 }
 
-/// All OPEN clarifications across every story (the NEEDS YOU queue).
+/// OPEN clarifications for the active project's stories (the NEEDS YOU queue).
+/// No active project → empty queue.
 async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Clarification>> {
-    Json(state.clarifications.all_open())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.clarifications.all_open_for_project(&p.repos))
 }
 
 /// All clarifications on a story (open and answered).
