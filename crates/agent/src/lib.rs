@@ -17,7 +17,6 @@
 //!   the gateway + `--add-dir`; the tool list enforces *which* tools at all.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use camerata_core::{AgentDriver, AgentOutcome, Role};
 use thiserror::Error;
@@ -32,7 +31,7 @@ pub mod generic;
 pub use generic::GenericCliDriver;
 
 pub mod liveness;
-pub use liveness::{spawn_mtime_probe, newest_mtime, MTIME_PROBE_INTERVAL};
+pub use liveness::{spawn_mtime_probe, newest_mtime, HeartbeatFn, MTIME_PROBE_INTERVAL};
 
 pub mod post_story_hook;
 pub use post_story_hook::{DocConvention, PostStoryHook, StoryCompletion, StoryDocEmitter};
@@ -83,9 +82,8 @@ pub fn agent_total_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Callback type: fired once per stdout line received from the agent subprocess.
-/// Callers that track run activity update `last_activity_ms` here. `None` = no callback.
-pub type HeartbeatFn = Arc<dyn Fn() + Send + Sync>;
+// HeartbeatFn is re-exported from `camerata-liveness` via the `liveness` module above.
+// It is available as `camerata_agent::HeartbeatFn` for backwards-compatibility.
 
 // ─── streaming subprocess helper ─────────────────────────────────────────────
 
@@ -757,6 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_subprocess_fires_heartbeat_per_line() {
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let counter = Arc::new(AtomicUsize::new(0));
         let counter2 = counter.clone();

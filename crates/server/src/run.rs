@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use camerata_core::{Decision, RuleId, ToolCall};
 use camerata_gateway::{enforced_gate_rules, evaluate_call};
+use camerata_liveness::LivenessTracker;
 
 use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
 
@@ -109,13 +110,15 @@ pub struct Run {
     pub done: bool,
     /// "scripted" (token-free, real-gate verdicts) or "live" (a real claude -p fleet).
     pub mode: String,
-    /// Epoch-ms of the last activity recorded for this run: a live event was pushed OR the
-    /// agent subprocess fired a heartbeat. Initialized to run-creation time. Used to derive
-    /// `idle_ms` and `stalled` without a separate clock call on the write path.
-    pub last_activity_ms: u128,
+    /// Liveness tracker: replaces the previous `last_activity_ms: u128` field. Thread-safe
+    /// (`Arc<AtomicU64>`), cheap to clone. `#[serde(skip)]` — not sent on the wire directly;
+    /// callers read the computed `idle_ms` / `stalled` from `RunStatusResponse` instead.
+    #[serde(skip)]
+    pub tracker: LivenessTracker,
     /// A short human-readable label of the most recent progress point (the kind/summary of
     /// the last gate event, or `"agent: <last line truncated>"` from a heartbeat). For
-    /// operator diagnosis when a run stalls.
+    /// operator diagnosis when a run stalls. Mirrors `tracker.last_label()` but kept as a
+    /// dedicated field so it serializes on the wire without an extra method call.
     pub last_progress_label: String,
     /// Whether this run is interactive (Watched) or autonomous (Autonomous).
     pub kind: RunKind,
@@ -255,10 +258,8 @@ impl RunStore {
             events: Vec::new(),
             done: false,
             mode: mode.to_string(),
-            last_activity_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
+            // LivenessTracker::new() initialises to the current wall clock (not stalled).
+            tracker: LivenessTracker::new(),
             last_progress_label: "created".to_string(),
             kind: kind.clone(),
             stall_policy,
@@ -294,12 +295,9 @@ impl RunStore {
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
                 let label = format!("{} {}", event.layer, event.verdict);
+                // Update the tracker (atomic, lock-free) and the label field together.
+                run.tracker.record_progress(&label);
                 run.last_progress_label = label;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis();
-                run.last_activity_ms = now;
                 run.events.push(event);
             }
         }
@@ -308,15 +306,13 @@ impl RunStore {
     /// Update the run's last-activity timestamp to now and optionally set the progress label.
     /// Called by `push_event` (automatic) and by the agent heartbeat callback (live runs).
     pub(crate) fn touch_activity(&self, id: &str, label: Option<String>) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
-                run.last_activity_ms = now;
                 if let Some(l) = label {
+                    run.tracker.record_progress(&l);
                     run.last_progress_label = l;
+                } else {
+                    run.tracker.tick();
                 }
             }
         }
@@ -399,7 +395,8 @@ pub enum StallDecision {
 
 /// Determine what action to take given a run's current idle time and stall policy. Pure.
 pub fn stall_decision(run: &Run, threshold_ms: u128, now_ms: u128) -> StallDecision {
-    let idle = now_ms.saturating_sub(run.last_activity_ms);
+    // Delegate idle computation to the tracker (u64 arithmetic, safe for wall-clock ms).
+    let idle = u128::from(run.tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX)));
     if idle < threshold_ms {
         StallDecision::Ok
     } else {
@@ -735,7 +732,7 @@ mod tests {
     fn push_event_updates_last_activity_ms() {
         let store = RunStore::new();
         let id = store.create("CAM-X", "scripted", RunKind::Watched);
-        let before = store.get(&id).unwrap().last_activity_ms;
+        let before = store.get(&id).unwrap().tracker.last_activity_ms();
 
         // Tiny sleep to ensure time advances.
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -748,7 +745,7 @@ mod tests {
             detail: "test".to_string(),
             content_hash: None,
         });
-        let after = store.get(&id).unwrap().last_activity_ms;
+        let after = store.get(&id).unwrap().tracker.last_activity_ms();
         assert!(after >= before, "last_activity_ms must advance after push_event");
     }
 
@@ -757,7 +754,7 @@ mod tests {
         let store = RunStore::new();
         let id = store.create("CAM-Y", "scripted", RunKind::Watched);
         let run = store.get(&id).unwrap();
-        assert!(run.last_activity_ms > 0, "last_activity_ms must be initialized");
+        assert!(run.tracker.last_activity_ms() > 0, "last_activity_ms must be initialized");
         assert_eq!(run.last_progress_label, "created");
     }
 
@@ -853,7 +850,7 @@ mod tests {
         let store = RunStore::new();
         let id = store.create("S-5", "live", RunKind::Watched);
         let run = store.get(&id).unwrap();
-        let now_ms = run.last_activity_ms + 50_000;
+        let now_ms = u128::from(run.tracker.last_activity_ms()) + 50_000;
         assert_eq!(stall_decision(&run, 120_000, now_ms), StallDecision::Ok);
     }
 
@@ -862,7 +859,7 @@ mod tests {
         let store = RunStore::new();
         let id = store.create("S-6", "live", RunKind::Watched);
         let run = store.get(&id).unwrap();
-        let now_ms = run.last_activity_ms + 200_000;
+        let now_ms = u128::from(run.tracker.last_activity_ms()) + 200_000;
         assert_eq!(stall_decision(&run, 120_000, now_ms), StallDecision::Alert);
     }
 
@@ -871,7 +868,7 @@ mod tests {
         let store = RunStore::new();
         let id = store.create("S-7", "scripted", RunKind::Autonomous);
         let run = store.get(&id).unwrap();
-        let now_ms = run.last_activity_ms + 700_000;
+        let now_ms = u128::from(run.tracker.last_activity_ms()) + 700_000;
         assert_eq!(stall_decision(&run, 600_000, now_ms), StallDecision::Cancel);
     }
 }

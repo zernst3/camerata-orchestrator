@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use camerata_agent::{prepare_session, HeartbeatFn, GATED_WRITE_TOOL};
-use camerata_checks::runner_for_worktree;
+use camerata_checks::{runner_for_worktree, runner_for_worktree_with_heartbeat};
 use camerata_core::{CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
 use camerata_gateway::enforced_gate_rules;
 use camerata_intake::{Plan, PlanTask, TaskKind};
@@ -54,24 +54,25 @@ impl CheckRunner for NoopChecks {
     }
 }
 
-/// Select the layer-2 (post-task lint/test bounce) runner for a worktree.
+/// Like the old `layer2_runner`, but also wires `on_activity` into every Rust
+/// [`camerata_checks::RustCheckRunner`] sub-runner so cargo subprocess output
+/// (fmt/clippy/test) fires heartbeats on the tracked run while the layer-2
+/// gate is executing. When `on_activity` is `None` the behaviour is identical
+/// to [`layer2_runner`].
 ///
-/// Normal runs use the language-matched [`runner_for_worktree`] (Rust/JS/Go/Python),
-/// which is fail-closed: a repo with a manifest but no lint/test wired returns
-/// "could-not-run", a hard failure. That is correct governance, but it deadlocks the
-/// ONE bootstrapping run that would *install* the tooling layer-2 needs.
-///
-/// When `skip_layer2` is `true` (the explicit, default-OFF bootstrap escape hatch),
-/// the run uses [`NoopChecks`] for layer 2 — no post-task lint/test bounce — so the
-/// tool-installing run can land. This skips ONLY layer 2. Layer 1 (the deny-before-write
-/// gate every spawned agent runs behind) and the server-side no-code-first decisions gate
-/// are unaffected: the gate is never bypassed. See
-/// `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
-fn layer2_runner(worktree: &Path, skip_layer2: bool) -> Box<dyn CheckRunner> {
+/// Used exclusively by the `_and_activity` fleet functions, where a
+/// `HeartbeatFn` pointing at `RunStore::touch_activity` is already in scope.
+fn layer2_runner_with_activity(
+    worktree: &Path,
+    skip_layer2: bool,
+    on_activity: Option<&HeartbeatFn>,
+) -> Box<dyn CheckRunner> {
     if skip_layer2 {
-        Box::new(NoopChecks)
-    } else {
-        runner_for_worktree(worktree)
+        return Box::new(NoopChecks);
+    }
+    match on_activity {
+        Some(cb) => runner_for_worktree_with_heartbeat(worktree, cb.clone()),
+        None => runner_for_worktree(worktree),
     }
 }
 
@@ -538,11 +539,11 @@ pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
-    // `layer2_runner` returns the language-matched CheckRunner via
-    // `runner_for_worktree` (Cargo.toml -> Rust, package.json -> JS/TS, go.mod -> Go,
-    // pyproject/requirements/Pipfile -> Python) for a normal run, or a NoopChecks for an
-    // explicit `skip_layer2` bootstrap run. The coordinator still takes &dyn CheckRunner.
-    let checks = layer2_runner(&worktree, skip_layer2);
+    // `layer2_runner_with_activity` returns a language-matched CheckRunner with the
+    // heartbeat baked in for Rust sub-runners (Cargo.toml -> RustCheckRunner::with_heartbeat),
+    // or a NoopChecks for an explicit `skip_layer2` bootstrap run. When `on_activity` is
+    // None the behaviour degrades to `layer2_runner` (unchanged).
+    let checks = layer2_runner_with_activity(&worktree, skip_layer2, on_activity.as_ref());
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
@@ -809,11 +810,10 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
-    // `layer2_runner` returns the language-matched CheckRunner via
-    // `runner_for_worktree` (Cargo.toml -> Rust, package.json -> JS/TS, go.mod -> Go,
-    // pyproject/requirements/Pipfile -> Python) for a normal run, or a NoopChecks for an
-    // explicit `skip_layer2` bootstrap run. The coordinator still takes &dyn CheckRunner.
-    let checks = layer2_runner(&worktree, skip_layer2);
+    // `layer2_runner_with_activity` returns a language-matched CheckRunner with the
+    // heartbeat baked in for Rust sub-runners so cargo output fires heartbeats during
+    // the layer-2 gate, or a NoopChecks for an explicit `skip_layer2` bootstrap run.
+    let checks = layer2_runner_with_activity(&worktree, skip_layer2, on_activity.as_ref());
     let fleet = FleetCoordinator::new(&*checks, &worktree);
     let report = fleet.run_with_iterations(&stages, max_iterations).await?;
 
@@ -859,7 +859,8 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camerata_agent::GATED_WRITE_TOOL;
+    use camerata_agent::{HeartbeatFn, GATED_WRITE_TOOL};
+    use camerata_core::Role;
     use camerata_intake::PlanTask;
 
     // ── scaffold_crate ────────────────────────────────────────────────────────
@@ -911,8 +912,8 @@ mod tests {
             allowed_paths: vec![],
         };
 
-        // skip_layer2 = false → real (JS) runner → fail-closed Err (the deadlock).
-        let real = layer2_runner(&dir, false);
+        // skip_layer2 = false, no heartbeat → real (JS) runner → fail-closed Err (the deadlock).
+        let real = layer2_runner_with_activity(&dir, false, None);
         let real_res = real.check(&role, &dir).await;
         assert!(
             real_res.is_err(),
@@ -920,12 +921,83 @@ mod tests {
         );
 
         // skip_layer2 = true → no-op runner → Ok(empty), so the bootstrap run can proceed.
-        let noop = layer2_runner(&dir, true);
+        let noop = layer2_runner_with_activity(&dir, true, None);
         let noop_res = noop.check(&role, &dir).await;
         assert_eq!(
             noop_res.expect("the bootstrap no-op runner must not error"),
             Vec::<RuleId>::new(),
             "the bootstrap no-op runner reports no violations (skips layer 2)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── layer2_runner_with_activity forwards callback to Rust sub-runners ─────
+
+    /// `layer2_runner_with_activity` with `Some(cb)` and a Rust worktree must
+    /// produce a `CombinedCheckRunner` whose language sub-runner is a
+    /// `PolyglotCheckRunner` over a `RustCheckRunner::with_heartbeat(cb)`.
+    ///
+    /// We verify this BEHAVIOURALLY: run `cargo fmt --check` on a cleanly-formatted
+    /// minimal crate via the returned runner and assert the heartbeat fires at least
+    /// once during the subprocess. This proves the callback threaded all the way
+    /// from `layer2_runner_with_activity` → `runner_for_worktree_with_heartbeat` →
+    /// `PolyglotCheckRunner::from_detected_with_heartbeat` →
+    /// `RustCheckRunner::with_heartbeat` → `subprocess::run_fmt_check(..., Some(cb))`.
+    ///
+    /// Token- and network-free: all subprocess calls run real cargo against a tiny
+    /// scaffolded crate, same as the existing `fmt_real_subprocess` integration test.
+    #[tokio::test]
+    async fn layer2_runner_with_activity_forwards_heartbeat_to_rust_runner() {
+        use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-fleet-test-heartbeat-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+
+        // A minimal Rust crate scaffolded in canonical format so fmt passes (and
+        // clippy/test won't be reached — fmt passes and exits 0 early enough that
+        // the runner is satisfied with a clean result).  We only need fmt to run
+        // and emit at least one stdout line so the heartbeat fires.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"heartbeat_test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ).unwrap();
+        std::fs::write(dir.join("src").join("lib.rs"), "// empty\n").unwrap();
+
+        let tick_count = Arc::new(AtomicU64::new(0));
+        let tick_count_cb = tick_count.clone();
+        let cb: HeartbeatFn = Arc::new(move || {
+            tick_count_cb.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let runner = layer2_runner_with_activity(&dir, false, Some(&cb));
+
+        let role = Role {
+            name: "test".into(),
+            rule_subset: vec![],
+            allowed_paths: vec![],
+        };
+
+        // Run the layer-2 gate. Cargo fmt on a canonical crate returns Ok([]).
+        let result = runner.check(&role, &dir).await;
+
+        // Heartbeat must have fired at least once during cargo fmt stdout output.
+        let ticks = tick_count.load(Ordering::Relaxed);
+        assert!(
+            ticks >= 1,
+            "layer2_runner_with_activity must fire the heartbeat at least once during \
+             cargo fmt; got {ticks} ticks — callback was not forwarded to the Rust runner"
+        );
+
+        // And the crate must be clean (no violations on a minimal canonical crate).
+        let violations = result.expect("layer2_runner_with_activity must not error on a valid Rust crate");
+        assert!(
+            violations.is_empty(),
+            "a canonical Rust crate must produce no layer-2 violations, got {violations:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,0 +1,19 @@
+[package]
+name = "camerata-liveness"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+# A leaf crate: zero camerata-crate deps. Depends only on tokio (for the async mtime
+# probe) and std. This keeps `camerata-core` dep-free of tokio while giving every
+# crate (agent, checks, server, fleet) a single home for liveness primitives.
+[lints]
+workspace = true
+
+[dependencies]
+# `time` feature required for tokio::time::sleep / tokio::time::Instant used by spawn_mtime_probe.
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tempfile = "3"

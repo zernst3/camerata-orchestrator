@@ -91,7 +91,7 @@ async fn badly_formatted_crate_yields_rust_fmt_violation() {
     // still parses (rustfmt only needs valid syntax, not a successful compile).
     scaffold_crate(&wt, "fn   main( ){let x=1;println!(\"{}\",x );}\n");
 
-    let runner = FmtCheckRunner;
+    let runner = FmtCheckRunner::new();
     let violations = runner
         .check(&any_role(), wt.path())
         .await
@@ -116,7 +116,7 @@ async fn cleanly_formatted_crate_yields_no_violations() {
         "fn main() {\n    let x = 1;\n    println!(\"{}\", x);\n}\n",
     );
 
-    let runner = FmtCheckRunner;
+    let runner = FmtCheckRunner::new();
     let violations = runner
         .check(&any_role(), wt.path())
         .await

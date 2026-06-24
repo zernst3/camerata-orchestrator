@@ -641,6 +641,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "camerata-liveness",
  "camerata-worktracker",
  "chrono",
  "serde",
@@ -657,10 +658,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "camerata-liveness",
  "camerata-rules",
  "fs2",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -750,6 +753,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-liveness"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "camerata-maintenance"
 version = "0.0.0"
 dependencies = [
@@ -806,6 +817,7 @@ dependencies = [
  "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
+ "camerata-liveness",
  "camerata-persistence",
  "camerata-rules",
  "camerata-worktracker",

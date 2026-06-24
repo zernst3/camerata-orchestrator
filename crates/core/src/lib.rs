@@ -85,5 +85,5 @@ pub use coordinator::{Coordinator, CoordinatorError, RunReport};
 pub mod fleet;
 pub use fleet::{FleetCoordinator, FleetReport, FleetStage, StageReport};
 
-pub mod liveness;
-pub use liveness::LivenessTracker;
+// LivenessTracker moved to the `camerata-liveness` leaf crate (Phase 1b).
+// Import it from `camerata_liveness::LivenessTracker` directly.
