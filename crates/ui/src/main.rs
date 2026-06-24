@@ -61,6 +61,42 @@ fn main() {
         .launch(App);
 }
 
+/// Kill whatever process(es) are currently holding `port`, so a fresh launch can
+/// take the socket over.  Used by the port-takeover retry loop in `App`: the newest
+/// Camerata launch must win, otherwise a stale server from a previous run shadows
+/// the freshly-built binary and the cockpit silently runs the OLD code.
+///
+/// On Unix (the app targets macOS) we ask `lsof -ti:<port>` for the holder PID(s)
+/// and `kill -9` each one.  These are instant probes, not long-running processes,
+/// so plain `std::process::Command` is fine (no async / kill_on_drop needed).  On
+/// non-Unix we can't reliably enumerate the holder, so this is a no-op and the
+/// caller simply retries / gives up.
+#[cfg(unix)]
+fn reclaim_port(port: &str) {
+    use std::process::Command;
+
+    let out = match Command::new("lsof").arg("-ti").arg(format!(":{port}")).output() {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("[camerata-ui] could not run lsof to reclaim :{port}: {e}");
+            return;
+        }
+    };
+
+    let pids = String::from_utf8_lossy(&out.stdout);
+    for pid in pids.split_whitespace() {
+        match Command::new("kill").arg("-9").arg(pid).status() {
+            Ok(_) => eprintln!("[camerata-ui] killed stale :{port} holder pid {pid}"),
+            Err(e) => eprintln!("[camerata-ui] failed to kill pid {pid} on :{port}: {e}"),
+        }
+    }
+}
+
+/// Non-Unix fallback: we have no portable way to enumerate the port holder, so we
+/// can't reclaim it.  The caller just retries and ultimately gives up loudly.
+#[cfg(not(unix))]
+fn reclaim_port(_port: &str) {}
+
 /// JavaScript injected into <head> on every page load.
 ///
 /// WHY THIS EXISTS
@@ -235,32 +271,70 @@ fn App() -> Element {
     use_hook(|| {
         std::thread::spawn(|| match tokio::runtime::Runtime::new() {
             Ok(rt) => rt.block_on(async {
-                if let Err(e) = camerata_server::serve(BFF_ADDR).await {
-                    // Check whether the error looks like a port-already-in-use failure.
-                    // `AddrInUse` surfaces as an `std::io::Error` whose kind is
-                    // `AddrInUse`; the Display string always contains "address already
-                    // in use" (Linux) or "Address already in use" (macOS) or the OS
-                    // equivalent.  We match on the lowercase string to be portable.
-                    let msg = e.to_string();
-                    if msg.to_lowercase().contains("address already in use")
-                        || msg.to_lowercase().contains("addr in use")
-                    {
-                        eprintln!(
-                            "\n\
-                             ╔══════════════════════════════════════════════════════════════╗\n\
-                             ║  [camerata-ui] WARNING: :{} ALREADY IN USE               ║\n\
-                             ║                                                              ║\n\
-                             ║  A stale Camerata server from a previous run is still        ║\n\
-                             ║  holding the port.  This build's code is NOT running —       ║\n\
-                             ║  the cockpit is talking to the OLD server.                   ║\n\
-                             ║                                                              ║\n\
-                             ║  Fix: quit ALL Camerata instances, then relaunch.            ║\n\
-                             ╚══════════════════════════════════════════════════════════════╝\n",
-                            BFF_ADDR
-                        );
-                    } else {
-                        eprintln!("[camerata-ui] embedded BFF exited: {e}");
+                // PORT TAKEOVER — the NEWEST launch must always win.
+                //
+                // The previous behaviour surrendered silently on `AddrInUse`: a stale
+                // Camerata server from an earlier run kept squatting on :8787 and the
+                // freshly-built binary quietly talked to the OLD code.  Closing +
+                // relaunching the app therefore did NOT reliably pick up new code.
+                //
+                // Instead, when the bind fails because the port is in use, we kill the
+                // process(es) holding it and retry, up to a small bounded number of
+                // attempts.  The fresh build wins; the stale server dies.
+                const MAX_ATTEMPTS: u32 = 3;
+                for attempt in 1..=MAX_ATTEMPTS {
+                    let err = match camerata_server::serve(BFF_ADDR).await {
+                        // serve() only returns on shutdown/error; Ok means a clean exit.
+                        Ok(()) => return,
+                        Err(e) => e,
+                    };
+
+                    // Is this an "address already in use" failure?  `AddrInUse` surfaces
+                    // as an `std::io::Error`; the Display string contains "address
+                    // already in use" (Linux) / "Address already in use" (macOS) or the
+                    // OS equivalent.  Match on the lowercased string to stay portable.
+                    let msg = err.to_string();
+                    let port_in_use = msg.to_lowercase().contains("address already in use")
+                        || msg.to_lowercase().contains("addr in use");
+
+                    if !port_in_use {
+                        // Some other failure (e.g. runtime error) — not recoverable by
+                        // reclaiming the port.  Report and stop.
+                        eprintln!("[camerata-ui] embedded BFF exited: {err}");
+                        return;
                     }
+
+                    if attempt < MAX_ATTEMPTS {
+                        // Reclaim the port from whatever is squatting on it, then retry.
+                        let port = BFF_ADDR.rsplit(':').next().unwrap_or("8787");
+                        eprintln!(
+                            "[camerata-ui] :{port} in use (attempt {attempt}/{MAX_ATTEMPTS}); \
+                             killing stale holder(s) and retrying"
+                        );
+                        reclaim_port(port);
+                        // Give the OS a moment to release the socket after the kill.
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+
+                    // Out of attempts: the port is still held and we could not take it
+                    // over.  Fail loudly so it's obvious the cockpit is NOT running this
+                    // build's code.
+                    eprintln!(
+                        "\n\
+                         ╔══════════════════════════════════════════════════════════════╗\n\
+                         ║  [camerata-ui] FATAL: :{} ALREADY IN USE                 ║\n\
+                         ║                                                              ║\n\
+                         ║  A stale Camerata server from a previous run is still        ║\n\
+                         ║  holding the port and could not be reclaimed after retries.  ║\n\
+                         ║  This build's code is NOT running —                          ║\n\
+                         ║  the cockpit is talking to the OLD server.                   ║\n\
+                         ║                                                              ║\n\
+                         ║  Fix: quit ALL Camerata instances, then relaunch.            ║\n\
+                         ╚══════════════════════════════════════════════════════════════╝\n",
+                        BFF_ADDR
+                    );
+                    return;
                 }
             }),
             Err(e) => eprintln!("[camerata-ui] could not start BFF runtime: {e}"),
