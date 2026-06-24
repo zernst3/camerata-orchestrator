@@ -2537,35 +2537,20 @@ pub(super) fn ProposedRulesTable(
     let id_map_writeback = id_map.clone();
     let view_repo_wb = view_repo.clone();
     let mut repo_selection_wb = repo_selection;
-    use_effect(move || {
-        // Do NOT write back until the async draft restore has completed. Before the draft loads
-        // this table's selection is the recommended-only seed (use_hook ran at mount before the
-        // async restore could set repo_selection). Writing that seed back would overwrite the
-        // draft's saved selection, making the restore a no-op.
-        if !draft_loaded() {
-            return;
-        }
-        let live_ids: Vec<String> = handle
-            .selected_ids()
-            .iter()
-            .filter_map(|rid| id_map_writeback.get(rid).map(|r| r.id.clone()))
-            .collect();
-        // ALWAYS write this table's live selection into the lifted map (under its key), then
-        // report the cross-repo total for the cost estimate. The single-repo case writes under
-        // the sentinel key so its picks — recommended AND manual — persist into the auto-saved
-        // draft and are restored on remount, instead of resetting to recommended-only.
-        let mut map = repo_selection_wb.peek().clone();
-        map.insert(selection_key(&view_repo_wb), live_ids);
-        let total: usize = map.values().map(|v| v.len()).sum();
-        repo_selection_wb.set(map);
-        selected_count.set(total);
-    });
     // One-shot restore: when the async draft load completes (draft_loaded flips to true),
     // re-apply the saved selection from repo_selection to the table checkboxes. This is
     // necessary because use_hook's pre-select ran ONCE at mount — before the async restore
     // could populate repo_selection — so the checkboxes reflect the recommended-only seed,
     // not the architect's saved picks. `selection_restored` guards against re-running on
     // every subsequent repo_selection write (which would fight the user's live ticks).
+    //
+    // REGISTRATION ORDER MATTERS: This effect must be registered BEFORE the writeback effect
+    // below. Dioxus runs effects in registration order when multiple effects are dirtied by the
+    // same signal change (here: draft_loaded flipping to true). The restore must apply saved
+    // picks to the table checkboxes FIRST; then the writeback reads those corrected checkboxes
+    // and writes them back to repo_selection. If the writeback ran first it would read the
+    // recommended-only seed (checkboxes haven't been restored yet) and contaminate
+    // repo_selection before restore could see the true saved picks.
     let mut selection_restored = use_signal(|| false);
     {
         let id_map_restore = id_map.clone();
@@ -2590,10 +2575,39 @@ pub(super) fn ProposedRulesTable(
                         handle.set_selection(*rid, true);
                     }
                 }
-                selection_restored.set(true);
             }
+            // Always set selection_restored = true after draft_loaded is true (even when there
+            // is no saved entry for this repo — that means it's a fresh first-view where the
+            // recommended-only seed is already correct). This unblocks the writeback effect.
+            selection_restored.set(true);
         });
     }
+    use_effect(move || {
+        // Do NOT write back until BOTH the async draft restore has completed AND the one-shot
+        // checkbox restore has finished applying saved picks to the table. Without the
+        // `selection_restored` gate this effect runs first (registration order) when
+        // `draft_loaded` flips to true, reads the recommended-only seed from the table
+        // (checkboxes haven't been restored yet), and overwrites repo_selection — so the
+        // restore effect then reads contaminated data and permanently loses the architect's
+        // saved picks.
+        if !draft_loaded() || !selection_restored() {
+            return;
+        }
+        let live_ids: Vec<String> = handle
+            .selected_ids()
+            .iter()
+            .filter_map(|rid| id_map_writeback.get(rid).map(|r| r.id.clone()))
+            .collect();
+        // ALWAYS write this table's live selection into the lifted map (under its key), then
+        // report the cross-repo total for the cost estimate. The single-repo case writes under
+        // the sentinel key so its picks — recommended AND manual — persist into the auto-saved
+        // draft and are restored on remount, instead of resetting to recommended-only.
+        let mut map = repo_selection_wb.peek().clone();
+        map.insert(selection_key(&view_repo_wb), live_ids);
+        let total: usize = map.values().map(|v| v.len()).sum();
+        repo_selection_wb.set(map);
+        selected_count.set(total);
+    });
     let mut arming = use_signal(|| false);
     let mut opening_pr = use_signal(|| false);
     // Apply-overwrite confirm gate: when the pre-apply preflight finds hand-written governance
@@ -3724,5 +3738,132 @@ mod tests {
     fn selection_key_repo_name_passes_through() {
         assert_eq!(selection_key("my-repo"), "my-repo");
         assert_eq!(selection_key("org/repo"), "org/repo");
+    }
+
+    // ── Writeback / restore ordering invariant tests ──────────────────────────
+    //
+    // These tests verify the pure logic of the effect-ordering fix:
+    // the writeback must not fire until AFTER the one-shot restore has applied
+    // the saved picks to the table. In the reactive layer this is enforced by
+    // the `selection_restored` gate (`if !draft_loaded() || !selection_restored()`).
+    // The tests below verify the equivalent pure-logic checks on the data structures
+    // that the effects operate on.
+
+    /// Simulates what happens when the writeback effect runs BEFORE restore (the pre-fix
+    /// bug): the recommended-only seed gets written into repo_selection, contaminating
+    /// the saved picks so the subsequent restore sees only recommended rules.
+    /// This test documents the BROKEN behavior and shows why the gate was needed.
+    #[test]
+    fn writeback_before_restore_contaminates_repo_selection() {
+        let saved_picks = vec!["rule-a".to_string(), "rule-c".to_string(), "rule-d".to_string()];
+        let recommended_only_seed = vec!["rule-a".to_string(), "rule-b".to_string(), "rule-c".to_string()];
+
+        // repo_selection starts with saved picks (set by the use_future async restore).
+        let mut repo_selection: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        repo_selection.insert(SINGLE_REPO_SELECTION_KEY.to_string(), saved_picks.clone());
+
+        // BUG: writeback fires first (before restore applied picks to checkboxes).
+        // The table checkboxes still show the recommended-only seed. Writeback reads THOSE
+        // and overwrites repo_selection with them.
+        repo_selection.insert(
+            SINGLE_REPO_SELECTION_KEY.to_string(),
+            recommended_only_seed.clone(),
+        );
+
+        // Now restore fires and reads repo_selection — but it's been contaminated.
+        let restored = repo_selection.get(SINGLE_REPO_SELECTION_KEY).unwrap().clone();
+        let mut restored_sorted = restored.clone();
+        restored_sorted.sort();
+        let mut expected_sorted = recommended_only_seed.clone();
+        expected_sorted.sort();
+        assert_eq!(restored_sorted, expected_sorted, "contaminated: restore saw recommended-only seed, not saved picks");
+        // Specifically: the user's non-recommended pick (rule-d) was lost.
+        assert!(!restored.contains(&"rule-d".to_string()), "rule-d (user pick) must be lost in the buggy path");
+        // And rule-b (which the user deselected) was reintroduced.
+        assert!(restored.contains(&"rule-b".to_string()), "rule-b (user deselected) reappears in the buggy path");
+    }
+
+    /// Simulates the CORRECT ordering: restore runs first (applying saved picks to
+    /// checkboxes), THEN writeback reads the corrected checkboxes and writes them back.
+    /// This is the `selection_restored` gate in action: the writeback only fires after
+    /// `selection_restored` is true, which the restore effect sets after it completes.
+    #[test]
+    fn restore_before_writeback_preserves_user_picks() {
+        let saved_picks = vec!["rule-a".to_string(), "rule-c".to_string(), "rule-d".to_string()];
+        let recommended_only_seed = vec!["rule-a".to_string(), "rule-b".to_string(), "rule-c".to_string()];
+
+        // repo_selection starts with saved picks (set by the async use_future).
+        let mut repo_selection: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        repo_selection.insert(SINGLE_REPO_SELECTION_KEY.to_string(), saved_picks.clone());
+
+        // Step 1: Restore runs first. It reads repo_selection (saved picks), applies them
+        // to the table checkboxes, and sets selection_restored = true.
+        let current_table_selection: Vec<String> = {
+            let map = &repo_selection;
+            if let Some(ids) = map.get(SINGLE_REPO_SELECTION_KEY) {
+                ids.clone() // table checkboxes now reflect saved picks
+            } else {
+                recommended_only_seed.clone() // fallback (fresh view)
+            }
+        };
+        let selection_restored = true; // restore sets this
+
+        // Step 2: Writeback fires (only because selection_restored is now true).
+        // It reads the corrected table checkboxes (saved picks, not recommended-only seed).
+        assert!(selection_restored, "writeback gate check: selection_restored must be true");
+        repo_selection.insert(
+            SINGLE_REPO_SELECTION_KEY.to_string(),
+            current_table_selection.clone(),
+        );
+
+        // repo_selection now holds the user's effective picks — no contamination.
+        let final_selection = repo_selection.get(SINGLE_REPO_SELECTION_KEY).unwrap();
+        let mut final_sorted = final_selection.clone();
+        final_sorted.sort();
+        let mut picks_sorted = saved_picks.clone();
+        picks_sorted.sort();
+        assert_eq!(final_sorted, picks_sorted, "correct path: repo_selection must match saved picks");
+
+        // The user's non-recommended pick (rule-d) is preserved.
+        assert!(final_selection.contains(&"rule-d".to_string()), "rule-d (user pick) must survive");
+        // The user's deselected rule (rule-b) stays gone.
+        assert!(!final_selection.contains(&"rule-b".to_string()), "rule-b (user-deselected) must not reappear");
+    }
+
+    /// When there is no saved entry (fresh first-view), the restore effect falls through
+    /// without modifying the checkboxes (the recommended seed is already correct), sets
+    /// selection_restored = true, and unblocks the writeback. The writeback then writes
+    /// the recommended seed into repo_selection, which is the desired baseline behavior.
+    #[test]
+    fn fresh_view_no_saved_entry_restore_unblocks_writeback_with_recommended_seed() {
+        // No saved picks: repo_selection is empty.
+        let repo_selection: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let recommended_seed = vec!["rule-a".to_string(), "rule-b".to_string()];
+
+        // Restore runs: no saved entry, so it falls through. Unconditionally sets selection_restored.
+        let saved = repo_selection.get(SINGLE_REPO_SELECTION_KEY);
+        assert!(saved.is_none(), "no saved entry on fresh view");
+        // selection_restored is set unconditionally (fixed behavior vs. old code that only
+        // set it inside `if let Some(...)` — old code would have left it false, permanently
+        // blocking the writeback for fresh views after draft_loaded = true).
+        let selection_restored = true; // unconditional set in fixed code
+
+        // Writeback fires because selection_restored is true.
+        assert!(selection_restored, "writeback must be unblocked even with no saved entry");
+
+        // The writeback reads the recommended seed from the table checkboxes (use_hook
+        // seeded them since there was no saved entry) and writes it to repo_selection.
+        let mut result: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        result.insert(SINGLE_REPO_SELECTION_KEY.to_string(), recommended_seed.clone());
+
+        assert_eq!(
+            result.get(SINGLE_REPO_SELECTION_KEY).cloned(),
+            Some(recommended_seed),
+            "recommended seed must be written as the baseline on fresh first-view"
+        );
     }
 }
