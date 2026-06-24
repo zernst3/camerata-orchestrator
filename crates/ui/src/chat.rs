@@ -444,8 +444,15 @@ pub(crate) fn unified_system_prompt(
          infer or invent values from any other layer. In particular, the Layer 2 catalog \
          lists rules that EXIST in Camerata, NOT rules the user has selected; never derive \
          selected-rule names or counts from it. If asked which rules are selected and \
-         Layer 3d reads NONE, state plainly that none are currently selected. Be concise \
-         and concrete.\n\n"
+         Layer 3d reads NONE, state plainly that none are currently selected. These \
+         dynamic layers are re-read FRESH every turn and reflect the state at THAT moment; \
+         the user changes selections, scans, and stories over time, so a value that differs \
+         from an earlier turn is a normal live update, NOT a contradiction and NOT a prior \
+         mistake — report the current value WITHOUT apologizing for, retracting, or \
+         second-guessing earlier answers, and do NOT describe trends or extrapolate (e.g. \
+         'a big increase since last time'). When stating a selection count, quote the exact \
+         'Total selected: N' figure from Layer 3d; never estimate or round. Be concise and \
+         concrete.\n\n"
     );
 
     // ── Layer 1a: Camerata technical reference ────────────────────────────────
@@ -1792,6 +1799,21 @@ mod tests {
         assert!(
             prompt.contains("ZERO rules selected"),
             "whitespace-only selected rules must render the explicit ZERO marker"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_preamble_treats_changed_values_as_live_not_mistakes() {
+        // Calibration guardrail: differing counts across turns are live updates,
+        // not prior mistakes to apologize for; quote the exact count, no trends.
+        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None);
+        assert!(
+            prompt.contains("NOT a prior") && prompt.contains("WITHOUT apologizing"),
+            "preamble must tell the model that a changed value is a live update, not a mistake to apologize for"
+        );
+        assert!(
+            prompt.contains("Total selected: N") && prompt.contains("never estimate"),
+            "preamble must tell the model to quote the exact selection count, not estimate"
         );
     }
 
