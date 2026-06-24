@@ -1,0 +1,108 @@
+id = "SEC-NO-UNSAFE-DESERIALIZATION-1"
+title = "Unsafe deserialization of untrusted data is never used in production code; tests that require it use a suppression with a reason"
+tag = "universal"
+domain = "*"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/ENFORCEMENT.md"
+title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-UNSAFE-DESERIALIZATION-1 (enforced gate rule)"
+
+[[sources]]
+url = "https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data"
+title = "OWASP — Deserialization of Untrusted Data"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Deserialization_Cheat_Sheet.html"
+title = "OWASP Deserialization Cheat Sheet"
+
+[decision]
+question = "When is it acceptable to deserialize untrusted data with an unsafe deserializer?"
+default = "never-in-production"
+why = """
+Unsafe deserialization is a class of critical vulnerability (OWASP Top 10 A08:2021) that can
+lead to remote code execution with no additional preconditions. The affected sinks share one
+property: they reconstruct arbitrary object graphs from a byte stream, and the reconstruction
+itself executes code (constructors, destructors, magic methods, finalizers). If an attacker can
+influence the stream, they control what code runs.
+
+Match-set (gate-enforced):
+  Python:
+    - yaml.load( without SafeLoader or FullLoader — the default YAML loader executes
+      arbitrary Python constructors (!!python/object). The carve-out is precise: a line
+      containing SafeLoader or FullLoader alongside yaml.load( is safe and is NOT flagged.
+    - yaml.unsafe_load( — explicitly named unsafe; no safe variant.
+    - pickle.load( / pickle.loads( — Python's native serialisation; trivially weaponisable.
+    - cPickle.load( / cPickle.loads( — C-extension alias of pickle; same risk.
+    - _pickle.load( — CPython internal alias; same risk.
+  PHP:
+    - unserialize( — PHP's native object deserialisation. The PHP manual explicitly warns
+      that it must never be called on untrusted input. No safe alternative exists; use JSON.
+  Ruby:
+    - Marshal.load( / Marshal.restore( — Ruby's native serialisation; untrusted input can
+      invoke arbitrary object methods during loading.
+  .NET:
+    - BinaryFormatter — deprecated in .NET 5+ specifically because of this vulnerability.
+    - NetDataContractSerializer — same risk profile; same deprecation trajectory.
+    - LosFormatter — ASP.NET ViewState serialiser; the same object-graph reconstruction
+      vulnerability applies.
+    - ObjectStateFormatter — companion to LosFormatter; same risk.
+
+Known gap — Java:
+  Java's ObjectInputStream.readObject() is the canonical unsafe-deser sink. However, it
+  fires on virtually every Java framework that uses serialisation internally (Spring, Hibernate,
+  RMI, Java EE containers), producing a false-positive rate that would block legitimate commits
+  without AST context (specifically: whether the input stream originates from user-controlled
+  data). A regex cannot distinguish "reading a local trusted object graph" from "deserialising
+  a network payload". Java coverage is deferred to the semgrep tier, where AST-structural
+  taint-tracking rules are available and can express the "user-controlled source" constraint.
+
+SafeLoader / FullLoader carve-out:
+  yaml.load(data, Loader=yaml.SafeLoader) and yaml.load(data, Loader=yaml.FullLoader) are
+  both safe. The Rust regex crate has no lookahead, so the arm implements the carve-out by
+  inspecting each matched line at call time: if the line contains "SafeLoader" or "FullLoader",
+  the match is skipped. yaml.safe_load( is separately safe and does not match the regex at all.
+
+Test-scope policy: Waive.
+  Test code legitimately deserialises trusted fixtures (e.g. a test that round-trips a known
+  payload through pickle or yaml.load). A Waive policy means the gate does not block
+  #[cfg(test)] blocks or test-path files. If the suppression is needed outside a test scope,
+  use camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1: <reason>.
+"""
+
+[[option]]
+id = "never-in-production"
+label = "Unsafe deserializers are never called on untrusted input in production code; tests that need them use a camerata:allow suppression"
+directive = """
+yaml.load without SafeLoader/FullLoader, yaml.unsafe_load, pickle/cPickle/_pickle .load/.loads,
+PHP unserialize(), Ruby Marshal.load/restore, and .NET BinaryFormatter/NetDataContractSerializer/
+LosFormatter/ObjectStateFormatter are never called on data whose origin is not fully trusted and
+sandboxed. The correct alternatives are: yaml.safe_load() or yaml.load(Loader=SafeLoader) for
+YAML; json / protobuf / msgpack for structured data that does not require arbitrary object
+reconstruction. When a test must call an unsafe deserialiser on a controlled fixture, suppress
+with a camerata:allow comment that explains why the input is trusted.
+"""
+why = """
+Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the
+byte stream, executing code during reconstruction. There is no safe way to call them on
+untrusted input regardless of input validation upstream — by the time the attack payload
+reaches the deserialiser, the execution has already begun. The safe alternatives (json,
+yaml.safe_load, protobuf) impose a schema that prevents arbitrary code paths from being
+invoked. The gate enforces the safe default and requires the code author to document a
+justification via the suppression comment when a genuine exception exists.
+"""
+
+[[option]]
+id = "allow-on-trusted-input"
+label = "Allow unsafe deserializers when the input source is known-trusted and sandboxed"
+directive = "Unsafe deserializers may be called when the input is proven to originate from a trusted internal source with no user control; the call must carry a camerata:allow comment documenting the trust boundary"
+why = """
+Rejected as the default: 'proven trusted' is an architectural claim that cannot be verified
+at the call site by a reviewer or the gate. 'Internal source' is routinely violated by
+dependency injection, message queues, and inter-service protocols that later accept external
+input. The suppression-with-reason pattern gives the same flexibility while requiring a
+documented justification that can be audited. The safe-alternative option is strictly stronger.
+"""
