@@ -1,7 +1,7 @@
 id = "SEC-NO-VENDOR-TOKEN-1"
 title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic) are never hardcoded; they live in a secrets manager or environment variables"
 tag = "universal"
-domain = "*"
+domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
 default = true

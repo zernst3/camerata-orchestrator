@@ -1,7 +1,7 @@
 id = "SPIRIT-DOC-DECISIONS-1"
 title = "Document decisions immediately"
 tag = "universal"
-domain = "*"
+domain = "universal"
 layer = "universal"
 enforcement = "structured"
 default = true

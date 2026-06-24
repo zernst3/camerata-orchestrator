@@ -879,7 +879,7 @@ pub fn select_by_ids<'a>(rule_set: &'a RuleSet, ids: &[RuleId]) -> Vec<&'a Rule>
 pub fn select_for_domains<'a>(rule_set: &'a RuleSet, domains: &[&str]) -> Vec<&'a Rule> {
     rule_set
         .iter()
-        .filter(|r| r.domain == "*" || domains.iter().any(|d| r.domain == *d))
+        .filter(|r| r.domain == "universal" || domains.iter().any(|d| r.domain == *d))
         .collect()
 }
 
@@ -892,7 +892,7 @@ pub fn select_for_domains<'a>(rule_set: &'a RuleSet, domains: &[&str]) -> Vec<&'
 /// Rules are selected using OR semantics across two axes:
 ///
 /// 1. **Domain match** — any rule whose `domain` field appears in `domains`
-///    (e.g. `"rust"`, `"sql"`, `"agentic"`).  Universal rules (`domain = "*"`)
+///    (e.g. `"rust"`, `"sql"`, `"agentic"`).  Universal rules (`domain = "universal"`)
 ///    are always included regardless of what `domains` contains.
 /// 2. **Explicit id override** — any rule whose id string appears in
 ///    `rule_ids` is included even if its domain was not requested.
@@ -947,7 +947,7 @@ pub async fn role_from_corpus(
         .iter()
         .filter(|r| {
             // Universal rules always included.
-            if r.domain == "*" {
+            if r.domain == "universal" {
                 return true;
             }
             // Domain match.
@@ -1008,7 +1008,11 @@ fn domain_to_glob(domain: &str) -> String {
         "ci-cd" => "**/.github/**".to_owned(),
         "go" => "**/*.go".to_owned(),
         "python" => "**/*.py".to_owned(),
-        _ => "**".to_owned(),
+        "universal" => "**".to_owned(),
+        _ => {
+            tracing::warn!(domain = %domain, "no file-glob mapping for domain; falling back to **");
+            "**".to_owned()
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 id = "PROC-REGRESSION-TEST-1"
 title = "Every bug fix ships with a regression test that fails before the fix and passes after"
 tag = "universal"
-domain = "*"
+domain = "universal"
 layer = "universal"
 enforcement = "structured"
 default = true

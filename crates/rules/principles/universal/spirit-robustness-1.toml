@@ -1,7 +1,7 @@
 id = "SPIRIT-ROBUSTNESS-1"
 title = "Robustness over terseness, but buy complexity only against a named threat"
 tag = "universal"
-domain = "*"
+domain = "universal"
 layer = "universal"
 enforcement = "prose"
 default = true

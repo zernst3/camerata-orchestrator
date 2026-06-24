@@ -1,7 +1,7 @@
 id = "SPIRIT-FILE-SIZE-1"
 title = "Files are sized for human reading, not for AI write-cost"
 tag = "universal"
-domain = "*"
+domain = "universal"
 layer = "universal"
 enforcement = "prose"
 default = true
