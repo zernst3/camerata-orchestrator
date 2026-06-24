@@ -50,9 +50,10 @@
 //! findings.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use camerata_agent::prepare_session;
+use camerata_agent::{HeartbeatFn, prepare_session};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::InvestigationArtifact;
@@ -465,7 +466,15 @@ async fn run_one_investigation_pass(
     // Opt the investigation agent into the READ-CLASS ask_clarification tool (Phase 3b).
     // This adds NO write path: the gate (gated_write only) and the disallowed-builtins
     // denylist (Task/Write/Bash/…) are unchanged.
-    let driver = spawn.driver.with_model(&model).with_clarification(true);
+    // Wire the activity heartbeat so streamed agent output keeps last_activity_ms fresh.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+    let driver = spawn
+        .driver
+        .with_model(&model)
+        .with_clarification(true)
+        .with_on_activity(on_activity);
 
     runs.push_event(
         &run_id,

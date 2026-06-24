@@ -12,9 +12,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use camerata_agent::HeartbeatFn;
 use camerata_fleet::tier::TierMap;
 use camerata_fleet::{
-    build_from_plan_with_model_iterations_and_layer2, build_from_plan_with_tier_map_and_layer2,
+    build_from_plan_with_model_iterations_layer2_and_activity,
+    build_from_plan_with_tier_map_layer2_and_activity,
     locate_gateway_bin, BuildEvent,
 };
 use camerata_intake::{Plan, PlanTask, TaskKind};
@@ -253,7 +255,14 @@ pub async fn execute_live_run(
     let store_cb = store.clone();
     let rid_cb = run_id.clone();
 
-    let result = build_from_plan_with_model_iterations_and_layer2(
+    // Wire the run's activity heartbeat into every agent driver spawned by the
+    // fleet, so each stdout line from the agent refreshes last_activity_ms and
+    // keeps stall detection from false-firing on a busy (but outputting) agent.
+    let store_hb = store.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+
+    let result = build_from_plan_with_model_iterations_layer2_and_activity(
         &plan,
         &root,
         &gateway_bin,
@@ -261,6 +270,7 @@ pub async fn execute_live_run(
         max_iterations,
         skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
+        Some(on_activity),
     )
     .await;
 
@@ -364,7 +374,13 @@ pub async fn execute_live_run_tiered(
     let store_cb = store.clone();
     let rid_cb = run_id.clone();
 
-    let result = build_from_plan_with_tier_map_and_layer2(
+    // Same heartbeat wiring as execute_live_run: per-line agent output refreshes
+    // last_activity_ms on the tracked run so stall detection stays accurate.
+    let store_hb = store.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+
+    let result = build_from_plan_with_tier_map_layer2_and_activity(
         &plan,
         &root,
         &gateway_bin,
@@ -372,6 +388,7 @@ pub async fn execute_live_run_tiered(
         max_iterations,
         skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
+        Some(on_activity),
     )
     .await;
 

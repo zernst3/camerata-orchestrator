@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
+use camerata_agent::{prepare_session, HeartbeatFn, GATED_WRITE_TOOL};
 use camerata_checks::runner_for_worktree;
 use camerata_core::{CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
 use camerata_gateway::enforced_gate_rules;
@@ -436,6 +436,36 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
     skip_layer2: bool,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_model_iterations_layer2_and_activity(
+        plan,
+        root,
+        gateway_bin,
+        model,
+        max_iterations,
+        skip_layer2,
+        on_event,
+        None,
+    )
+    .await
+}
+
+/// Like [`build_from_plan_with_model_iterations_and_layer2`], but accepts an
+/// optional `on_activity` heartbeat callback that is wired into every agent
+/// driver via [`ClaudeCliDriver::with_on_activity`]. The callback fires on every
+/// stdout line emitted by the agent subprocess, keeping `last_activity_ms` fresh
+/// while an agent is actively producing output.
+///
+/// Pass `None` for identical behaviour to the non-activity variant.
+pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    model: Option<&str>,
+    max_iterations: usize,
+    skip_layer2: bool,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+    on_activity: Option<HeartbeatFn>,
+) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
     // ── Scaffold the shared worktree ─────────────────────────────────────────
@@ -472,8 +502,14 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
             // Thread the operator's model choice into every agent. `with_model("")`
             // is a no-op (the driver ignores blank ids), so passing None here via
             // unwrap_or("") is safe.
-            match model {
+            let d = match model {
                 Some(m) => d.with_model(m),
+                None => d,
+            };
+            // Wire the activity heartbeat so streamed agent output keeps
+            // last_activity_ms fresh. `with_on_activity` is a no-op when None.
+            match &on_activity {
+                Some(cb) => d.with_on_activity(cb.clone()),
                 None => d,
             }
         })
@@ -646,6 +682,33 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
     skip_layer2: bool,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
 ) -> anyhow::Result<BuildOutcome> {
+    build_from_plan_with_tier_map_layer2_and_activity(
+        plan,
+        root,
+        gateway_bin,
+        tier_map,
+        max_iterations,
+        skip_layer2,
+        on_event,
+        None,
+    )
+    .await
+}
+
+/// Like [`build_from_plan_with_tier_map_and_layer2`], but wires an optional
+/// `on_activity` heartbeat into every agent driver so streamed output keeps
+/// `last_activity_ms` fresh for the parent tracked run. Pass `None` for
+/// identical behaviour to the non-activity variant.
+pub async fn build_from_plan_with_tier_map_layer2_and_activity(
+    plan: &Plan,
+    root: &Path,
+    gateway_bin: &Path,
+    tier_map: &tier::TierMap,
+    max_iterations: usize,
+    skip_layer2: bool,
+    on_event: &(dyn Fn(BuildEvent) + Send + Sync),
+    on_activity: Option<HeartbeatFn>,
+) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
     // ── Scaffold the shared worktree ─────────────────────────────────────────
@@ -706,11 +769,17 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
 
     let drivers: Vec<camerata_agent::ClaudeCliDriver> = (0..total)
         .map(|i| {
-            camerata_agent::ClaudeCliDriver::new(mcp_config_paths[i].clone())
+            let d = camerata_agent::ClaudeCliDriver::new(mcp_config_paths[i].clone())
                 .with_worktree(&worktree)
                 .with_model(&per_stage_models[i])
                 // Only the lead gets the delegate tool in --allowedTools.
-                .as_orchestrator(is_orchestrator[i])
+                .as_orchestrator(is_orchestrator[i]);
+            // Wire the activity heartbeat so streamed agent output keeps
+            // last_activity_ms fresh for the parent tracked run.
+            match &on_activity {
+                Some(cb) => d.with_on_activity(cb.clone()),
+                None => d,
+            }
         })
         .collect();
 

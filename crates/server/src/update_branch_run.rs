@@ -37,9 +37,10 @@
 //! CONFLICTING merge cannot be resolved without an agent, so the run aborts the merge and
 //! reports an honest "conflicts need live mode" failure — never a faked resolution.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use camerata_agent::prepare_session;
+use camerata_agent::{HeartbeatFn, prepare_session};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 
@@ -324,7 +325,12 @@ async fn resolve_conflicts_and_commit(
             return;
         }
     };
-    let driver = spawn.driver.with_model(model);
+    // Wire the run's activity heartbeat so the conflict-resolution agent's
+    // streamed output keeps last_activity_ms fresh throughout its execution.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.to_owned();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+    let driver = spawn.driver.with_model(model).with_on_activity(on_activity);
 
     runs.push_event(
         run_id,
