@@ -2558,13 +2558,25 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         "SEC-NO-RAW-SQL-CONCAT-1" => Some("sql"),
         "SEC-NO-DISABLED-TLS-1" => Some("tls"),
         // Semgrep rules (camerata.security.*)
-        "camerata.security.hardcoded-secret" => Some("secret"),
+        // NOTE: keep these in sync with the rule ids in
+        // crates/server/assets/semgrep-rules/security.yml. A semgrep rule whose id is
+        // missing here returns None, so the deduper cannot categorize it and it will
+        // NEVER collapse against an overlapping floor finding (the 2026-06-23 dedup gap:
+        // the -rust/-csharp/-dquote ids were added to the corpus but not registered here).
+        "camerata.security.hardcoded-secret"
+        | "camerata.security.hardcoded-secret-dquote" => Some("secret"),
         "camerata.security.sql-string-concat-python"
-        | "camerata.security.sql-string-concat-js" => Some("sql"),
+        | "camerata.security.sql-string-concat-js"
+        | "camerata.security.sql-string-concat-rust"
+        | "camerata.security.sql-string-concat-csharp" => Some("sql"),
         "camerata.security.exec-injection"
         | "camerata.security.exec-injection-js" => Some("exec"),
         "camerata.security.weak-hash-python"
-        | "camerata.security.weak-hash-js" => Some("hash"),
+        | "camerata.security.weak-hash-js"
+        | "camerata.security.weak-hash-rust"
+        | "camerata.security.weak-hash-csharp" => Some("hash"),
+        "camerata.security.disabled-tls-rust"
+        | "camerata.security.disabled-tls-csharp" => Some("tls"),
         "camerata.security.path-traversal-python" => Some("path"),
         "camerata.security.subprocess-shell-true" => Some("shell"),
         "camerata.security.yaml-unsafe-load" => Some("yaml"),
@@ -9857,6 +9869,15 @@ mod tests {
         assert_eq!(finding_security_category("camerata.security.exec-injection-js"), Some("exec"));
         assert_eq!(finding_security_category("camerata.security.weak-hash-python"), Some("hash"));
         assert_eq!(finding_security_category("camerata.security.weak-hash-js"), Some("hash"));
+        // Rust + C# semgrep ids (the 2026-06-23 dedup-gap fix): must be categorized so they
+        // can collapse against an overlapping floor finding at the same (repo, path, line).
+        assert_eq!(finding_security_category("camerata.security.hardcoded-secret-dquote"), Some("secret"));
+        assert_eq!(finding_security_category("camerata.security.sql-string-concat-rust"), Some("sql"));
+        assert_eq!(finding_security_category("camerata.security.sql-string-concat-csharp"), Some("sql"));
+        assert_eq!(finding_security_category("camerata.security.weak-hash-rust"), Some("hash"));
+        assert_eq!(finding_security_category("camerata.security.weak-hash-csharp"), Some("hash"));
+        assert_eq!(finding_security_category("camerata.security.disabled-tls-rust"), Some("tls"));
+        assert_eq!(finding_security_category("camerata.security.disabled-tls-csharp"), Some("tls"));
         assert_eq!(finding_security_category("camerata.security.path-traversal-python"), Some("path"));
         assert_eq!(finding_security_category("camerata.security.subprocess-shell-true"), Some("shell"));
         assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("yaml"));
@@ -9865,6 +9886,29 @@ mod tests {
         // Unknown rule: no category (pass-through, no dedup)
         assert_eq!(finding_security_category("ARCH-NO-CIRCULAR-DEPS-1"), None);
         assert_eq!(finding_security_category("some-unknown-linter-rule"), None);
+    }
+
+    /// Regression for the 2026-06-23 dedup gap: a floor SQL finding and a semgrep
+    /// `sql-string-concat-rust` finding on the SAME file:line MUST collapse (floor canonical),
+    /// not double-report. Before the fix, the -rust id had no category so it skipped dedup.
+    #[test]
+    fn crosstool_dedup_floor_and_semgrep_rust_sql_same_location_collapses() {
+        let mut existing = vec![floor_finding("me/svc", "src/db.rs", 1444, "SEC-NO-RAW-SQL-CONCAT-1")];
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "src/db.rs",
+            1444,
+            "camerata.security.sql-string-concat-rust",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        // Semgrep finding folded in, not surfaced as its own row.
+        assert!(leftover.is_empty(), "semgrep-rust SQL should collapse into the floor row");
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor stays canonical");
+        assert!(existing[0]
+            .also_matches
+            .iter()
+            .any(|m| m == "camerata.security.sql-string-concat-rust"));
     }
 
     /// FIX 2 (a): ruff (rank 1, "sql" category via S608) + semgrep (rank 2, "sql" via
