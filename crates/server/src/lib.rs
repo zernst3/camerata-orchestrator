@@ -2523,7 +2523,8 @@ async fn onboard_audit(
 /// IMPORTANT: do NOT remove rules from either ruleset to fix overlap. The floor enforces
 /// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
 /// a hole in CI coverage. The fix is presentation-time dedup at scan preview only (see
-/// `dedup_preview_against_floor`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
+/// `dedup_scan_previews`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
+#[cfg_attr(not(test), allow(dead_code))]
 fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     match semgrep_rule_id {
         "camerata.security.hardcoded-secret" => Some("SEC-NO-HARDCODED-SECRETS-1"),
@@ -2533,75 +2534,146 @@ fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     }
 }
 
-/// Merge a batch of scan-preview tool findings into the existing floor findings,
-/// deduplicating at the scan preview layer only. This is the presentation-time
-/// dedup described in docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md.
+/// Map ANY finding's rule id (floor OR any preview tool) to a normalized security
+/// category string, or `None` when no category mapping exists. Used by
+/// `dedup_scan_previews` for cross-tool dedup: two findings on the same
+/// (repo, path, line) with the SAME normalized category are duplicates; different
+/// categories on the same line are KEPT (conservative / surface-over-hide).
 ///
-/// ## Dedup rule
+/// Category vocabulary (lowercase, hyphen-separated):
+/// - `"secret"` — hardcoded secrets, vendor tokens, private keys
+/// - `"sql"`    — raw SQL string concatenation (injection)
+/// - `"exec"`   — OS command / exec injection
+/// - `"hash"`   — weak cryptographic hash
+/// - `"path"`   — path traversal
+/// - `"shell"`  — subprocess with shell=True
+/// - `"yaml"`   — unsafe YAML load
+/// - `"tls"`    — disabled TLS / cert verification
 ///
-/// A preview finding is a DUPLICATE if ALL of the following hold:
-///   1. It comes from the semgrep tool (`preview_tool == Some("semgrep")`).
-///   2. Its semgrep rule id maps to a floor rule via `semgrep_floor_category`.
-///   3. A floor finding already exists in `existing` with the SAME `repo`, `path`,
-///      and `line` AND the SAME floor rule id as the mapping returns.
+/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
+pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
+    match rule_id {
+        // Floor rules (SEC-* ids from AUDIT_RULES)
+        "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => Some("secret"),
+        "SEC-NO-RAW-SQL-CONCAT-1" => Some("sql"),
+        "SEC-NO-DISABLED-TLS-1" => Some("tls"),
+        // Semgrep rules (camerata.security.*)
+        "camerata.security.hardcoded-secret" => Some("secret"),
+        "camerata.security.sql-string-concat-python"
+        | "camerata.security.sql-string-concat-js" => Some("sql"),
+        "camerata.security.exec-injection"
+        | "camerata.security.exec-injection-js" => Some("exec"),
+        "camerata.security.weak-hash-python"
+        | "camerata.security.weak-hash-js" => Some("hash"),
+        "camerata.security.path-traversal-python" => Some("path"),
+        "camerata.security.subprocess-shell-true" => Some("shell"),
+        "camerata.security.yaml-unsafe-load" => Some("yaml"),
+        // Ruff / ESLint lints that overlap with floor or semgrep in the same category.
+        // S608 = possible SQL injection (Ruff/flake8-bandit) — same category as the floor SQL rule.
+        "S608" => Some("sql"),
+        _ => None,
+    }
+}
+
+/// Precedence rank for a finding when choosing the canonical row among duplicates.
+/// Lower = higher precedence (kept as canonical). Ordering:
+///   0 = floor (deterministic, stable, gate-enforced SEC-* id)
+///   1 = clippy / ruff / eslint (native language linter)
+///   2 = semgrep (polyglot, more permissive category match)
+fn finding_dedup_rank(f: &crate::onboard::Finding) -> u8 {
+    if !f.preview {
+        return 0; // floor finding (enforced, never preview)
+    }
+    match f.preview_tool.as_deref() {
+        Some("clippy") | Some("ruff") | Some("eslint") => 1,
+        Some("semgrep") => 2,
+        _ => 1,
+    }
+}
+
+/// Generalized scan-preview dedup: merge `previews` into `existing` (floor + any
+/// already-accumulated preview findings), collapsing findings that share the same
+/// `(repo, path, line)` AND a compatible `finding_security_category` into a single
+/// canonical row.
 ///
-/// When a duplicate is detected: the floor finding is CANONICAL (its `SEC-*` rule_id
-/// is what `eval.rs` scores and what the Layer-1 gate enforces). The semgrep rule_id
-/// is appended to `also_matches` on the kept floor finding so the provenance is honest
-/// (the row reads "violates SEC-NO-HARDCODED-SECRETS-1, also flagged by
-/// camerata.security.hardcoded-secret"). The semgrep finding is dropped.
+/// ## Canonical preference order
 ///
-/// When NOT a duplicate (line mismatch, no floor twin, non-semgrep tool, non-overlapping
-/// semgrep rule): the preview finding passes through to `out` untouched.
+/// floor > clippy/ruff/eslint (rank 1) > semgrep (rank 2)
 ///
-/// ## Why floor is canonical
+/// When a new preview finding duplicates an EXISTING row, the existing row is
+/// kept if its rank is lower (higher precedence), and the new finding's rule id is
+/// appended to `also_matches` on the canonical. If the new finding has HIGHER
+/// precedence than the existing preview row, the new finding BECOMES canonical (its
+/// rule_id is kept and the old rule_id is swapped into `also_matches`).
 ///
-/// The `SEC-*` floor rule ids are the ones `eval.rs` scores and the Layer-1 gate
-/// enforces. Swapping them out for semgrep rule ids would silently break gate scoring.
+/// ## Conservative dedup
 ///
-/// ## Line matching
+/// Only deduplicated when same location AND same security category. Two findings on
+/// the same line but different categories are BOTH kept ("surface over hide").
 ///
-/// Exact line equality (`usize ==`). No fuzzy proximity: a semgrep finding on line 5
-/// and a floor finding on line 6 are NOT duplicates — they must be independent (adjacent
-/// lines can legitimately both have a problem).
-pub(crate) fn dedup_preview_against_floor(
+/// ## Backward compatibility
+///
+/// This is a strict superset of the old `dedup_preview_against_floor` contract.
+/// The floor↔semgrep dedup behavior is preserved exactly as a special case.
+///
+/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
+pub(crate) fn dedup_scan_previews(
     existing: &mut Vec<crate::onboard::Finding>,
     previews: Vec<crate::onboard::Finding>,
 ) -> Vec<crate::onboard::Finding> {
     let mut out: Vec<crate::onboard::Finding> = Vec::with_capacity(previews.len());
 
     for preview in previews {
-        // Only semgrep findings from overlapping rules are candidates for dedup.
-        let is_semgrep = preview.preview_tool.as_deref() == Some("semgrep");
-        let floor_rule = is_semgrep
-            .then(|| semgrep_floor_category(&preview.rule_id))
-            .flatten();
+        let preview_cat = finding_security_category(&preview.rule_id);
 
-        if let Some(floor_rule_id) = floor_rule {
-            // Look for an existing floor finding at the same (repo, path, line, category).
-            // The floor finding has `preview == false` (it is enforced, not advisory).
-            let twin = existing.iter_mut().find(|f| {
-                !f.preview
-                    && f.repo == preview.repo
+        // Try to find an existing finding that shares the same location AND category.
+        // The category must be Some (we don't collapse unrecognized categories).
+        let twin_idx = if let Some(cat) = preview_cat {
+            existing.iter().position(|f| {
+                f.repo == preview.repo
                     && f.path == preview.path
                     && f.line == preview.line
-                    && f.rule_id == floor_rule_id
-            });
+                    && finding_security_category(&f.rule_id) == Some(cat)
+            })
+        } else {
+            None
+        };
 
-            if let Some(floor_finding) = twin {
-                // Duplicate: record the semgrep rule_id as a corroborating source on
-                // the canonical floor finding and drop the semgrep copy.
-                floor_finding.also_matches.push(preview.rule_id.clone());
-                continue; // drop the semgrep finding
+        if let Some(idx) = twin_idx {
+            let existing_rank = finding_dedup_rank(&existing[idx]);
+            let preview_rank = finding_dedup_rank(&preview);
+
+            if preview_rank >= existing_rank {
+                // Existing row has equal or higher precedence: keep it, fold preview in.
+                existing[idx].also_matches.push(preview.rule_id.clone());
+                // drop the preview finding (continue to next)
+            } else {
+                // Preview has higher precedence: promote it to canonical, demote existing.
+                let old_rule_id = existing[idx].rule_id.clone();
+                let mut new_canonical = preview;
+                new_canonical.also_matches.extend(existing[idx].also_matches.drain(..));
+                new_canonical.also_matches.push(old_rule_id);
+                existing[idx] = new_canonical;
+                // promoted to existing; don't push to out
             }
-            // No floor twin at this exact (repo, path, line): semgrep caught something
-            // the regex missed. Net-new coverage — keep it.
+        } else {
+            // No twin at this (repo, path, line, category): net-new coverage or different
+            // category — keep it.
+            out.push(preview);
         }
-
-        out.push(preview);
     }
 
     out
+}
+
+/// Backward-compatible alias kept so the large existing test suite (`dedup_preview_against_floor`)
+/// continues to pass without modification. Delegates directly to `dedup_scan_previews`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn dedup_preview_against_floor(
+    existing: &mut Vec<crate::onboard::Finding>,
+    previews: Vec<crate::onboard::Finding>,
+) -> Vec<crate::onboard::Finding> {
+    dedup_scan_previews(existing, previews)
 }
 
 /// Run the scan-time deterministic preview pass over each local repo source and append
@@ -2609,6 +2681,10 @@ pub(crate) fn dedup_preview_against_floor(
 /// (or the corpus is unavailable). Preview findings are ADVISORY-but-deterministic — they
 /// carry stable tool rule-ids, stay OUT of the LLM review, and are labeled "not enforced
 /// until wired" in the UI. layer3_only rules were already excluded by `split_scannable_rules`.
+///
+/// Stack-gating: for each repo the set of languages present (from its file extensions)
+/// is derived and passed to `run_scan_tools` so tools whose required language is absent
+/// are omitted entirely — they never appear as a passing "✓ 0".
 async fn merge_scan_preview(
     report: &mut crate::onboard::ScanReport,
     sources: &[(String, std::path::PathBuf)],
@@ -2634,14 +2710,24 @@ async fn merge_scan_preview(
         if for_repo.is_empty() {
             continue;
         }
+        // Derive the language set present in this repo so stack-gating can omit
+        // tools whose language is absent (e.g. no eslint on a Rust-only repo).
+        let dir_clone = dir.clone();
+        let present_languages =
+            tokio::task::spawn_blocking(move || {
+                crate::onboard::files::read_local_repo_files(&dir_clone)
+                    .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
         let (previews, mut notes) =
-            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, job).await;
-        // Dedup semgrep findings that overlap the deterministic floor BEFORE appending.
-        // When a semgrep rule fires on the same (repo, path, line) as a floor rule it
-        // mirrors, the floor finding is kept as canonical and the semgrep rule_id is
-        // folded into `also_matches`. Net-new semgrep findings (no floor twin at that
-        // exact line) pass through untouched. See `dedup_preview_against_floor`.
-        let deduped = dedup_preview_against_floor(&mut report.findings, previews);
+            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, Some(&present_languages), job).await;
+        // Dedup preview findings that overlap the deterministic floor or other preview
+        // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
+        // compatible security category, the higher-precedence finding is kept canonical and
+        // the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
+        let deduped = dedup_scan_previews(&mut report.findings, previews);
         report.findings.extend(deduped);
         report.coverage_notes.append(&mut notes);
     }
@@ -2735,16 +2821,34 @@ async fn onboard_audit_start(
         // Pipeline:
         //   1. floor      (always, when run_deterministic)
         //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
-        //      from the selected mechanical rules via the corpus, when run_deterministic)
+        //      from the selected mechanical rules via the corpus, when run_deterministic;
+        //      STACK-GATED: a tool whose language is absent from all repos is omitted)
         //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
         //
         // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
         // "1/2 tools" while the other two are still invisible.
         if run_deterministic {
             let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
+            // Derive the UNION of all languages present across every source repo.
+            // Stack-gating uses this union so the pre-declared tool count matches the
+            // tools that `merge_scan_preview` will actually run (which gates per-repo
+            // but adds to the same job). Using the union is conservative: a tool
+            // present in ANY repo stays in the denominator.
+            let mut union_languages = std::collections::HashSet::<String>::new();
+            for (_, dir) in &sources {
+                let dir_clone = dir.clone();
+                if let Ok(Ok(extracted)) =
+                    tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir_clone)).await
+                {
+                    union_languages.extend(
+                        crate::scan_tools::languages_from_files(&extracted.files)
+                    );
+                }
+            }
+            let lang_gate = if union_languages.is_empty() { None } else { Some(&union_languages) };
             let mut tool_ids: Vec<String> = vec!["floor".to_string()];
             let preview_ids =
-                crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup);
+                crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup, lang_gate);
             tool_ids.extend(preview_ids);
             let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
                 .map(|v| !v.is_empty())
@@ -9477,6 +9581,226 @@ mod tests {
                 "rule '{rule}' must map to None (no floor twin)"
             );
         }
+    }
+
+    // ── FIX 2: cross-preview-tool dedup tests ────────────────────────────────
+    //
+    // These tests exercise `dedup_scan_previews` and `finding_security_category`
+    // directly. Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
+
+    /// Build a clippy preview finding (preview = true, preview_tool = "clippy").
+    fn clippy_finding(
+        repo: &str,
+        path: &str,
+        line: usize,
+        rule_id: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "medium".to_string(),
+            snippet: String::new(),
+            detail: "clippy detail".to_string(),
+            preview: true,
+            preview_tool: Some("clippy".to_string()),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// Build a ruff preview finding.
+    fn ruff_finding(
+        repo: &str,
+        path: &str,
+        line: usize,
+        rule_id: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "medium".to_string(),
+            snippet: String::new(),
+            detail: "ruff detail".to_string(),
+            preview: true,
+            preview_tool: Some("ruff".to_string()),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// Build an eslint preview finding.
+    fn eslint_finding(
+        repo: &str,
+        path: &str,
+        line: usize,
+        rule_id: &str,
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "medium".to_string(),
+            snippet: String::new(),
+            detail: "eslint detail".to_string(),
+            preview: true,
+            preview_tool: Some("eslint".to_string()),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    /// finding_security_category: verify the category table is consistent.
+    #[test]
+    fn finding_security_category_maps_correctly() {
+        // Floor rules
+        assert_eq!(finding_security_category("SEC-NO-HARDCODED-SECRETS-1"), Some("secret"));
+        assert_eq!(finding_security_category("SEC-NO-PRIVATE-KEY-1"), Some("secret"));
+        assert_eq!(finding_security_category("SEC-NO-VENDOR-TOKEN-1"), Some("secret"));
+        assert_eq!(finding_security_category("SEC-NO-RAW-SQL-CONCAT-1"), Some("sql"));
+        assert_eq!(finding_security_category("SEC-NO-DISABLED-TLS-1"), Some("tls"));
+        // Semgrep rules
+        assert_eq!(finding_security_category("camerata.security.hardcoded-secret"), Some("secret"));
+        assert_eq!(finding_security_category("camerata.security.sql-string-concat-python"), Some("sql"));
+        assert_eq!(finding_security_category("camerata.security.sql-string-concat-js"), Some("sql"));
+        assert_eq!(finding_security_category("camerata.security.exec-injection"), Some("exec"));
+        assert_eq!(finding_security_category("camerata.security.exec-injection-js"), Some("exec"));
+        assert_eq!(finding_security_category("camerata.security.weak-hash-python"), Some("hash"));
+        assert_eq!(finding_security_category("camerata.security.weak-hash-js"), Some("hash"));
+        assert_eq!(finding_security_category("camerata.security.path-traversal-python"), Some("path"));
+        assert_eq!(finding_security_category("camerata.security.subprocess-shell-true"), Some("shell"));
+        assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("yaml"));
+        // Ruff bandit code
+        assert_eq!(finding_security_category("S608"), Some("sql"));
+        // Unknown rule: no category (pass-through, no dedup)
+        assert_eq!(finding_security_category("ARCH-NO-CIRCULAR-DEPS-1"), None);
+        assert_eq!(finding_security_category("some-unknown-linter-rule"), None);
+    }
+
+    /// FIX 2 (a): ruff (rank 1, "sql" category via S608) + semgrep (rank 2, "sql" via
+    /// sql-string-concat-python) on the SAME (repo, path, line) collapse to ONE row.
+    /// Ruff is canonical (rank 1 < rank 2); semgrep rule_id is folded into `also_matches`.
+    #[test]
+    fn crosstool_dedup_ruff_and_semgrep_same_location_collapses() {
+        // S608 (Ruff / flake8-bandit) → "sql"; sql-string-concat-python → "sql".
+        // Both map to the same category, so they collapse.
+        let ruff = ruff_finding("me/api", "src/db.py", 15, "S608");
+        let mut existing = vec![ruff];
+        let previews = vec![semgrep_finding(
+            "me/api",
+            "src/db.py",
+            15,
+            "camerata.security.sql-string-concat-python",
+        )];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        // The semgrep finding is collapsed: it must NOT appear in `out`.
+        assert!(
+            out.is_empty(),
+            "semgrep duplicate of ruff must be collapsed, not added: {out:?}"
+        );
+        // The ruff finding is kept canonical and records the semgrep rule.
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].preview_tool.as_deref(), Some("ruff"), "ruff is canonical");
+        assert!(
+            existing[0].also_matches.contains(&"camerata.security.sql-string-concat-python".to_string()),
+            "semgrep rule must be in also_matches: {:?}",
+            existing[0].also_matches
+        );
+    }
+
+    /// FIX 2 (b): floor (rank 0) + ruff (rank 1) on the same location + same "sql" category:
+    /// floor wins. Ruff rule id is folded into `also_matches` on the floor finding.
+    #[test]
+    fn crosstool_dedup_floor_beats_ruff_at_same_location() {
+        let floor = floor_finding("me/api", "src/queries.py", 5, "SEC-NO-RAW-SQL-CONCAT-1");
+        let mut existing = vec![floor];
+        // Ruff S608 fires on the same spot (same "sql" category).
+        let previews = vec![ruff_finding("me/api", "src/queries.py", 5, "S608")];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        assert!(
+            out.is_empty(),
+            "ruff duplicate of floor must be collapsed: {out:?}"
+        );
+        assert_eq!(existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1", "floor rule_id is canonical");
+        assert!(
+            existing[0].also_matches.contains(&"S608".to_string()),
+            "ruff rule must be in also_matches: {:?}",
+            existing[0].also_matches
+        );
+    }
+
+    /// FIX 2 (c): same (repo, path, line) but DIFFERENT categories: BOTH findings are kept.
+    /// Conservative dedup — surface over hide.
+    #[test]
+    fn crosstool_dedup_different_categories_same_line_are_kept() {
+        // eslint: SQL injection lint on line 7
+        let eslint = eslint_finding("me/web", "src/db.ts", 7, "no-sql-injection");
+        let mut existing = vec![eslint];
+        // Semgrep: exec-injection on the SAME line (different category: "exec" vs "sql").
+        let previews = vec![semgrep_finding(
+            "me/web",
+            "src/db.ts",
+            7,
+            "camerata.security.exec-injection-js",
+        )];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        // BOTH must be kept: different categories, even though same line.
+        assert_eq!(
+            out.len(),
+            1,
+            "different-category findings on the same line must BOTH be kept: out={out:?}"
+        );
+        assert_eq!(out[0].rule_id, "camerata.security.exec-injection-js");
+        // The eslint finding must not have been mutated.
+        assert!(existing[0].also_matches.is_empty(), "eslint must not be touched");
+    }
+
+    /// FIX 2 (d): floor↔semgrep dedup still works as before (backward-compat regression test).
+    /// `dedup_preview_against_floor` delegates to `dedup_scan_previews`, so the floor→semgrep
+    /// behavior is fully preserved.
+    #[test]
+    fn crosstool_dedup_floor_semgrep_regression_unchanged() {
+        let mut existing = vec![floor_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/api",
+            "src/config.rs",
+            7,
+            "camerata.security.hardcoded-secret",
+        )];
+        let out = dedup_preview_against_floor(&mut existing, previews);
+        assert!(out.is_empty(), "floor↔semgrep dedup regression: {out:?}");
+        assert_eq!(
+            existing[0].also_matches,
+            vec!["camerata.security.hardcoded-secret"]
+        );
+    }
+
+    /// FIX 2 (e): findings with unrecognized (None) categories are never cross-deduped,
+    /// even on the same (repo, path, line).
+    #[test]
+    fn crosstool_dedup_unknown_category_never_deduped() {
+        let clip = clippy_finding("me/api", "src/lib.rs", 3, "clippy::unknown-lint");
+        let mut existing = vec![clip];
+        // An eslint rule with no recognized category on the same line.
+        let previews = vec![eslint_finding("me/api", "src/lib.rs", 3, "some-custom-eslint-rule")];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        // Both must be kept since neither has a recognized security category.
+        assert_eq!(out.len(), 1, "unrecognized-category findings must not be collapsed");
+        assert!(existing[0].also_matches.is_empty());
     }
 
     // ── ci_story_body helpers ─────────────────────────────────────────────────

@@ -37,7 +37,7 @@
 //! from what the repo eventually pins — the preview is indicative, the gate is
 //! authoritative.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::onboard::{CoverageNote, Finding, SelectedRule};
@@ -187,6 +187,74 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
     }
 }
 
+// ─── stack-aware language gating ─────────────────────────────────────────────
+
+/// Derive the set of languages PRESENT in a file list by mapping each file
+/// extension to a normalised language label. The label strings match what
+/// [`crate::onboard::propose::lang_for_ext`] returns; they are case-sensitive
+/// (e.g. `"Rust"`, `"Python"`, `"JavaScript"`, `"TypeScript"`).
+///
+/// Pure; used by the stack-gating predicate so the test suite can drive it
+/// without touching the filesystem.
+pub fn languages_from_files(files: &[(String, String)]) -> HashSet<String> {
+    files
+        .iter()
+        .filter_map(|(path, _)| crate::onboard::propose::lang_for_ext(path))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Return `true` if `tool` should run given the set of languages PRESENT in the
+/// repo being scanned. A tool whose required language is absent is **omitted**
+/// from the run (and from the pre-declared tool count) — it must NOT appear as a
+/// passing "✓ 0" on a stack that has no such files.
+///
+/// Language membership rules (each tool gates on at least one language):
+/// - `Clippy`  → Rust present
+/// - `Ruff`    → Python present
+/// - `Eslint`  → JavaScript OR TypeScript present
+/// - `Semgrep` → any semgrep-supported language present (Python, JS, TS, Go,
+///               Java, Ruby, Rust, C#, PHP, C, C++); passes if present_languages
+///               is empty (unknown / can't derive → run conservatively).
+///
+/// When `present_languages` is `None`, all tools pass (backward-compat: callers
+/// that haven't threaded language info through yet don't regress).
+pub fn tool_languages_present(tool: ScanTool, present: Option<&HashSet<String>>) -> bool {
+    let Some(langs) = present else {
+        return true; // no language info → don't gate
+    };
+    // If we couldn't derive any languages (e.g. empty repo or all binary files)
+    // be conservative: let all tools through rather than silently omitting them.
+    if langs.is_empty() {
+        return true;
+    }
+    match tool {
+        ScanTool::Clippy => langs.contains("Rust"),
+        ScanTool::Ruff => langs.contains("Python"),
+        ScanTool::Eslint => langs.contains("JavaScript") || langs.contains("TypeScript"),
+        ScanTool::Semgrep => {
+            // Semgrep supports a broad polyglot set; gate on any recognized language
+            // from that set being present. If the language list is non-empty but
+            // contains NONE of these, the repo is e.g. pure SQL/Kotlin/Swift — do
+            // not run semgrep (would produce a misleading "✓ 0").
+            const SEMGREP_LANGS: &[&str] = &[
+                "Python",
+                "JavaScript",
+                "TypeScript",
+                "Go",
+                "Java",
+                "Ruby",
+                "Rust",
+                "C#",
+                "PHP",
+                "C",
+                "C++",
+            ];
+            SEMGREP_LANGS.iter().any(|l| langs.contains(*l))
+        }
+    }
+}
+
 /// Group the SELECTED mechanical rules by the scan tool that would produce their
 /// findings, dropping `layer3_only` rules (CodeQL / paid tiers never preview) and
 /// any rule whose tool we can't derive. Returns `(by_tool, ungrouped)` where
@@ -198,9 +266,15 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
 /// closure rather than the `RuleSet` lets the unit tests drive this with
 /// hand-built [`Rule`]s (whose fields are public) without the private `RuleSet`
 /// constructor.
+///
+/// `present_languages` — when `Some`, tools whose required language is absent from
+/// the set are omitted entirely (stack-gating: a Rust-only repo won't have eslint
+/// or ruff in the output, even if a JS rule was selected). When `None`, no gating
+/// (all tools pass; backward-compat).
 pub fn group_by_tool<'a, 'r>(
     selected: &'a [SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+    present_languages: Option<&HashSet<String>>,
 ) -> (BTreeMap<ScanTool, Vec<&'a SelectedRule>>, Vec<&'a SelectedRule>) {
     let mut by_tool: BTreeMap<ScanTool, Vec<&SelectedRule>> = BTreeMap::new();
     let mut ungrouped: Vec<&SelectedRule> = Vec::new();
@@ -218,7 +292,13 @@ pub fn group_by_tool<'a, 'r>(
             continue;
         }
         match tool_for_rule(rule) {
-            Some(tool) => by_tool.entry(tool).or_default().push(sr),
+            Some(tool) if tool_languages_present(tool, present_languages) => {
+                by_tool.entry(tool).or_default().push(sr)
+            }
+            Some(_tool) => {
+                // Tool's language is absent from the repo — silently omit (no note,
+                // no false-clean). The stack gates, regardless of rule selection.
+            }
             None => ungrouped.push(sr),
         }
     }
@@ -231,6 +311,10 @@ pub fn group_by_tool<'a, 'r>(
 /// step in `onboard_audit_start` so the job can show the correct "N" before any tool
 /// executes.
 ///
+/// `present_languages` must be the SAME set passed to `run_scan_tools` so the
+/// pre-declared "N" matches the stack-gated tools that actually run. When `None`,
+/// no stack-gating is applied (backward-compat).
+///
 /// Returns a `Vec<String>` of tool names in stable order (sorted, then "unrouted" last
 /// when applicable).  The result mirrors exactly what `run_scan_tools` would call
 /// `det_register_tool` with, so the pre-declared total always matches what the live
@@ -238,8 +322,9 @@ pub fn group_by_tool<'a, 'r>(
 pub fn preview_tool_ids_for_rules<'r>(
     selected: &[SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+    present_languages: Option<&HashSet<String>>,
 ) -> Vec<String> {
-    let (by_tool, ungrouped) = group_by_tool(selected, lookup);
+    let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let mut names: Vec<String> = by_tool.keys().map(|t| t.name().to_string()).collect();
     if !ungrouped.is_empty() {
         names.push("unrouted".to_string());
@@ -498,6 +583,12 @@ async fn run_capture_stdout(
 /// scan-runnable subset — but this fn re-checks `is_ci_enforced` + `layer3_only`
 /// defensively via [`group_by_tool`]).
 ///
+/// `present_languages` — when `Some`, stack-gates each tool: a tool whose required
+/// language is absent is omitted from the run AND from the pre-declared count (so
+/// a Rust-only repo never runs eslint, even if a JS rule was selected). When `None`,
+/// no gating (all tools run). Callers should pass
+/// `Some(&languages_from_files(&files))` for the repo's actual file set.
+///
 /// `progress` — when `Some`, the pass reports PER-TOOL progress into the job
 /// (`(store, job_id)`): each tool registers (`starting`), is marked `running` before
 /// it executes, and `done` with its findings count when it finishes — mirroring how the
@@ -507,9 +598,10 @@ pub async fn run_scan_tools<'r>(
     dir: &Path,
     selected: &[SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+    present_languages: Option<&HashSet<String>>,
     progress: Option<(&crate::jobs::JobStore, &str)>,
 ) -> (Vec<Finding>, Vec<CoverageNote>) {
-    let (by_tool, ungrouped) = group_by_tool(selected, lookup);
+    let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
     let mut findings = Vec::new();
     let mut coverage_notes: Vec<CoverageNote> = Vec::new();
 
@@ -814,7 +906,7 @@ mod tests {
             selected("PROSE-1"),
             selected("GO-A"),
         ];
-        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup);
+        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup, None);
         assert!(by_tool.contains_key(&ScanTool::Clippy));
         assert!(by_tool.contains_key(&ScanTool::Ruff));
         // layer3_only never previews.
@@ -935,7 +1027,7 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes) = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
+        let (findings, notes) = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
         assert!(findings.is_empty(), "missing tool must yield no finding rows");
         assert!(!notes.is_empty(), "missing tool must yield a coverage note");
         assert!(notes.iter().any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
@@ -951,7 +1043,7 @@ mod tests {
         ];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("MECH-1"), selected("ARCH-1")];
-        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup);
+        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup, None);
         // MECH-1 routes to clippy
         assert!(
             by_tool
@@ -981,7 +1073,7 @@ mod tests {
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
         let (findings, notes) =
-            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None).await;
+            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
         assert!(findings.is_empty(), "a missing tool must yield NO finding row");
         assert!(!notes.is_empty(), "a missing tool must yield a coverage note");
         assert!(
@@ -1015,7 +1107,7 @@ mod tests {
         ];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("R-1"), selected("R-2"), selected("R-3")];
-        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        let ids = preview_tool_ids_for_rules(&sel, &lookup, None);
         // Two distinct tools: clippy and ruff (order: BTreeMap order = clippy < ruff).
         assert_eq!(ids.len(), 2, "two distinct tools for three rules: {:?}", ids);
         assert!(ids.contains(&"clippy".to_string()), "must include clippy");
@@ -1033,7 +1125,7 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("ARCH-1")];
-        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        let ids = preview_tool_ids_for_rules(&sel, &lookup, None);
         assert!(ids.is_empty(), "architectural rules yield no preview tool ids");
     }
 
@@ -1048,10 +1140,114 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let sel = vec![selected("JAVA-1")];
-        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        let ids = preview_tool_ids_for_rules(&sel, &lookup, None);
         assert!(
             ids.contains(&"unrouted".to_string()),
             "an ungrouped rule must produce 'unrouted' in the id list: {:?}",
+            ids
+        );
+    }
+
+    // ── FIX 1: stack-aware language gating tests ─────────────────────────────
+
+    /// `languages_from_files`: verify extension→language mapping for key extensions.
+    #[test]
+    fn languages_from_files_maps_extensions() {
+        let files: Vec<(String, String)> = vec![
+            ("src/main.rs".to_string(), String::new()),
+            ("app.py".to_string(), String::new()),
+            ("index.ts".to_string(), String::new()),
+            ("utils.jsx".to_string(), String::new()),
+            ("Cargo.toml".to_string(), String::new()), // no extension match → ignored
+        ];
+        let langs = languages_from_files(&files);
+        assert!(langs.contains("Rust"), "should detect Rust from .rs");
+        assert!(langs.contains("Python"), "should detect Python from .py");
+        assert!(langs.contains("TypeScript"), "should detect TypeScript from .ts");
+        assert!(langs.contains("JavaScript"), "should detect JavaScript from .jsx");
+        assert!(!langs.contains("TOML"), "TOML has no language label");
+    }
+
+    /// `tool_languages_present` — None passthrough (backward-compat).
+    #[test]
+    fn tool_languages_present_none_always_passes() {
+        for tool in [ScanTool::Clippy, ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+            assert!(
+                tool_languages_present(tool, None),
+                "{:?} must pass when present_languages is None",
+                tool
+            );
+        }
+    }
+
+    /// `tool_languages_present` — Rust-only repo: clippy+semgrep pass, eslint+ruff don't.
+    #[test]
+    fn tool_languages_present_rust_only() {
+        let langs: HashSet<String> = ["Rust".to_string()].into();
+        assert!(tool_languages_present(ScanTool::Clippy, Some(&langs)), "clippy needs Rust → present");
+        assert!(tool_languages_present(ScanTool::Semgrep, Some(&langs)), "semgrep supports Rust → present");
+        assert!(!tool_languages_present(ScanTool::Ruff, Some(&langs)), "ruff needs Python → absent");
+        assert!(!tool_languages_present(ScanTool::Eslint, Some(&langs)), "eslint needs JS/TS → absent");
+    }
+
+    /// `tool_languages_present` — empty lang set → all tools pass (conservative).
+    #[test]
+    fn tool_languages_present_empty_set_is_permissive() {
+        let langs: HashSet<String> = HashSet::new();
+        for tool in [ScanTool::Clippy, ScanTool::Ruff, ScanTool::Eslint, ScanTool::Semgrep] {
+            assert!(
+                tool_languages_present(tool, Some(&langs)),
+                "{:?} must pass on an empty language set (conservative)",
+                tool
+            );
+        }
+    }
+
+    /// FIX 1 core: a JS rule selected on a Rust-only repo must NOT include eslint in
+    /// the pre-declared tool list (`preview_tool_ids_for_rules`) or in the group.
+    #[test]
+    fn stack_gating_rust_only_repo_excludes_eslint_and_ruff() {
+        let rules = vec![
+            rule_with("RUST-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
+            rule_with("JS-1",   EnforcementKind::Mechanical, false, &["eslint: eqeqeq"]),
+            rule_with("PY-1",   EnforcementKind::Mechanical, false, &["Ruff: S608"]),
+            rule_with("SG-1",   EnforcementKind::Mechanical, false, &["semgrep"]),
+        ];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("RUST-1"), selected("JS-1"), selected("PY-1"), selected("SG-1")];
+
+        // Rust-only language set.
+        let rust_only: HashSet<String> = ["Rust".to_string()].into();
+
+        let (by_tool, _ungrouped) = group_by_tool(&sel, &lookup, Some(&rust_only));
+        assert!(by_tool.contains_key(&ScanTool::Clippy), "clippy must run (Rust present)");
+        assert!(by_tool.contains_key(&ScanTool::Semgrep), "semgrep must run (Rust is semgrep-supported)");
+        assert!(!by_tool.contains_key(&ScanTool::Eslint), "eslint must be OMITTED (no JS/TS)");
+        assert!(!by_tool.contains_key(&ScanTool::Ruff), "ruff must be OMITTED (no Python)");
+
+        // The pre-declared IDs must match the stack-gated set.
+        let ids = preview_tool_ids_for_rules(&sel, &lookup, Some(&rust_only));
+        assert!(ids.contains(&"clippy".to_string()), "clippy in pre-declared ids");
+        assert!(ids.contains(&"semgrep".to_string()), "semgrep in pre-declared ids");
+        assert!(!ids.contains(&"eslint".to_string()), "eslint NOT in pre-declared ids for Rust-only repo");
+        assert!(!ids.contains(&"ruff".to_string()), "ruff NOT in pre-declared ids for Rust-only repo");
+    }
+
+    /// FIX 1: even if the selected JS rule was the ONLY selection, the stack gate
+    /// must omit eslint entirely from a Rust-only repo (no false "✓ 0").
+    #[test]
+    fn stack_gating_js_rule_on_rust_repo_yields_no_eslint() {
+        let rules = vec![
+            rule_with("JS-ONLY", EnforcementKind::Mechanical, false, &["eslint: no-eval"]),
+        ];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("JS-ONLY")];
+        let rust_only: HashSet<String> = ["Rust".to_string()].into();
+
+        let ids = preview_tool_ids_for_rules(&sel, &lookup, Some(&rust_only));
+        assert!(
+            !ids.contains(&"eslint".to_string()),
+            "a JS rule on a Rust-only repo must produce NO eslint tool id: {:?}",
             ids
         );
     }
