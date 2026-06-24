@@ -422,10 +422,21 @@ impl ProjectStore {
     /// persist every change back to it. This is what the running app uses, so
     /// projects survive restarts.
     pub fn load_or_new(path: std::path::PathBuf) -> Self {
-        let state = std::fs::read_to_string(&path)
+        let mut state = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<State>(&s).ok())
             .unwrap_or_default();
+        // ISOLATION (A7): validate the persisted active pointer. A dangling `active` id
+        // (project deleted out-of-band, hand-edited file, partial write) would otherwise
+        // make `active()` fall through to `projects.first()`, silently grounding the chat
+        // on the wrong project. Reset to the first project (or None when empty).
+        let active_is_valid = state
+            .active
+            .as_ref()
+            .is_some_and(|id| state.projects.iter().any(|p| &p.id == id));
+        if !active_is_valid {
+            state.active = state.projects.first().map(|p| p.id.clone());
+        }
         Self {
             inner: std::sync::Arc::new(Mutex::new(state)),
             path: Some(std::sync::Arc::new(path)),
