@@ -2528,6 +2528,13 @@ async fn onboard_audit(
         });
     }
 
+    // ── Write last_scan (synchronous path) ───────────────────────────────────────────
+    // Store the completed report immediately so chat grounding can read it regardless of
+    // whether the UI has round-tripped the draft back yet (timing race fixed).
+    if let Some(id) = &project_id {
+        state.set_last_scan(id.clone(), report.clone());
+    }
+
     Json(report)
 }
 
@@ -2870,6 +2877,8 @@ async fn onboard_audit_start(
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
+    // Captured so the async path can write to last_scan the instant the report is final.
+    let last_scan = state.last_scan.clone();
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -3009,6 +3018,15 @@ async fn onboard_audit_start(
         // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
         // handler. If you add ledger capture here in the future, follow the same
         // background-spawn pattern used there.)
+
+        // ── Write last_scan (async job path) ────────────────────────────────────────
+        // Store the completed report before finishing the job so any concurrent chat
+        // request landing immediately after sees the full results. Fail-soft.
+        if let Some(id) = &project_id {
+            let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(id.clone(), report.clone());
+        }
+
         jobs.finish(&jid, report);
     });
 
