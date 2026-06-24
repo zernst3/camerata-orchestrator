@@ -113,6 +113,12 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// Per-project last completed scan report. Written the instant any scan handler finishes
+    /// (both the synchronous `onboard_audit` path and the async job path). Read by
+    /// `active_project_context` as the authoritative source for grounding, with the
+    /// UI-round-tripped draft as a first-priority fallback. In-memory only (v1); does not
+    /// survive a process restart (a v2 concern).
+    last_scan: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>>,
     /// The central, version-tracked SQLite artifact store (ROUTE-A). Backs the per-story
     /// decision-record + investigation-note history that used to live inline on the UoW.
     /// `None` until a data-dir-backed store is opened in [`AppState::from_env`]; tests
@@ -158,6 +164,7 @@ impl AppState {
             uow: crate::uow::UowStore::new(),
             escalations: crate::escalation::EscalationStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             artifacts: None,
             feature_flags: crate::feature_flags::FeatureFlags::default(),
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
@@ -172,6 +179,28 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Store the last completed scan report for the given project. Called the instant a
+    /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
+    /// poisoning: recovers the inner value rather than panicking the handler.
+    pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        let mut guard = self
+            .last_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert(project_id, report);
+    }
+
+    /// Retrieve the last completed scan report for the given project, if any.
+    /// Returns a clone so callers do not hold the lock across await points.
+    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
+        let guard = self
+            .last_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(project_id).cloned()
     }
 
     /// Build state seeded with the representative spine + seeded open clarifications,
