@@ -38,7 +38,10 @@
 //! authoritative.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use camerata_agent::{HeartbeatFn, MTIME_PROBE_INTERVAL, spawn_mtime_probe};
 
 use crate::onboard::{CoverageNote, Finding, SelectedRule};
 use crate::tool_provisioning;
@@ -691,18 +694,65 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
 /// returns `Err` so the caller can emit a graceful note. A non-zero exit is NOT
 /// an error — linters exit non-zero when they find issues, which is the normal
 /// "there are findings" signal.
+///
+/// When `on_progress` is `Some`, stdout is READ LINE BY LINE and the callback is
+/// fired on every line received. This keeps `last_activity_ms` fresh while a tool
+/// like `cargo clippy` compiles a big repo (the rivet fix): the compile phase
+/// streams many output lines even before any lint result appears, so the job never
+/// appears stalled mid-compile. Output is accumulated into a single `String` and
+/// returned exactly as before, so all callers and parsers are unchanged.
+///
+/// When `on_progress` is `None` the function falls back to `.output().await`
+/// (buffered, no heartbeat) — identical to the previous behaviour. This is the
+/// path taken by the no-job synchronous callers.
 async fn run_capture_stdout(
     dir: &Path,
     program: &str,
     args: &[&str],
+    on_progress: Option<&HeartbeatFn>,
 ) -> std::io::Result<(String, bool)> {
-    let out = tokio::process::Command::new(program)
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .await?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    Ok((stdout, out.status.success()))
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    match on_progress {
+        None => {
+            // Fast path: no heartbeat needed. Buffer everything.
+            let out = tokio::process::Command::new(program)
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .await?;
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            Ok((stdout, out.status.success()))
+        }
+        Some(cb) => {
+            // Streaming path: read stdout line-by-line, firing the heartbeat on
+            // every line.  Stderr is captured separately (piped but not streamed)
+            // so it doesn't interleave with the JSON stdout the parsers expect.
+            let mut child = tokio::process::Command::new(program)
+                .args(args)
+                .current_dir(dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+
+            let stdout = child.stdout.take().expect("stdout is piped");
+            let mut lines = BufReader::new(stdout).lines();
+            let mut accumulated = String::new();
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                cb();
+                accumulated.push_str(&line);
+                accumulated.push('\n');
+            }
+
+            // Drain stderr (ignored for content; only the exit status matters for
+            // the "is non-zero exit an error" judgement in the caller).
+            let _ = child.stderr.take();
+
+            let status = child.wait().await?;
+            Ok((accumulated, status.success()))
+        }
+    }
 }
 
 /// Run the SCAN-TIME deterministic preview pass for ONE repo: group the selected
@@ -772,11 +822,21 @@ pub async fn run_scan_tools<'r>(
         }
     }
 
+    // Build a HeartbeatFn that ticks `last_activity_ms` on the job whenever a
+    // scan tool emits a stdout line OR the build-dir mtime advances (the rivet
+    // fix). When there is no progress context (silent synchronous path), this is
+    // `None` and both signals are disabled — identical to the previous behaviour.
+    let on_progress: Option<HeartbeatFn> = progress.map(|(jstore, jid)| {
+        let store = jstore.clone();
+        let id = jid.to_string();
+        Arc::new(move || store.touch_activity(&id)) as HeartbeatFn
+    });
+
     for (tool, rules) in by_tool {
         if let Some((jstore, jid)) = progress {
             jstore.det_tool_running(jid, tool.name());
         }
-        let produced = match run_one_tool(repo, dir, tool, &rules, lookup).await {
+        let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone()).await {
             Ok(mut fs) => {
                 let n = fs.len();
                 findings.append(&mut fs);
@@ -806,13 +866,39 @@ pub async fn run_scan_tools<'r>(
 /// exactly `rules`, and parse the result into preview findings. Returns `Err`
 /// (which the caller turns into a note) when the tool cannot be spawned or its
 /// output cannot be parsed — never a false clean.
+///
+/// When `on_progress` is `Some`, two liveness signals fire for the duration of
+/// this tool's execution:
+///
+/// 1. **Output-line signal** — `run_capture_stdout` fires the callback on every
+///    stdout line received (fast for linters that stream JSON results).
+///
+/// 2. **Build-dir mtime probe** — a background `tokio::spawn` task polls
+///    `dir/target/` every 15s and fires the callback when the mtime advances.
+///    This covers `cargo clippy` cold-compiling a big repo (rocksdb/native deps,
+///    8+ min) that writes to `target/` continuously but emits no stdout lines
+///    until compilation finishes. The probe is aborted when the tool exits.
+///
+/// Both signals call the same `on_progress` callback, which the caller wires to
+/// `JobStore::touch_activity`. The combined effect: even a completely quiet compile
+/// keeps `last_activity_ms` updated, so the stall-detection idle counter stays low
+/// and the UI banner never false-fires for a legitimately busy tool.
 async fn run_one_tool<'r>(
     repo: &str,
     dir: &Path,
     tool: ScanTool,
     rules: &[&SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+    on_progress: Option<HeartbeatFn>,
 ) -> anyhow::Result<Vec<Finding>> {
+    // Start the build-dir mtime probe for the duration of this tool run.
+    // Targets the `target/` subdirectory of the repo root (cargo's default output
+    // dir). The probe is best-effort: if `target/` doesn't exist (non-Rust repo),
+    // newest_mtime returns None and the probe just skips its ticks silently.
+    let _mtime_probe = on_progress.as_ref().map(|cb| {
+        let target_dir: PathBuf = dir.join("target");
+        spawn_mtime_probe(target_dir, cb.clone(), MTIME_PROBE_INTERVAL)
+    });
     // Collect the per-rule selector tokens from each rule's linter source.
     let selectors: Vec<String> = rules
         .iter()
@@ -845,6 +931,7 @@ async fn run_one_tool<'r>(
                 dir,
                 &bin_str,
                 &["--sarif", "--config", &rules_str, "--quiet", "."],
+                on_progress.as_ref(),
             )
             .await?;
             parse_sarif(repo, ScanTool::Semgrep, &stdout)
@@ -865,6 +952,7 @@ async fn run_one_tool<'r>(
                     &select,
                     ".",
                 ],
+                on_progress.as_ref(),
             )
             .await?;
             parse_ruff_json(repo, &stdout)
@@ -890,7 +978,8 @@ async fn run_one_tool<'r>(
                 args.push(lint);
             }
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok) = run_capture_stdout(dir, "cargo", &arg_refs).await?;
+            let (stdout, _ok) =
+                run_capture_stdout(dir, "cargo", &arg_refs, on_progress.as_ref()).await?;
             parse_clippy_json(repo, &stdout)
         }
         ScanTool::Eslint => {
@@ -925,7 +1014,8 @@ async fn run_one_tool<'r>(
             }
             args.push(".".into());
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok) = run_capture_stdout(dir, &bin_str, &arg_refs).await?;
+            let (stdout, _ok) =
+                run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
             parse_sarif(repo, ScanTool::Eslint, &stdout)
         }
     }
@@ -1640,5 +1730,67 @@ mod tests {
             !is_in_repo_scope(&root, "/home/user/.cargo/registry/src/foo/src/lib.rs"),
             "cargo registry path must be excluded"
         );
+    }
+
+    // ── streaming path liveness tests ────────────────────────────────────────
+
+    /// `run_capture_stdout` with `on_progress = Some` fires the heartbeat for each
+    /// line of output from the child process. This is the output-line signal half
+    /// of the rivet fix: even before clippy emits any JSON result it produces
+    /// compiler progress lines that keep the job alive.
+    #[tokio::test]
+    async fn run_capture_stdout_streaming_fires_heartbeat_per_line() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use camerata_agent::HeartbeatFn;
+
+        let count = Arc::new(AtomicU64::new(0));
+        let count_cb = count.clone();
+        let cb: HeartbeatFn = Arc::new(move || {
+            count_cb.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // `echo` outputs exactly 3 lines; printf packs them separated by newlines.
+        // We use `sh -c 'printf ...'` for portability across test environments.
+        let dir = std::env::temp_dir();
+        let (stdout, ok) = run_capture_stdout(
+            &dir,
+            "sh",
+            &["-c", "printf 'line1\\nline2\\nline3\\n'"],
+            Some(&cb),
+        )
+        .await
+        .expect("sh should be on PATH");
+
+        assert!(ok, "sh exit should be 0");
+        assert_eq!(
+            stdout.lines().count(),
+            3,
+            "stdout should contain 3 lines"
+        );
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            3,
+            "heartbeat should fire once per output line"
+        );
+    }
+
+    /// `run_capture_stdout` with `on_progress = None` does NOT require a streaming
+    /// path and still returns correct output (the buffered fast path is unchanged).
+    #[tokio::test]
+    async fn run_capture_stdout_no_progress_still_works() {
+        let dir = std::env::temp_dir();
+        let (stdout, ok) = run_capture_stdout(
+            &dir,
+            "sh",
+            &["-c", "printf 'hello\\nworld\\n'"],
+            None,
+        )
+        .await
+        .expect("sh should be on PATH");
+
+        assert!(ok);
+        assert!(stdout.contains("hello"));
+        assert!(stdout.contains("world"));
     }
 }

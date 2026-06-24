@@ -147,9 +147,10 @@ impl JobStore {
         }
     }
 
-    /// Update the job's last-activity timestamp to now. Called by `det_tool_running` and
-    /// `det_tool_done` so idle time can be tracked across deterministic-scan tool transitions.
-    fn touch_activity(&self, id: &str) {
+    /// Update the job's last-activity timestamp to now. Called by `det_tool_running`,
+    /// `det_tool_done`, and the streaming scan-tool path (per stdout line and per mtime
+    /// advance) so idle time stays low while a tool is actively running.
+    pub(crate) fn touch_activity(&self, id: &str) {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
