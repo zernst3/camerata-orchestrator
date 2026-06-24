@@ -26,6 +26,9 @@ rules:
       Hardcoded secret detected: '$VAR' appears to be assigned a literal
       credential. Move this value to an environment variable or a secrets
       manager and load it at runtime.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-HARDCODED-SECRETS-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [python, javascript, typescript, java, ruby]
     patterns:
@@ -47,6 +50,9 @@ rules:
       Hardcoded secret detected: '$VAR' appears to be assigned a literal
       credential. Move this value to an environment variable or a secrets
       manager and load it at runtime.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-HARDCODED-SECRETS-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [go, rust]
     patterns:
@@ -100,6 +106,9 @@ rules:
       Possible SQL injection: the query is built by string concatenation or
       f-string interpolation. Use parameterised queries (cursor.execute(sql, params))
       instead of embedding user-controlled data in the SQL string.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-RAW-SQL-CONCAT-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [python]
     patterns:
@@ -114,6 +123,9 @@ rules:
       Possible SQL injection: the query is built by template-literal interpolation
       or string concatenation. Use parameterised queries / prepared statements
       instead of embedding variables directly in the SQL string.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-RAW-SQL-CONCAT-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [javascript, typescript]
     patterns:
@@ -203,6 +215,9 @@ rules:
       Unsafe YAML deserialisation: yaml.load() without an explicit Loader can
       execute arbitrary Python code embedded in the YAML. Use yaml.safe_load()
       for untrusted input, or pass Loader=yaml.SafeLoader explicitly.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-UNSAFE-DESERIALIZATION-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [python]
     patterns:
@@ -245,6 +260,9 @@ rules:
       format!() interpolation or string concatenation. Use parameterised
       queries (sqlx::query! / diesel's query builder / prepared statements)
       instead of embedding variables directly in the SQL string.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-RAW-SQL-CONCAT-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [rust]
     # Pattern anchors the match INSIDE a double-quoted string:
@@ -298,6 +316,9 @@ rules:
       suppresses certificate validation, making the connection vulnerable to
       machine-in-the-middle attacks. Remove these calls or guard them behind a
       compile-time #[cfg(test)] flag.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-DISABLED-TLS-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [rust]
     pattern-either:
@@ -323,6 +344,9 @@ rules:
       (SqlCommand with SqlParameter), Entity Framework LINQ queries, or
       Dapper with named parameters instead of embedding variables in the SQL
       string.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-RAW-SQL-CONCAT-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [csharp]
     patterns:
@@ -373,6 +397,9 @@ rules:
       checks, making TLS decorative. Remove the override or implement a real
       pinning check; use RemoteCertificateValidationErrors in tests only, never
       in production code.
+      [Advisory duplicate — also enforced by Camerata's security floor
+      (SEC-NO-DISABLED-TLS-1); kept as a selectable advisory rule,
+      deduped against the floor at scan time.]
     severity: ERROR
     languages: [csharp]
     # Note: the ellipsis-wildcard lambda form `(... => true)` is not valid in
