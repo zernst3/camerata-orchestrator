@@ -6118,8 +6118,17 @@ async fn uow_from_workitem(
     // The UoW key is the spine story id (provider prefix stripped).
     let story_id = crate::workitems::story_id_for(&req.work_item_id);
 
-    // DEDUP by external ref: a UoW already exists for this work item id.
-    let already = state.uow.list().iter().any(|u| u.story_id == story_id);
+    // DEDUP by external ref: a UoW already exists for this work item id WITHIN the
+    // active project. Scoping to the active project's repos lets two projects adopt
+    // the same issue id without colliding. No active project → no scope → no dedup.
+    let already = match state.projects.active() {
+        Some(p) => state
+            .uow
+            .list_for_project(&p.repos)
+            .iter()
+            .any(|u| u.story_id == story_id),
+        None => false,
+    };
     if already {
         return Ok(Json(
             serde_json::json!({ "uow_id": story_id, "created": false }),
