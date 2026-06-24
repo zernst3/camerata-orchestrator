@@ -113,6 +113,12 @@ pub struct AppState {
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
     scan_cache: crate::scan_cache::ScanCacheStore,
+    /// Per-project last completed scan report. Written the instant any scan handler finishes
+    /// (both the synchronous `onboard_audit` path and the async job path). Read by
+    /// `active_project_context` as the authoritative source for grounding, with the
+    /// UI-round-tripped draft as a first-priority fallback. In-memory only (v1); does not
+    /// survive a process restart (a v2 concern).
+    last_scan: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, crate::onboard::ScanReport>>>,
     /// The central, version-tracked SQLite artifact store (ROUTE-A). Backs the per-story
     /// decision-record + investigation-note history that used to live inline on the UoW.
     /// `None` until a data-dir-backed store is opened in [`AppState::from_env`]; tests
@@ -158,6 +164,7 @@ impl AppState {
             uow: crate::uow::UowStore::new(),
             escalations: crate::escalation::EscalationStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
+            last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             artifacts: None,
             feature_flags: crate::feature_flags::FeatureFlags::default(),
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
@@ -172,6 +179,28 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Store the last completed scan report for the given project. Called the instant a
+    /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
+    /// poisoning: recovers the inner value rather than panicking the handler.
+    pub(crate) fn set_last_scan(&self, project_id: String, report: crate::onboard::ScanReport) {
+        let mut guard = self
+            .last_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert(project_id, report);
+    }
+
+    /// Retrieve the last completed scan report for the given project, if any.
+    /// Returns a clone so callers do not hold the lock across await points.
+    /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    pub(crate) fn get_last_scan(&self, project_id: &str) -> Option<crate::onboard::ScanReport> {
+        let guard = self
+            .last_scan
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(project_id).cloned()
     }
 
     /// Build state seeded with the representative spine + seeded open clarifications,
@@ -2499,6 +2528,13 @@ async fn onboard_audit(
         });
     }
 
+    // ── Write last_scan (synchronous path) ───────────────────────────────────────────
+    // Store the completed report immediately so chat grounding can read it regardless of
+    // whether the UI has round-tripped the draft back yet (timing race fixed).
+    if let Some(id) = &project_id {
+        state.set_last_scan(id.clone(), report.clone());
+    }
+
     Json(report)
 }
 
@@ -2841,6 +2877,8 @@ async fn onboard_audit_start(
     let soc2_enabled = state.feature_flags.soc2;
     // Captured for the spawned task so the async audit's model calls feed the cumulative meter.
     let usage_ledger = state.usage_ledger.clone();
+    // Captured so the async path can write to last_scan the instant the report is final.
+    let last_scan = state.last_scan.clone();
     tokio::spawn(async move {
         if sources.is_empty() {
             jobs.fail(
@@ -2980,6 +3018,15 @@ async fn onboard_audit_start(
         // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
         // handler. If you add ledger capture here in the future, follow the same
         // background-spawn pattern used there.)
+
+        // ── Write last_scan (async job path) ────────────────────────────────────────
+        // Store the completed report before finishing the job so any concurrent chat
+        // request landing immediately after sees the full results. Fail-soft.
+        if let Some(id) = &project_id {
+            let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
+            guard.insert(id.clone(), report.clone());
+        }
+
         jobs.finish(&jid, report);
     });
 
@@ -6784,7 +6831,13 @@ async fn active_project_context(
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d));
+            .and_then(|d| extract_scan_results_from_draft(d))
+            .or_else(|| {
+                state
+                    .get_last_scan(&project.id)
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
+            });
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
@@ -6808,7 +6861,13 @@ async fn active_project_context(
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d));
+            .and_then(|d| extract_scan_results_from_draft(d))
+            .or_else(|| {
+                state
+                    .get_last_scan(&project.id)
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
+            });
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
@@ -6827,6 +6886,12 @@ async fn active_project_context(
         })
     } else {
         // Blank: project exists but no draft and no onboarded repos.
+        // Still check last_scan — a scan may have completed without a draft being
+        // round-tripped back (timing race: this is the exact bug being fixed).
+        let scan_results_section = state
+            .get_last_scan(&project.id)
+            .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+            .filter(|s| !s.is_empty());
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
@@ -6836,7 +6901,7 @@ async fn active_project_context(
             ruleset_summary: None,
             finding_count: None,
             findings_summary: None,
-            scan_results_section: None,
+            scan_results_section,
             draft_json: None,
             message: Some(format!(
                 "Project '{}' has no scan or onboarding data yet — start an onboarding scan to populate the project context.",
@@ -10926,5 +10991,163 @@ mod tests {
         let out = result.unwrap();
         assert!(out.contains("DI-1"), "must contain rule_id from audit section");
         assert!(!out.contains("secret-value-here"), "snippet must not leak via audit path");
+    }
+
+    // ── last_scan store tests ─────────────────────────────────────────────────────────
+
+    /// Helper: build a minimal ScanReport with one active finding.
+    fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
+        crate::onboard::ScanReport {
+            repos: vec!["owner/repo".to_string()],
+            stacks: Vec::new(),
+            files_scanned: 1,
+            files_excluded: 0,
+            code_chars: 100,
+            excluded_mechanical_rules: Vec::new(),
+            findings: vec![crate::onboard::Finding {
+                repo: "owner/repo".to_string(),
+                path: "src/main.rs".to_string(),
+                line: 42,
+                rule_id: rule_id.to_string(),
+                severity: "high".to_string(),
+                snippet: String::new(),
+                detail: "test finding".to_string(),
+                status: "active".to_string(),
+                also_matches: Vec::new(),
+                preview: false,
+                preview_tool: None,
+                in_test: false,
+                needs_review: false,
+            }],
+            proposed_rules: Vec::new(),
+            gated: false,
+            message: None,
+            actual_usage: None,
+            deep: None,
+            coverage_notes: Vec::new(),
+        }
+    }
+
+    /// set_last_scan / get_last_scan round-trip: a stored report is returned.
+    #[test]
+    fn last_scan_set_get_round_trip() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+
+        // Before any write: None.
+        assert!(
+            state.get_last_scan("proj-1").is_none(),
+            "get_last_scan must return None before any set"
+        );
+
+        state.set_last_scan("proj-1".to_string(), report.clone());
+
+        let got = state.get_last_scan("proj-1");
+        assert!(got.is_some(), "get_last_scan must return Some after set");
+        let got = got.unwrap();
+        assert_eq!(got.findings.len(), 1, "findings must be preserved");
+        assert_eq!(
+            got.findings[0].rule_id,
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "rule_id must round-trip"
+        );
+    }
+
+    /// Different project ids are stored independently.
+    #[test]
+    fn last_scan_is_keyed_per_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.set_last_scan("proj-A".to_string(), make_scan_report("RULE-A"));
+        state.set_last_scan("proj-B".to_string(), make_scan_report("RULE-B"));
+
+        let a = state.get_last_scan("proj-A").unwrap();
+        let b = state.get_last_scan("proj-B").unwrap();
+        assert_eq!(a.findings[0].rule_id, "RULE-A");
+        assert_eq!(b.findings[0].rule_id, "RULE-B");
+        assert!(state.get_last_scan("proj-C").is_none());
+    }
+
+    /// active_project_context returns scan_results_section from last_scan when no draft.
+    #[tokio::test]
+    async fn active_project_context_uses_last_scan_when_no_draft() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Create a project (automatically becomes active).
+        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // No draft has been saved, but we store a completed scan report.
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+        state.set_last_scan(project.id.clone(), report);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section = body.get("scan_results_section");
+        assert!(
+            section.is_some() && section.unwrap() != &serde_json::Value::Null,
+            "scan_results_section must be populated from last_scan when no draft, got: {body:?}"
+        );
+        let section_str = section.unwrap().as_str().unwrap_or("");
+        assert!(
+            section_str.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "scan_results_section must contain the finding rule_id, got: {section_str}"
+        );
+    }
+
+    /// Draft takes precedence over last_scan when the draft has findings.
+    #[tokio::test]
+    async fn active_project_context_draft_takes_precedence_over_last_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // Store a last_scan report with one rule id.
+        let report = make_scan_report("LAST-SCAN-RULE");
+        state.set_last_scan(project.id.clone(), report);
+
+        // Save a draft with a DIFFERENT rule id — draft must win.
+        let draft = serde_json::json!({
+            "scan": {
+                "findings": [{
+                    "repo": "owner/repo",
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "rule_id": "DRAFT-RULE",
+                    "severity": "high",
+                    "status": "active",
+                    "snippet": "",
+                    "detail": "draft finding"
+                }],
+                "coverage_notes": []
+            }
+        });
+        state.draft.save(&project.id, draft);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section_str = body
+            .get("scan_results_section")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert!(
+            section_str.contains("DRAFT-RULE"),
+            "draft rule must appear when draft has findings, got: {section_str}"
+        );
+        assert!(
+            !section_str.contains("LAST-SCAN-RULE"),
+            "last_scan rule must NOT appear when draft takes precedence, got: {section_str}"
+        );
     }
 }
