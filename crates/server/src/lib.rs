@@ -8604,8 +8604,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stories_endpoint_returns_the_seeded_spine() {
-        let app = router(AppState::seeded());
+    async fn stories_endpoint_returns_the_active_projects_spine() {
+        // ISOLATION (A8): /api/stories is project-scoped. A story is in-scope when one of its
+        // build-target repos (or its source container) is in the active project's repos.
+        // Stories targeting another repo must NOT leak.
+        use camerata_worktracker::{FeatureStatus, RepoTarget};
+
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Active project owns `acme/app`.
+        state
+            .projects
+            .create("Acme", vec!["acme/app".to_string()])
+            .unwrap();
+
+        // Two in-scope stories (target acme/app) and one out-of-scope (targets other/repo).
+        let mk = |id: &str, repo: &str, status: FeatureStatus| CanonicalStory {
+            id: id.to_string(),
+            external_ref: None,
+            title: format!("story {id}"),
+            description: "desc".to_string(),
+            status,
+            created_by: "architect".to_string(),
+            targets: vec![RepoTarget::new(repo)],
+        };
+        state
+            .stories
+            .upsert(mk("CAM-1", "acme/app", FeatureStatus::Executing))
+            .await
+            .unwrap();
+        state
+            .stories
+            .upsert(mk("CAM-2", "acme/app", FeatureStatus::SignedOff))
+            .await
+            .unwrap();
+        state
+            .stories
+            .upsert(mk("OTHER-1", "other/repo", FeatureStatus::Executing))
+            .await
+            .unwrap();
+
+        let app = router(state);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -8618,10 +8656,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0]["id"], "CAM-1");
-        // FeatureStatus serializes snake_case.
-        assert_eq!(arr[0]["status"], "executing");
+        assert_eq!(arr.len(), 2, "only the active project's stories, got: {json:?}");
+        let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"CAM-1") && ids.contains(&"CAM-2"));
+        assert!(
+            !ids.contains(&"OTHER-1"),
+            "out-of-project story must not leak, got: {ids:?}"
+        );
     }
 
     /// #20: POST /api/stories/adopt-issue maps a GitHub issue onto the spine (token-free,
@@ -9385,6 +9426,9 @@ mod tests {
     async fn uow_from_workitem_dedups_by_external_ref() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: the dedup + listing are now project-scoped; activate a project whose
+        // repos cover the work item's repo (`o/r`).
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
         let uow = state.uow.clone();
         let app = router(state);
 
@@ -9423,6 +9467,8 @@ mod tests {
     async fn uows_list_carries_workitem_and_stage() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: /api/uows is project-scoped; activate a project covering `o/r`.
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
         let app = router(state);
 
         // Create one UoW from a work item.
@@ -9554,7 +9600,13 @@ mod tests {
     /// `work_item = null` and `authoring = true`.
     #[tokio::test]
     async fn blank_uow_creates_and_lists_as_authoring() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        // ISOLATION (A1/A2): a blank draft has a `draft-` id with NO resolvable repo, so the
+        // project-scoped /api/uows EXCLUDES it by design. This test now verifies (a) the blank
+        // endpoint still mints a draft id, and (b) the draft does NOT leak into the scoped list
+        // (neither with no active project, nor under an unrelated active project).
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
+        let app = router(state);
 
         let resp = app
             .clone()
@@ -9584,12 +9636,10 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let uows = json["uows"].as_array().unwrap();
-        let entry = uows
-            .iter()
-            .find(|u| u["id"] == uow_id)
-            .expect("draft in /api/uows");
-        assert!(entry["work_item"].is_null(), "draft has no work item yet");
-        assert_eq!(entry["authoring"], true, "draft flagged as authoring");
+        assert!(
+            uows.iter().all(|u| u["id"] != uow_id),
+            "repo-less draft must NOT appear in the project-scoped /api/uows, got: {json:?}"
+        );
     }
 
     /// `POST /api/uow/:id/author` appends the chat turn and persists the requirements
@@ -9673,6 +9723,10 @@ mod tests {
     #[tokio::test]
     async fn publish_link_step_links_draft_without_rekey() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: /api/uows is project-scoped and resolves a LINKED draft's repo from its
+        // work_item (`me/api#7`). Activate a project covering `me/api` so the linked draft is
+        // visible (an UNLINKED draft would remain excluded — no resolvable repo).
+        state.projects.create("P", vec!["me/api".to_string()]).unwrap();
         let uow_store = state.uow.clone();
         let stories = state.stories.clone();
         let app = router(state);

@@ -766,16 +766,25 @@ impl UowStore {
             .collect()
     }
 
-    /// UoWs whose story_id resolves to a repo in `repos` (the active project's repos).
-    /// Draft UoWs whose story_id has no resolvable repo are EXCLUDED.
+    /// UoWs whose repo is in `repos` (the active project's repos).
+    ///
+    /// The repo is resolved from the UoW's `work_item` link when present (a draft that
+    /// has been published/linked to a real issue carries the work item's `owner/repo#num`
+    /// id there, while its KEY stays the original `draft-…` id), and otherwise from the
+    /// `story_id` key. This keeps a LINKED draft visible under its work item's project
+    /// while still EXCLUDING an unlinked draft whose id has no resolvable repo.
     pub fn list_for_project(&self, repos: &[String]) -> Vec<UnitOfWork> {
         self.mem
             .lock()
             .expect("uow mutex poisoned")
             .values()
             .filter(|u| {
-                crate::repo_from_story_id(&u.story_id)
-                    .is_some_and(|r| repos.iter().any(|p| p == &r))
+                let repo = u
+                    .work_item
+                    .as_deref()
+                    .and_then(crate::repo_from_story_id)
+                    .or_else(|| crate::repo_from_story_id(&u.story_id));
+                repo.is_some_and(|r| repos.iter().any(|p| p == &r))
             })
             .cloned()
             .collect()
