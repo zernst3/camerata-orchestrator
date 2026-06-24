@@ -10992,4 +10992,162 @@ mod tests {
         assert!(out.contains("DI-1"), "must contain rule_id from audit section");
         assert!(!out.contains("secret-value-here"), "snippet must not leak via audit path");
     }
+
+    // ── last_scan store tests ─────────────────────────────────────────────────────────
+
+    /// Helper: build a minimal ScanReport with one active finding.
+    fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {
+        crate::onboard::ScanReport {
+            repos: vec!["owner/repo".to_string()],
+            stacks: Vec::new(),
+            files_scanned: 1,
+            files_excluded: 0,
+            code_chars: 100,
+            excluded_mechanical_rules: Vec::new(),
+            findings: vec![crate::onboard::Finding {
+                repo: "owner/repo".to_string(),
+                path: "src/main.rs".to_string(),
+                line: 42,
+                rule_id: rule_id.to_string(),
+                severity: "high".to_string(),
+                snippet: String::new(),
+                detail: "test finding".to_string(),
+                status: "active".to_string(),
+                also_matches: Vec::new(),
+                preview: false,
+                preview_tool: None,
+                in_test: false,
+                needs_review: false,
+            }],
+            proposed_rules: Vec::new(),
+            gated: false,
+            message: None,
+            actual_usage: None,
+            deep: None,
+            coverage_notes: Vec::new(),
+        }
+    }
+
+    /// set_last_scan / get_last_scan round-trip: a stored report is returned.
+    #[test]
+    fn last_scan_set_get_round_trip() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+
+        // Before any write: None.
+        assert!(
+            state.get_last_scan("proj-1").is_none(),
+            "get_last_scan must return None before any set"
+        );
+
+        state.set_last_scan("proj-1".to_string(), report.clone());
+
+        let got = state.get_last_scan("proj-1");
+        assert!(got.is_some(), "get_last_scan must return Some after set");
+        let got = got.unwrap();
+        assert_eq!(got.findings.len(), 1, "findings must be preserved");
+        assert_eq!(
+            got.findings[0].rule_id,
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "rule_id must round-trip"
+        );
+    }
+
+    /// Different project ids are stored independently.
+    #[test]
+    fn last_scan_is_keyed_per_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.set_last_scan("proj-A".to_string(), make_scan_report("RULE-A"));
+        state.set_last_scan("proj-B".to_string(), make_scan_report("RULE-B"));
+
+        let a = state.get_last_scan("proj-A").unwrap();
+        let b = state.get_last_scan("proj-B").unwrap();
+        assert_eq!(a.findings[0].rule_id, "RULE-A");
+        assert_eq!(b.findings[0].rule_id, "RULE-B");
+        assert!(state.get_last_scan("proj-C").is_none());
+    }
+
+    /// active_project_context returns scan_results_section from last_scan when no draft.
+    #[tokio::test]
+    async fn active_project_context_uses_last_scan_when_no_draft() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Create a project (automatically becomes active).
+        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // No draft has been saved, but we store a completed scan report.
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+        state.set_last_scan(project.id.clone(), report);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section = body.get("scan_results_section");
+        assert!(
+            section.is_some() && section.unwrap() != &serde_json::Value::Null,
+            "scan_results_section must be populated from last_scan when no draft, got: {body:?}"
+        );
+        let section_str = section.unwrap().as_str().unwrap_or("");
+        assert!(
+            section_str.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "scan_results_section must contain the finding rule_id, got: {section_str}"
+        );
+    }
+
+    /// Draft takes precedence over last_scan when the draft has findings.
+    #[tokio::test]
+    async fn active_project_context_draft_takes_precedence_over_last_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state.projects.create("TestProj", vec!["owner/repo".to_string()]).unwrap();
+
+        // Store a last_scan report with one rule id.
+        let report = make_scan_report("LAST-SCAN-RULE");
+        state.set_last_scan(project.id.clone(), report);
+
+        // Save a draft with a DIFFERENT rule id — draft must win.
+        let draft = serde_json::json!({
+            "scan": {
+                "findings": [{
+                    "repo": "owner/repo",
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "rule_id": "DRAFT-RULE",
+                    "severity": "high",
+                    "status": "active",
+                    "snippet": "",
+                    "detail": "draft finding"
+                }],
+                "coverage_notes": []
+            }
+        });
+        state.draft.save(&project.id, draft);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section_str = body
+            .get("scan_results_section")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        assert!(
+            section_str.contains("DRAFT-RULE"),
+            "draft rule must appear when draft has findings, got: {section_str}"
+        );
+        assert!(
+            !section_str.contains("LAST-SCAN-RULE"),
+            "last_scan rule must NOT appear when draft takes precedence, got: {section_str}"
+        );
+    }
 }
