@@ -212,27 +212,32 @@ rules:
 
   # ── Rust: SQL string concatenation ──────────────────────────────────────────
   #
-  # Detects format! macros that embed SQL keywords alongside positional holes.
-  # Requiring SQL keywords (SELECT, INSERT, UPDATE, DELETE, FROM, WHERE) in the
-  # format string reduces false positives from non-SQL format strings.
+  # Detects format! macros (or raw string concatenation) that build a SQL query
+  # via interpolation.  All three conditions must hold inside ONE double-quoted
+  # string literal:
+  #   1. A DML verb (SELECT/INSERT/UPDATE/DELETE) appears at or near the start
+  #      of the string (optional leading whitespace/newline only), so mid-sentence
+  #      prose like "select the best option from the list" is NOT matched.
+  #   2. A confirming SQL clause (FROM/INTO/SET/VALUES/JOIN/WHERE) appears later
+  #      in the SAME string — rejects standalone-keyword URL fragments such as
+  #      "/api/uow/{}/update-branch" (UPDATE with no clause).
+  #   3. The string contains a format placeholder ({} or {name}) OR is
+  #      immediately followed by + (string concatenation) — rejects parameterised
+  #      queries that use ? / $1 placeholders with no interpolation.
   #
-  # Implementation note: the original structural rule used
-  #   pattern: format!($TEMPLATE, ...)
-  #   metavariable-regex: $TEMPLATE / (?i)(SELECT|...)
-  # but semgrep 1.167 does not apply metavariable-regex constraints on macro
-  # argument metavariables in Rust — the constraint compiles but silently
-  # returns 0 findings even when $TEMPLATE clearly contains "SELECT ...".
-  # The $S + $VAR pattern for string concatenation has the same problem:
-  # $S binds to the variable name on the left, not the string literal, so the
-  # SQL-keyword regex never matches.
+  # Anchoring inside the quoted string (rather than spanning raw source text)
+  # eliminates the cross-context false positives that fired on the rivet codebase:
+  #   - AI system prompt in chat.rs  ("You answer questions … select … from …")
+  #   - Log lines ("reading build output from '{}'")
+  #   - URL route patterns ("/api/uow/{}/update-branch")
+  #   - Jira/comment text ("UPDATE agent_os_fs … — see JIRA-123")
   #
-  # pattern-regex operates on raw file text (language-agnostic) and is
-  # unaffected by parser limitations. It fires reliably on the same fixture
-  # that the structural rule missed.
+  # Implementation note: semgrep's Rust parser does not reliably apply
+  # metavariable-regex constraints on macro-argument metavariables (silently 0
+  # findings). pattern-regex operates on raw text and fires correctly.
   #
-  # Note: sqlx / diesel with query macros already refuse string interpolation
-  # at compile time; this rule targets ad-hoc query building that bypasses
-  # those guards.
+  # Note: sqlx / diesel with query macros refuse string interpolation at compile
+  # time; this rule targets ad-hoc query building that bypasses those guards.
 
   - id: camerata.security.sql-string-concat-rust
     message: >
@@ -242,7 +247,21 @@ rules:
       instead of embedding variables directly in the SQL string.
     severity: ERROR
     languages: [rust]
-    pattern-regex: '(?i)format!\s*\(\s*"[^"]*\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b[^"]*"[^)]*,'
+    # Pattern anchors the match INSIDE a double-quoted string:
+    #   "             — opening quote
+    #   [ \t\r\n]*    — optional leading whitespace (multiline queries)
+    #   \b(DML)\b     — 1. DML keyword near the string start
+    #   (non-quote)*  — content (escape-aware)
+    #   \b(CLAUSE)\b  — 2. confirming clause in the SAME string
+    #   (non-quote)*  — content after clause
+    #   (\{…\}|"+)    — 3. format placeholder OR closing quote followed by +
+    pattern-regex: >-
+      (?ix)
+      "[ \t\r\n]*\b(?:SELECT|INSERT|UPDATE|DELETE)\b
+      (?:[^"\\]|\\[\s\S])*?
+      \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b
+      (?:[^"\\]|\\[\s\S])*?
+      (?:\{\w*\}|"[ \t]*\+)
 
   # ── Rust: Weak / broken cryptographic hash ───────────────────────────────────
   #
