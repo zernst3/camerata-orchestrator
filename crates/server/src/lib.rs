@@ -2547,7 +2547,11 @@ fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
 /// - `"hash"`   — weak cryptographic hash
 /// - `"path"`   — path traversal
 /// - `"shell"`  — subprocess with shell=True
-/// - `"yaml"`   — unsafe YAML load
+/// - `"deser"`  — unsafe deserialization (yaml.load w/o SafeLoader, pickle, unserialize,
+///                Marshal.load, BinaryFormatter, …). Replaces the old `"yaml"` category so
+///                the floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 and the semgrep rule
+///                camerata.security.yaml-unsafe-load share one category and collapse
+///                correctly when they fire on the same (repo, path, line).
 /// - `"tls"`    — disabled TLS / cert verification
 ///
 /// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
@@ -2557,6 +2561,12 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => Some("secret"),
         "SEC-NO-RAW-SQL-CONCAT-1" => Some("sql"),
         "SEC-NO-DISABLED-TLS-1" => Some("tls"),
+        // SEC-NO-UNSAFE-DESERIALIZATION-1: the floor rule for the deser category.
+        // camerata.security.yaml-unsafe-load (semgrep) maps to the same category so that
+        // a floor finding and a semgrep finding on the same (repo, path, line) collapse to
+        // one row, floor canonical. The old "yaml" category string is retired; both sides
+        // now use "deser" (broader: covers pickle, unserialize, Marshal.load, BinaryFormatter).
+        "SEC-NO-UNSAFE-DESERIALIZATION-1" => Some("deser"),
         // Semgrep rules (camerata.security.*)
         // NOTE: keep these in sync with the rule ids in
         // crates/server/assets/semgrep-rules/security.yml. A semgrep rule whose id is
@@ -2579,7 +2589,9 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         | "camerata.security.disabled-tls-csharp" => Some("tls"),
         "camerata.security.path-traversal-python" => Some("path"),
         "camerata.security.subprocess-shell-true" => Some("shell"),
-        "camerata.security.yaml-unsafe-load" => Some("yaml"),
+        // yaml-unsafe-load maps to "deser" (not "yaml") so it collapses with the
+        // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 when both fire on the same line.
+        "camerata.security.yaml-unsafe-load" => Some("deser"),
         // Ruff / ESLint lints that overlap with floor or semgrep in the same category.
         // S608 = possible SQL injection (Ruff/flake8-bandit) — same category as the floor SQL rule.
         "S608" => Some("sql"),
@@ -8174,9 +8186,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        // The ten substantive rules, GOV-1 (the synthetic test rule) filtered out.
-        // Count updated when SEC-NO-CAMERATA-CONFIG-1 was added (2026-06-22).
-        assert_eq!(arr.len(), 10);
+        // The eleven substantive rules, GOV-1 (the synthetic test rule) filtered out.
+        // Count updated when SEC-NO-UNSAFE-DESERIALIZATION-1 was added (2026-06-24).
+        assert_eq!(arr.len(), 11);
         let ids: Vec<&str> = arr.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"SEC-NO-HARDCODED-SECRETS-1"));
         assert!(ids.contains(&"SEC-NO-PATH-ESCAPE-1"));
@@ -8186,6 +8198,7 @@ mod tests {
         assert!(ids.contains(&"SEC-NO-SECRET-FILE-1"));
         assert!(ids.contains(&"SEC-NO-DISABLED-TLS-1"));
         assert!(ids.contains(&"SEC-NO-CAMERATA-CONFIG-1"));
+        assert!(ids.contains(&"SEC-NO-UNSAFE-DESERIALIZATION-1"));
         assert!(!ids.contains(&"GOV-1"));
     }
 
@@ -9880,7 +9893,11 @@ mod tests {
         assert_eq!(finding_security_category("camerata.security.disabled-tls-csharp"), Some("tls"));
         assert_eq!(finding_security_category("camerata.security.path-traversal-python"), Some("path"));
         assert_eq!(finding_security_category("camerata.security.subprocess-shell-true"), Some("shell"));
-        assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("yaml"));
+        // yaml-unsafe-load now maps to "deser" (not "yaml") so it collapses with the
+        // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 at the same (repo, path, line).
+        assert_eq!(finding_security_category("camerata.security.yaml-unsafe-load"), Some("deser"));
+        // New floor rule (Step 3 of unsafe-deser port): same "deser" category.
+        assert_eq!(finding_security_category("SEC-NO-UNSAFE-DESERIALIZATION-1"), Some("deser"));
         // Ruff bandit code
         assert_eq!(finding_security_category("S608"), Some("sql"));
         // Unknown rule: no category (pass-through, no dedup)
@@ -9909,6 +9926,47 @@ mod tests {
             .also_matches
             .iter()
             .any(|m| m == "camerata.security.sql-string-concat-rust"));
+    }
+
+    /// Regression for the unsafe-deser floor port: a floor SEC-NO-UNSAFE-DESERIALIZATION-1
+    /// finding and a semgrep camerata.security.yaml-unsafe-load finding on the SAME
+    /// (repo, path, line) MUST collapse to one row, floor canonical, because both map to the
+    /// "deser" category. Before this step the yaml-unsafe-load rule mapped to "yaml" and the
+    /// floor rule did not exist, so they would have produced two rows.
+    #[test]
+    fn crosstool_dedup_floor_and_semgrep_deser_same_location_collapses() {
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "src/loader.py",
+            42,
+            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "src/loader.py",
+            42,
+            "camerata.security.yaml-unsafe-load",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        // Semgrep finding must be folded into the floor row, not surfaced as its own row.
+        assert!(
+            leftover.is_empty(),
+            "semgrep yaml-unsafe-load must collapse into the floor deser row: {leftover:?}"
+        );
+        assert_eq!(existing.len(), 1);
+        assert_eq!(
+            existing[0].rule_id,
+            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            "floor rule_id must remain canonical"
+        );
+        assert!(
+            existing[0]
+                .also_matches
+                .iter()
+                .any(|m| m == "camerata.security.yaml-unsafe-load"),
+            "semgrep rule must appear in also_matches: {:?}",
+            existing[0].also_matches
+        );
     }
 
     /// FIX 2 (a): ruff (rank 1, "sql" category via S608) + semgrep (rank 2, "sql" via

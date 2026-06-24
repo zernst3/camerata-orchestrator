@@ -267,6 +267,29 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
 /// line-by-line scan misses). Path-based rules return empty. The brownfield audit uses
 /// this for per-line findings; the write-time gate still uses the boolean arm.
 pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
+    // SEC-NO-UNSAFE-DESERIALIZATION-1 requires the SafeLoader/FullLoader carve-out:
+    // matches on `yaml.load(` where the SAME LINE also contains SafeLoader or FullLoader
+    // must be suppressed. The carve-out is applied here (not just in the arm) so the
+    // brownfield audit's per-line attribution also respects it.
+    if rule_id == "SEC-NO-UNSAFE-DESERIALIZATION-1" {
+        let re = sec_unsafe_deser_regex();
+        let mut lines: Vec<usize> = re
+            .find_iter(content)
+            .filter_map(|m| {
+                let lineno = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+                // Apply SafeLoader/FullLoader carve-out: skip yaml.load( matches on lines
+                // that also carry a safe-loader keyword.
+                if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, lineno)) {
+                    return None;
+                }
+                Some(lineno)
+            })
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        return lines;
+    }
+
     let re = match rule_id {
         "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
         "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
@@ -274,7 +297,6 @@ pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
         "SEC-NO-PRIVATE-KEY-1" => sec_private_key_regex(),
         "SEC-NO-VENDOR-TOKEN-1" => sec_vendor_token_regex(),
         "SEC-NO-DISABLED-TLS-1" => sec_disabled_tls_regex(),
-        "SEC-NO-UNSAFE-DESERIALIZATION-1" => sec_unsafe_deser_regex(),
         _ => return Vec::new(),
     };
     let mut lines: Vec<usize> = re

@@ -72,6 +72,7 @@ pub const AUDIT_RULES: &[&str] = &[
     // completeness (brownfield path-level audit visibility) — its primary home is the gate.
     "SEC-NO-SECRET-FILE-1",
     "SEC-NO-DISABLED-TLS-1",
+    "SEC-NO-UNSAFE-DESERIALIZATION-1",
 ];
 
 /// One violation already present in the repo.
