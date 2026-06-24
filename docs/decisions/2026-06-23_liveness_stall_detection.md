@@ -275,6 +275,20 @@ already passes `Some(on_activity)`) now fires heartbeats during cargo fmt/clippy
 without any server-side change. All non-`_and_activity` callers continue to receive
 `None` and are unaffected. 1 new fleet test (`layer2_runner_with_activity_forwards_heartbeat_to_rust_runner`) verifies end-to-end forwarding.
 
+### Step 4c — multilang heartbeat extension (follow-up commit, 2026-06-24)
+
+All six non-Rust layer-2 runners (`JsCheckRunner`, `PythonCheckRunner`, `GoCheckRunner`,
+`RubyCheckRunner`, `JavaCheckRunner`, `CSharpCheckRunner`) gained `on_progress:
+Option<HeartbeatFn>` fields and `with_heartbeat(cb)` constructors mirroring the Rust runner.
+Every `run_command(...)` call site in these runners now passes `self.on_progress.as_ref()`
+instead of `None`, so each stdout line from npm / ruff / pytest / gofmt / bundle / mvnw /
+dotnet fires the heartbeat. `PolyglotCheckRunner::from_detected_with_heartbeat` now wires
+`cb` into ALL seven runners (previously only the Rust one). `GoCheckRunner` was converted
+from a unit struct to a named-field struct; its existing test updated accordingly. 4 new tests
+verify the JS heartbeat path and the `from_detected_with_heartbeat` wiring. All non-heartbeat
+constructors and callers pass `None` and are unaffected (backwards-compatible). 205
+camerata-checks tests pass.
+
 ### What was explicitly declined (out of scope per task brief)
 
 - `sysinfo` / CPU probe — not added (no new dep).

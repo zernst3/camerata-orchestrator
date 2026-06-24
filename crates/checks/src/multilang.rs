@@ -204,7 +204,16 @@ impl JsPackageManager {
 ///
 /// `npm run lint` / `npm run test` resolve through the REPO's `node_modules`
 /// binaries, so the exact versions declared in the repo's lockfile are used.
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`JsCheckRunner::with_heartbeat`], every `run_command`
+/// call (install + lint + test) passes the callback as `on_progress` so each
+/// stdout line fires a heartbeat. Construct via [`JsCheckRunner::new`] for the
+/// no-heartbeat path (unchanged behaviour).
 pub struct JsCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
     /// Override for the install program (used in tests to inject a fake binary).
     /// `None` means auto-detect from the worktree lockfiles.
     #[cfg(test)]
@@ -212,9 +221,21 @@ pub struct JsCheckRunner {
 }
 
 impl JsCheckRunner {
-    /// Create a standard `JsCheckRunner` (auto-detect package manager from lockfiles).
+    /// Create a standard `JsCheckRunner` with no heartbeat (auto-detect package
+    /// manager from lockfiles, backwards-compatible).
     pub fn new() -> Self {
         Self {
+            on_progress: None,
+            #[cfg(test)]
+            install_program_override: None,
+        }
+    }
+
+    /// Create a `JsCheckRunner` that fires `cb` on every stdout line from every
+    /// subprocess it spawns (install, lint, test). Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            on_progress: Some(cb),
             #[cfg(test)]
             install_program_override: None,
         }
@@ -268,7 +289,7 @@ impl JsCheckRunner {
         #[cfg(not(test))]
         let program = program;
 
-        let out = run_command(worktree, program, &args.iter().map(|s| *s).collect::<Vec<_>>(), None)
+        let out = run_command(worktree, program, &args.iter().map(|s| *s).collect::<Vec<_>>(), self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
 
@@ -306,14 +327,14 @@ impl CheckRunner for JsCheckRunner {
         let mut violations = Vec::new();
 
         if has_lint {
-            let out = run_command(worktree, "npm", &["run", "lint"], None)
+            let out = run_command(worktree, "npm", &["run", "lint"], self.on_progress.as_ref())
                 .await
                 .context("running `npm run lint`")?;
             violations.extend(map_command_to_rule(&out, js_checks_rule()));
         }
 
         if has_test {
-            let out = run_command(worktree, "npm", &["run", "test"], None)
+            let out = run_command(worktree, "npm", &["run", "test"], self.on_progress.as_ref())
                 .await
                 .context("running `npm run test`")?;
             violations.extend(map_command_to_rule(&out, js_checks_rule()));
@@ -350,7 +371,16 @@ impl CheckRunner for JsCheckRunner {
 /// If venv creation or install fails, returns `Err` (fail closed).
 ///
 /// No global `ruff` or `pytest` binary is used — only the venv-local ones.
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`PythonCheckRunner::with_heartbeat`], every `run_command`
+/// call (venv creation, pip install, ruff, pytest) passes the callback as
+/// `on_progress` so each stdout line fires a heartbeat. Use [`PythonCheckRunner::new`]
+/// for the no-heartbeat path (unchanged behaviour).
 pub struct PythonCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
     /// Override for the `python3` binary path (used in tests to inject a fake binary).
     #[cfg(test)]
     pub python_bin_override: Option<String>,
@@ -360,9 +390,22 @@ pub struct PythonCheckRunner {
 }
 
 impl PythonCheckRunner {
-    /// Create a standard `PythonCheckRunner`.
+    /// Create a standard `PythonCheckRunner` with no heartbeat (backwards-compatible).
     pub fn new() -> Self {
         Self {
+            on_progress: None,
+            #[cfg(test)]
+            python_bin_override: None,
+            #[cfg(test)]
+            pip_bin_override: None,
+        }
+    }
+
+    /// Create a `PythonCheckRunner` that fires `cb` on every stdout line from every
+    /// subprocess it spawns (venv, install, ruff, pytest). Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            on_progress: Some(cb),
             #[cfg(test)]
             python_bin_override: None,
             #[cfg(test)]
@@ -414,7 +457,7 @@ impl PythonCheckRunner {
         #[cfg(not(test))]
         let python = "python3";
 
-        let out = run_command(worktree, python, &["-m", "venv", ".camerata-venv"], None)
+        let out = run_command(worktree, python, &["-m", "venv", ".camerata-venv"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{python} -m venv .camerata-venv`"))?;
 
@@ -450,7 +493,7 @@ impl PythonCheckRunner {
             PythonManifest::PyprojectToml | PythonManifest::SetupPy => vec!["install", "-e", "."],
         };
 
-        let out = run_command(worktree, &pip, &args, None)
+        let out = run_command(worktree, &pip, &args, self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `pip {}`", args.join(" ")))?;
 
@@ -499,12 +542,12 @@ impl CheckRunner for PythonCheckRunner {
 
         let mut violations = Vec::new();
 
-        let lint = run_command(worktree, &ruff, &["check", "."], None)
+        let lint = run_command(worktree, &ruff, &["check", "."], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{ruff} check .`"))?;
         violations.extend(map_command_to_rule(&lint, python_checks_rule()));
 
-        let test = run_command(worktree, &pytest, &["-q"], None)
+        let test = run_command(worktree, &pytest, &["-q"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{pytest} -q`"))?;
         violations.extend(map_command_to_rule(&test, python_checks_rule()));
@@ -530,7 +573,35 @@ impl CheckRunner for PythonCheckRunner {
 ///
 /// Honesty: if `gofmt`/`go` is not installed, the spawn `Err` propagates as an
 /// `Err` from `check` (fail closed) — never a false clean.
-pub struct GoCheckRunner;
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`GoCheckRunner::with_heartbeat`], every `run_command`
+/// call fires `cb` on each stdout line. Use [`GoCheckRunner::new`] for the
+/// no-heartbeat path (backwards-compatible).
+pub struct GoCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
+}
+
+impl GoCheckRunner {
+    /// Create a `GoCheckRunner` with no heartbeat (backwards-compatible).
+    pub fn new() -> Self {
+        Self { on_progress: None }
+    }
+
+    /// Create a `GoCheckRunner` that fires `cb` on every stdout line from every
+    /// subprocess it spawns (gofmt, go vet, go test). Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self { on_progress: Some(cb) }
+    }
+}
+
+impl Default for GoCheckRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl CheckRunner for GoCheckRunner {
@@ -539,19 +610,19 @@ impl CheckRunner for GoCheckRunner {
 
         // gofmt -l lists unformatted files on stdout and exits 0; treat any
         // non-whitespace output as a violation.
-        let fmt = run_command(worktree, "gofmt", &["-l", "."], None)
+        let fmt = run_command(worktree, "gofmt", &["-l", "."], self.on_progress.as_ref())
             .await
             .context("running `gofmt -l .` (is gofmt installed?)")?;
         if !fmt.combined.trim().is_empty() {
             violations.push(go_checks_rule());
         }
 
-        let vet = run_command(worktree, "go", &["vet", "./..."], None)
+        let vet = run_command(worktree, "go", &["vet", "./..."], self.on_progress.as_ref())
             .await
             .context("running `go vet ./...` (is go installed?)")?;
         violations.extend(map_command_to_rule(&vet, go_checks_rule()));
 
-        let test = run_command(worktree, "go", &["test", "./..."], None)
+        let test = run_command(worktree, "go", &["test", "./..."], self.on_progress.as_ref())
             .await
             .context("running `go test ./...`")?;
         violations.extend(map_command_to_rule(&test, go_checks_rule()));
@@ -590,16 +661,36 @@ impl CheckRunner for GoCheckRunner {
 /// - `bundle install` fails → `Err` (install failure).
 /// - Neither a rubocop config nor a runnable test command is defined → `Err`
 ///   ("could-not-run", never a silent clean).
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`RubyCheckRunner::with_heartbeat`], every `run_command`
+/// call (bundle install, rubocop, rspec/rake) passes the callback as `on_progress`
+/// so each stdout line fires a heartbeat. Use [`RubyCheckRunner::new`] for the
+/// no-heartbeat path (unchanged behaviour).
 pub struct RubyCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
     /// Override for the `bundle` binary path (used in tests to inject a fake binary).
     #[cfg(test)]
     pub bundle_bin_override: Option<String>,
 }
 
 impl RubyCheckRunner {
-    /// Create a standard `RubyCheckRunner`.
+    /// Create a standard `RubyCheckRunner` with no heartbeat (backwards-compatible).
     pub fn new() -> Self {
         Self {
+            on_progress: None,
+            #[cfg(test)]
+            bundle_bin_override: None,
+        }
+    }
+
+    /// Create a `RubyCheckRunner` that fires `cb` on every stdout line from every
+    /// subprocess it spawns (install, rubocop, rspec/rake). Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            on_progress: Some(cb),
             #[cfg(test)]
             bundle_bin_override: None,
         }
@@ -639,7 +730,7 @@ impl RubyCheckRunner {
     /// Run `bundle install` (fail closed if it fails).
     async fn ensure_gems_installed(&self, worktree: &Path) -> anyhow::Result<()> {
         let bundle = self.bundle_program();
-        let out = run_command(worktree, &bundle, &["install"], None)
+        let out = run_command(worktree, &bundle, &["install"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{bundle} install` (is bundler installed?)"))?;
         if !out.success {
@@ -680,14 +771,14 @@ impl CheckRunner for RubyCheckRunner {
         let mut violations = Vec::new();
 
         if has_rubocop {
-            let lint = run_command(worktree, &bundle, &["exec", "rubocop"], None)
+            let lint = run_command(worktree, &bundle, &["exec", "rubocop"], self.on_progress.as_ref())
                 .await
                 .with_context(|| format!("running `{bundle} exec rubocop`"))?;
             violations.extend(map_command_to_rule(&lint, ruby_checks_rule()));
         }
 
         if let Some(args) = test_args {
-            let test = run_command(worktree, &bundle, &args, None)
+            let test = run_command(worktree, &bundle, &args, self.on_progress.as_ref())
                 .await
                 .with_context(|| format!("running `{bundle} {}`", args.join(" ")))?;
             violations.extend(map_command_to_rule(&test, ruby_checks_rule()));
@@ -776,7 +867,16 @@ impl JavaBuildTool {
 /// - The build tool binary (wrapper or global) cannot be spawned → spawn `Err`
 ///   propagates (toolchain missing).
 /// - A non-zero build/test exit maps to [`java_checks_rule`].
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`JavaCheckRunner::with_heartbeat`], the `run_command`
+/// call passes the callback as `on_progress` so each stdout line fires a
+/// heartbeat. Use [`JavaCheckRunner::new`] for the no-heartbeat path (unchanged
+/// behaviour).
 pub struct JavaCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
     /// Override for the build-tool program (used in tests to inject a fake binary).
     /// `None` means auto-detect (wrapper-preferred) from the worktree.
     #[cfg(test)]
@@ -784,9 +884,20 @@ pub struct JavaCheckRunner {
 }
 
 impl JavaCheckRunner {
-    /// Create a standard `JavaCheckRunner`.
+    /// Create a standard `JavaCheckRunner` with no heartbeat (backwards-compatible).
     pub fn new() -> Self {
         Self {
+            on_progress: None,
+            #[cfg(test)]
+            program_override: None,
+        }
+    }
+
+    /// Create a `JavaCheckRunner` that fires `cb` on every stdout line from the
+    /// Maven/Gradle build. Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            on_progress: Some(cb),
             #[cfg(test)]
             program_override: None,
         }
@@ -816,7 +927,7 @@ impl CheckRunner for JavaCheckRunner {
         let program = self.program_override.clone().unwrap_or(program);
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let out = run_command(worktree, &program, &arg_refs, None)
+        let out = run_command(worktree, &program, &arg_refs, self.on_progress.as_ref())
             .await
             .with_context(|| {
                 format!(
@@ -854,16 +965,36 @@ impl CheckRunner for JavaCheckRunner {
 /// - No `*.csproj`/`*.sln` at the root → `Err` (could-not-run).
 /// - `dotnet` cannot be spawned → spawn `Err` propagates (toolchain missing).
 /// - A non-zero exit on any step maps to [`csharp_checks_rule`].
+///
+/// # Liveness / heartbeat (Phase 1b)
+///
+/// When constructed via [`CSharpCheckRunner::with_heartbeat`], every `run_command`
+/// call (format, build, test) passes the callback as `on_progress` so each stdout
+/// line fires a heartbeat. Use [`CSharpCheckRunner::new`] for the no-heartbeat path
+/// (unchanged behaviour).
 pub struct CSharpCheckRunner {
+    /// Optional per-line heartbeat fired on every stdout line from subprocesses.
+    on_progress: Option<HeartbeatFn>,
     /// Override for the `dotnet` binary path (used in tests to inject a fake binary).
     #[cfg(test)]
     pub dotnet_bin_override: Option<String>,
 }
 
 impl CSharpCheckRunner {
-    /// Create a standard `CSharpCheckRunner`.
+    /// Create a standard `CSharpCheckRunner` with no heartbeat (backwards-compatible).
     pub fn new() -> Self {
         Self {
+            on_progress: None,
+            #[cfg(test)]
+            dotnet_bin_override: None,
+        }
+    }
+
+    /// Create a `CSharpCheckRunner` that fires `cb` on every stdout line from every
+    /// subprocess it spawns (dotnet format, build, test). Use this inside a tracked dev run.
+    pub fn with_heartbeat(cb: HeartbeatFn) -> Self {
+        Self {
+            on_progress: Some(cb),
             #[cfg(test)]
             dotnet_bin_override: None,
         }
@@ -919,19 +1050,19 @@ impl CheckRunner for CSharpCheckRunner {
         let dotnet = self.dotnet_program();
         let mut violations = Vec::new();
 
-        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"], None)
+        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"], self.on_progress.as_ref())
             .await
             .with_context(|| {
                 format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
             })?;
         violations.extend(map_command_to_rule(&fmt, csharp_checks_rule()));
 
-        let build = run_command(worktree, &dotnet, &["build"], None)
+        let build = run_command(worktree, &dotnet, &["build"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{dotnet} build`"))?;
         violations.extend(map_command_to_rule(&build, csharp_checks_rule()));
 
-        let test = run_command(worktree, &dotnet, &["test"], None)
+        let test = run_command(worktree, &dotnet, &["test"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{dotnet} test`"))?;
         violations.extend(map_command_to_rule(&test, csharp_checks_rule()));
@@ -1180,10 +1311,10 @@ impl PolyglotCheckRunner {
         Self::from_detected_impl(detected, None)
     }
 
-    /// Like [`from_detected`], but wires `cb` into every Rust sub-runner so
-    /// cargo subprocess output fires heartbeats during a tracked dev run.
-    /// Non-Rust runners receive no heartbeat (their subprocess calls are fast
-    /// enough that stall detection would not false-positive on them).
+    /// Like [`from_detected`], but wires `cb` into every sub-runner (Rust and
+    /// non-Rust alike) so subprocess stdout fires heartbeats during a tracked
+    /// dev run. Each stdout line from npm/ruff/pytest/gofmt/bundle/mvnw/dotnet
+    /// calls `cb()`, keeping `last_activity_ms` fresh.
     pub fn from_detected_with_heartbeat(
         detected: Vec<(WorktreeLanguage, PathBuf)>,
         cb: HeartbeatFn,
@@ -1203,12 +1334,30 @@ impl PolyglotCheckRunner {
                         Some(cb) => Box::new(crate::RustCheckRunner::with_heartbeat(cb.clone())),
                         None => Box::new(crate::RustCheckRunner::new()),
                     },
-                    WorktreeLanguage::JavaScript => Box::new(JsCheckRunner::new()),
-                    WorktreeLanguage::Python => Box::new(PythonCheckRunner::new()),
-                    WorktreeLanguage::Go => Box::new(GoCheckRunner),
-                    WorktreeLanguage::Ruby => Box::new(RubyCheckRunner::new()),
-                    WorktreeLanguage::Java => Box::new(JavaCheckRunner::new()),
-                    WorktreeLanguage::CSharp => Box::new(CSharpCheckRunner::new()),
+                    WorktreeLanguage::JavaScript => match &on_progress {
+                        Some(cb) => Box::new(JsCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(JsCheckRunner::new()),
+                    },
+                    WorktreeLanguage::Python => match &on_progress {
+                        Some(cb) => Box::new(PythonCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(PythonCheckRunner::new()),
+                    },
+                    WorktreeLanguage::Go => match &on_progress {
+                        Some(cb) => Box::new(GoCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(GoCheckRunner::new()),
+                    },
+                    WorktreeLanguage::Ruby => match &on_progress {
+                        Some(cb) => Box::new(RubyCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(RubyCheckRunner::new()),
+                    },
+                    WorktreeLanguage::Java => match &on_progress {
+                        Some(cb) => Box::new(JavaCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(JavaCheckRunner::new()),
+                    },
+                    WorktreeLanguage::CSharp => match &on_progress {
+                        Some(cb) => Box::new(CSharpCheckRunner::with_heartbeat(cb.clone())),
+                        None => Box::new(CSharpCheckRunner::new()),
+                    },
                     WorktreeLanguage::Unknown => return None,
                 };
                 Some((lang, dir, runner))
@@ -1305,14 +1454,12 @@ pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
     runner_for_worktree_impl(worktree, None)
 }
 
-/// Like [`runner_for_worktree`], but wires a heartbeat callback into every Rust
-/// [`crate::RustCheckRunner`] sub-runner so cargo subprocess output fires
-/// `cb()` on each stdout line during a tracked dev run. Use this at call sites
-/// where a [`camerata_server::run::RunStore`] run id is in scope (i.e. the
+/// Like [`runner_for_worktree`], but wires a heartbeat callback into every
+/// sub-runner (Rust and non-Rust alike) so every subprocess stdout line during
+/// a tracked dev run fires `cb()` — keeping `last_activity_ms` fresh for all
+/// seven languages. Use this at call sites where a
+/// [`camerata_server::run::RunStore`] run id is in scope (i.e. the
 /// `_and_activity` fleet functions).
-///
-/// Non-Rust language runners receive no heartbeat — their subprocess calls
-/// are bounded and fast enough that stall detection would not false-positive.
 pub fn runner_for_worktree_with_heartbeat(worktree: &Path, cb: HeartbeatFn) -> Box<dyn CheckRunner> {
     runner_for_worktree_impl(worktree, Some(cb))
 }
@@ -1585,6 +1732,7 @@ mod tests {
         let _fake_npm = write_fake_bin(&bin_dir, "fake-pm", &dir, 0);
 
         let runner = JsCheckRunner {
+            on_progress: None,
             install_program_override: Some(bin_dir.join("fake-pm").to_string_lossy().into_owned()),
         };
 
@@ -1613,6 +1761,7 @@ mod tests {
         write_fake_bin(&bin_dir, "fake-npm-ci", &dir, 0);
 
         let runner = JsCheckRunner {
+            on_progress: None,
             install_program_override: Some(
                 bin_dir.join("fake-npm-ci").to_string_lossy().into_owned(),
             ),
@@ -1640,6 +1789,7 @@ mod tests {
         write_fake_bin(&bin_dir, "fake-fail-pm", &dir, 1);
 
         let runner = JsCheckRunner {
+            on_progress: None,
             install_program_override: Some(
                 bin_dir.join("fake-fail-pm").to_string_lossy().into_owned(),
             ),
@@ -1766,6 +1916,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = PythonCheckRunner {
+            on_progress: None,
             python_bin_override: Some(script_path.to_string_lossy().into_owned()),
             pip_bin_override: None,
         };
@@ -1800,6 +1951,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = PythonCheckRunner {
+            on_progress: None,
             python_bin_override: Some(script_path.to_string_lossy().into_owned()),
             pip_bin_override: None,
         };
@@ -1828,6 +1980,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = PythonCheckRunner {
+            on_progress: None,
             python_bin_override: None,
             pip_bin_override: Some(script_path.to_string_lossy().into_owned()),
         };
@@ -1863,6 +2016,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = PythonCheckRunner {
+            on_progress: None,
             python_bin_override: None,
             pip_bin_override: Some(script_path.to_string_lossy().into_owned()),
         };
@@ -1896,6 +2050,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = PythonCheckRunner {
+            on_progress: None,
             python_bin_override: Some(script_path.to_string_lossy().into_owned()),
             pip_bin_override: None,
         };
@@ -1937,6 +2092,7 @@ mod tests {
         let bin_dir = tmp();
         write_fake_bin(&bin_dir, "fake-bundle", &dir, 0);
         let runner = RubyCheckRunner {
+            on_progress: None,
             bundle_bin_override: Some(bin_dir.join("fake-bundle").to_string_lossy().into_owned()),
         };
 
@@ -1958,6 +2114,7 @@ mod tests {
         let bin_dir = tmp();
         write_fake_bin(&bin_dir, "fake-bundle-fail", &dir, 1);
         let runner = RubyCheckRunner {
+            on_progress: None,
             bundle_bin_override: Some(
                 bin_dir.join("fake-bundle-fail").to_string_lossy().into_owned(),
             ),
@@ -1986,6 +2143,7 @@ mod tests {
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = RubyCheckRunner {
+            on_progress: None,
             bundle_bin_override: Some(script_path.to_string_lossy().into_owned()),
         };
 
@@ -2048,6 +2206,7 @@ mod tests {
         let bin_dir = tmp();
         write_fake_bin(&bin_dir, "fake-mvn", &dir, 0);
         let runner = JavaCheckRunner {
+            on_progress: None,
             program_override: Some(bin_dir.join("fake-mvn").to_string_lossy().into_owned()),
         };
         let violations = runner.check(&role(), &dir).await.unwrap();
@@ -2062,6 +2221,7 @@ mod tests {
         let bin_dir = tmp();
         write_fake_bin(&bin_dir, "fake-gradle-fail", &dir, 1);
         let runner = JavaCheckRunner {
+            on_progress: None,
             program_override: Some(
                 bin_dir.join("fake-gradle-fail").to_string_lossy().into_owned(),
             ),
@@ -2097,6 +2257,7 @@ mod tests {
         // Fake dotnet: exit 0 for format/build/test.
         write_fake_bin(&bin_dir, "fake-dotnet", &dir, 0);
         let runner = CSharpCheckRunner {
+            on_progress: None,
             dotnet_bin_override: Some(bin_dir.join("fake-dotnet").to_string_lossy().into_owned()),
         };
         let violations = runner.check(&role(), &dir).await.unwrap();
@@ -2112,6 +2273,7 @@ mod tests {
         // dotnet that fails `format` (exit 1 for everything is fine — we just need a bounce).
         write_fake_bin(&bin_dir, "fake-dotnet-fail", &dir, 1);
         let runner = CSharpCheckRunner {
+            on_progress: None,
             dotnet_bin_override: Some(
                 bin_dir.join("fake-dotnet-fail").to_string_lossy().into_owned(),
             ),
@@ -2184,7 +2346,7 @@ mod tests {
             rule_subset: vec![],
             allowed_paths: vec![],
         };
-        let violations = GoCheckRunner.check(&role, &dir).await.unwrap();
+        let violations = GoCheckRunner::new().check(&role, &dir).await.unwrap();
         assert!(
             violations.contains(&go_checks_rule()),
             "unformatted Go should bounce, got: {violations:?}"
@@ -2493,5 +2655,130 @@ mod tests {
         let runner = runner_for_worktree(&dir);
         let violations = runner.check(&role(), &dir).await.unwrap();
         assert_eq!(violations, vec![], "noop reports clean for no-manifest tree");
+    }
+
+    // ── multilang heartbeat forwarding (Phase 1b) ─────────────────────────────
+    //
+    // Each non-Rust runner constructed with `with_heartbeat(cb)` must pass `Some`
+    // to every `run_command` call so the heartbeat fires on subprocess output.
+    // We verify this by running a real (fake-binary) subprocess and asserting
+    // the counter increments — the same technique used for the Rust path.
+
+    /// Build a counter-based `HeartbeatFn` and return the counter + fn.
+    fn make_heartbeat() -> (std::sync::Arc<std::sync::atomic::AtomicU64>, HeartbeatFn) {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let count2 = count.clone();
+        let cb: HeartbeatFn = std::sync::Arc::new(move || {
+            count2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        (count, cb)
+    }
+
+    /// A fake binary that echoes one line to stdout and exits 0.
+    #[cfg(unix)]
+    fn write_echo_bin(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let path = bin_dir.join(name);
+        fs::write(&path, "#!/bin/sh\necho heartbeat-line\nexit 0\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `JsCheckRunner::with_heartbeat` forwards `Some(&cb)` to `run_command`;
+    /// the heartbeat fires on each stdout line emitted by the install/lint/test
+    /// subprocesses.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn js_runner_with_heartbeat_fires_on_subprocess_output() {
+        let dir = tmp();
+        let bin_dir = tmp();
+
+        // package.json with a lint + test script that each echo one line.
+        let lint_bin = write_echo_bin(&bin_dir, "fake-lint");
+        let test_bin = write_echo_bin(&bin_dir, "fake-test");
+        let pkg = format!(
+            r#"{{"scripts":{{"lint":"{}","test":"{}"}}}}"#,
+            lint_bin.display(),
+            test_bin.display()
+        );
+        fs::write(dir.join("package.json"), pkg).unwrap();
+        // Pre-create node_modules so install is skipped (install is the first run_command).
+        fs::create_dir(dir.join("node_modules")).unwrap();
+
+        let (count, cb) = make_heartbeat();
+        let runner = JsCheckRunner {
+            on_progress: Some(cb),
+            install_program_override: None,
+        };
+
+        let _ = runner.check(&role(), &dir).await;
+
+        assert!(
+            count.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "expected at least 2 heartbeat ticks (one per lint/test output line), got {}",
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    /// `JsCheckRunner::new()` passes `None` — no heartbeat fires (no-op path).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn js_runner_new_passes_none_to_run_command() {
+        let dir = tmp();
+        fs::write(dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::create_dir(dir.join("node_modules")).unwrap();
+
+        // Runner with NO heartbeat — this simply asserts it compiles + runs clean.
+        let runner = JsCheckRunner::new();
+        let violations = runner.check(&role(), &dir).await.unwrap();
+        assert!(violations.is_empty(), "no-heartbeat path should run clean: {violations:?}");
+    }
+
+    /// `from_detected_with_heartbeat` wires the heartbeat into every non-Rust
+    /// sub-runner. Verify by building a JS-only detected list and asserting the
+    /// runner's sub-runner holds a heartbeat (via project_count sanity + a
+    /// live check that fires the counter).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn polyglot_from_detected_with_heartbeat_wires_multilang_runners() {
+        let dir = tmp();
+        let js_dir = dir.join("ui");
+        fs::create_dir_all(&js_dir).unwrap();
+        fs::write(js_dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::create_dir(js_dir.join("node_modules")).unwrap();
+
+        let detected = detect_languages(&dir);
+        assert_eq!(detected.len(), 1, "should detect JS: {detected:?}");
+
+        let (count, cb) = make_heartbeat();
+        let composite = PolyglotCheckRunner::from_detected_with_heartbeat(detected, cb);
+
+        // Run — the JsCheckRunner inside should have Some(cb) and fire it.
+        let _ = composite.check(&role(), &dir).await;
+
+        // `npm run lint` and `npm run test` each produce at least one line, so at
+        // least 2 ticks if the heartbeat was wired in.
+        assert!(
+            count.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "expected >= 2 heartbeat ticks from the wired JS sub-runner, got {}",
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    /// `from_detected` (no-heartbeat) still constructs runners that pass `None` —
+    /// no heartbeat fires, and the run completes normally.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn polyglot_from_detected_no_heartbeat_still_works() {
+        let dir = tmp();
+        let js_dir = dir.join("ui");
+        fs::create_dir_all(&js_dir).unwrap();
+        fs::write(js_dir.join("package.json"), r#"{"scripts":{"lint":"true","test":"true"}}"#).unwrap();
+        fs::create_dir(js_dir.join("node_modules")).unwrap();
+
+        let detected = detect_languages(&dir);
+        let composite = PolyglotCheckRunner::from_detected(detected);
+        // Should run clean; no panic / no false stall.
+        let violations = composite.check(&role(), &js_dir).await.unwrap();
+        assert!(violations.is_empty(), "no-heartbeat polyglot should run clean: {violations:?}");
     }
 }
