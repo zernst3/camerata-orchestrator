@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-liveness = { path = "../liveness" }
 camerata-worktracker = { path = "../worktracker" }
 tokio = { workspace = true }
 serde = { workspace = true }

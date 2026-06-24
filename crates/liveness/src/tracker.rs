@@ -6,9 +6,8 @@
 //!
 //! # Design goals
 //!
-//! - **Zero tokio/async deps** — lives in `camerata-core`, which is dep-light by
-//!   design. The async helpers (mtime probe, output-line heartbeat) live in
-//!   `camerata-agent`.
+//! - **Zero tokio/async deps** — this module uses only `std`. The async helpers (mtime
+//!   probe, output-line heartbeat) live in `crate::probe`.
 //! - **Thread-safe** — `Arc<AtomicU64>` for the timestamp; `Arc<Mutex<String>>` for
 //!   the optional progress label. Clones cheaply (Arc bumps).
 //! - **Pure stall math** — `idle_ms` and `is_stalled` are deterministic given the

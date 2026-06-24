@@ -641,6 +641,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-core",
+ "camerata-liveness",
  "camerata-worktracker",
  "chrono",
  "serde",
@@ -747,6 +748,14 @@ name = "camerata-linter-registry"
 version = "0.0.0"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "camerata-liveness"
+version = "0.0.0"
+dependencies = [
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
