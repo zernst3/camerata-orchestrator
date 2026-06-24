@@ -54,3 +54,47 @@ code. This is correct layering, not a weakness.
 - **Per-repo artifact noted:** on a pure-Rust repo only the floor-overlapping semgrep rules
   fire (the additive four are Python/JS-targeted), which is why semgrep *looked* fully
   redundant on Camerata. It isn't, for a Python/JS codebase.
+
+## Implemented (2026-06-24) — SEC-NO-UNSAFE-DESERIALIZATION-1
+
+The unsafe-deserialization port is complete. Gate-blocking match-set:
+
+| Sink | Language | Notes |
+|---|---|---|
+| `yaml.load(` | Python | Blocked UNLESS the same line contains `SafeLoader` or `FullLoader` (carve-out) |
+| `yaml.unsafe_load(` | Python | Always blocked; no safe variant |
+| `pickle.load(` / `pickle.loads(` | Python | Always blocked |
+| `cPickle.load(` / `cPickle.loads(` | Python | C-extension alias of pickle; always blocked |
+| `_pickle.load(` | Python | CPython internal alias; always blocked |
+| `unserialize(` | PHP | Always blocked; PHP manual explicitly warns against untrusted input |
+| `Marshal.load(` / `Marshal.restore(` | Ruby | Always blocked |
+| `BinaryFormatter` | .NET | Always blocked; deprecated in .NET 5+ for this reason |
+| `NetDataContractSerializer` | .NET | Always blocked |
+| `LosFormatter` | .NET | Always blocked |
+| `ObjectStateFormatter` | .NET | Always blocked |
+
+**SafeLoader / FullLoader carve-out:** `yaml.load(data, Loader=yaml.SafeLoader)` and
+`yaml.load(data, Loader=yaml.FullLoader)` are safe. The Rust regex crate has no lookahead,
+so the carve-out is applied post-match in both the write-time arm and the `content_match_lines`
+(brownfield audit) path: each match on `yaml.load(` is checked against the text of its line.
+
+**Java gap:** Java's `ObjectInputStream.readObject()` is excluded. Without AST taint-tracking
+the FP rate would block every framework using Java serialisation internally (Spring, Hibernate,
+RMI). Java coverage is deferred to the semgrep tier.
+
+**Test-scope policy:** Waive. Test fixtures legitimately deserialise controlled payloads.
+
+**Dedup category:** `"deser"`. The semgrep rule `camerata.security.yaml-unsafe-load` was
+previously in the `"yaml"` category (no floor twin). It is now remapped to `"deser"` so that a
+floor finding and a semgrep finding on the same `(repo, path, line)` collapse to one row, floor
+canonical. The `"yaml"` category string is retired.
+
+**Files changed:**
+- `crates/gateway/src/lib.rs` — rule id constructor, test-scope policy (Waive), RULE_REGISTRY
+  entry, `content_match_lines` dispatch with SafeLoader carve-out, `sec_unsafe_deser_regex()`,
+  `arm_sec_no_unsafe_deserialization_1`, 19 gateway tests.
+- `crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml` — corpus TOML.
+- `crates/server/src/onboard.rs` — AUDIT_RULES.
+- `crates/server/src/lib.rs` — `finding_security_category` (new "deser" arm + yaml-unsafe-load
+  remap), dedup regression test, rule-count integration test.
+- `crates/server/src/eval.rs` — 5 positive eval fixtures + 3 clean controls.

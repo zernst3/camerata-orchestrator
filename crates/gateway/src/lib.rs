@@ -99,6 +99,11 @@ pub fn sec_no_disabled_tls_1_rule() -> RuleId {
     RuleId("SEC-NO-DISABLED-TLS-1".to_string())
 }
 
+/// The id for the unsafe-deserialization rule.
+pub fn sec_no_unsafe_deserialization_1_rule() -> RuleId {
+    RuleId("SEC-NO-UNSAFE-DESERIALIZATION-1".to_string())
+}
+
 /// The id for the Camerata config protection rule.
 ///
 /// `.camerata/` contains operator-controlled configuration (governance rules,
@@ -130,7 +135,7 @@ pub enum TestScopePolicy {
 /// enforced in test scope so they cannot be evaded by placing content in a test file).
 pub fn test_scope_policy(rule_id: &str) -> TestScopePolicy {
     match rule_id {
-        "SEC-NO-RAW-SQL-CONCAT-1" | "SEC-NO-DISABLED-TLS-1" => TestScopePolicy::Waive,
+        "SEC-NO-RAW-SQL-CONCAT-1" | "SEC-NO-DISABLED-TLS-1" | "SEC-NO-UNSAFE-DESERIALIZATION-1" => TestScopePolicy::Waive,
         _ => TestScopePolicy::Downgrade,
     }
 }
@@ -235,6 +240,16 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
         arm: arm_sec_no_disabled_tls_1,
     },
     RuleEntry {
+        id: "SEC-NO-UNSAFE-DESERIALIZATION-1",
+        description: "Deny content that uses an unsafe deserialization call on untrusted input: \
+                      Python yaml.load without SafeLoader/FullLoader, yaml.unsafe_load, \
+                      pickle.load/loads, cPickle.load/loads, _pickle.load; PHP unserialize(); \
+                      Ruby Marshal.load/restore; .NET BinaryFormatter/NetDataContractSerializer/\
+                      LosFormatter/ObjectStateFormatter. Java deserialization is a known gap \
+                      (too many FPs without AST context). Waive policy in test scope.",
+        arm: arm_sec_no_unsafe_deserialization_1,
+    },
+    RuleEntry {
         id: "SEC-NO-CAMERATA-CONFIG-1",
         description: "Deny any write whose path targets the `.camerata/` configuration \
                       directory. This directory contains operator-controlled governance \
@@ -252,6 +267,29 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
 /// line-by-line scan misses). Path-based rules return empty. The brownfield audit uses
 /// this for per-line findings; the write-time gate still uses the boolean arm.
 pub fn content_match_lines(rule_id: &str, content: &str) -> Vec<usize> {
+    // SEC-NO-UNSAFE-DESERIALIZATION-1 requires the SafeLoader/FullLoader carve-out:
+    // matches on `yaml.load(` where the SAME LINE also contains SafeLoader or FullLoader
+    // must be suppressed. The carve-out is applied here (not just in the arm) so the
+    // brownfield audit's per-line attribution also respects it.
+    if rule_id == "SEC-NO-UNSAFE-DESERIALIZATION-1" {
+        let re = sec_unsafe_deser_regex();
+        let mut lines: Vec<usize> = re
+            .find_iter(content)
+            .filter_map(|m| {
+                let lineno = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
+                // Apply SafeLoader/FullLoader carve-out: skip yaml.load( matches on lines
+                // that also carry a safe-loader keyword.
+                if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, lineno)) {
+                    return None;
+                }
+                Some(lineno)
+            })
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        return lines;
+    }
+
     let re = match rule_id {
         "SEC-NO-HARDCODED-SECRETS-1" => sec_secrets_regex(),
         "SEC-NO-RAW-SQL-CONCAT-1" => sec_sql_concat_regex(),
@@ -1151,6 +1189,157 @@ fn arm_sec_no_disabled_tls_1(path: &str, content: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+// ── SEC-NO-UNSAFE-DESERIALIZATION-1 ──────────────────────────────────────────
+
+/// Compiled pattern for `SEC-NO-UNSAFE-DESERIALIZATION-1`.
+///
+/// # Match-set (language-by-language)
+///
+/// **Python**
+/// - `yaml.load(` — but ONLY when the line does NOT also contain `SafeLoader` or `FullLoader`.
+///   The regex crate has no lookahead, so we use two passes: first match `yaml.load(`; then
+///   the arm checks whether the matched line also carries the safe-loader token, and if so it
+///   advances past that match and tries the next one.
+/// - `yaml.unsafe_load(` — unconditionally unsafe (no safe-load variant).
+/// - `pickle.load(` / `pickle.loads(` — unconditionally unsafe on untrusted input.
+/// - `cPickle.load(` / `cPickle.loads(` — C extension alias of pickle.
+/// - `_pickle.load(` — CPython private alias; also matches pickle.load / cPickle.load to avoid
+///   false negatives on minified imports.
+///
+/// **PHP**
+/// - `unserialize(` — no safe alternative; the PHP manual explicitly warns against use on
+///   untrusted input.
+///
+/// **Ruby**
+/// - `Marshal.load(` / `Marshal.restore(` — Ruby's native object serialisation; untrusted
+///   input can execute arbitrary code.
+///
+/// **.NET**
+/// - `BinaryFormatter` — deprecated in .NET 5+; arbitrary code execution on untrusted input.
+/// - `NetDataContractSerializer` — same risk profile as BinaryFormatter.
+/// - `LosFormatter` — ViewState serialiser with the same code-exec risk.
+/// - `ObjectStateFormatter` — companion to LosFormatter.
+///
+/// **Java — KNOWN GAP**
+/// Java's `ObjectInputStream.readObject()` is the classic unsafe-deser sink, but in practice
+/// it fires on every framework that uses serialisation internally (Spring, Hibernate, etc.),
+/// producing an FP rate that blocks legitimate commits. Safe detection requires AST context
+/// (whether the stream originates from user-controlled input), which a regex cannot provide.
+/// Java coverage is deferred to the semgrep tier where AST rules are available.
+///
+/// # SafeLoader / FullLoader carve-out
+///
+/// `yaml.load(data)` is unsafe; `yaml.load(data, Loader=yaml.SafeLoader)` is safe.
+/// The regex crate has no lookahead or negative lookahead. We handle this in the arm:
+/// match `yaml.load(` first; then for each match, extract the line and skip if it contains
+/// `SafeLoader` or `FullLoader`. `yaml.unsafe_load(` is covered separately and is always
+/// denied regardless.
+///
+/// # camerata:allow and self-ref handling
+///
+/// The inline suppression `// camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1: reason` is
+/// honoured by the standard suppression layer (handled upstream). The rule also contains
+/// the pattern name `yaml.load(` in the doc comment of this function; the self-referential
+/// suppression path (is_self_referential_snippet) skips corpus + gate-rule source files.
+static SEC_UNSAFE_DESER_REGEX: OnceLock<Regex> = OnceLock::new();
+
+fn sec_unsafe_deser_regex() -> &'static Regex {
+    SEC_UNSAFE_DESER_REGEX.get_or_init(|| {
+        // Alternation (longest-specific first within each language).
+        // Python:
+        //   yaml.unsafe_load( — explicit unsafe variant, no carve-out.
+        //   yaml.load(        — the arm will skip matches on lines containing SafeLoader/FullLoader.
+        //   _pickle.load(     — covers pickle.load, cPickle.load, _pickle.load (all share the suffix).
+        //   pickle.loads(     — covers pickle.loads; also matches cPickle.loads.
+        //   cPickle.load(     — C-extension alias not covered by _pickle prefix above.
+        //   cPickle.loads(    — same.
+        // PHP:
+        //   unserialize(
+        // Ruby:
+        //   Marshal.restore(  — listed before Marshal.load to avoid partial match ambiguity.
+        //   Marshal.load(
+        // .NET (class name presence is the signal; instantiation or static call follows in code):
+        //   BinaryFormatter
+        //   NetDataContractSerializer
+        //   LosFormatter
+        //   ObjectStateFormatter
+        Regex::new(
+            r"(?x)
+            yaml\.unsafe_load\(
+            | yaml\.load\(
+            | _pickle\.load\(
+            | pickle\.loads\(
+            | pickle\.load\(
+            | cPickle\.loads\(
+            | cPickle\.load\(
+            | unserialize\(
+            | Marshal\.restore\(
+            | Marshal\.load\(
+            | BinaryFormatter
+            | NetDataContractSerializer
+            | LosFormatter
+            | ObjectStateFormatter
+            ",
+        )
+        .expect("SEC-NO-UNSAFE-DESERIALIZATION-1 regex must compile")
+    })
+}
+
+/// Returns the 1-based line that a byte offset falls on in `content`.
+fn byte_offset_to_line(content: &str, offset: usize) -> usize {
+    content[..offset].bytes().filter(|&b| b == b'\n').count() + 1
+}
+
+/// Returns the text of line `lineno` (1-based) in `content`, or `""` if out of range.
+fn line_text(content: &str, lineno: usize) -> &str {
+    content
+        .lines()
+        .nth(lineno.saturating_sub(1))
+        .unwrap_or("")
+}
+
+/// True when `line` (text of one source line) contains a safe-loader token that
+/// means `yaml.load(` on that line is actually a safe call.
+fn yaml_load_is_safe(line: &str) -> bool {
+    line.contains("SafeLoader") || line.contains("FullLoader")
+}
+
+/// SEC-NO-UNSAFE-DESERIALIZATION-1: deny content that calls an unsafe deserialization
+/// function on untrusted input. See [`sec_unsafe_deser_regex`] for the full match-set.
+fn arm_sec_no_unsafe_deserialization_1(path: &str, content: &str) -> Result<(), String> {
+    let re = sec_unsafe_deser_regex();
+    for m in re.find_iter(content) {
+        let match_line = byte_offset_to_line(content, m.start());
+
+        // SafeLoader / FullLoader carve-out: if the matched token is `yaml.load(` and
+        // the same line carries a safe-loader keyword, this particular call is safe — skip it.
+        if m.as_str().starts_with("yaml.load(") && yaml_load_is_safe(line_text(content, match_line)) {
+            continue;
+        }
+
+        let in_test = is_test_or_fixture_path(path)
+            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
+        if in_test {
+            match test_scope_policy("SEC-NO-UNSAFE-DESERIALIZATION-1") {
+                TestScopePolicy::Waive => continue,
+                TestScopePolicy::Downgrade => {}
+            }
+        }
+
+        let matched = m.as_str();
+        let preview: String = matched.chars().take(30).collect();
+        return Err(format!(
+            "SEC-NO-UNSAFE-DESERIALIZATION-1: content calls an unsafe deserialization \
+             function (`{preview}…`). Deserializing untrusted data with yaml.load (without \
+             SafeLoader), pickle, unserialize, Marshal.load, or BinaryFormatter can execute \
+             arbitrary code. Use a safe alternative (yaml.safe_load, JSON, protobuf) or add \
+             a `camerata:allow` suppression with a reason if the input is trusted and \
+             sandboxed."
+        ));
+    }
+    Ok(())
 }
 
 // ── SEC-NO-CAMERATA-CONFIG-1 ──────────────────────────────────────────────────
@@ -2295,6 +2484,137 @@ mod tests {
         assert!(arm_sec_no_disabled_tls_1("src/client.go", content).is_err());
     }
 
+    // ── SEC-NO-UNSAFE-DESERIALIZATION-1 ──────────────────────────────────────────
+
+    // ── POSITIVE tests (must DENY) ────────────────────────────────────────────────
+
+    #[test]
+    fn unsafe_deser_detects_yaml_load_without_safeloader() {
+        // Plain yaml.load( with no safe loader → must deny.
+        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.load(f)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_yaml_unsafe_load() {
+        assert!(arm_sec_no_unsafe_deserialization_1("src/parser.py", "out = yaml.unsafe_load(s)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_pickle_loads() {
+        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.loads(d)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_pickle_load() {
+        assert!(arm_sec_no_unsafe_deserialization_1("src/cache.py", "obj = pickle.load(f)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_php_unserialize() {
+        assert!(arm_sec_no_unsafe_deserialization_1("src/handler.php", "$obj = unserialize($x);").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_ruby_marshal_load() {
+        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.load(b)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_ruby_marshal_restore() {
+        assert!(arm_sec_no_unsafe_deserialization_1("lib/store.rb", "obj = Marshal.restore(data)").is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_dotnet_binary_formatter() {
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/Serializer.cs",
+            "var bf = new BinaryFormatter(); bf.Deserialize(s);"
+        ).is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_dotnet_net_data_contract_serializer() {
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/Serializer.cs",
+            "var s = new NetDataContractSerializer();"
+        ).is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_dotnet_los_formatter() {
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/ViewState.cs",
+            "var lf = new LosFormatter(); lf.Serialize(ms, obj);"
+        ).is_err());
+    }
+
+    #[test]
+    fn unsafe_deser_detects_dotnet_object_state_formatter() {
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/ViewState.cs",
+            "var osf = new ObjectStateFormatter();"
+        ).is_err());
+    }
+
+    // ── NEGATIVE tests (must ALLOW) ───────────────────────────────────────────────
+
+    #[test]
+    fn unsafe_deser_allows_yaml_safe_load() {
+        assert!(arm_sec_no_unsafe_deserialization_1("src/config.py", "data = yaml.safe_load(f)").is_ok());
+    }
+
+    #[test]
+    fn unsafe_deser_allows_yaml_load_with_safeloader_kwarg() {
+        // yaml.load with explicit SafeLoader is safe.
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/config.py",
+            "data = yaml.load(f, Loader=yaml.SafeLoader)"
+        ).is_ok());
+    }
+
+    #[test]
+    fn unsafe_deser_allows_yaml_load_with_fullloader_kwarg() {
+        // FullLoader is also a safe alternative.
+        assert!(arm_sec_no_unsafe_deserialization_1(
+            "src/config.py",
+            "data = yaml.load(f, Loader=yaml.FullLoader)"
+        ).is_ok());
+    }
+
+    #[test]
+    fn unsafe_deser_allows_json_loads() {
+        // json.loads is always safe (no arbitrary code execution).
+        assert!(arm_sec_no_unsafe_deserialization_1("src/api.py", "obj = json.loads(s)").is_ok());
+    }
+
+    #[test]
+    fn unsafe_deser_waived_in_cfg_test_scope() {
+        // Waive policy: unsafe deser inside #[cfg(test)] is allowed (test infrastructure).
+        let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let v = yaml.load(f);\n    }\n}\n";
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("src/lib.rs", content).is_ok(),
+            "unsafe deser in #[cfg(test)] must be waived"
+        );
+    }
+
+    #[test]
+    fn unsafe_deser_waived_in_test_path() {
+        // A file under tests/ is a test path → waive.
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)").is_ok(),
+            "pickle.loads in tests/ path must be waived"
+        );
+    }
+
+    #[test]
+    fn unsafe_deser_camerata_allow_suppression_in_arm_output() {
+        // The denial message tells the user how to suppress with camerata:allow.
+        let result = arm_sec_no_unsafe_deserialization_1("src/legacy.py", "pickle.loads(buf)");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("camerata:allow"), "denial must mention camerata:allow: {msg}");
+    }
+
     // ── registry coverage for new rules ──────────────────────────────────────────
 
     #[test]
@@ -2304,6 +2624,7 @@ mod tests {
         assert!(ids.contains(&"SEC-NO-VENDOR-TOKEN-1"));
         assert!(ids.contains(&"SEC-NO-SECRET-FILE-1"));
         assert!(ids.contains(&"SEC-NO-DISABLED-TLS-1"));
+        assert!(ids.contains(&"SEC-NO-UNSAFE-DESERIALIZATION-1"));
     }
 
     #[test]

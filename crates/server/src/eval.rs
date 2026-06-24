@@ -341,6 +341,56 @@ pub fn fixtures() -> Vec<Fixture> {
             content: "response = requests.get(url, verify=True)\n",
             expected: &[],
         },
+        // ── SEC-NO-UNSAFE-DESERIALIZATION-1 — planted violations ──────────────
+        Fixture {
+            name: "unsafe_deser_pickle_loads",
+            path: "src/cache.py",
+            content: "obj = pickle.loads(data)\n",
+            expected: &["SEC-NO-UNSAFE-DESERIALIZATION-1"],
+        },
+        Fixture {
+            name: "unsafe_deser_yaml_load",
+            path: "src/config.py",
+            content: "cfg = yaml.load(f)\n",
+            expected: &["SEC-NO-UNSAFE-DESERIALIZATION-1"],
+        },
+        Fixture {
+            name: "unsafe_deser_php_unserialize",
+            path: "src/handler.php",
+            content: "$obj = unserialize($payload);\n",
+            expected: &["SEC-NO-UNSAFE-DESERIALIZATION-1"],
+        },
+        Fixture {
+            name: "unsafe_deser_ruby_marshal_load",
+            path: "lib/store.rb",
+            content: "obj = Marshal.load(buf)\n",
+            expected: &["SEC-NO-UNSAFE-DESERIALIZATION-1"],
+        },
+        Fixture {
+            name: "unsafe_deser_dotnet_binary_formatter",
+            path: "src/Serializer.cs",
+            content: "var bf = new BinaryFormatter();\nvar obj = bf.Deserialize(stream);\n",
+            expected: &["SEC-NO-UNSAFE-DESERIALIZATION-1"],
+        },
+        // ── SEC-NO-UNSAFE-DESERIALIZATION-1 — clean controls ──────────────────
+        Fixture {
+            name: "clean_yaml_safe_load",
+            path: "src/config.py",
+            content: "cfg = yaml.safe_load(f)\n",
+            expected: &[],
+        },
+        Fixture {
+            name: "clean_yaml_load_with_safeloader",
+            path: "src/config.py",
+            content: "cfg = yaml.load(f, Loader=yaml.SafeLoader)\n",
+            expected: &[],
+        },
+        Fixture {
+            name: "clean_json_loads",
+            path: "src/api.py",
+            content: "obj = json.loads(body)\n",
+            expected: &[],
+        },
         // ── SEC-NO-SECRET-FILE-1 — planted violation (path-based) ─────────────
         // This rule fires on the FILE PATH, not the content. The audit produces a
         // line=0 path-level finding when the arm rejects the path.
