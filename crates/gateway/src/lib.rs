@@ -837,47 +837,68 @@ fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), Strin
 ///
 /// # Heuristic and its limits
 ///
-/// Fires only when **all three** co-occur within a bounded window (across lines):
-///   1. A DML keyword (SELECT/INSERT/UPDATE/DELETE), **word-bounded** so substrings like
-///      `Selection`/`selected` and labels like "Select page" do not match.
-///   2. A confirming SQL clause (FROM/INTO/SET/VALUES/JOIN/WHERE) — the statement-shape gate
-///      that distinguishes real SQL from ordinary text that happens to contain a keyword.
-///   3. A format interpolation (`{}`/`{named}`) or string-concat (`" +`) — i.e. the query is
-///      being BUILT by concatenation, which is the actual risk.
+/// Fires only when a **double-quoted string literal** satisfies all three conditions:
+///   1. Contains a DML keyword (SELECT/INSERT/UPDATE/DELETE), word-bounded inside the string.
+///   2. Contains a confirming SQL clause (FROM/INTO/SET/VALUES/JOIN/WHERE) — **within the same
+///      string**, so the DML word and the clause must both appear between the same pair of `"`.
+///      This is the critical identifier-FP guard: a class like `"repo-select-label"` contains
+///      `select` but has no clause before the closing `"`, so it is rejected. Similarly,
+///      `"app-update-dismiss"` contains `update` but no clause, so it is rejected.
+///   3. The SQL string is BUILT by concat/interpolation: either a `{}`/`{name}` placeholder
+///      appears inside the string (between the clause and the optional closing quote), OR the
+///      string literal closes and is immediately followed by `+` (string concatenation).
 ///
-/// Requiring (2) is the precision fix: before it, the bare keyword + a nearby `{}` was enough,
-/// so `"Selection: {n} row(s)"` and other rsx text critical-flagged frontend code.
+/// The previous design used a DOTALL window (`.{0,200}?`) spanning across any source text,
+/// which caused false positives when a DML word appeared inside a kebab/snake identifier
+/// (e.g. `repo-select-label`, `app-update-dismiss`) and a clause-like token (e.g. `.set()`,
+/// a method call) plus an unrelated `{...}` (rsx block or format arg) appeared nearby.
+/// Anchoring the entire match inside a quoted string eliminates the cross-context window.
 ///
 /// Known limits / false-negative sources:
 /// - Parameterised queries using `$1`/`?` placeholders instead of `{}`/`" +` are NOT caught —
 ///   this rule complements, not replaces, a parameterised-query lint.
-/// - A query whose keyword and clause/interpolation span more than the window may be missed.
+/// - Raw string literals (`r#"..."#`) are not matched by the opening `"` anchor; raw-SQL in
+///   raw strings is a known gap.
 /// - Intentional raw SQL in test fixtures / migrations triggers it; exclude those via the
 ///   rule-subset config.
 static SEC_SQL_CONCAT_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn sec_sql_concat_regex() -> &'static Regex {
     SEC_SQL_CONCAT_REGEX.get_or_init(|| {
-        // Require actual SQL-STATEMENT SHAPE, not a bare keyword. Three parts must co-occur
-        // within a bounded window (across lines via the `s` dotall flag):
-        //   1. a DML keyword, WORD-BOUNDED — `\b…\b` so `Selection`, `selected`, a button
-        //      labelled "Select page", etc. no longer match the keyword at all;
-        //   2. a CONFIRMING clause (FROM / INTO / SET / VALUES / JOIN / WHERE) — this is the
-        //      "is it really SQL" gate. A UI string like "Selection: {n} row(s)" has a
-        //      keyword-ish prefix but no clause, so it's rejected;
-        //   3. an interpolation `{}`/`{named}` or string-concat `" +` — the rule is about
-        //      BUILDING the query via concat/interpolation, not a static query string.
-        // This is the precision fix for the deterministic floor: it was matching the
-        // substring "Select" in ordinary rsx text and critical-flagging frontend code.
+        // Anchor the entire match INSIDE a double-quoted string literal.
+        //
+        // Structure:
+        //   "  — opening double-quote (the string must start here)
+        //   (?:[^"\\]|\\.)*?  — escape-aware string content (non-greedy); [^"\\] matches any
+        //                        char that is NOT a quote-close or backslash (incl. newlines for
+        //                        multi-line strings); \\. matches a backslash + any escaped char
+        //   \b(DML)\b  — DML keyword, word-bounded INSIDE the string; `\b` on `-` and space
+        //                means e.g. `repo-select-label` does match `\bselect\b` (the `-` is a
+        //                boundary), BUT the clause gate below rejects it because no FROM/SET/etc.
+        //                appears before the closing `"` of that same string
+        //   (?:[^"\\]|\\.)*?  — more string content (no closing quote yet)
+        //   \b(CLAUSE)\b  — confirming clause, also INSIDE the same string
+        //   (?:[^"\\]|\\.)*?  — more content after the clause
+        //   ( \{\w*\} | "\s*\+ )  — either a format placeholder {} or {name} still inside the
+        //                            string, OR the string closes and is followed by + concat
+        //
+        // (?ix) = case-insensitive + verbose (ignore whitespace / allow # comments).
+        // No `s` (dotall) flag needed: [^"\\] already matches \n.
         Regex::new(
-            r#"(?isx)
-            \b(?:SELECT|INSERT|UPDATE|DELETE)\b   # 1. DML keyword, word-bounded
-            .{0,200}?
-            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b   # 2. confirming SQL clause
-            .{0,200}?
+            r#"(?ix)
+            "                                            # opening double-quote
+            (?:[^"\\]|\\[\s\S])*?                       # escape-aware content (non-greedy);
+                                                         # [^"\\] = any char except quote/backslash
+                                                         # (incl. \n for multi-line strings);
+                                                         # \\[\s\S] = backslash + ANY char incl.
+                                                         # line-continuation \\\n sequences
+            \b(?:SELECT|INSERT|UPDATE|DELETE)\b          # 1. DML keyword inside the string
+            (?:[^"\\]|\\[\s\S])*?                       # content between DML and clause
+            \b(?:FROM|INTO|SET|VALUES|JOIN|WHERE)\b      # 2. confirming clause (same string)
+            (?:[^"\\]|\\[\s\S])*?                       # content after clause
             (?:
-                \{\w*\}         # 3a. {} or {named} format interpolation
-              | "\s*\+          # 3b. closing quote followed by + (string concat)
+                \{\w*\}          # 3a. {} or {named} format placeholder (inside the string)
+              | "\s*\+           # 3b. closing quote immediately followed by + (string concat)
             )
             "#,
         )
@@ -1355,6 +1376,95 @@ mod tests {
             "format!(\"UPDATE users SET name = '{name}' WHERE id = {id}\")"
         )
         .is_empty());
+    }
+
+    // False-positive regression tests: identifier-embedded DML words must NOT fire.
+    // Root cause was the old DOTALL cross-line window: `\bSELECT\b` matched inside
+    // kebab identifiers like `repo-select-label` (the `-` is a word boundary), then a
+    // clause-like `.set()` call and an unrelated `{...}` rsx block within 200 chars
+    // satisfied the other two parts of the pattern.  The fix anchors the whole match
+    // INSIDE a double-quoted string literal so the clause must co-occur inside the SAME
+    // string as the DML keyword — class strings like `"repo-select-label"` contain
+    // `select` but no SQL clause before their closing `"`.
+    #[test]
+    fn sql_concat_identifier_fp_regression() {
+        // EXACT user examples (verbatim from the bug report):
+
+        // 1. `"repo-select-label"` — `select` inside the kebab class string, but no
+        //    FROM/SET/WHERE inside that same string.  Previously fired critical.
+        let kebab_select = r#"label { class: "repo-select-label", "Filter by repo:" }"#;
+        assert!(
+            content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", kebab_select).is_empty(),
+            "repo-select-label (kebab identifier) must NOT match: {kebab_select}"
+        );
+
+        // 2. `"app-update-dismiss"` — `update` inside the kebab class string, no clause.
+        //    Previously fired critical because `.set(true)` nearby matched \bSET\b and
+        //    `{...}` in surrounding rsx satisfied the interpolation check.
+        let kebab_update = r#"button {
+                class: "app-update-dismiss",
+                onclick: move |_| dismissed.set(true),
+                "\u{00D7}"
+            }"#;
+        assert!(
+            content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", kebab_update).is_empty(),
+            "app-update-dismiss (kebab identifier) must NOT match"
+        );
+
+        // Additional identifier / rsx patterns that must stay silent:
+        for (label, src) in [
+            (
+                "snake_case selected_rule variable",
+                "let selected_rule = rules.iter().find(|r| r.id == id);",
+            ),
+            (
+                "fn update_handler with json block",
+                r#"fn update_handler() { let x = json!({ "a": 1 }); }"#,
+            ),
+            (
+                "rsx with some-select-thing class near {var}",
+                r#"div { class: "some-select-thing", "{label}" }"#,
+            ),
+            (
+                "button Select all near {count}",
+                r#"button { "Select all ({count})" }"#,
+            ),
+        ] {
+            assert!(
+                content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", src).is_empty(),
+                "must NOT match [{label}]: {src}"
+            );
+        }
+
+        // True positives that must still fire despite similar surface features:
+        // Real SQL-by-concat uses DML + clause INSIDE the same string literal.
+        for (label, src) in [
+            (
+                "SELECT FROM with {} inside string",
+                r#"format!("SELECT * FROM users WHERE id = {}", user_id)"#,
+            ),
+            (
+                "SELECT FROM with named interpolation inside string",
+                r#"format!("SELECT name FROM accounts WHERE org = {org_id}")"#,
+            ),
+            (
+                "UPDATE SET with named interpolation inside string",
+                r#"format!("UPDATE orders SET status = {status} WHERE id = {id}")"#,
+            ),
+            (
+                "INSERT INTO VALUES with {} inside string",
+                r#"let q = format!("INSERT INTO events (name) VALUES ('{}')", name);"#,
+            ),
+            (
+                "SELECT FROM string-concat with +",
+                r#"String q = "SELECT * FROM users WHERE name = '" + name + "'";"#,
+            ),
+        ] {
+            assert!(
+                !content_match_lines("SEC-NO-RAW-SQL-CONCAT-1", src).is_empty(),
+                "MUST match (true positive) [{label}]: {src}"
+            );
+        }
     }
 
     #[test]
