@@ -267,7 +267,7 @@ impl JsCheckRunner {
         #[cfg(not(test))]
         let program = program;
 
-        let out = run_command(worktree, program, &args.iter().map(|s| *s).collect::<Vec<_>>())
+        let out = run_command(worktree, program, &args.iter().map(|s| *s).collect::<Vec<_>>(), None)
             .await
             .with_context(|| format!("running `{program} {}`", args.join(" ")))?;
 
@@ -305,14 +305,14 @@ impl CheckRunner for JsCheckRunner {
         let mut violations = Vec::new();
 
         if has_lint {
-            let out = run_command(worktree, "npm", &["run", "lint"])
+            let out = run_command(worktree, "npm", &["run", "lint"], None)
                 .await
                 .context("running `npm run lint`")?;
             violations.extend(map_command_to_rule(&out, js_checks_rule()));
         }
 
         if has_test {
-            let out = run_command(worktree, "npm", &["run", "test"])
+            let out = run_command(worktree, "npm", &["run", "test"], None)
                 .await
                 .context("running `npm run test`")?;
             violations.extend(map_command_to_rule(&out, js_checks_rule()));
@@ -413,7 +413,7 @@ impl PythonCheckRunner {
         #[cfg(not(test))]
         let python = "python3";
 
-        let out = run_command(worktree, python, &["-m", "venv", ".camerata-venv"])
+        let out = run_command(worktree, python, &["-m", "venv", ".camerata-venv"], None)
             .await
             .with_context(|| format!("running `{python} -m venv .camerata-venv`"))?;
 
@@ -449,7 +449,7 @@ impl PythonCheckRunner {
             PythonManifest::PyprojectToml | PythonManifest::SetupPy => vec!["install", "-e", "."],
         };
 
-        let out = run_command(worktree, &pip, &args)
+        let out = run_command(worktree, &pip, &args, None)
             .await
             .with_context(|| format!("running `pip {}`", args.join(" ")))?;
 
@@ -498,12 +498,12 @@ impl CheckRunner for PythonCheckRunner {
 
         let mut violations = Vec::new();
 
-        let lint = run_command(worktree, &ruff, &["check", "."])
+        let lint = run_command(worktree, &ruff, &["check", "."], None)
             .await
             .with_context(|| format!("running `{ruff} check .`"))?;
         violations.extend(map_command_to_rule(&lint, python_checks_rule()));
 
-        let test = run_command(worktree, &pytest, &["-q"])
+        let test = run_command(worktree, &pytest, &["-q"], None)
             .await
             .with_context(|| format!("running `{pytest} -q`"))?;
         violations.extend(map_command_to_rule(&test, python_checks_rule()));
@@ -538,19 +538,19 @@ impl CheckRunner for GoCheckRunner {
 
         // gofmt -l lists unformatted files on stdout and exits 0; treat any
         // non-whitespace output as a violation.
-        let fmt = run_command(worktree, "gofmt", &["-l", "."])
+        let fmt = run_command(worktree, "gofmt", &["-l", "."], None)
             .await
             .context("running `gofmt -l .` (is gofmt installed?)")?;
         if !fmt.combined.trim().is_empty() {
             violations.push(go_checks_rule());
         }
 
-        let vet = run_command(worktree, "go", &["vet", "./..."])
+        let vet = run_command(worktree, "go", &["vet", "./..."], None)
             .await
             .context("running `go vet ./...` (is go installed?)")?;
         violations.extend(map_command_to_rule(&vet, go_checks_rule()));
 
-        let test = run_command(worktree, "go", &["test", "./..."])
+        let test = run_command(worktree, "go", &["test", "./..."], None)
             .await
             .context("running `go test ./...`")?;
         violations.extend(map_command_to_rule(&test, go_checks_rule()));
@@ -638,7 +638,7 @@ impl RubyCheckRunner {
     /// Run `bundle install` (fail closed if it fails).
     async fn ensure_gems_installed(&self, worktree: &Path) -> anyhow::Result<()> {
         let bundle = self.bundle_program();
-        let out = run_command(worktree, &bundle, &["install"])
+        let out = run_command(worktree, &bundle, &["install"], None)
             .await
             .with_context(|| format!("running `{bundle} install` (is bundler installed?)"))?;
         if !out.success {
@@ -679,14 +679,14 @@ impl CheckRunner for RubyCheckRunner {
         let mut violations = Vec::new();
 
         if has_rubocop {
-            let lint = run_command(worktree, &bundle, &["exec", "rubocop"])
+            let lint = run_command(worktree, &bundle, &["exec", "rubocop"], None)
                 .await
                 .with_context(|| format!("running `{bundle} exec rubocop`"))?;
             violations.extend(map_command_to_rule(&lint, ruby_checks_rule()));
         }
 
         if let Some(args) = test_args {
-            let test = run_command(worktree, &bundle, &args)
+            let test = run_command(worktree, &bundle, &args, None)
                 .await
                 .with_context(|| format!("running `{bundle} {}`", args.join(" ")))?;
             violations.extend(map_command_to_rule(&test, ruby_checks_rule()));
@@ -815,7 +815,7 @@ impl CheckRunner for JavaCheckRunner {
         let program = self.program_override.clone().unwrap_or(program);
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let out = run_command(worktree, &program, &arg_refs)
+        let out = run_command(worktree, &program, &arg_refs, None)
             .await
             .with_context(|| {
                 format!(
@@ -918,19 +918,19 @@ impl CheckRunner for CSharpCheckRunner {
         let dotnet = self.dotnet_program();
         let mut violations = Vec::new();
 
-        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"])
+        let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"], None)
             .await
             .with_context(|| {
                 format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
             })?;
         violations.extend(map_command_to_rule(&fmt, csharp_checks_rule()));
 
-        let build = run_command(worktree, &dotnet, &["build"])
+        let build = run_command(worktree, &dotnet, &["build"], None)
             .await
             .with_context(|| format!("running `{dotnet} build`"))?;
         violations.extend(map_command_to_rule(&build, csharp_checks_rule()));
 
-        let test = run_command(worktree, &dotnet, &["test"])
+        let test = run_command(worktree, &dotnet, &["test"], None)
             .await
             .with_context(|| format!("running `{dotnet} test`"))?;
         violations.extend(map_command_to_rule(&test, csharp_checks_rule()));

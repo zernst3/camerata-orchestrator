@@ -10,8 +10,10 @@ workspace = true
 
 [dependencies]
 camerata-core = { path = "../core" }
+camerata-liveness = { path = "../liveness" }
 camerata-rules = { path = "../rules" }
-tokio.workspace = true
+# `io-util` for AsyncBufReadExt / BufReader in the streaming subprocess path.
+tokio = { workspace = true, features = ["io-util"] }
 anyhow.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
@@ -21,3 +23,7 @@ serde_json.workspace = true
 fs2 = { workspace = true }
 # Manifest (.camerata/checks.toml) parsing (Decision: 2026-06-22_check_manifest_single_source_of_truth).
 toml = "0.8"
+
+[dev-dependencies]
+# subprocess streaming tests (spawn sh to emit lines and verify heartbeat fires).
+tempfile = "3"

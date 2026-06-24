@@ -184,7 +184,7 @@ impl CheckRunner for FmtCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref())
+        let output = subprocess::run_fmt_check(worktree, target_dir.as_deref(), None)
             .await
             .context("running cargo fmt --check")?;
 
@@ -204,7 +204,7 @@ impl CheckRunner for ClippyCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_clippy(worktree, target_dir.as_deref())
+        let output = subprocess::run_clippy(worktree, target_dir.as_deref(), None)
             .await
             .context("running cargo clippy")?;
 
@@ -224,7 +224,7 @@ impl CheckRunner for TestCheckRunner {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
-        let output = subprocess::run_test(worktree, target_dir.as_deref())
+        let output = subprocess::run_test(worktree, target_dir.as_deref(), None)
             .await
             .context("running cargo test")?;
 
