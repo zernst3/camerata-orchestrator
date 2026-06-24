@@ -6831,7 +6831,13 @@ async fn active_project_context(
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d));
+            .and_then(|d| extract_scan_results_from_draft(d))
+            .or_else(|| {
+                state
+                    .get_last_scan(&project.id)
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
+            });
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
@@ -6855,7 +6861,13 @@ async fn active_project_context(
             .unwrap_or((None, None));
         let scan_results_section = draft
             .as_ref()
-            .and_then(|d| extract_scan_results_from_draft(d));
+            .and_then(|d| extract_scan_results_from_draft(d))
+            .or_else(|| {
+                state
+                    .get_last_scan(&project.id)
+                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+                    .filter(|s| !s.is_empty())
+            });
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
@@ -6874,6 +6886,12 @@ async fn active_project_context(
         })
     } else {
         // Blank: project exists but no draft and no onboarded repos.
+        // Still check last_scan — a scan may have completed without a draft being
+        // round-tripped back (timing race: this is the exact bug being fixed).
+        let scan_results_section = state
+            .get_last_scan(&project.id)
+            .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
+            .filter(|s| !s.is_empty());
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
@@ -6883,7 +6901,7 @@ async fn active_project_context(
             ruleset_summary: None,
             finding_count: None,
             findings_summary: None,
-            scan_results_section: None,
+            scan_results_section,
             draft_json: None,
             message: Some(format!(
                 "Project '{}' has no scan or onboarding data yet — start an onboarding scan to populate the project context.",
