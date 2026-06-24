@@ -2,21 +2,32 @@ rules:
   # ── Hardcoded secrets ────────────────────────────────────────────────────────
   #
   # Catches string literals that look like API keys, tokens, or passwords
-  # assigned directly in source. The pattern covers the most common idioms
-  # across Python, JavaScript, TypeScript, Go, Java, Ruby, Rust, and C#.
+  # assigned directly in source.
   #
-  # 2026-06-23: Added Rust and C# to languages list (both use the same
-  # variable-assignment idiom that the existing pattern captures).
-  # Also added dedicated Rust and C# rules for SQL injection, weak hashing,
-  # and disabled TLS verification — all families present for other languages.
+  # Two rules cover the same family:
+  #
+  #   1. camerata.security.hardcoded-secret (Python, JS, TS, Java, Ruby)
+  #      These languages support both single- and double-quoted string literals,
+  #      so the pattern-either block includes both forms.
+  #
+  #   2. camerata.security.hardcoded-secret-dquote (Go, Rust)
+  #      These languages do NOT support `'...'` as a string literal:
+  #        - Rust: `'...'` is lifetime syntax — semgrep raises PatternParseError
+  #        - Go:   `'...'` is rune-literal syntax — semgrep raises Lexical_error
+  #      Double-quote assignment covers all credential forms in both languages.
+  #
+  #   C# is NOT covered: semgrep's C# parser does not reliably parse the
+  #   `$VAR = "..."` assignment form for local declarations (returns 0
+  #   findings on confirmed violations). C# secrets are caught by the
+  #   deterministic floor (token-entropy scan) instead.
 
   - id: camerata.security.hardcoded-secret
     message: >
-      Hardcoded secret detected: '$METAVAR' appears to be assigned a literal
+      Hardcoded secret detected: '$VAR' appears to be assigned a literal
       credential. Move this value to an environment variable or a secrets
       manager and load it at runtime.
     severity: ERROR
-    languages: [python, javascript, typescript, go, java, ruby, rust, csharp]
+    languages: [python, javascript, typescript, java, ruby]
     patterns:
       - pattern-either:
           - pattern: $VAR = "..."
@@ -27,10 +38,25 @@ rules:
             (?i)(password|passwd|secret|api_key|apikey|token|auth_token|
             access_token|private_key|client_secret|client_id|aws_secret|
             stripe_key|twilio_auth|sendgrid_key|slack_token|github_token)
+
+  # Go + Rust variant: single-quote string patterns cause parse errors in both
+  # languages' semgrep grammars (lifetime in Rust, rune-literal in Go).
+  # Double-quote covers all string-credential assignments in both.
+  - id: camerata.security.hardcoded-secret-dquote
+    message: >
+      Hardcoded secret detected: '$VAR' appears to be assigned a literal
+      credential. Move this value to an environment variable or a secrets
+      manager and load it at runtime.
+    severity: ERROR
+    languages: [go, rust]
+    patterns:
+      - pattern: $VAR = "..."
       - metavariable-regex:
-          metavariable: $LITERAL
-          # Filter trivial placeholders and empty strings so we get signal, not noise.
-          regex: ^(?!(?:""?|''?|<.*>|\$\{.*\}|%s|%v|your[-_].*here)$).{4,}
+          metavariable: $VAR
+          regex: >-
+            (?i)(password|passwd|secret|api_key|apikey|token|auth_token|
+            access_token|private_key|client_secret|client_id|aws_secret|
+            stripe_key|twilio_auth|sendgrid_key|slack_token|github_token)
 
   # ── eval / exec injection ────────────────────────────────────────────────────
   #
@@ -186,14 +212,23 @@ rules:
 
   # ── Rust: SQL string concatenation ──────────────────────────────────────────
   #
-  # Detects format! macros or string concatenation that embed SQL keywords
-  # alongside interpolated variables. Requiring SQL keywords (SELECT, INSERT,
-  # UPDATE, DELETE, FROM, WHERE) in the format string reduces false positives
-  # from non-SQL format strings.
+  # Detects format! macros that embed SQL keywords alongside positional holes.
+  # Requiring SQL keywords (SELECT, INSERT, UPDATE, DELETE, FROM, WHERE) in the
+  # format string reduces false positives from non-SQL format strings.
   #
-  # The patterns target the two dominant idioms in Rust:
-  #   - format!("SELECT ... {} ...", var)   — macro with positional hole
-  #   - "SELECT ...".to_string() + &var     — owned-string concatenation
+  # Implementation note: the original structural rule used
+  #   pattern: format!($TEMPLATE, ...)
+  #   metavariable-regex: $TEMPLATE / (?i)(SELECT|...)
+  # but semgrep 1.167 does not apply metavariable-regex constraints on macro
+  # argument metavariables in Rust — the constraint compiles but silently
+  # returns 0 findings even when $TEMPLATE clearly contains "SELECT ...".
+  # The $S + $VAR pattern for string concatenation has the same problem:
+  # $S binds to the variable name on the left, not the string literal, so the
+  # SQL-keyword regex never matches.
+  #
+  # pattern-regex operates on raw file text (language-agnostic) and is
+  # unaffected by parser limitations. It fires reliably on the same fixture
+  # that the structural rule missed.
   #
   # Note: sqlx / diesel with query macros already refuse string interpolation
   # at compile time; this rule targets ad-hoc query building that bypasses
@@ -207,13 +242,7 @@ rules:
       instead of embedding variables directly in the SQL string.
     severity: ERROR
     languages: [rust]
-    patterns:
-      - pattern-either:
-          - pattern: format!($TEMPLATE, ...)
-          - pattern: $S + $VAR
-      - metavariable-regex:
-          metavariable: $TEMPLATE
-          regex: '(?i)(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)'
+    pattern-regex: '(?i)format!\s*\(\s*"[^"]*\b(?:SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)\b[^"]*"[^)]*,'
 
   # ── Rust: Weak / broken cryptographic hash ───────────────────────────────────
   #
@@ -327,8 +356,15 @@ rules:
       in production code.
     severity: ERROR
     languages: [csharp]
+    # Note: the ellipsis-wildcard lambda form `(... => true)` is not valid in
+    # semgrep's C# grammar and causes a PatternParseError at scan time.
+    # The four-named-parameter form `($A, $B, $C, $D) => true` matches all
+    # real-world usages of both RemoteCertificateValidationCallback (which
+    # takes sender, certificate, chain, errors) and
+    # HttpClientHandler.ServerCertificateCustomValidationCallback (which
+    # takes message, certificate, chain, errors).
     pattern-either:
-      - pattern: ServicePointManager.ServerCertificateValidationCallback = (... => true)
-      - pattern: ServicePointManager.ServerCertificateValidationCallback = delegate { return true; }
-      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = (... => true)
-      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = delegate { return true; }
+      - pattern: ServicePointManager.ServerCertificateValidationCallback = ($A, $B, $C, $D) => true;
+      - pattern: ServicePointManager.ServerCertificateValidationCallback = delegate { return true; };
+      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = ($A, $B, $C, $D) => true;
+      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = delegate { return true; };
