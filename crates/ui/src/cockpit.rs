@@ -916,7 +916,10 @@ fn ProjectGate() -> Element {
                                         let payload = conflict_payload.clone();
                                         spawn(async move {
                                             match import_project_payload(&payload, true).await {
-                                                ImportResult::Imported(_) => {
+                                                ImportResult::Imported(p) => {
+                                                    // Set the imported project active so the
+                                                    // cockpit and chat ground on it.
+                                                    let _ = set_active_project(&p.id).await;
                                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Imported. Resolve the repo paths in the Rules view.");
                                                     refresh += 1;
                                                     screen.set(CockpitScreen::InProject);
@@ -1083,7 +1086,9 @@ fn ProjectGate() -> Element {
                                 let name = new_name();
                                 if name.trim().is_empty() { return; }
                                 spawn(async move {
-                                    if create_project(&name, Vec::new()).await.is_some() {
+                                    if let Some(p) = create_project(&name, Vec::new()).await {
+                                        // Newly-created project: set it active so chat grounds on it.
+                                        let _ = set_active_project(&p.id).await;
                                         screen.set(CockpitScreen::InProject);
                                     }
                                 });
@@ -1096,7 +1101,10 @@ fn ProjectGate() -> Element {
                         onclick: move |_| {
                             spawn(async move {
                                 match import_project_json().await {
-                                    ImportResult::Imported(_) => {
+                                    ImportResult::Imported(p) => {
+                                        // Set the imported project active so the cockpit and
+                                        // chat ground on it (mirrors the "Open" button path).
+                                        let _ = set_active_project(&p.id).await;
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Imported. Resolve the repo paths in the Rules view.");
                                         refresh += 1;
                                         screen.set(CockpitScreen::InProject);
