@@ -6591,6 +6591,13 @@ pub struct ProjectContextResponse {
     /// the draft; absent when no scan has been run yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan_results_section: Option<String>,
+    /// A compact, queryable summary of the rules the user has selected in the onboarding
+    /// draft (repo_selection + chosen options), formatted for injection into the chat
+    /// system prompt as Layer 3d. Populated whenever repo_selection is non-empty — works
+    /// pre-scan and pre-onboard as soon as the user makes a selection. Absent when no
+    /// rules are selected yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_rules_section: Option<String>,
     /// A human-readable message explaining why the context is limited (e.g., no active
     /// project, or the project has not been onboarded).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -6839,6 +6846,149 @@ fn extract_findings_from_draft(
     Some((total, lines.join("\n")))
 }
 
+/// Build the selected-rules section for the chat system prompt from the onboarding draft.
+///
+/// Reads `repo_selection` (repo → [rule_id]) and `chosen` (rule_id → option_id) from the
+/// draft, enriches with titles and option labels from `scan.proposed_rules`, and renders a
+/// compact, queryable block:
+///
+/// ```text
+/// Total selected: 4 rule(s) across 2 repo(s)
+/// Rules:
+///   SEC-NO-HARDCODED-SECRETS-1 · "No hardcoded secrets" (all repos) [default option]
+///   PERF-FK-INDEX-1 · "FK index required" (owner/api) → chosen: strict-mode
+/// ```
+///
+/// Returns `None` when no rules are selected (empty `repo_selection`), so callers can
+/// skip the section rather than injecting an empty or misleading block. Works pre-scan
+/// and pre-onboard: the draft carries `repo_selection`/`chosen` as soon as the user
+/// makes a selection, even before any findings exist.
+///
+/// This is a pure function: it takes the draft JSON value and returns a formatted string
+/// or None. It does not touch any async I/O or server state.
+pub(crate) fn render_selected_rules_for_chat(draft: &serde_json::Value) -> Option<String> {
+    // repo_selection: { repo_key: [rule_id, ...] }
+    // A sentinel key ("__single__" or similar) means the project is single-repo.
+    let repo_selection_val = draft.get("repo_selection")?;
+    let repo_selection: std::collections::HashMap<String, Vec<String>> =
+        serde_json::from_value(repo_selection_val.clone()).ok()?;
+
+    // Collect all selected rule ids (union across repos) and which repos selected each.
+    let mut by_rule: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (repo_key, rule_ids) in &repo_selection {
+        for rid in rule_ids {
+            by_rule.entry(rid.clone()).or_default().push(repo_key.clone());
+        }
+    }
+
+    if by_rule.is_empty() {
+        return None;
+    }
+
+    // chosen: { rule_id: option_id } — non-default option overrides.
+    let chosen: std::collections::HashMap<String, String> = draft
+        .get("chosen")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    // Build a lookup: rule_id → (title, options map {id → label}, default_option_id).
+    #[derive(serde::Deserialize)]
+    struct DraftRuleLight {
+        id: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        options: Vec<DraftOptionLight>,
+        #[serde(default)]
+        default_option: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DraftOptionLight {
+        id: String,
+        label: String,
+    }
+
+    let rule_meta: std::collections::HashMap<String, DraftRuleLight> = draft
+        .get("scan")
+        .and_then(|s| s.get("proposed_rules"))
+        .and_then(|v| serde_json::from_value::<Vec<DraftRuleLight>>(v.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r.id.clone(), r))
+        .collect();
+
+    // Count distinct repos (excluding sentinel single-repo key if present).
+    let distinct_repos: std::collections::HashSet<&str> = repo_selection
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !k.starts_with("__"))
+        .collect();
+    let repo_display_count = distinct_repos.len().max(1);
+
+    let total = by_rule.len();
+    let mut out = format!(
+        "Total selected: {total} rule(s) across {repo_display_count} repo(s)\nRules:\n"
+    );
+
+    for (rule_id, mut repos) in by_rule {
+        repos.sort();
+        repos.dedup();
+
+        // Scope annotation — hide sentinel keys from human-readable display.
+        let visible_repos: Vec<&str> = repos
+            .iter()
+            .map(String::as_str)
+            .filter(|k| !k.starts_with("__"))
+            .collect();
+        let scope_note = if visible_repos.is_empty() {
+            "all repos".to_string()
+        } else if visible_repos.len() == repo_display_count {
+            "all repos".to_string()
+        } else {
+            visible_repos.join(", ")
+        };
+
+        // Title from proposed_rules, falling back to the id itself.
+        let title = rule_meta
+            .get(&rule_id)
+            .and_then(|m| m.title.as_deref())
+            .unwrap_or("");
+
+        // Chosen-option annotation.
+        let option_note = if let Some(chosen_id) = chosen.get(&rule_id) {
+            // Try to resolve the label.
+            let label = rule_meta
+                .get(&rule_id)
+                .and_then(|m| m.options.iter().find(|o| &o.id == chosen_id))
+                .map(|o| o.label.as_str())
+                .unwrap_or(chosen_id.as_str());
+            format!(" → chosen: {label}")
+        } else {
+            // Check if there IS a default so we can annotate honestly.
+            if rule_meta
+                .get(&rule_id)
+                .and_then(|m| m.default_option.as_deref())
+                .is_some()
+            {
+                " [default option]".to_string()
+            } else {
+                String::new()
+            }
+        };
+
+        if title.is_empty() {
+            out.push_str(&format!("  {rule_id} ({scope_note}){option_note}\n"));
+        } else {
+            out.push_str(&format!(
+                "  {rule_id} · \"{title}\" ({scope_note}){option_note}\n"
+            ));
+        }
+    }
+
+    Some(out)
+}
+
 /// `GET /api/projects/active/context` — the grounding payload for the project-aware chat
 /// mode. No AI call; purely a read of the active project's current state (draft + ruleset).
 ///
@@ -6858,6 +7008,7 @@ async fn active_project_context(
             finding_count: None,
             findings_summary: None,
             scan_results_section: None,
+            selected_rules_section: None,
             draft_json: None,
             message: Some(
                 "No active project — create one to use project-aware chat.".to_string(),
@@ -6899,6 +7050,7 @@ async fn active_project_context(
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
             });
+        let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
@@ -6909,6 +7061,7 @@ async fn active_project_context(
             finding_count,
             findings_summary,
             scan_results_section,
+            selected_rules_section,
             draft_json: None, // Don't inject the full draft post-onboard (noisy).
             message: None,
         })
@@ -6938,6 +7091,7 @@ async fn active_project_context(
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
             });
+        let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
@@ -6948,6 +7102,7 @@ async fn active_project_context(
             finding_count,
             findings_summary,
             scan_results_section,
+            selected_rules_section,
             draft_json: draft,
             message: Some(format!(
                 "Project '{}' has an in-progress onboarding (scan/audit) that has not been applied yet.",
@@ -6982,6 +7137,7 @@ async fn active_project_context(
             finding_count: None,
             findings_summary: None,
             scan_results_section,
+            selected_rules_section: None, // Blank: no draft, so no selections yet.
             draft_json: None,
             message: Some(format!(
                 "Project '{}' has no scan or onboarding data yet — start an onboarding scan to populate the project context.",
@@ -11356,6 +11512,224 @@ mod tests {
         assert!(
             !section_str.contains("RECENT-RULE"),
             "recent_scan must NOT appear when per-project last_scan is present, got: {section_str}"
+        );
+    }
+
+    // ── render_selected_rules_for_chat tests ──────────────────────────────────────────
+
+    /// Empty repo_selection → None.
+    #[test]
+    fn render_selected_rules_none_on_empty_selection() {
+        let draft = serde_json::json!({
+            "repo_selection": {},
+            "chosen": {}
+        });
+        assert!(
+            render_selected_rules_for_chat(&draft).is_none(),
+            "empty repo_selection must return None"
+        );
+    }
+
+    /// No repo_selection key → None.
+    #[test]
+    fn render_selected_rules_none_when_no_repo_selection_key() {
+        let draft = serde_json::json!({ "scan": {} });
+        assert!(
+            render_selected_rules_for_chat(&draft).is_none(),
+            "missing repo_selection must return None"
+        );
+    }
+
+    /// Selected rule ids appear in output with correct count.
+    #[test]
+    fn render_selected_rules_includes_rule_ids_and_count() {
+        let draft = serde_json::json!({
+            "repo_selection": {
+                "owner/api": ["SEC-1", "PERF-1"],
+                "owner/ui": ["SEC-1"]
+            },
+            "chosen": {},
+            "scan": { "proposed_rules": [] }
+        });
+        let out = render_selected_rules_for_chat(&draft)
+            .expect("non-empty selection must return Some");
+        assert!(
+            out.contains("SEC-1"),
+            "SEC-1 must appear in selected rules output"
+        );
+        assert!(
+            out.contains("PERF-1"),
+            "PERF-1 must appear in selected rules output"
+        );
+        // Total selected = 2 distinct rules.
+        assert!(
+            out.contains("Total selected: 2"),
+            "total must count distinct rules, got: {out}"
+        );
+    }
+
+    /// Chosen non-default option is rendered with its label.
+    #[test]
+    fn render_selected_rules_chosen_option_shown() {
+        let draft = serde_json::json!({
+            "repo_selection": {
+                "owner/api": ["RULE-A"]
+            },
+            "chosen": {
+                "RULE-A": "opt-strict"
+            },
+            "scan": {
+                "proposed_rules": [
+                    {
+                        "id": "RULE-A",
+                        "title": "My Rule",
+                        "scope": "repo-local",
+                        "kind": "review",
+                        "enforcement": "prose",
+                        "verification": "draft",
+                        "options": [
+                            { "id": "opt-default", "label": "Default mode", "directive": "use default", "why": "" },
+                            { "id": "opt-strict", "label": "Strict mode", "directive": "use strict", "why": "" }
+                        ],
+                        "default_option": "opt-default"
+                    }
+                ]
+            }
+        });
+        let out = render_selected_rules_for_chat(&draft)
+            .expect("must return Some when rules selected");
+        assert!(
+            out.contains("chosen: Strict mode"),
+            "chosen option label must appear in output, got: {out}"
+        );
+    }
+
+    /// Default option is annotated as [default option] when no override is chosen.
+    #[test]
+    fn render_selected_rules_default_option_annotated() {
+        let draft = serde_json::json!({
+            "repo_selection": {
+                "owner/api": ["RULE-B"]
+            },
+            "chosen": {},
+            "scan": {
+                "proposed_rules": [
+                    {
+                        "id": "RULE-B",
+                        "title": "Rule B",
+                        "scope": "repo-local",
+                        "kind": "review",
+                        "enforcement": "prose",
+                        "verification": "draft",
+                        "options": [
+                            { "id": "opt-a", "label": "Option A", "directive": "do a", "why": "" }
+                        ],
+                        "default_option": "opt-a"
+                    }
+                ]
+            }
+        });
+        let out = render_selected_rules_for_chat(&draft)
+            .expect("must return Some when rules selected");
+        assert!(
+            out.contains("[default option]"),
+            "default option must be annotated when no override chosen, got: {out}"
+        );
+    }
+
+    /// `active_project_context` includes selected_rules_section when draft has
+    /// repo_selection entries.
+    #[tokio::test]
+    async fn active_project_context_includes_selected_rules_section() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("TestProj", vec!["owner/repo".to_string()])
+            .unwrap();
+
+        // Save a draft with a repo_selection (simulates the user checking rules).
+        let draft = serde_json::json!({
+            "scan": {
+                "repos": ["owner/repo"],
+                "findings": [],
+                "proposed_rules": [
+                    {
+                        "id": "SEC-NO-HARDCODED-SECRETS-1",
+                        "title": "No hardcoded secrets",
+                        "scope": "repo-local",
+                        "kind": "review",
+                        "enforcement": "prose",
+                        "verification": "grounded",
+                        "options": [],
+                        "default_option": null
+                    }
+                ]
+            },
+            "repo_selection": {
+                "owner/repo": ["SEC-NO-HARDCODED-SECRETS-1"]
+            },
+            "chosen": {}
+        });
+        state.draft.save(&project.id, draft);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        let section = body.get("selected_rules_section");
+        assert!(
+            section.is_some() && section.unwrap() != &serde_json::Value::Null,
+            "selected_rules_section must be present when repo_selection is non-empty, got: {body:?}"
+        );
+        let section_str = section.unwrap().as_str().unwrap_or("");
+        assert!(
+            section_str.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "selected rule id must appear in selected_rules_section, got: {section_str}"
+        );
+        assert!(
+            section_str.contains("Total selected: 1"),
+            "total count must be 1, got: {section_str}"
+        );
+    }
+
+    /// `active_project_context` has selected_rules_section absent when repo_selection is empty.
+    #[tokio::test]
+    async fn active_project_context_selected_rules_absent_when_no_selection() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("EmptyProj", vec!["owner/repo".to_string()])
+            .unwrap();
+
+        // Draft has an empty repo_selection.
+        let draft = serde_json::json!({
+            "scan": { "repos": ["owner/repo"], "findings": [], "proposed_rules": [] },
+            "repo_selection": {},
+            "chosen": {}
+        });
+        state.draft.save(&project.id, draft);
+
+        let app = router(state);
+        let req = Request::builder()
+            .uri("/api/projects/active/context")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = body_json(resp).await;
+        // selected_rules_section must be absent (None / null) when nothing is selected.
+        let section = body.get("selected_rules_section");
+        let is_absent = section.is_none()
+            || section == Some(&serde_json::Value::Null);
+        assert!(
+            is_absent,
+            "selected_rules_section must be absent when repo_selection is empty, got: {body:?}"
         );
     }
 }

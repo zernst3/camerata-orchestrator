@@ -273,7 +273,7 @@ pub(crate) fn render_uow_section(snaps: &[UowSnapshot]) -> String {
     s
 }
 
-// ── Layer 3c: scan results (from active project context) ─────────────────────
+// ── Layer 3c/3d: project context (scan results + selected rules) ──────────────
 
 /// Minimal projection of `GET /api/projects/active/context` — only the fields
 /// the chat module needs. Extra fields from the server are ignored by serde.
@@ -285,24 +285,50 @@ struct ProjectContextLite {
     /// on the server. Present when a scan has been run; absent otherwise.
     #[serde(default)]
     pub scan_results_section: Option<String>,
+    /// The compact selected-rules section rendered by `render_selected_rules_for_chat`
+    /// on the server. Present whenever the user has selected at least one rule in the
+    /// onboarding draft — available pre-scan, as soon as a selection is made.
+    #[serde(default)]
+    pub selected_rules_section: Option<String>,
 }
 
-/// Fetch the active project's scan results section from
-/// `GET /api/projects/active/context`. Returns `None` when the endpoint
-/// is unreachable, there is no active project, or the project has no scan yet.
-/// Silently degrades so the chat stays functional with no scan grounding.
-async fn fetch_project_scan_section() -> Option<String> {
-    let ctx: ProjectContextLite =
-        reqwest::get(format!("{}/api/projects/active/context", crate::BFF_URL))
-            .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
+/// Fetch both the scan-results section (Layer 3c) and the selected-rules section
+/// (Layer 3d) from `GET /api/projects/active/context` in a single round-trip.
+/// Returns `(scan_section, selected_rules_section)` where each is `None` when
+/// absent/empty. Silently degrades: both are `None` when the endpoint is
+/// unreachable or there is no active project.
+async fn fetch_project_context_sections() -> (Option<String>, Option<String>) {
+    let ctx: ProjectContextLite = match reqwest::get(format!(
+        "{}/api/projects/active/context",
+        crate::BFF_URL
+    ))
+    .await
+    .ok()
+    .and_then(|r| {
+        // reqwest::Response::json is async; block via a small sync parse.
+        // We're already inside an async context so we just await below.
+        Some(r)
+    }) {
+        Some(r) => match r.json::<ProjectContextLite>().await {
+            Ok(v) => v,
+            Err(_) => return (None, None),
+        },
+        None => return (None, None),
+    };
     if !ctx.ok {
-        return None;
+        return (None, None);
     }
-    ctx.scan_results_section.filter(|s| !s.trim().is_empty())
+    (
+        ctx.scan_results_section.filter(|s| !s.trim().is_empty()),
+        ctx.selected_rules_section.filter(|s| !s.trim().is_empty()),
+    )
+}
+
+/// Fetch only the scan-results section (Layer 3c). Kept for use in unit tests
+/// that predate the selected-rules section.
+#[cfg(test)]
+async fn fetch_project_scan_section() -> Option<String> {
+    fetch_project_context_sections().await.0
 }
 
 // ── Layer 4: focused finding ──────────────────────────────────────────────────
@@ -374,6 +400,7 @@ pub(crate) fn unified_system_prompt(
     pulled_issues_section: Option<&str>,
     finding: Option<&FindingContext>,
     scan_results_section: Option<&str>,
+    selected_rules_section: Option<&str>,
 ) -> String {
     let not_covered = UNIFIED_NOT_COVERED_PHRASE;
     let mut p = format!(
@@ -442,6 +469,20 @@ pub(crate) fn unified_system_prompt(
         if !sec.trim().is_empty() {
             p.push_str(
                 "=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS (from /api/projects/active/context) ===\n",
+            );
+            p.push_str(sec);
+            p.push_str("\n");
+        }
+    }
+
+    // ── Layer 3d: selected rules & options (optional) ────────────────────────
+    // Present as soon as the user has selected rules in the onboarding draft —
+    // available pre-scan. Shows total selected count, rule ids, and any non-default
+    // chosen options. Lets the architect ask "which rules did I select?" at any point.
+    if let Some(sec) = selected_rules_section {
+        if !sec.trim().is_empty() {
+            p.push_str(
+                "=== LAYER 3d: SELECTED RULES & OPTIONS (this project, from onboarding draft) ===\n",
             );
             p.push_str(sec);
             p.push_str("\n");
@@ -589,10 +630,12 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let uow_res = use_resource(fetch_uow_snapshot);
     let uow_snaps: Vec<UowSnapshot> = uow_res.read().clone().flatten().unwrap_or_default();
 
-    // Layer 3c: scan results — fetched once per session from the active project
-    // context endpoint. Silently absent when there is no active project or no scan.
-    let scan_res = use_resource(fetch_project_scan_section);
-    let scan_section: Option<String> = scan_res.read().clone().flatten();
+    // Layers 3c + 3d: scan results and selected-rules sections — fetched together
+    // in a single round-trip from the active project context endpoint. Each is
+    // silently absent when not available (no active project, no scan, no selection).
+    let ctx_res = use_resource(fetch_project_context_sections);
+    let (scan_section, selected_rules_section): (Option<String>, Option<String>) =
+        ctx_res.read().clone().unwrap_or((None, None));
 
     // Layer 4: track the last-injected finding by a stable key to avoid
     // re-opening/re-clearing on unrelated re-renders.
@@ -626,6 +669,8 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let catalog_btn = rules_catalog;
     let scan_kd = scan_section.clone();
     let scan_btn = scan_section.clone();
+    let rules_sel_kd = selected_rules_section.clone();
+    let rules_sel_btn = selected_rules_section.clone();
 
     rsx! {
         // Floating launcher.
@@ -747,6 +792,30 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 }
                             }
                         }
+                        // Layer 3d: selected rules — available pre-scan, from the onboarding draft.
+                        {
+                            let sel_dot_style = if selected_rules_section.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let sel_label = if let Some(ref sec) = selected_rules_section {
+                                // Extract the count from the first line "Total selected: N rule(s)".
+                                let n = sec
+                                    .lines()
+                                    .next()
+                                    .and_then(|l| l.strip_prefix("Total selected: "))
+                                    .and_then(|rest| rest.split_whitespace().next())
+                                    .and_then(|n| n.parse::<usize>().ok())
+                                    .unwrap_or(0);
+                                format!("Selected rules ({n} selected)")
+                            } else {
+                                "Selected rules (none yet)".to_string()
+                            };
+                            rsx! {
+                                div {
+                                    style: "display:flex;align-items:center;gap:.4rem;",
+                                    span { style: "{sel_dot_style}", "\u{25cf}" }
+                                    span { "{sel_label}" }
+                                }
+                            }
+                        }
                         // Layer 4: only shown when a finding is focused.
                         if let Some(ref f) = *active_finding.read() {
                             if !f.rule_id.is_empty() {
@@ -831,6 +900,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             let finding_kd = active_finding.read().clone();
                             let pis_kd = props.pulled_issues_section.clone();
                             let scan_kd2 = scan_kd.clone();
+                            let rules_sel_kd2 = rules_sel_kd.clone();
                             move |e: Event<KeyboardData>| {
                                 if e.key() == Key::Enter && !e.modifiers().shift() {
                                     e.prevent_default();
@@ -846,6 +916,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         pis_kd.as_deref(),
                                         finding_kd.as_ref(),
                                         scan_kd2.as_deref(),
+                                        rules_sel_kd2.as_deref(),
                                     );
                                     // Snapshot prior turns BEFORE appending the new user message —
                                     // the server renders history + the new prompt separately.
@@ -888,6 +959,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 let finding_btn = active_finding.read().clone();
                                 let pis_btn = props.pulled_issues_section.clone();
                                 let scan_btn2 = scan_btn.clone();
+                                let rules_sel_btn2 = rules_sel_btn.clone();
                                 move |_| {
                                     let prompt = draft().trim().to_string();
                                     if prompt.is_empty() || sending() {
@@ -901,6 +973,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         pis_btn.as_deref(),
                                         finding_btn.as_ref(),
                                         scan_btn2.as_deref(),
+                                        rules_sel_btn2.as_deref(),
                                     );
                                     // Snapshot prior turns BEFORE appending the new user message —
                                     // the server renders history + the new prompt separately.
@@ -1056,7 +1129,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_technical_reference_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ==="),
             "Unified prompt missing LAYER 1 header"
@@ -1069,7 +1142,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_user_guide_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 1b: CAMERATA USER GUIDE ==="),
             "Unified prompt missing LAYER 1b header"
@@ -1083,7 +1156,7 @@ mod tests {
     #[test]
     fn unified_prompt_includes_rules_catalog_when_present() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
-        let prompt = unified_system_prompt(catalog, "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt(catalog, "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt missing LAYER 2 header"
@@ -1096,7 +1169,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_when_empty() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header when catalog is empty"
@@ -1105,7 +1178,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_omits_rules_catalog_for_whitespace_only_input() {
-        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("   \n\t  ", "No stories.\n", None, None, None, None);
         assert!(
             !prompt.contains("=== LAYER 2: GOVERNANCE RULES CATALOG"),
             "Unified prompt should omit LAYER 2 header for whitespace-only catalog"
@@ -1114,7 +1187,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_layer3_dev_state_header() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("=== LAYER 3: LIVE DEVELOPMENT STATE"),
             "Unified prompt missing LAYER 3 header"
@@ -1125,7 +1198,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_contains_not_covered_phrase() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Unified prompt missing the not-covered phrase: {:?}",
@@ -1137,7 +1210,7 @@ mod tests {
     fn unified_prompt_not_covered_phrase_survives_catalog_and_uow() {
         let catalog = "- RULE-1 [security · repo-local]: no hardcoded secrets\n";
         let uow = "- CAM-1: stage=development, gate=no run yet, sign-off=not signed off\n";
-        let prompt = unified_system_prompt(catalog, uow, None, None, None);
+        let prompt = unified_system_prompt(catalog, uow, None, None, None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Unified prompt missing the not-covered phrase after adding catalog + uow"
@@ -1146,7 +1219,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_not_covered_phrase_marked_critical() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("CRITICAL"),
             "Unified prompt should mark the not-covered guardrail as CRITICAL"
@@ -1157,7 +1230,7 @@ mod tests {
     /// so the model encounters the constraint before reading grounding data.
     #[test]
     fn unified_prompt_not_covered_phrase_appears_before_first_layer() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         let phrase_pos = prompt
             .find(UNIFIED_NOT_COVERED_PHRASE)
             .expect("UNIFIED_NOT_COVERED_PHRASE not found");
@@ -1180,7 +1253,7 @@ mod tests {
     fn layer3_appears_after_layers_1_and_2() {
         let catalog = "- RULE-1 [security · repo-local]: foo\n";
         let uow = "- CAM-1: stage=development, gate=no run yet\n";
-        let prompt = unified_system_prompt(catalog, uow, None, None, None);
+        let prompt = unified_system_prompt(catalog, uow, None, None, None, None);
         let layer1_pos = prompt
             .find("=== LAYER 1: CAMERATA TECHNICAL REFERENCE ===")
             .expect("LAYER 1 header not found");
@@ -1205,7 +1278,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_includes_focused_finding_section() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None);
         assert!(
             prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with finding missing LAYER 4 header"
@@ -1230,7 +1303,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_without_finding_has_no_layer4() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt without finding must not include LAYER 4"
@@ -1240,7 +1313,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_empty_finding_has_no_layer4() {
         let empty = FindingContext::default();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&empty), None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&empty), None, None);
         assert!(
             !prompt.contains("=== LAYER 4: FOCUSED FINDING"),
             "Prompt with empty finding must not include LAYER 4"
@@ -1250,7 +1323,7 @@ mod tests {
     #[test]
     fn unified_prompt_with_finding_retains_not_covered_guardrail() {
         let f = make_finding();
-        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, Some(&f), None, None);
         assert!(
             prompt.contains(UNIFIED_NOT_COVERED_PHRASE),
             "Finding-scoped prompt must retain the not-covered guardrail"
@@ -1263,7 +1336,7 @@ mod tests {
     fn layer4_appears_after_layer3() {
         let f = make_finding();
         let uow = "- CAM-1: stage=development\n";
-        let prompt = unified_system_prompt("", uow, None, Some(&f), None);
+        let prompt = unified_system_prompt("", uow, None, Some(&f), None, None);
         let layer3_pos = prompt
             .find("=== LAYER 3: LIVE DEVELOPMENT STATE")
             .expect("LAYER 3 header not found");
@@ -1281,7 +1354,7 @@ mod tests {
     #[test]
     fn unified_prompt_layer3b_present_when_pulled_issues_supplied() {
         let issues = "- #10 [Epic, open]: Auth overhaul\n  - #11 [child, open]: Token refresh\n";
-        let prompt = unified_system_prompt("", "No stories.\n", Some(issues), None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", Some(issues), None, None, None);
         assert!(
             prompt.contains("=== LAYER 3b: PULLED ISSUES"),
             "Layer 3b header must appear when pulled_issues_section is Some"
@@ -1294,7 +1367,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3b_absent_when_none() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             !prompt.contains("=== LAYER 3b:"),
             "Layer 3b header must not appear when pulled_issues_section is None"
@@ -1303,7 +1376,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3b_absent_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", Some("   \n "), None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", Some("   \n "), None, None, None);
         assert!(
             !prompt.contains("=== LAYER 3b:"),
             "Layer 3b header must not appear for whitespace-only pulled_issues_section"
@@ -1315,7 +1388,7 @@ mod tests {
         let f = make_finding();
         let uow = "- CAM-1: stage=development\n";
         let issues = "- #10 [Epic, open]: Auth\n";
-        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), None);
+        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), None, None);
         let layer3_pos = prompt
             .find("=== LAYER 3: LIVE DEVELOPMENT STATE")
             .expect("LAYER 3 not found");
@@ -1440,7 +1513,7 @@ mod tests {
     #[test]
     fn unified_prompt_layer3c_present_when_scan_results_supplied() {
         let scan = "Total findings: 3\n  high: 2\n  medium: 1\n";
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some(scan));
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some(scan), None);
         assert!(
             prompt.contains("=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS"),
             "Layer 3c header must appear when scan_results_section is Some, got no header in prompt"
@@ -1453,7 +1526,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3c_absent_when_none() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             !prompt.contains("=== LAYER 3c:"),
             "Layer 3c header must not appear when scan_results_section is None"
@@ -1462,7 +1535,7 @@ mod tests {
 
     #[test]
     fn unified_prompt_layer3c_absent_when_whitespace_only() {
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some("   \n "));
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, Some("   \n "), None);
         assert!(
             !prompt.contains("=== LAYER 3c:"),
             "Layer 3c header must not appear for whitespace-only scan_results_section"
@@ -1475,7 +1548,7 @@ mod tests {
         let uow = "- CAM-1: stage=development\n";
         let issues = "- #10 [Epic, open]: Auth\n";
         let scan = "Total findings: 1\n  high: 1\n";
-        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), Some(scan));
+        let prompt = unified_system_prompt("", uow, Some(issues), Some(&f), Some(scan), None);
         let layer3b_pos = prompt
             .find("=== LAYER 3b: PULLED ISSUES")
             .expect("LAYER 3b not found");
@@ -1498,11 +1571,63 @@ mod tests {
     #[test]
     fn unified_prompt_preamble_mentions_scan_findings() {
         // The preamble must tell the model it can answer questions about scan findings.
-        let prompt = unified_system_prompt("", "No stories.\n", None, None, None);
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
         assert!(
             prompt.contains("scan findings") || prompt.contains("scan results"),
             "Preamble must mention scan findings so the model knows it can answer about them; \
              got preamble without mention"
+        );
+    }
+
+    // ── Layer 3d: selected rules section ─────────────────────────────────────
+
+    #[test]
+    fn unified_prompt_layer3d_present_when_selected_rules_supplied() {
+        let sel = "Total selected: 2 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some(sel));
+        assert!(
+            prompt.contains("=== LAYER 3d: SELECTED RULES & OPTIONS"),
+            "Layer 3d header must appear when selected_rules_section is Some"
+        );
+        assert!(
+            prompt.contains("SEC-1"),
+            "Selected rule id must appear verbatim in Layer 3d"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_layer3d_absent_when_none() {
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None);
+        assert!(
+            !prompt.contains("=== LAYER 3d:"),
+            "Layer 3d header must not appear when selected_rules_section is None"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_layer3d_absent_when_whitespace_only() {
+        let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some("  \n "));
+        assert!(
+            !prompt.contains("=== LAYER 3d:"),
+            "Layer 3d header must not appear for whitespace-only selected_rules_section"
+        );
+    }
+
+    #[test]
+    fn layer3d_appears_after_layer3c() {
+        let scan = "Total findings: 1\n";
+        let sel = "Total selected: 1 rule(s) across 1 repo(s)\nRules:\n  SEC-1 (all repos)\n";
+        let prompt =
+            unified_system_prompt("", "No stories.\n", None, None, Some(scan), Some(sel));
+        let layer3c_pos = prompt
+            .find("=== LAYER 3c:")
+            .expect("LAYER 3c not found");
+        let layer3d_pos = prompt
+            .find("=== LAYER 3d:")
+            .expect("LAYER 3d not found");
+        assert!(
+            layer3c_pos < layer3d_pos,
+            "LAYER 3c must precede LAYER 3d ({layer3c_pos} < {layer3d_pos})"
         );
     }
 }
