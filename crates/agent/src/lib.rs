@@ -31,6 +31,9 @@ pub use session::{
 pub mod generic;
 pub use generic::GenericCliDriver;
 
+pub mod liveness;
+pub use liveness::{spawn_mtime_probe, newest_mtime, MTIME_PROBE_INTERVAL};
+
 pub mod post_story_hook;
 pub use post_story_hook::{DocConvention, PostStoryHook, StoryCompletion, StoryDocEmitter};
 
