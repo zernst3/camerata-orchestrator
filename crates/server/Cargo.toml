@@ -59,6 +59,7 @@ ignore = { workspace = true }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }
+camerata-liveness = { path = "../liveness" }
 camerata-worktracker = { path = "../worktracker" }
 # Post-story hooks: the `PostStoryHook` trait and `StoryDocEmitter` live in the
 # agent crate so they can also be used directly in the fleet/CLI paths.

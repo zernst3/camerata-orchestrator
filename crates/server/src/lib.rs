@@ -1168,7 +1168,7 @@ async fn get_run(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let idle = crate::run::idle_ms(run.last_activity_ms, now_ms);
+    let idle = crate::run::idle_ms(u128::from(run.tracker.last_activity_ms()), now_ms);
     let stalled = crate::run::is_stalled(idle, threshold_ms);
     let stall_policy = run.stall_policy.clone();
     let failure_reason = run.failure_reason.clone();

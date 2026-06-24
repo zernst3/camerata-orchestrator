@@ -17,13 +17,16 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use camerata_liveness::LivenessTracker;
+
 use crate::onboard::{Finding, ScanReport};
 
 /// Per-job activity metadata for stall detection and cancel signalling.
 #[derive(Debug, Clone)]
 pub struct JobMeta {
-    /// Epoch-ms of the last recorded activity (tool start/done, or creation).
-    pub last_activity_ms: u128,
+    /// Liveness tracker: wraps the epoch-ms timestamp + optional progress label.
+    /// Replaces the previous bare `last_activity_ms: u128` field.
+    pub tracker: LivenessTracker,
     /// Set to `true` when a cancel has been requested; checked by the job worker.
     pub cancel_requested: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -125,12 +128,9 @@ impl JobStore {
                 },
             );
         }
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
         let meta = JobMeta {
-            last_activity_ms: now_ms,
+            // LivenessTracker::new() initialises to current wall clock (not stalled).
+            tracker: LivenessTracker::new(),
             cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         if let Ok(mut m) = self.job_meta.lock() {
@@ -151,12 +151,8 @@ impl JobStore {
     /// `det_tool_done`, and the streaming scan-tool path (per stdout line and per mtime
     /// advance) so idle time stays low while a tool is actively running.
     pub(crate) fn touch_activity(&self, id: &str) {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        if let Some(meta) = self.job_meta.lock().unwrap().get_mut(id) {
-            meta.last_activity_ms = now_ms;
+        if let Some(meta) = self.job_meta.lock().unwrap().get(id) {
+            meta.tracker.tick();
         }
     }
 
@@ -276,12 +272,16 @@ impl JobStore {
 
     /// How many milliseconds has this job been idle (no tool activity) relative to `now_ms`?
     /// Returns `None` for an unknown job id.
+    ///
+    /// The signature accepts and returns `u128` for backwards-compatibility with the HTTP
+    /// polling endpoint. Internally delegates to `LivenessTracker::idle_ms` (which uses `u64`
+    /// — safe for all practical wall-clock values, saturating past year 584 million).
     pub fn idle_ms(&self, id: &str, now_ms: u128) -> Option<u128> {
         self.job_meta
             .lock()
             .unwrap()
             .get(id)
-            .map(|m| now_ms.saturating_sub(m.last_activity_ms))
+            .map(|m| u128::from(m.tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX))))
     }
 
     /// Cancel a job: set the cancel flag and update the job status to `"cancelled"`.

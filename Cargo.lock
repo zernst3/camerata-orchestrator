@@ -817,6 +817,7 @@ dependencies = [
  "camerata-fleet",
  "camerata-gateway",
  "camerata-intake",
+ "camerata-liveness",
  "camerata-persistence",
  "camerata-rules",
  "camerata-worktracker",
