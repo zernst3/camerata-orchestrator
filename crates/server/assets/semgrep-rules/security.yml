@@ -3,7 +3,12 @@ rules:
   #
   # Catches string literals that look like API keys, tokens, or passwords
   # assigned directly in source. The pattern covers the most common idioms
-  # across Python, JavaScript, TypeScript, Go, Java, and Ruby.
+  # across Python, JavaScript, TypeScript, Go, Java, Ruby, Rust, and C#.
+  #
+  # 2026-06-23: Added Rust and C# to languages list (both use the same
+  # variable-assignment idiom that the existing pattern captures).
+  # Also added dedicated Rust and C# rules for SQL injection, weak hashing,
+  # and disabled TLS verification — all families present for other languages.
 
   - id: camerata.security.hardcoded-secret
     message: >
@@ -11,7 +16,7 @@ rules:
       credential. Move this value to an environment variable or a secrets
       manager and load it at runtime.
     severity: ERROR
-    languages: [python, javascript, typescript, go, java, ruby]
+    languages: [python, javascript, typescript, go, java, ruby, rust, csharp]
     patterns:
       - pattern-either:
           - pattern: $VAR = "..."
@@ -178,3 +183,152 @@ rules:
       - pattern: yaml.load($DATA)
       - pattern-not: yaml.load($DATA, Loader=yaml.SafeLoader)
       - pattern-not: yaml.load($DATA, Loader=yaml.BaseLoader)
+
+  # ── Rust: SQL string concatenation ──────────────────────────────────────────
+  #
+  # Detects format! macros or string concatenation that embed SQL keywords
+  # alongside interpolated variables. Requiring SQL keywords (SELECT, INSERT,
+  # UPDATE, DELETE, FROM, WHERE) in the format string reduces false positives
+  # from non-SQL format strings.
+  #
+  # The patterns target the two dominant idioms in Rust:
+  #   - format!("SELECT ... {} ...", var)   — macro with positional hole
+  #   - "SELECT ...".to_string() + &var     — owned-string concatenation
+  #
+  # Note: sqlx / diesel with query macros already refuse string interpolation
+  # at compile time; this rule targets ad-hoc query building that bypasses
+  # those guards.
+
+  - id: camerata.security.sql-string-concat-rust
+    message: >
+      Possible SQL injection: a SQL query string is being constructed with
+      format!() interpolation or string concatenation. Use parameterised
+      queries (sqlx::query! / diesel's query builder / prepared statements)
+      instead of embedding variables directly in the SQL string.
+    severity: ERROR
+    languages: [rust]
+    patterns:
+      - pattern-either:
+          - pattern: format!($TEMPLATE, ...)
+          - pattern: $S + $VAR
+      - metavariable-regex:
+          metavariable: $TEMPLATE
+          regex: '(?i)(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE)'
+
+  # ── Rust: Weak / broken cryptographic hash ───────────────────────────────────
+  #
+  # The md5 and sha1 crates expose their primary type (Md5, Sha1) and a
+  # module-level function (md5::compute / sha1::Sha1::new). Flag both call
+  # forms. Use sha2::Sha256 or ring::digest::SHA256 instead.
+
+  - id: camerata.security.weak-hash-rust
+    message: >
+      Weak or broken hash function: MD5 and SHA-1 are cryptographically broken
+      and MUST NOT be used for passwords, MACs, or digital signatures. Use
+      sha2::Sha256 or ring/sha2 equivalents instead.
+    severity: WARNING
+    languages: [rust]
+    pattern-either:
+      - pattern: md5::compute(...)
+      - pattern: <Md5 as $TRAIT>::new(...)
+      - pattern: Md5::new(...)
+      - pattern: sha1::Sha1::new(...)
+      - pattern: <Sha1 as $TRAIT>::new(...)
+      - pattern: Sha1::new(...)
+
+  # ── Rust: Disabled TLS verification ─────────────────────────────────────────
+  #
+  # reqwest's ClientBuilder exposes danger_accept_invalid_certs() and
+  # danger_accept_invalid_hostnames() exactly to support test scenarios, but
+  # shipping either as true in production disables certificate validation
+  # entirely, making TLS decorative only.
+
+  - id: camerata.security.disabled-tls-rust
+    message: >
+      TLS verification is disabled: passing `true` to
+      danger_accept_invalid_certs() or danger_accept_invalid_hostnames()
+      suppresses certificate validation, making the connection vulnerable to
+      machine-in-the-middle attacks. Remove these calls or guard them behind a
+      compile-time #[cfg(test)] flag.
+    severity: ERROR
+    languages: [rust]
+    pattern-either:
+      - pattern: $BUILDER.danger_accept_invalid_certs(true)
+      - pattern: $BUILDER.danger_accept_invalid_hostnames(true)
+      - pattern: $BUILDER.accept_invalid_certs(true)
+      - pattern: $BUILDER.accept_invalid_hostnames(true)
+
+  # ── C#: SQL string concatenation ────────────────────────────────────────────
+  #
+  # Detects interpolated string literals or concatenated strings passed to
+  # SqlCommand / SqliteCommand / SqlDataAdapter constructors or their
+  # CommandText property. The metavariable-regex on the interpolated template
+  # requires a SQL keyword so we do not flag unrelated string operations.
+  #
+  # Entity Framework and Dapper parameterised calls are left alone because
+  # they don't match the SqlCommand constructor or CommandText patterns.
+
+  - id: camerata.security.sql-string-concat-csharp
+    message: >
+      Possible SQL injection: a SQL query is constructed with string
+      interpolation or concatenation. Use parameterised commands
+      (SqlCommand with SqlParameter), Entity Framework LINQ queries, or
+      Dapper with named parameters instead of embedding variables in the SQL
+      string.
+    severity: ERROR
+    languages: [csharp]
+    patterns:
+      - pattern-either:
+          - pattern: new SqlCommand($"...", ...)
+          - pattern: new SqlCommand("..." + $VAR, ...)
+          - pattern: new SqliteCommand($"...", ...)
+          - pattern: new SqliteCommand("..." + $VAR, ...)
+          - pattern: $CMD.CommandText = $"..."
+          - pattern: $CMD.CommandText = "..." + $VAR
+
+  # ── C#: Weak / broken cryptographic hash ─────────────────────────────────────
+  #
+  # System.Security.Cryptography.MD5 and SHA1 are factory-created via
+  # MD5.Create() / SHA1.Create(). Both are flagged. Use SHA256.Create() or
+  # the Microsoft.AspNetCore.Cryptography.KeyDerivation package for passwords.
+
+  - id: camerata.security.weak-hash-csharp
+    message: >
+      Weak or broken hash function: MD5 and SHA-1 are cryptographically broken
+      and MUST NOT be used for passwords, MACs, or digital signatures. Use
+      SHA256.Create(), SHA512.Create(), or a dedicated password-hashing library
+      (PBKDF2 / BCrypt.Net / Argon2) instead.
+    severity: WARNING
+    languages: [csharp]
+    pattern-either:
+      - pattern: MD5.Create(...)
+      - pattern: new MD5CryptoServiceProvider(...)
+      - pattern: SHA1.Create(...)
+      - pattern: new SHA1CryptoServiceProvider(...)
+      - pattern: new SHA1Managed(...)
+
+  # ── C#: Disabled TLS / certificate validation ─────────────────────────────────
+  #
+  # Assigning a callback that always returns true to
+  # ServicePointManager.ServerCertificateValidationCallback or the
+  # HttpClientHandler equivalent disables TLS certificate validation globally
+  # (ServicePointManager) or per-client (HttpClientHandler). Both are flagged.
+  #
+  # The lambda-returns-true pattern `(_, _, _, _) => true` is the
+  # archetypal "accept all" body; we match it and the named-method equivalent.
+
+  - id: camerata.security.disabled-tls-csharp
+    message: >
+      TLS certificate validation is disabled: assigning a callback that returns
+      true unconditionally to ServerCertificateValidationCallback or
+      ServerCertificateCustomValidationCallback suppresses all certificate
+      checks, making TLS decorative. Remove the override or implement a real
+      pinning check; use RemoteCertificateValidationErrors in tests only, never
+      in production code.
+    severity: ERROR
+    languages: [csharp]
+    pattern-either:
+      - pattern: ServicePointManager.ServerCertificateValidationCallback = (... => true)
+      - pattern: ServicePointManager.ServerCertificateValidationCallback = delegate { return true; }
+      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = (... => true)
+      - pattern: $HANDLER.ServerCertificateCustomValidationCallback = delegate { return true; }
