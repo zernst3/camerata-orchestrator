@@ -2339,7 +2339,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
 
     // The open finding (row-click) — same host-outside-the-table pattern, shared with
     // FindingsTable. The modal shows the violated rule's directive + the full detail.
-    let detail_finding = use_signal(|| Option::<FindingView>::None);
+    let mut detail_finding = use_signal(|| Option::<FindingView>::None);
     use_context_provider(|| detail_finding);
 
     // rule id -> what it enforces (the chosen/default alternative's directive, else
@@ -2382,7 +2382,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut last_saved = use_signal(|| Option::<String>::None);
     let mut restart_arm = use_signal(|| false);
     let mut finishing = use_signal(|| false);
-    let dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
+    let mut dispositions = use_signal(std::collections::HashMap::<String, Disposition>::new);
     let mut triage_view = use_signal(|| TriageState::Unresolved);
     let mut processing = use_signal(|| false);
 
@@ -2396,6 +2396,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     let mut chosen_w = chosen;
     let mut custom_rules_w = custom_rules;
     let mut draft_loaded = use_signal(|| false);
+    use_context_provider(|| draft_loaded);
     {
         let report_repos = report.repos.clone();
         use_future(move || {
@@ -2749,7 +2750,14 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // Clear the PREVIOUS run's findings so a re-audit starts from a
                             // blank Findings table instead of showing stale results while
                             // the new audit runs (the server also clears the transcript).
+                            // Also reset per-finding triage state, view filter, and the open
+                            // detail modal — they're specific to the previous run's findings.
+                            // repo_selection / chosen / custom_rules are NOT reset: those are
+                            // the architect's persistent rule choices that survive a re-audit.
                             audit.set(None);
+                            dispositions.set(std::collections::HashMap::new());
+                            triage_view.set(TriageState::Unresolved);
+                            detail_finding.set(None);
                             job_progress.set(None);
                             det_progress.set(None);
                             auditing.set(true);
@@ -3464,5 +3472,36 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OnboardingDraft;
+
+    /// Old drafts that predate the `dispositions` or `triage_view` fields must still
+    /// deserialize cleanly — every field on OnboardingDraft has `#[serde(default)]`
+    /// except `scan`, which is always written. The scan object itself requires
+    /// `files_scanned`, `findings`, `proposed_rules`, and `gated` (no `#[serde(default)]`
+    /// on those). All other OnboardingDraft fields (`repo_selection`, `chosen`, `custom`,
+    /// `dispositions`, `viewed_repo`, `triage_view`, `audit`) default to empty/None.
+    #[test]
+    fn onboarding_draft_back_compat_missing_optional_fields() {
+        // A minimal draft from before dispositions / triage_view / viewed_repo were added.
+        let json = r#"{
+            "scan": {
+                "files_scanned": 0,
+                "findings": [],
+                "proposed_rules": [],
+                "gated": false
+            }
+        }"#;
+        let d: OnboardingDraft = serde_json::from_str(json).expect("back-compat deserialization failed");
+        assert!(d.dispositions.is_empty(), "dispositions should default to empty");
+        assert!(d.repo_selection.is_empty(), "repo_selection should default to empty");
+        assert!(d.chosen.is_empty(), "chosen should default to empty");
+        assert!(d.custom.is_empty(), "custom should default to empty");
+        assert!(d.audit.is_none(), "audit should default to None");
+        assert!(d.viewed_repo.is_empty(), "viewed_repo should default to empty string");
     }
 }

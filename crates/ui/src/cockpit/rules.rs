@@ -2430,6 +2430,12 @@ pub(super) fn ProposedRulesTable(
     // highlight + needs-a-choice check read THIS repo's picks.
     let viewed_repo = use_context::<Signal<String>>();
     let placement = use_context::<Signal<std::collections::HashMap<String, Vec<String>>>>();
+    // Gate: do NOT write back to repo_selection until the async draft restore has finished.
+    // Without this guard the writeback effect fires immediately on mount (before the draft
+    // loads) and overwrites the draft's saved repo_selection with the recommended-only seed,
+    // so the restore that runs later has nothing to rehydrate. Provided as context by
+    // ScanResults immediately after `let mut draft_loaded = use_signal(|| false)`.
+    let draft_loaded = use_context::<Signal<bool>>();
     // Full cross-repo rule lookup (by rule id) for building audit/arm requests that span
     // every repo's saved selection, not just the one this table is currently showing.
     let all_by_id: std::collections::HashMap<String, ProposedRuleView> = if all_rules.is_empty() {
@@ -2532,6 +2538,13 @@ pub(super) fn ProposedRulesTable(
     let view_repo_wb = view_repo.clone();
     let mut repo_selection_wb = repo_selection;
     use_effect(move || {
+        // Do NOT write back until the async draft restore has completed. Before the draft loads
+        // this table's selection is the recommended-only seed (use_hook ran at mount before the
+        // async restore could set repo_selection). Writing that seed back would overwrite the
+        // draft's saved selection, making the restore a no-op.
+        if !draft_loaded() {
+            return;
+        }
         let live_ids: Vec<String> = handle
             .selected_ids()
             .iter()
@@ -2547,6 +2560,40 @@ pub(super) fn ProposedRulesTable(
         repo_selection_wb.set(map);
         selected_count.set(total);
     });
+    // One-shot restore: when the async draft load completes (draft_loaded flips to true),
+    // re-apply the saved selection from repo_selection to the table checkboxes. This is
+    // necessary because use_hook's pre-select ran ONCE at mount — before the async restore
+    // could populate repo_selection — so the checkboxes reflect the recommended-only seed,
+    // not the architect's saved picks. `selection_restored` guards against re-running on
+    // every subsequent repo_selection write (which would fight the user's live ticks).
+    let mut selection_restored = use_signal(|| false);
+    {
+        let id_map_restore = id_map.clone();
+        let view_repo_restore = view_repo.clone();
+        use_effect(move || {
+            if selection_restored() || !draft_loaded() {
+                return;
+            }
+            // Subscribes to repo_selection so this effect re-runs if the signal is set AFTER
+            // draft_loaded (the async future may set them in either order across ticks).
+            let map = repo_selection.read().clone();
+            if let Some(saved_ids) = map.get(&selection_key(&view_repo_restore)) {
+                let saved_set: std::collections::HashSet<String> =
+                    saved_ids.iter().cloned().collect();
+                // Clear ALL current checkboxes then re-apply only the saved set.
+                let current = handle.selected_ids();
+                for rid in &current {
+                    handle.set_selection(*rid, false);
+                }
+                for (rid, rule) in &id_map_restore {
+                    if saved_set.contains(&rule.id) {
+                        handle.set_selection(*rid, true);
+                    }
+                }
+                selection_restored.set(true);
+            }
+        });
+    }
     let mut arming = use_signal(|| false);
     let mut opening_pr = use_signal(|| false);
     // Apply-overwrite confirm gate: when the pre-apply preflight finds hand-written governance
@@ -3661,5 +3708,21 @@ pub(super) fn SingleRuleEditor(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{selection_key, SINGLE_REPO_SELECTION_KEY};
+
+    #[test]
+    fn selection_key_empty_returns_sentinel() {
+        assert_eq!(selection_key(""), SINGLE_REPO_SELECTION_KEY);
+    }
+
+    #[test]
+    fn selection_key_repo_name_passes_through() {
+        assert_eq!(selection_key("my-repo"), "my-repo");
+        assert_eq!(selection_key("org/repo"), "org/repo");
     }
 }
