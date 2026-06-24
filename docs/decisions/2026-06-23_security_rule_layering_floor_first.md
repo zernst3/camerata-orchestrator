@@ -1,0 +1,56 @@
+# Security rule layering: floor-first
+
+**Date:** 2026-06-23
+**Status:** Accepted
+**Context:** Dogfooding surfaced that the bundled semgrep security rules overlap the
+deterministic security floor. Question raised: is semgrep CE moot? Decision: no — but
+the floor is the #1 enforcement layer, so anything that *can* live in the floor *should*.
+
+## The layers, in priority order
+
+1. **Security floor (Tier 1 — enforced).** Deterministic, language-agnostic regex content
+   rules in `crates/gateway`. Gate-blocking: a floor violation stops the commit/PR. This is
+   the #1 enforcement mechanism. Current coverage: hardcoded-secrets, vendor-token,
+   private-key, secret-files, secret-in-URL, raw-SQL-concat, disabled-TLS, path-escape.
+2. **Advisory / preview (Tier 2 — surfaced, not blocked).** clippy / ruff / eslint / semgrep.
+   Deterministic but NOT gate-enforced; shown as preview findings.
+3. **AI review (Tier 3).** Judgment-based, architectural.
+
+## The rule: floor-first, subject to the floor's admission bar
+
+Anything that *can* live in the floor *should* — the floor is enforced, deterministic, and
+near-zero-FP, which is strictly stronger than an advisory preview. BUT a rule is admissible
+to the enforced floor ONLY if it clears the floor's bar:
+
+> **Floor admission bar:** near-zero false-positive AND always-block-worthy — i.e. the matched
+> pattern has *no* legitimate use. (Hardcoded secrets, private keys, SQL built by string
+> interpolation, disabled TLS verification all clear this: there is no good reason to do them.)
+
+A security signal that is *context-dependent* — the pattern has legitimate uses — does NOT
+clear the bar and must stay in Tier 2 (advisory), because enforcing it would block correct
+code. This is correct layering, not a weakness.
+
+## Applying the bar to the four floor-missing semgrep categories
+
+| Category | Floor-admissible? | Why |
+|---|---|---|
+| **unsafe-deserialization** (`yaml.load` w/o SafeLoader, `pickle.loads`, `unserialize`) | **Yes** | Near-zero legitimate use on untrusted input; almost always a vuln. **Port to floor.** |
+| **shell-injection** (`shell=True` / `os.system` with interpolation) | Borderline | `shell=True` alone has uses; only *interpolated* command strings are always-bad. Port a tightly-anchored arm (interpolation required), else stay Tier 2. |
+| **weak-hash** (md5 / sha1) | **No** | md5/sha1 have legitimate non-crypto uses (cache keys, ETags, checksums). Enforcing would block correct code. **Stays Tier 2 (advisory).** |
+| **exec-injection** (`eval` / `exec` / `Function()`) | **No** | eval/exec are heavily context-dependent. **Stays Tier 2.** |
+
+## Consequences
+
+- **Port unsafe-deserialization into the floor** (new `SEC-*` arm, anchored, near-zero-FP,
+  tested). Then it's enforced, not just an advisory semgrep preview.
+- **Semgrep stays a selectable option** and is NOT moot: its enduring value is breadth the
+  floor cannot enforce — AST-structural rules regex can't express, framework-specific rules,
+  the public registry, and the context-dependent signals (weak-hash, exec, shell) that
+  belong in the advisory tier by design.
+- **Caveat the overlap, don't delete it.** Where a semgrep security rule duplicates a floor
+  category, label it advisory/redundant in the UI; the scan-time cross-tool dedup
+  (`finding_security_category` + `dedup_scan_previews`, fixed 2026-06-23 `b7db61a`) collapses
+  the double-report so the user sees one row, floor canonical.
+- **Per-repo artifact noted:** on a pure-Rust repo only the floor-overlapping semgrep rules
+  fire (the additive four are Python/JS-targeted), which is why semgrep *looked* fully
+  redundant on Camerata. It isn't, for a Python/JS codebase.
