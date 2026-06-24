@@ -225,10 +225,15 @@ impl AppState {
     }
 
     /// Retrieve the most recently completed scan, regardless of which project it belonged to.
-    /// Used as a last-resort fallback in `active_project_context` when neither the draft nor
-    /// the per-project `last_scan` entry holds results for the currently active project.
+    ///
+    /// ISOLATION (A5): this was a last-resort fallback in `active_project_context`, but it
+    /// leaked one project's scan into another's chat grounding, so all production call sites
+    /// were removed. The `recent_scan` field is still written on scan completion and this
+    /// accessor is retained for the isolation regression tests (which assert the data exists
+    /// yet does NOT surface cross-project). Not called from production code by design.
     /// Returns a clone so callers do not hold the lock across await points.
     /// Fail-soft on lock poisoning: returns `None` rather than panicking.
+    #[allow(dead_code)]
     pub(crate) fn get_recent_scan(&self) -> Option<crate::onboard::ScanReport> {
         let guard = self
             .recent_scan
@@ -586,7 +591,23 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             // Pass 1: remove worktrees for terminal-state (SignedOff) UoWs.
-            for uow in uow_store.list() {
+            //
+            // ISOLATION: only sweep UoWs whose repo belongs to a known project. The
+            // global `list()` would resolve and act on every project's UoWs even when
+            // none is active/onboarded; scope to the union of all projects' in-scope
+            // repos via `list_for_project`, and skip the pass entirely when there are
+            // no project repos to sweep.
+            let project_repos: Vec<String> = projects
+                .list()
+                .into_iter()
+                .flat_map(|p| p.repos)
+                .collect();
+            let scoped_uows = if project_repos.is_empty() {
+                Vec::new()
+            } else {
+                uow_store.list_for_project(&project_repos)
+            };
+            for uow in scoped_uows {
                 if uow.stage != crate::lifecycle::UowStage::SignedOff {
                     continue;
                 }
@@ -680,9 +701,31 @@ async fn rules() -> Json<Vec<RuleDto>> {
     Json(dtos)
 }
 
-/// The canonical story spine.
+/// The canonical story spine, scoped to the active project.
+///
+/// ISOLATION (A8): the spine is global, so an unfiltered list leaks every project's
+/// stories. A story belongs to the active project when any of its build TARGET repos
+/// or its SOURCE container (`external_ref.container`) is in the project's `repos`.
+/// No active project → empty list.
 async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStory>>, AppError> {
-    let list = state.stories.list().await.map_err(AppError)?;
+    let Some(p) = state.projects.active() else {
+        return Ok(Json(Vec::new()));
+    };
+    let in_scope = |s: &CanonicalStory| -> bool {
+        s.targets.iter().any(|t| p.repos.iter().any(|r| r == &t.repo))
+            || s.external_ref
+                .as_ref()
+                .and_then(|e| e.container.as_ref())
+                .is_some_and(|c| p.repos.iter().any(|r| r == c))
+    };
+    let list: Vec<CanonicalStory> = state
+        .stories
+        .list()
+        .await
+        .map_err(AppError)?
+        .into_iter()
+        .filter(in_scope)
+        .collect();
     Ok(Json(list))
 }
 
@@ -1448,9 +1491,13 @@ async fn sign_off_run(
     Ok(Json(uow).into_response())
 }
 
-/// All OPEN clarifications across every story (the NEEDS YOU queue).
+/// OPEN clarifications for the active project's stories (the NEEDS YOU queue).
+/// No active project → empty queue.
 async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Clarification>> {
-    Json(state.clarifications.all_open())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.clarifications.all_open_for_project(&p.repos))
 }
 
 /// All clarifications on a story (open and answered).
@@ -5048,9 +5095,12 @@ async fn list_children(
     Ok(Json(children))
 }
 
-/// All routines.
+/// Routines for the active project. No active project → empty list.
 async fn list_routines(State(state): State<AppState>) -> Json<Vec<Routine>> {
-    Json(state.routines.list())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.routines.list_for_project(&p.id))
 }
 
 /// Create a routine.
@@ -5832,7 +5882,10 @@ async fn git_cherry_pick(
 
 /// All known UoWs across every story.
 async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfWork>> {
-    Json(state.uow.list())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.uow.list_for_project(&p.repos))
 }
 
 /// The UoW for a story. Creates a default one if the story has no UoW yet.
@@ -6048,8 +6101,11 @@ struct UowView {
 /// (resolved from the story spine) and its lifecycle stage. A draft UoW's work item is
 /// resolved by its explicit `work_item` link (set at publish), falling back to the key.
 async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    let Some(p) = state.projects.active() else {
+        return Ok(Json(serde_json::json!({ "uows": [] })));
+    };
     let stories = state.stories.list().await.map_err(AppError)?;
-    let uows = state.uow.list();
+    let uows = state.uow.list_for_project(&p.repos);
     let views: Vec<UowView> = uows
         .into_iter()
         .map(|u| {
@@ -6096,8 +6152,17 @@ async fn uow_from_workitem(
     // The UoW key is the spine story id (provider prefix stripped).
     let story_id = crate::workitems::story_id_for(&req.work_item_id);
 
-    // DEDUP by external ref: a UoW already exists for this work item id.
-    let already = state.uow.list().iter().any(|u| u.story_id == story_id);
+    // DEDUP by external ref: a UoW already exists for this work item id WITHIN the
+    // active project. Scoping to the active project's repos lets two projects adopt
+    // the same issue id without colliding. No active project → no scope → no dedup.
+    let already = match state.projects.active() {
+        Some(p) => state
+            .uow
+            .list_for_project(&p.repos)
+            .iter()
+            .any(|u| u.story_id == story_id),
+        None => false,
+    };
     if already {
         return Ok(Json(
             serde_json::json!({ "uow_id": story_id, "created": false }),
@@ -6558,6 +6623,10 @@ pub struct ProjectContextResponse {
     pub ok: bool,
     /// Onboarding phase determines which grounding fields are populated.
     pub phase: ProjectPhase,
+    /// The active project's stable id (present when `ok=true`). Lets the client confirm
+    /// which project this grounding belongs to, closing the cross-project leak surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     /// The active project's name (present when `ok=true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
@@ -7001,6 +7070,7 @@ async fn active_project_context(
         return Json(ProjectContextResponse {
             ok: false,
             phase: ProjectPhase::Blank,
+            project_id: None,
             project_name: None,
             repos: Vec::new(),
             onboarded: Vec::new(),
@@ -7040,20 +7110,12 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion.
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
             });
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PostOnboard,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: project.onboarded.clone(),
@@ -7081,20 +7143,12 @@ async fn active_project_context(
                     .get_last_scan(&project.id)
                     .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
                     .filter(|s| !s.is_empty())
-            })
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion.
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
             });
         let selected_rules_section = draft.as_ref().and_then(render_selected_rules_for_chat);
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::PreOnboard,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: Vec::new(),
@@ -7116,20 +7170,11 @@ async fn active_project_context(
         let scan_results_section = state
             .get_last_scan(&project.id)
             .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                // Last-resort fallback: use the most-recently-completed scan regardless of
-                // which project it belongs to.  Covers the case where the active project
-                // changed between scan submission and scan completion (the root cause of
-                // "Scan results (none yet)" showing after a successful scan).
-                state
-                    .get_recent_scan()
-                    .map(|r| render_scan_results_for_chat(&r.findings, &r.coverage_notes))
-                    .filter(|s| !s.is_empty())
-            });
+            .filter(|s| !s.is_empty());
         Json(ProjectContextResponse {
             ok: true,
             phase: ProjectPhase::Blank,
+            project_id: Some(project.id.clone()),
             project_name: Some(project.name.clone()),
             repos: project.repos.clone(),
             onboarded: Vec::new(),
@@ -7262,7 +7307,7 @@ async fn uow_begin_investigation(
 /// GitHub-sourced id WITHOUT the `github:` prefix (see [`UowView`]); the repo is the part
 /// before the last `#`. Returns `None` when the id has no `#` or the repo part is not a
 /// valid `owner/repo`.
-fn repo_from_story_id(story_id: &str) -> Option<String> {
+pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
     let (repo, _num) = story_id.rsplit_once('#')?;
     if camerata_worktracker::RepoCoord::parse(repo).is_some() {
         Some(repo.to_string())
@@ -7763,7 +7808,13 @@ struct StoryDevContext {
 async fn development_context(State(state): State<AppState>) -> Json<serde_json::Value> {
     use camerata_worktracker::investigation::decisions_approved_for_development;
 
-    let uow_list = state.uow.list();
+    let Some(p) = state.projects.active() else {
+        return Json(serde_json::json!({
+            "ok": true,
+            "units_of_work": [],
+        }));
+    };
+    let uow_list = state.uow.list_for_project(&p.repos);
     let items: Vec<StoryDevContext> = uow_list
         .into_iter()
         .map(|uow| {
@@ -8553,8 +8604,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stories_endpoint_returns_the_seeded_spine() {
-        let app = router(AppState::seeded());
+    async fn stories_endpoint_returns_the_active_projects_spine() {
+        // ISOLATION (A8): /api/stories is project-scoped. A story is in-scope when one of its
+        // build-target repos (or its source container) is in the active project's repos.
+        // Stories targeting another repo must NOT leak.
+        use camerata_worktracker::{FeatureStatus, RepoTarget};
+
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Active project owns `acme/app`.
+        state
+            .projects
+            .create("Acme", vec!["acme/app".to_string()])
+            .unwrap();
+
+        // Two in-scope stories (target acme/app) and one out-of-scope (targets other/repo).
+        let mk = |id: &str, repo: &str, status: FeatureStatus| CanonicalStory {
+            id: id.to_string(),
+            external_ref: None,
+            title: format!("story {id}"),
+            description: "desc".to_string(),
+            status,
+            created_by: "architect".to_string(),
+            targets: vec![RepoTarget::new(repo)],
+        };
+        state
+            .stories
+            .upsert(mk("CAM-1", "acme/app", FeatureStatus::Executing))
+            .await
+            .unwrap();
+        state
+            .stories
+            .upsert(mk("CAM-2", "acme/app", FeatureStatus::SignedOff))
+            .await
+            .unwrap();
+        state
+            .stories
+            .upsert(mk("OTHER-1", "other/repo", FeatureStatus::Executing))
+            .await
+            .unwrap();
+
+        let app = router(state);
         let resp = app
             .oneshot(
                 Request::builder()
@@ -8567,10 +8656,13 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert_eq!(arr[0]["id"], "CAM-1");
-        // FeatureStatus serializes snake_case.
-        assert_eq!(arr[0]["status"], "executing");
+        assert_eq!(arr.len(), 2, "only the active project's stories, got: {json:?}");
+        let ids: Vec<&str> = arr.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"CAM-1") && ids.contains(&"CAM-2"));
+        assert!(
+            !ids.contains(&"OTHER-1"),
+            "out-of-project story must not leak, got: {ids:?}"
+        );
     }
 
     /// #20: POST /api/stories/adopt-issue maps a GitHub issue onto the spine (token-free,
@@ -9334,6 +9426,9 @@ mod tests {
     async fn uow_from_workitem_dedups_by_external_ref() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: the dedup + listing are now project-scoped; activate a project whose
+        // repos cover the work item's repo (`o/r`).
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
         let uow = state.uow.clone();
         let app = router(state);
 
@@ -9372,6 +9467,8 @@ mod tests {
     async fn uows_list_carries_workitem_and_stage() {
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: /api/uows is project-scoped; activate a project covering `o/r`.
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
         let app = router(state);
 
         // Create one UoW from a work item.
@@ -9503,7 +9600,13 @@ mod tests {
     /// `work_item = null` and `authoring = true`.
     #[tokio::test]
     async fn blank_uow_creates_and_lists_as_authoring() {
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        // ISOLATION (A1/A2): a blank draft has a `draft-` id with NO resolvable repo, so the
+        // project-scoped /api/uows EXCLUDES it by design. This test now verifies (a) the blank
+        // endpoint still mints a draft id, and (b) the draft does NOT leak into the scoped list
+        // (neither with no active project, nor under an unrelated active project).
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
+        let app = router(state);
 
         let resp = app
             .clone()
@@ -9533,12 +9636,10 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         let uows = json["uows"].as_array().unwrap();
-        let entry = uows
-            .iter()
-            .find(|u| u["id"] == uow_id)
-            .expect("draft in /api/uows");
-        assert!(entry["work_item"].is_null(), "draft has no work item yet");
-        assert_eq!(entry["authoring"], true, "draft flagged as authoring");
+        assert!(
+            uows.iter().all(|u| u["id"] != uow_id),
+            "repo-less draft must NOT appear in the project-scoped /api/uows, got: {json:?}"
+        );
     }
 
     /// `POST /api/uow/:id/author` appends the chat turn and persists the requirements
@@ -9622,6 +9723,10 @@ mod tests {
     #[tokio::test]
     async fn publish_link_step_links_draft_without_rekey() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // ISOLATION: /api/uows is project-scoped and resolves a LINKED draft's repo from its
+        // work_item (`me/api#7`). Activate a project covering `me/api` so the linked draft is
+        // visible (an UNLINKED draft would remain excluded — no resolvable repo).
+        state.projects.create("P", vec!["me/api".to_string()]).unwrap();
         let uow_store = state.uow.clone();
         let stories = state.stories.clone();
         let app = router(state);
@@ -11436,13 +11541,15 @@ mod tests {
     /// per-project last_scan entry (simulates the active-project-changed-between-submit-
     /// and-complete race that caused "Scan results (none yet)").
     #[tokio::test]
-    async fn active_project_context_falls_back_to_recent_scan() {
+    async fn active_project_context_does_not_leak_recent_scan_across_projects() {
+        // ISOLATION (A5): the recent_scan global fallback was REMOVED. A scan stored under
+        // a different project's id must NEVER surface in the active project's chat grounding.
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         // Create and activate a project.
         let project = state.projects.create("ActiveProj", vec!["owner/repo".to_string()]).unwrap();
 
-        // Simulate a scan that was stored under a DIFFERENT project id (the project that was
-        // active at scan submission time) — NOT under `project.id`.
+        // Simulate a scan stored under a DIFFERENT project id (the project that was active at
+        // scan submission time) — NOT under `project.id`. This also populates recent_scan.
         state.set_last_scan("other-project-id".to_string(), make_scan_report("RECENT-RULE"));
 
         // Confirm: per-project lookup for the ACTIVE project is empty.
@@ -11450,7 +11557,8 @@ mod tests {
             state.get_last_scan(&project.id).is_none(),
             "test setup: active project must have no per-project last_scan entry"
         );
-        // Confirm: recent_scan was populated by the set_last_scan call above.
+        // Confirm: recent_scan was populated by the set_last_scan call above (so the
+        // assertion below proves the fallback is gone, not that the data is absent).
         assert!(
             state.get_recent_scan().is_some(),
             "test setup: recent_scan must be populated"
@@ -11466,15 +11574,13 @@ mod tests {
 
         let body = body_json(resp).await;
         let section = body.get("scan_results_section");
+        // The fallback is gone: with no per-project scan for the active project, the section
+        // must be absent/null and must NOT contain the OTHER project's rule id.
+        let section_str = section.and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            section.is_some() && section.unwrap() != &serde_json::Value::Null,
-            "scan_results_section must be populated via the recent_scan fallback, got: {body:?}"
-        );
-        let section_str = section.unwrap().as_str().unwrap_or("");
-        assert!(
-            section_str.contains("RECENT-RULE"),
-            "recent_scan fallback must surface the rule_id from the mismatched-project scan, \
-             got: {section_str}"
+            !section_str.contains("RECENT-RULE"),
+            "cross-project recent_scan must NOT leak into the active project's chat grounding, \
+             got: {body:?}"
         );
     }
 
