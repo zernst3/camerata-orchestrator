@@ -1,132 +1,1362 @@
 {
   "entries": [
     {
-      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "ffec30983bd9d694",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "8a25a67e8187f79d",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-PRIVATE-KEY-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "66c5d9eddb8f164d",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "ee36ef4db6ac7444",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "bcbeda245e02ab84",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "4870ede3aa6a8a0c",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
-      "path": "crates/server/src/eval.rs",
-      "fingerprint": "215610b9984e83d7",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
-      "path": "crates/fleet/src/gate_probe.rs",
-      "fingerprint": "9868ef4d5a7d5a64",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
-      "path": "crates/gateway/src/lib.rs",
-      "fingerprint": "b0cf200eb48a2195",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "SEC-NO-PRIVATE-KEY-1",
-      "path": "crates/gateway/src/lib.rs",
-      "fingerprint": "8c70df4e692f9427",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "camerata.security.hardcoded-secret-dquote",
-      "path": "crates/gateway/src/lib.rs",
-      "fingerprint": "688bc76ced50b032",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "camerata.security.sql-string-concat-rust",
-      "path": "crates/gateway/src/lib.rs",
-      "fingerprint": "a3cf76f123704570",
-      "reason": "Self Reference in Camerata source code or example/fake",
-      "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
-      "kind": "ignore",
-      "ticket": null
-    },
-    {
-      "rule_id": "camerata.security.sql-string-concat-rust",
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
       "path": "crates/server/src/onboard.rs",
-      "fingerprint": "a3cf76f123704570",
-      "reason": "Self Reference in Camerata source code or example/fake",
+      "fingerprint": "58048b938c18cdd7",
+      "reason": "These are code tests, not applicable finds",
       "accepted_by": "architect",
-      "accepted_at": "2026-06-24T23:48:32.227523+00:00",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "836384ed159e20bd",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "a81ee9a81a31f25f",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "51a70282ff071a6a",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "12671ad853530013",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "779349cd314fd788",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "779349cd314fd788",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "26ff5868c2818371",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "9ad459af4231cda3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "2f1fee481edc00c7",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "efd47ed144379052",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "90a7bed83baa9c02",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "18e4d8bcf6a17dbd",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "591a9c0f982d06bb",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "45bd19316319483c",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "263c2f47fd543067",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "446ea4129014aeed",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "e5f3233d3f5438cf",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "16e4dc183fc4bafa",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "e93ff0238a2716e3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "978e198740cce018",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "978e198740cce018",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "46eb6ad7a077bd21",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "cc04afd9cc477873",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "cff026f73ae0cd77",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "d44723ed48badaa2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "303cc3ead9aeffd2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "256212b811f0b7e0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "a0b1341056aaa5c6",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "c4905c5a76c310d0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "5fc7a726f677f3da",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "9d6d797201deffe9",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "ebf7ef37cdd20116",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "ab3e8acae3e10b03",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "e99488a8c39bd400",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "5fdf025b4c58c6d1",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard.rs",
+      "fingerprint": "e414f80890601669",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/server/src/evidence.rs",
+      "fingerprint": "45526fb930e02e8e",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/server/src/evidence.rs",
+      "fingerprint": "2a551bdca3c1e29e",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/server/src/ai_audit.rs",
+      "fingerprint": "cdade01d25af9716",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/persistence/src/enforcement_catch.rs",
+      "fingerprint": "8e0a7b354d241d60",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "0b814ce331dfeaeb",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "98bbfc31ec427f2c",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6f63a2ce45a051e9",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "94173ba7cef51b71",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "542918379aa5e890",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "48e120be011d8cd5",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "40411a28ef86f4c3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "40411a28ef86f4c3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "c849b99f0ddb68ff",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "aa118df9ffd6ce25",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "164b071a3665d2d2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "93e880a3abf25eea",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "aec82d868688002e",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "54062ae5f561354b",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e6e9087ca224c586",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5a1daa69133db09a",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5526ac5761544ca2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "54ed717d15802405",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "c4eb85ca82cdfb6a",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5fa77c30a054291e",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "75f74701055d5e17",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "f828e793e923c2e4",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "44e40cfa50bed311",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "56b2a2a8bc346d47",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b117c4afecb965b0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "101ccf17b38c69da",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "a83694ee7b862fd6",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e1bf5754b0a79324",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "63541d2366005674",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "408a127758a66f52",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "a909588d65a88612",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "f5c7bedc43ce9fe3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "593fc77c1abb89e3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "ff9ed123ec6725a1",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d28b495ed0473598",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6985e0d99a135b85",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "41796dd50728c598",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "31d78a2ee64d4af3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "63e9e24779e4551a",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "27b5d20142558847",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "0dadd1030625f141",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "baa152d06ba1b788",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-RAW-SQL-CONCAT-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "ac621616fb96a9ea",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "bb4cdda6b46893f3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "1c10be740f2adec0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d312b847a37ae22d",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b828df3d047e36fc",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "948b0e6e97fe2384",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "12e41c1956e052f6",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "23b3cb3c3e4788c8",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "ARCH-NO-SECRETS-IN-URL-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e2686f0420f3a6ea",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "c91cd55001ae5fc2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3d697d6caa6fb2f8",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "939081b8b448e632",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "2047c8eaeb72e12f",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3a309d20e6485907",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "af3f3298ada0a0c1",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b80e7e5107598cf8",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "1f7eac7d50341083",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "173922750fd39dd0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-PRIVATE-KEY-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "9d1587415927a8b7",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "c0844ffd375b7bdc",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "4cb6562b54384f19",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b9f937fb73b33c00",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "9625a14dfc3c54ea",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3de2fca1692fb6d2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "1a7c4649906100d5",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "4b74289b81a90f5a",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "17079b610e501a75",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e76bf25285e6364e",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "32fe51d9f8138007",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-VENDOR-TOKEN-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d5ca181293d417c1",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "2d08c6c1cb364307",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d05c5d1ae9888990",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "61be8a8b5fa0f5b1",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "cc7bfff78cfcde53",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6b856ee207a51c56",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d73462e02b28ad72",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3a448cece34820bd",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3c135d76cee0f6dc",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "ca00b0ba7562aef0",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "cb911053a665cb73",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5418593855d34f9d",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "f77731a5ede9453c",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "97bb41ab682f0881",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b87c99f3efa4676f",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "66bc03e53fd41eb3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "a1349d06c2d90e7f",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "4cf685bcd07267e2",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "65b68f76561404f3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "fe8f4b67633af1b4",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d73cad1e99477783",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "160e1735629d96a3",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "85e031202dfe690b",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "0f2990325515e82f",
+      "reason": "These are code tests, not applicable finds",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:33.780634+00:00",
       "kind": "ignore",
       "ticket": null
     }
