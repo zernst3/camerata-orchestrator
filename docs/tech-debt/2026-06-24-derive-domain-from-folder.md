@@ -29,3 +29,10 @@ Key observation: **for every rule except universal, the folder already equals th
 
 ## Scope
 `crates/rules/src/lib.rs` (loader + `select_for_domains` + `derive_allowed_paths`), every TOML's `domain` field (drop or make override-only), the universal rules' `"*"` → `"Universal"`, and any server-side stack→domain selection. Parent: **Tech Debt Epic #70**.
+
+## Implemented — 2026-06-24
+
+- `Rule.domain` is now derived from the TOML's corpus-relative parent folder path. Folder components are joined with `:` (e.g. `rust/dioxus/` → `"rust:dioxus"`, `universal/` → `"universal"`). The in-file `domain` field is now `Optional` — absent means fully derived; present triggers a warning if it disagrees with the folder, but the derived value always wins.
+- The universal sentinel `"*"` is replaced by `"universal"` throughout corpus logic: `select_for_domains`, `role_from_corpus`, `domain_to_glob`, `propose.rs`, and the 13 `universal/` TOML files.
+- Added `derived_domain_from_folder_path` and `universal_folder_derives_universal_domain` tests; updated all existing `"*"`-category assertions in tests.
+- Governance-scope `"*"` (arm.rs, project.rs, lib.rs custom rules) left untouched.

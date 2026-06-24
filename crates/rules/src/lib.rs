@@ -1077,12 +1077,15 @@ mod tests {
         // Reuse the production parser by going through RuleToml + the same field
         // wiring load_one uses. We deserialize RuleToml directly here because
         // load_one is file-based; the field mapping is identical.
+        // Since domain is now Option<String> (derived from path in production),
+        // we use the explicit value if present or fall back to "rust" as a
+        // sentinel for tests that are checking other fields (not the domain).
         let raw: RuleToml = toml::from_str(toml_src).expect("rule TOML parses");
         Rule {
             id: RuleId(raw.id),
             title: raw.title,
             enforcement: raw.enforcement,
-            domain: raw.domain,
+            domain: raw.domain.unwrap_or_else(|| "rust".to_string()),
             summary: String::new(),
             decision_question: None,
             decision_why: None,
@@ -1134,7 +1137,7 @@ mod tests {
             id = "RULE-NO-PROV-1"
             title = "A rule that predates the provenance schema"
             enforcement = "prose"
-            domain = "*"
+            domain = "rust"
         "#;
         let rule = parse_rule(src);
         assert_eq!(rule.verification(), Verification::Draft);
@@ -1299,6 +1302,22 @@ mod tests {
             let _ = rule.verification();
             let _ = rule.is_shippable();
         }
+
+        // After the *→universal refactor: no rule should have domain="*".
+        let star_rules: Vec<_> = set.iter().filter(|r| r.domain == "*").collect();
+        assert!(
+            star_rules.is_empty(),
+            "no corpus rules should have domain='*' after refactor; found: {:?}",
+            star_rules.iter().map(|r| r.id_str()).collect::<Vec<_>>()
+        );
+        // The universal domain should be non-empty if the corpus has universal/ rules.
+        if set.len() > 50 {
+            let universal_rules: Vec<_> = set.iter().filter(|r| r.domain == "universal").collect();
+            assert!(
+                !universal_rules.is_empty(),
+                "expected universal rules to load as 'universal' domain"
+            );
+        }
     }
 
     fn populated_set() -> RuleSet {
@@ -1318,7 +1337,7 @@ mod tests {
             "agentic",
             EnforcementKind::Mechanical,
         ));
-        set.push(make_rule("SPIRIT-OPTIMIZE-1", "*", EnforcementKind::Prose));
+        set.push(make_rule("SPIRIT-OPTIMIZE-1", "universal", EnforcementKind::Prose));
         set.push(make_rule(
             "ARCH-STRICT-LAYERING-1",
             "api-layer",
@@ -1369,7 +1388,7 @@ mod tests {
         domains.sort_unstable();
         assert!(domains.contains(&"rust"));
         assert!(domains.contains(&"agentic"));
-        assert!(domains.contains(&"*"));
+        assert!(domains.contains(&"universal"));
         assert!(domains.contains(&"api-layer"));
     }
 
@@ -1487,7 +1506,7 @@ mod tests {
         let ids = vec![RuleId("SPIRIT-OPTIMIZE-1".to_owned())];
         let result = select_by_ids(&set, &ids);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain, "*");
+        assert_eq!(result[0].domain, "universal");
     }
 
     // ── select_for_domains (universal inclusion) ──────────────────────────────
@@ -1495,7 +1514,7 @@ mod tests {
     #[test]
     fn select_for_domains_includes_universal_rules() {
         let set = populated_set();
-        // ask for "agentic" only — universal "*" should appear too
+        // ask for "agentic" only — universal "universal" should appear too
         let result = select_for_domains(&set, &["agentic"]);
         let ids: Vec<&str> = result.iter().map(|r| r.id_str()).collect();
         assert!(
@@ -1516,7 +1535,7 @@ mod tests {
         let set = populated_set();
         let result = select_for_domains(&set, &[]);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].domain, "*");
+        assert_eq!(result[0].domain, "universal");
     }
 
     // ── EnforcementKind Display ────────────────────────────────────────────
@@ -1742,7 +1761,7 @@ mod tests {
 
         // With no domains / ids the subset must consist only of universal rules.
         let set = load_corpus(path).await.expect("corpus loads");
-        let universal_count = set.iter().filter(|r| r.domain == "*").count();
+        let universal_count = set.iter().filter(|r| r.domain == "universal").count();
         assert_eq!(
             role.rule_subset.len(),
             universal_count,
@@ -1978,5 +1997,74 @@ mod tests {
             assert!(rule.options.iter().any(|o| o.id == "codeql-public-free"));
             assert!(rule.options.iter().any(|o| o.id == "codeql-ghas-paid"));
         }
+    }
+
+    // ── derive-from-folder (unit tests for the path → domain derivation) ─────
+
+    #[tokio::test]
+    async fn derived_domain_from_folder_path() {
+        // Create a temporary corpus dir with a rule in a nested folder.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus_dir = tmp.path();
+
+        // Create rust/dioxus/test-rule.toml
+        let rust_dioxus = corpus_dir.join("rust").join("dioxus");
+        std::fs::create_dir_all(&rust_dioxus).expect("create dirs");
+        let toml_path = rust_dioxus.join("test-rule.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+            id = "RUST-DIOXUS-TEST-1"
+            title = "Test rule"
+            enforcement = "prose"
+        "#,
+        )
+        .expect("write toml");
+
+        let set = load_corpus(corpus_dir).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("RUST-DIOXUS-TEST-1")
+            .expect("rule loaded");
+        assert_eq!(
+            rule.domain, "rust:dioxus",
+            "domain derived from rust/dioxus/ folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn universal_folder_derives_universal_domain() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus_dir = tmp.path();
+
+        let universal_dir = corpus_dir.join("universal");
+        std::fs::create_dir_all(&universal_dir).expect("create dirs");
+        let toml_path = universal_dir.join("arch-lifecycle.toml");
+        std::fs::write(
+            &toml_path,
+            r#"
+            id = "ARCH-RESOURCE-LIFECYCLE-TEST-1"
+            title = "Test universal rule"
+            enforcement = "prose"
+        "#,
+        )
+        .expect("write toml");
+
+        let set = load_corpus(corpus_dir).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("ARCH-RESOURCE-LIFECYCLE-TEST-1")
+            .expect("rule loaded");
+        assert_eq!(
+            rule.domain, "universal",
+            "universal/ folder derives 'universal' domain"
+        );
+
+        // Must be selected when no domains specified (universal always included).
+        let selected = select_for_domains(&set, &[]);
+        assert!(
+            selected
+                .iter()
+                .any(|r| r.id_str() == "ARCH-RESOURCE-LIFECYCLE-TEST-1"),
+            "universal rule is selected with empty domain list"
+        );
     }
 }
