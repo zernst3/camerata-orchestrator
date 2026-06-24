@@ -1,0 +1,644 @@
+{
+  "entries": [
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/assets/semgrep-rules/security.yml",
+      "fingerprint": "dc3884296b185319",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/assets/semgrep-rules/security.yml",
+      "fingerprint": "e7b3d8225bd8feb0",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/assets/semgrep-rules/security.yml",
+      "fingerprint": "69831ff3807e36a4",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/assets/semgrep-rules/security.yml",
+      "fingerprint": "6624a82c65f0623d",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/onboard/self_ref.rs",
+      "fingerprint": "1c137feb8911f0d1",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "b56bddbb5d6790c3",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "f123c885b88ff23e",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "ec217e4506a71030",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "501b50fdd2c99b8f",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "a17de241e523ac31",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "2b8ac63960934286",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/server/src/eval.rs",
+      "fingerprint": "80f03f45e9bcbac1",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/rules/principles/universal/sec-no-disabled-tls-1.toml",
+      "fingerprint": "f9e0d8de90c64f5b",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "501e6df8910d8148",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "9b3b71970b0cc9a9",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "20d6c8b7f7567f4a",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "7b8da2de5c107f0d",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "60cd63331cece34a",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "3abef7b308e4d78e",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "72fa5d279491d135",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "2e411670770719d3",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "b1fcd1f22934aa78",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "6a24cad1c828d7b1",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "a6f9be4ec9783ec0",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/rules/principles/universal/sec-no-unsafe-deserialization-1.toml",
+      "fingerprint": "8f89a74e12b19a75",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "2b0ac3ac8f02b4cd",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-DISABLED-TLS-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "8365ed4e07e468b6",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "56911c4b7330b30f",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e833e42ccf4fe812",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "e17f5fdd1daa72c3",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "0c857bc2740df33e",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b8118913383b6178",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "25622a4689434922",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6762dd055634f8fc",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "dcb7de386e26d214",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "8939c9da1a243ecd",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "973101bba60d3f36",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "444243e26324ae98",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "1a89dad7a938cd3e",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d4cb3718438d1bb5",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d417cb17a1edfc9f",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "a162f107d844b1d0",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "40de80581d9301e4",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "ff728f4b4610bd87",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6d66012404be4763",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "c789dd6c97938b1b",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5c69c6d06883b2d5",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "9e1c0f66e05a21a2",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "4eecd2047ff35c43",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d6faec82165acabd",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5d6604b4cee320aa",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "a2482e59b6f22d24",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "7f74c2a4e96363e5",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "543d929ed6c00b04",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "5f295f5c35051c7c",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "2aa4475c584163ff",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6e275d076026c679",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "6c01e0174e460328",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "7909007d0ff1dcb8",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "d3313f938102df33",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "3b640a77e0995c7d",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "818c815f4aa60cb6",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "233d5b56088fc853",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    },
+    {
+      "rule_id": "SEC-NO-UNSAFE-DESERIALIZATION-1",
+      "path": "crates/gateway/src/lib.rs",
+      "fingerprint": "b7ea1fcd5ab24114",
+      "reason": "These are self-referential to Camerata source code",
+      "accepted_by": "architect",
+      "accepted_at": "2026-06-24T23:48:27.481787+00:00",
+      "kind": "ignore",
+      "ticket": null
+    }
+  ]
+}
