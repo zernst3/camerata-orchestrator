@@ -1,7 +1,7 @@
 id = "ARCH-RESOURCE-LIFECYCLE-1"
 title = "The app reaps every subprocess it spawns and cleans every temp artifact it writes"
 tag = "stack"
-domain = "universal"
+domain = "*"
 layer = "universal"
 enforcement = "architectural"
 default = true
