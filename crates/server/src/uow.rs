@@ -766,6 +766,21 @@ impl UowStore {
             .collect()
     }
 
+    /// UoWs whose story_id resolves to a repo in `repos` (the active project's repos).
+    /// Draft UoWs whose story_id has no resolvable repo are EXCLUDED.
+    pub fn list_for_project(&self, repos: &[String]) -> Vec<UnitOfWork> {
+        self.mem
+            .lock()
+            .expect("uow mutex poisoned")
+            .values()
+            .filter(|u| {
+                crate::repo_from_story_id(&u.story_id)
+                    .is_some_and(|r| repos.iter().any(|p| p == &r))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Return `true` when the story's UoW has an evidence record with a critical
     /// scoped-scan finding that blocks sign-off. Reads under the mutex so the result
     /// reflects the CURRENT (not a snapshot) state.
@@ -1385,6 +1400,36 @@ mod tests {
         // set_status to Done.
         store.set_status("CAM-1", DevStatus::Done);
         assert_eq!(store.get_or_create("CAM-1").dev_status, DevStatus::Done);
+    }
+
+    #[test]
+    fn list_for_project_scopes_by_repo_and_excludes_unresolvable() {
+        let store = UowStore::new();
+
+        // Two repos belonging to two different projects, plus a draft id with no repo.
+        store.get_or_create("acme/alpha#1");
+        store.get_or_create("acme/alpha#2");
+        store.get_or_create("other/beta#7");
+        store.get_or_create("CAM-DRAFT"); // no `#`, no resolvable repo
+
+        // Scoping to acme/alpha returns only its two UoWs.
+        let alpha = store.list_for_project(&["acme/alpha".to_string()]);
+        assert_eq!(alpha.len(), 2);
+        assert!(alpha.iter().all(|u| u.story_id.starts_with("acme/alpha#")));
+
+        // Scoping to other/beta returns only its one UoW.
+        let beta = store.list_for_project(&["other/beta".to_string()]);
+        assert_eq!(beta.len(), 1);
+        assert_eq!(beta[0].story_id, "other/beta#7");
+
+        // A project with both repos sees both repos' UoWs but never the draft.
+        let both = store
+            .list_for_project(&["acme/alpha".to_string(), "other/beta".to_string()]);
+        assert_eq!(both.len(), 3);
+        assert!(both.iter().all(|u| u.story_id != "CAM-DRAFT"));
+
+        // Empty repo list → nothing.
+        assert!(store.list_for_project(&[]).is_empty());
     }
 
     #[test]

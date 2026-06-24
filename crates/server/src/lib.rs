@@ -7262,7 +7262,7 @@ async fn uow_begin_investigation(
 /// GitHub-sourced id WITHOUT the `github:` prefix (see [`UowView`]); the repo is the part
 /// before the last `#`. Returns `None` when the id has no `#` or the repo part is not a
 /// valid `owner/repo`.
-fn repo_from_story_id(story_id: &str) -> Option<String> {
+pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
     let (repo, _num) = story_id.rsplit_once('#')?;
     if camerata_worktracker::RepoCoord::parse(repo).is_some() {
         Some(repo.to_string())
