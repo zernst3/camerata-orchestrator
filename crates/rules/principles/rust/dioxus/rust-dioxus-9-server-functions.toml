@@ -1,34 +1,33 @@
 id = "RUST-DIOXUS-9"
-title = "Server-to-client calls use server functions, not a separately maintained HTTP client"
+title = "Server-to-client calls: framework server functions or a REST API"
 tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: Server-to-client calls use server functions, not a separately maintained HTTP client?"
-default = "server-to-client-calls-use-server-functions-not"
-why = "A hand-rolled client crate doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change. Server functions are the framework-native shape for the same intent: one source of truth per operation, one place to change when the operation evolves. They also play correctly with server-side rendering, where the same call resolves through an in-process function during the initial render and through the network during client-side hydration. A hand-rolled REST client crate that the UI imports duplicates the route surface across the boundary and loses static type checks at the call site, since the route is named in one place and called from another. A typed RPC layer added as a separate dependency is equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively. A graph-query endpoint with code generation is premature complexity for the common case; it works at scale, but the project's data graph rarely warrants it from day one and the upfront cost rarely pays back."
+question = "What position does the project take on: how the UI calls the server — framework server functions or a REST API?"
+why = "Both are legitimate, widely-used ways for a Dioxus UI to reach its server, and neither is presumed correct — the right choice follows from where the project draws its boundaries. Framework server functions (the `#[server]` macro) generate the client and server sides from one definition, keep a single source of truth per operation, and resolve in-process during server-side rendering and over the network during hydration: a natural fit when the UI and server ship together as one fullstack unit. A REST API is the natural fit when the server is a standalone boundary — it serves consumers beyond this UI (mobile, third parties, other services), speaks standard HTTP semantics (caching, status codes, auth middleware, gateways, observability), and can be versioned and deployed independently of the front end; a typed or OpenAPI-generated client keeps its call sites type-checked. Choose by asking whether the server is an internal detail of one app (which favors server functions) or an independent product surface (which favors a REST API), not by defaulting to either."
 
 [[option]]
 id = "server-to-client-calls-use-server-functions-not"
-label = "Server-to-client calls use server functions, not a separately maintained HTTP client"
-directive = "When the UI needs data or actions from the server, the framework's server-function macro is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition. The function body runs server-side and may call the application's service layer directly. A separately maintained REST or RPC client crate that the UI imports is forbidden, because the same route surface would then have to be kept in sync across two boundaries. When the function legitimately needs to talk to a third party (payment provider, email gateway, external API), the call to that third party lives in the server-side body of a server function, never in client-side code."
-why = "A hand-rolled client crate doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change."
+label = "The UI calls the server through framework server functions"
+directive = "When the UI needs data or actions from the server, the framework's server-function macro (`#[server]`) is used to declare them. The macro generates the client-side call (over the wire, serialized) and the server-side handler from a single function definition; the body runs server-side and may call the application's service layer directly. Within this choice the UI does not also maintain a separate REST/RPC client for the same operations — the server function is the single source of truth per operation. When a function needs to reach a third party (payment provider, email gateway, external API), that call lives in the server-side body of a server function, never in client-side code."
+why = "Keeps one source of truth per operation: a single function definition generates both sides, so a renamed field or changed return type is updated in one place, and the same call resolves in-process during server-side rendering and over the network during hydration. The strongest fit when the UI and server ship together as one fullstack app and the server has no consumers other than this front end."
 
 [[option]]
 id = "server-to-client-calls-go-through-a-hand-rolled"
-label = "server-to-client calls go through a hand-rolled REST client crate …"
-directive = "server-to-client calls go through a hand-rolled REST client crate that the UI imports, with route definitions on the server and matching call sites in the client crate"
-why = "Doubles the surface that has to stay in sync (the server-side route definition plus the client-side call) and reintroduces an opportunity for drift on every signature change: a renamed field or changed return type must be updated in two places rather than one."
+label = "The server exposes a REST API the UI consumes through an HTTP client"
+directive = "The server exposes versioned REST endpoints, and the UI calls them through an HTTP client — preferably a typed or OpenAPI-generated client so call sites stay type-checked. The server is treated as an independent boundary: its API is documented and stable enough to serve other consumers (mobile apps, third-party integrations, other services), and it can be versioned and deployed on a cadence independent of the front end. Standard HTTP semantics — caching, status codes, auth middleware, gateways, observability — apply uniformly across every consumer."
+why = "The right shape when the server is a standalone product surface rather than an internal detail of one UI: it serves consumers beyond this front end, speaks a language-agnostic protocol every platform already understands, and lets the API and UI evolve and deploy on independent cadences. In return it asks that the endpoint contract and the client stay in sync; a typed or generated client (an OpenAPI-generated SDK, or a shared types crate) absorbs most of that cost by restoring static checks at the call site."
 
 [[option]]
 id = "server-to-client-calls-go-through-a-typed-rpc-la"
 label = "server-to-client calls go through a typed RPC layer added …"
 directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc, or similar), rather than through the framework's server-function macro"
-why = "Equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively: the generated stub types must stay in sync with the service definition, codegen adds a build step, and the project takes on the full surface of the RPC library's maintenance and upgrade cycle."
+why = "Equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively: the generated stub types must stay in sync with the service definition, codegen adds a build step, and the project takes on the full surface of the RPC library's maintenance and upgrade cycle. Reasonable when an RPC ecosystem (shared contracts, polyglot services) is already in use across the system."
 
 [[option]]
 id = "the-server-exposes-a-graph-query-endpoint-with-c"
@@ -39,3 +38,7 @@ why = "Premature complexity for the common case: the project's data graph rarely
 [[sources]]
 url = "https://dioxuslabs.com/learn/0.6/guides/fullstack/server_functions"
 title = "Dioxus fullstack: Server Functions — #[server] macro generates client/server from one definition"
+
+[[sources]]
+url = "https://developer.mozilla.org/en-US/docs/Web/HTTP"
+title = "MDN: HTTP — standard semantics a REST API gives every consumer (caching, status codes, methods)"
