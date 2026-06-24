@@ -197,6 +197,19 @@ pub(crate) struct GateProvenanceLite {
     pub mode: String,
 }
 
+/// Wrapper for `GET /api/development/context`, which returns an OBJECT
+/// `{"ok": bool, "units_of_work": [...]}` — NOT a bare array. Deserialising the
+/// response directly as `Vec<UowSnapshot>` silently fails (object ≠ array),
+/// which previously left development-state grounding empty and invited the model
+/// to fabricate. This wrapper matches the server shape exactly.
+#[derive(Clone, serde::Deserialize, Default)]
+struct DevelopmentContextResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    units_of_work: Vec<UowSnapshot>,
+}
+
 /// Derive a short `gate_status` label from a UoW snapshot for display + prompt injection.
 fn gate_status_label(snap: &UowSnapshot) -> &'static str {
     match snap.gate_provenance.as_ref() {
@@ -212,17 +225,22 @@ fn gate_status_label(snap: &UowSnapshot) -> &'static str {
 /// available (server branches merge separately). Both return the same wire
 /// shape for the fields we need.
 async fn fetch_uow_snapshot() -> Option<Vec<UowSnapshot>> {
-    // Try the dedicated context endpoint first (pw/server branch).
+    // The dedicated context endpoint returns the OBJECT wrapper
+    // `{"ok": true, "units_of_work": [...]}` — parse it as such (see
+    // `DevelopmentContextResponse`). Parsing it as a bare array was the bug that
+    // silently emptied development-state grounding.
     let dev_url = format!("{}/api/development/context", crate::BFF_URL);
     if let Ok(resp) = reqwest::get(&dev_url).await {
         if resp.status().is_success() {
-            if let Ok(snaps) = resp.json::<Vec<UowSnapshot>>().await {
-                return Some(snaps);
+            if let Ok(wrapped) = resp.json::<DevelopmentContextResponse>().await {
+                if wrapped.ok {
+                    return Some(wrapped.units_of_work);
+                }
             }
         }
     }
-    // Fallback: the existing /api/uow endpoint returns the full UnitOfWork which
-    // is a superset of UowSnapshot (same field names, serde(default) covers extras).
+    // Last-resort fallback: the legacy /api/uow endpoint returns a bare array of
+    // the full UnitOfWork (a superset of UowSnapshot; serde(default) covers extras).
     reqwest::get(format!("{}/api/uow", crate::BFF_URL))
         .await
         .ok()?
@@ -420,7 +438,13 @@ pub(crate) fn unified_system_prompt(
          layers. CRITICAL: if a question cannot be answered from any of the layers, \
          respond with exactly \"{not_covered}\" followed by a brief statement of what \
          IS available. Never fabricate facts about Camerata's code, architecture, rules, \
-         story states, or scan findings that are not present in the layers. Be concise \
+         story states, or scan findings that are not present in the layers. Each dynamic \
+         layer below (Layers 3, 3c, 3d) ALWAYS appears; when its body reads \"NONE\" the \
+         value is definitively empty/zero, NOT unknown — answer accordingly and never \
+         infer or invent values from any other layer. In particular, the Layer 2 catalog \
+         lists rules that EXIST in Camerata, NOT rules the user has selected; never derive \
+         selected-rule names or counts from it. If asked which rules are selected and \
+         Layer 3d reads NONE, state plainly that none are currently selected. Be concise \
          and concrete.\n\n"
     );
 
@@ -482,38 +506,48 @@ pub(crate) fn unified_system_prompt(
     // Present when the active project has a scan report. Contains severity/status
     // totals, by-rule breakdown, and a capped finding list. Snippet is NEVER
     // included (server-side guarantee); only rule + location + gate detail appear.
-    if let Some(sec) = scan_results_section {
-        if !sec.trim().is_empty() {
-            p.push_str(
-                "=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS (from /api/projects/active/context) ===\n",
-            );
-            p.push_str(sec);
-            p.push_str("\n");
-        }
+    // Always rendered (absence is meaningful): an empty body must read as an
+    // explicit NONE so the model never invents findings.
+    p.push_str(
+        "=== LAYER 3c: ACTIVE PROJECT SCAN RESULTS (from /api/projects/active/context) ===\n",
+    );
+    match scan_results_section {
+        Some(sec) if !sec.trim().is_empty() => p.push_str(sec),
+        _ => p.push_str(
+            "NONE — the active project has no scan results (not scanned yet, or zero \
+             findings). Do NOT infer or invent any findings.\n",
+        ),
     }
+    p.push_str("\n");
 
     // ── Layer 3d: selected rules & options (optional) ────────────────────────
     // Present as soon as the user has selected rules in the onboarding draft —
     // available pre-scan. Shows total selected count, rule ids, and any non-default
     // chosen options. Lets the architect ask "which rules did I select?" at any point.
-    if let Some(sec) = selected_rules_section {
-        if !sec.trim().is_empty() {
-            match project_name {
-                Some(name) if !name.trim().is_empty() => {
-                    p.push_str(&format!(
-                        "=== LAYER 3d: SELECTED RULES & OPTIONS (from {name} onboarding draft) ===\n"
-                    ));
-                }
-                _ => {
-                    p.push_str(
-                        "=== LAYER 3d: SELECTED RULES & OPTIONS (this project, from onboarding draft) ===\n",
-                    );
-                }
-            }
-            p.push_str(sec);
-            p.push_str("\n");
+    // Always rendered (absence is meaningful): an empty body must read as an
+    // explicit ZERO so the model never fabricates a selection count from Layer 2.
+    match project_name {
+        Some(name) if !name.trim().is_empty() => {
+            p.push_str(&format!(
+                "=== LAYER 3d: SELECTED RULES & OPTIONS (from {name} onboarding draft) ===\n"
+            ));
+        }
+        _ => {
+            p.push_str(
+                "=== LAYER 3d: SELECTED RULES & OPTIONS (this project, from onboarding draft) ===\n",
+            );
         }
     }
+    match selected_rules_section {
+        Some(sec) if !sec.trim().is_empty() => p.push_str(sec),
+        _ => p.push_str(
+            "NONE — the user currently has ZERO rules selected for this project. Do NOT \
+             infer, estimate, or invent any selected-rule names or counts (the Layer 2 \
+             catalog lists rules that EXIST, not rules the user selected). If asked which \
+             rules are selected, state plainly that none are currently selected.\n",
+        ),
+    }
+    p.push_str("\n");
 
     // ── Layer 4: focused finding (optional) ───────────────────────────────────
     if let Some(f) = finding {
@@ -653,19 +687,43 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     // message is sent). Also pre-fetched when the panel opens so the "what this
     // assistant can see" strip can show a story count without the user needing
     // to send a message first.
-    let uow_res = use_resource(fetch_uow_snapshot);
+    // A periodic tick drives a LIVE refresh of the status strip below while the
+    // chat panel is open, so it reflects current server state (selections / scan /
+    // stories change as the user works) instead of a frozen session-start snapshot.
+    // Gated on `open` so it does not poll localhost in the background when closed.
+    let mut refresh_tick = use_signal(|| 0u32);
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            if open() {
+                *refresh_tick.write() += 1;
+            }
+        }
+    });
+
+    // Layer 3: UoW snapshot — re-fetched on each tick (and once on mount). Reading
+    // `refresh_tick()` inside the closure registers the dependency that re-runs it.
+    let uow_res = use_resource(move || {
+        let _ = refresh_tick();
+        fetch_uow_snapshot()
+    });
     let uow_snaps: Vec<UowSnapshot> = uow_res.read().clone().flatten().unwrap_or_default();
+    // `Some(_)` means the fetch RESOLVED (even to empty); `None` means still pending.
+    // Lets the strip distinguish "loading" from "loaded but genuinely empty".
+    let uow_resolved = uow_res.read().is_some();
 
     // Layers 3c + 3d (+ project name): scan results, selected-rules sections, and
-    // the active project name — fetched together in a single round-trip from the
-    // active project context endpoint. Each is silently absent when not available
-    // (no active project, no scan, no selection).
+    // the active project name — fetched together from the active project context
+    // endpoint, also re-fetched on each tick so the strip stays live.
     //
     // NOTE: these reads ONLY feed the "what this assistant can see" status strip
     // below. The send paths (onkeydown / onclick) refetch this context fresh
     // inside their spawn so each message reflects the latest selection / project /
-    // scan — they do NOT reuse these (potentially stale) session-start captures.
-    let ctx_res = use_resource(fetch_project_context_sections);
+    // scan independently of this strip.
+    let ctx_res = use_resource(move || {
+        let _ = refresh_tick();
+        fetch_project_context_sections()
+    });
     let (_active_project_name, scan_section, selected_rules_section): (
         Option<String>,
         Option<String>,
@@ -798,11 +856,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         }
                         {
                             let uow_label = if !uow_snaps.is_empty() {
-                                format!("Development state ({} stories, refreshed this turn)", uow_snaps.len())
+                                format!("Development state ({} stories, live)", uow_snaps.len())
+                            } else if uow_resolved {
+                                "Development state (no stories tracked yet)".to_string()
                             } else {
                                 "Development state (loading\u{2026})".to_string()
                             };
-                            let uow_dot_style = if !uow_snaps.is_empty() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            // Green once resolved (even if empty); grey only while pending.
+                            let uow_dot_style = if uow_resolved { "color:#16a34a;" } else { "color:#94a3b8;" };
                             rsx! {
                                 div {
                                     style: "display:flex;align-items:center;gap:.4rem;",
@@ -1086,8 +1147,8 @@ fn rules_catalog_loaded(catalog: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_uow_section, unified_system_prompt, FindingContext, GateProvenanceLite,
-        UowSnapshot, TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
+        render_uow_section, unified_system_prompt, DevelopmentContextResponse, FindingContext,
+        GateProvenanceLite, UowSnapshot, TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
     };
 
     // ── fixtures ─────────────────────────────────────────────────────────────
@@ -1634,20 +1695,26 @@ mod tests {
     }
 
     #[test]
-    fn unified_prompt_layer3c_absent_when_none() {
+    fn unified_prompt_layer3c_renders_none_marker_when_none() {
+        // Absence is meaningful: Layer 3c ALWAYS renders, with an explicit NONE
+        // marker when there are no scan results, so the model never invents findings.
         let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None, None);
         assert!(
-            !prompt.contains("=== LAYER 3c:"),
-            "Layer 3c header must not appear when scan_results_section is None"
+            prompt.contains("=== LAYER 3c:"),
+            "Layer 3c header must ALWAYS appear (absence is meaningful)"
+        );
+        assert!(
+            prompt.contains("NONE — the active project has no scan results"),
+            "Layer 3c must render an explicit NONE marker when scan results are absent"
         );
     }
 
     #[test]
-    fn unified_prompt_layer3c_absent_when_whitespace_only() {
+    fn unified_prompt_layer3c_renders_none_marker_when_whitespace_only() {
         let prompt = unified_system_prompt("", "No stories.\n", None, None, Some("   \n "), None, None);
         assert!(
-            !prompt.contains("=== LAYER 3c:"),
-            "Layer 3c header must not appear for whitespace-only scan_results_section"
+            prompt.contains("NONE — the active project has no scan results"),
+            "whitespace-only scan results must render the explicit NONE marker"
         );
     }
 
@@ -1705,20 +1772,54 @@ mod tests {
     }
 
     #[test]
-    fn unified_prompt_layer3d_absent_when_none() {
+    fn unified_prompt_layer3d_renders_none_marker_when_none() {
+        // Absence is meaningful: Layer 3d ALWAYS renders, with an explicit ZERO
+        // marker, so the model never fabricates a selection count from Layer 2.
         let prompt = unified_system_prompt("", "No stories.\n", None, None, None, None, None);
         assert!(
-            !prompt.contains("=== LAYER 3d:"),
-            "Layer 3d header must not appear when selected_rules_section is None"
+            prompt.contains("=== LAYER 3d:"),
+            "Layer 3d header must ALWAYS appear (absence is meaningful)"
+        );
+        assert!(
+            prompt.contains("ZERO rules selected"),
+            "Layer 3d must render an explicit ZERO marker when no rules are selected"
         );
     }
 
     #[test]
-    fn unified_prompt_layer3d_absent_when_whitespace_only() {
+    fn unified_prompt_layer3d_renders_none_marker_when_whitespace_only() {
         let prompt = unified_system_prompt("", "No stories.\n", None, None, None, Some("  \n "), None);
         assert!(
-            !prompt.contains("=== LAYER 3d:"),
-            "Layer 3d header must not appear for whitespace-only selected_rules_section"
+            prompt.contains("ZERO rules selected"),
+            "whitespace-only selected rules must render the explicit ZERO marker"
+        );
+    }
+
+    #[test]
+    fn unified_prompt_preamble_forbids_inferring_selections_from_catalog() {
+        // Anti-fabrication guardrail: the preamble must tell the model the Layer 2
+        // catalog lists rules that EXIST, not rules the user selected.
+        let prompt = unified_system_prompt("CATALOG", "No stories.\n", None, None, None, None, None);
+        assert!(
+            prompt.contains("NOT rules the user has selected"),
+            "preamble must forbid deriving selected-rule counts from the Layer 2 catalog"
+        );
+    }
+
+    #[test]
+    fn development_context_response_parses_object_wrapper_not_bare_array() {
+        // Locks the server contract: /api/development/context is an OBJECT
+        // {"ok":true,"units_of_work":[...]} — parsing it as a bare array was the bug.
+        let body = r#"{"ok":true,"units_of_work":[{"story_id":"CAM-1","stage":"development","updated":"2026-06-24T00:00:00Z"}]}"#;
+        let parsed: DevelopmentContextResponse =
+            serde_json::from_str(body).expect("object wrapper must deserialize");
+        assert!(parsed.ok);
+        assert_eq!(parsed.units_of_work.len(), 1);
+        assert_eq!(parsed.units_of_work[0].story_id, "CAM-1");
+        // And the old bare-array assumption must NOT parse the object (the original bug).
+        assert!(
+            serde_json::from_str::<Vec<UowSnapshot>>(body).is_err(),
+            "object response must NOT parse as a bare array (regression guard)"
         );
     }
 
