@@ -701,9 +701,31 @@ async fn rules() -> Json<Vec<RuleDto>> {
     Json(dtos)
 }
 
-/// The canonical story spine.
+/// The canonical story spine, scoped to the active project.
+///
+/// ISOLATION (A8): the spine is global, so an unfiltered list leaks every project's
+/// stories. A story belongs to the active project when any of its build TARGET repos
+/// or its SOURCE container (`external_ref.container`) is in the project's `repos`.
+/// No active project → empty list.
 async fn stories(State(state): State<AppState>) -> Result<Json<Vec<CanonicalStory>>, AppError> {
-    let list = state.stories.list().await.map_err(AppError)?;
+    let Some(p) = state.projects.active() else {
+        return Ok(Json(Vec::new()));
+    };
+    let in_scope = |s: &CanonicalStory| -> bool {
+        s.targets.iter().any(|t| p.repos.iter().any(|r| r == &t.repo))
+            || s.external_ref
+                .as_ref()
+                .and_then(|e| e.container.as_ref())
+                .is_some_and(|c| p.repos.iter().any(|r| r == c))
+    };
+    let list: Vec<CanonicalStory> = state
+        .stories
+        .list()
+        .await
+        .map_err(AppError)?
+        .into_iter()
+        .filter(in_scope)
+        .collect();
     Ok(Json(list))
 }
 
@@ -5069,9 +5091,12 @@ async fn list_children(
     Ok(Json(children))
 }
 
-/// All routines.
+/// Routines for the active project. No active project → empty list.
 async fn list_routines(State(state): State<AppState>) -> Json<Vec<Routine>> {
-    Json(state.routines.list())
+    let Some(p) = state.projects.active() else {
+        return Json(vec![]);
+    };
+    Json(state.routines.list_for_project(&p.id))
 }
 
 /// Create a routine.
