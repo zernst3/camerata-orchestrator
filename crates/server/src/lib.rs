@@ -2456,6 +2456,37 @@ async fn onboard_audit(
         merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
     }
 
+    // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────────
+    // Runs after preview linters so a slow osv-scanner never blocks them.
+    // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
+    // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
+    if run_deterministic {
+        use tokio::time::{timeout, Duration};
+        let dep_audit_timeout = Duration::from_secs(60);
+        for (spec, dir) in &sources {
+            let spec = spec.as_str();
+            let run = crate::dep_audit::run_dep_audit(spec, dir);
+            let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                Ok(result) => result,
+                Err(_elapsed) => (
+                    Vec::new(),
+                    Some(crate::onboard::CoverageNote {
+                        tool: "osv-scanner".to_string(),
+                        message: format!(
+                            "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                        ),
+                    }),
+                ),
+            };
+            if !dep_findings.is_empty() {
+                report.findings.extend(dep_findings);
+            }
+            if let Some(note) = dep_note {
+                report.coverage_notes.push(note);
+            }
+        }
+    }
+
     // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ──────────
     // After a scan completes, write one floor/catch record for each ACTIVE floor finding
     // to the enforcement ledger. Best-effort / fail-soft: runs in a background task so
@@ -2693,6 +2724,38 @@ async fn onboard_audit_start(
             );
             return;
         }
+
+        // ── Pre-declare the FULL deterministic tool pipeline before any tool runs ──
+        //
+        // The progress box shows "X / N tools"; N must reflect the complete pipeline
+        // from the first poll, not grow one tool at a time.  We compute the complete
+        // tool set now — before audit_repos starts — and seed the job with all of them
+        // at `starting` status.
+        //
+        // Pipeline:
+        //   1. floor      (always, when run_deterministic)
+        //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
+        //      from the selected mechanical rules via the corpus, when run_deterministic)
+        //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
+        //
+        // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
+        // "1/2 tools" while the other two are still invisible.
+        if run_deterministic {
+            let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
+            let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+            let preview_ids =
+                crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup);
+            tool_ids.extend(preview_ids);
+            let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !dep_audit_disabled {
+                tool_ids.push("dep-audit".to_string());
+            }
+            let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+            jobs.declare_tools(&jid, &id_refs);
+        }
+
         let (mut report, manifest) = crate::onboard::audit_repos(
             &sources,
             &selected,
@@ -2729,6 +2792,51 @@ async fn onboard_audit_start(
             )
             .await;
         }
+
+        // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
+        //
+        // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
+        // provisioning or scan never blocks them.  A single 60-second hard
+        // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
+        // the step fails soft and the scan completes without dep-audit findings.
+        //
+        // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
+        // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
+        if run_deterministic {
+            use tokio::time::{timeout, Duration};
+            let dep_audit_timeout = Duration::from_secs(60);
+            for (spec, dir) in &sources {
+                let spec = spec.as_str();
+                let run = crate::dep_audit::run_dep_audit(spec, dir);
+                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => (
+                        Vec::new(),
+                        Some(crate::onboard::CoverageNote {
+                            tool: "osv-scanner".to_string(),
+                            message: format!(
+                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                            ),
+                        }),
+                    ),
+                };
+                let dep_count = dep_findings.len();
+                jobs.det_tool_running(&jid, "dep-audit");
+                jobs.det_tool_done(&jid, "dep-audit", dep_count);
+                if !dep_findings.is_empty() {
+                    jobs.add_findings(&jid, dep_findings.clone());
+                    report.findings.extend(dep_findings);
+                }
+                if let Some(note) = dep_note {
+                    report.coverage_notes.push(note);
+                }
+            }
+        }
+
+        // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
+        // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
+        // handler. If you add ledger capture here in the future, follow the same
+        // background-spawn pattern used there.)
         jobs.finish(&jid, report);
     });
 

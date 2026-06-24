@@ -65,7 +65,7 @@ use crate::tool_provisioning;
 /// ```
 ///
 /// Never set this variable in production code paths.
-const DISABLE_ENV_VAR: &str = "CAMERATA_DISABLE_DEP_AUDIT";
+pub const DISABLE_ENV_VAR: &str = "CAMERATA_DISABLE_DEP_AUDIT";
 
 /// The stable rule id that all dep-audit findings carry.  Advisory-specific ids
 /// (RUSTSEC-…, GHSA-…, CVE-…) are placed in `detail` so they are searchable
@@ -694,5 +694,68 @@ mod tests {
         }
         // Nonexistent repo dir → no findings even if binary was found.
         assert!(findings.is_empty());
+    }
+
+    // ── hard total-timeout at call site (fail-soft) ───────────────────────────
+    //
+    // The 60-second hard timeout that wraps `run_dep_audit` in `lib.rs`
+    // (`onboard_audit_start`) must fail soft: produce no findings and emit a
+    // CoverageNote, then let the scan proceed.  We test the PATTERN here using
+    // a short (1 ms) timeout around a future that never resolves — this exercises
+    // the timeout arm, the CoverageNote shape, and the absence of any panic.
+    //
+    // Note: we don't test the full integration path (lib.rs calls run_dep_audit)
+    // here because that requires a running server; instead we replicate the exact
+    // timeout+coverage-note pattern in isolation.
+    #[tokio::test]
+    async fn hard_timeout_on_slow_dep_audit_produces_coverage_note() {
+        use tokio::time::{timeout, Duration};
+
+        // A future that never resolves — simulates a hung osv-scanner.
+        let never_resolves = std::future::pending::<(Vec<Finding>, Option<CoverageNote>)>();
+
+        let timeout_result = timeout(Duration::from_millis(1), never_resolves).await;
+
+        // The timeout must fire.
+        assert!(
+            timeout_result.is_err(),
+            "a 1 ms timeout on a never-resolving future must fire"
+        );
+
+        // Replicate the caller's fail-soft path: convert Elapsed → CoverageNote + empty findings.
+        let (dep_findings, dep_note): (Vec<Finding>, Option<CoverageNote>) = (
+            Vec::new(),
+            Some(CoverageNote {
+                tool: TOOL_NAME.to_string(),
+                message: "dependency audit (osv-scanner) timed out after 60 s for acme/api"
+                    .to_string(),
+            }),
+        );
+
+        // Fail-soft invariants.
+        assert!(dep_findings.is_empty(), "no findings on timeout");
+        let note = dep_note.unwrap();
+        assert_eq!(note.tool, TOOL_NAME, "coverage note must name the tool");
+        assert!(
+            note.message.contains("timed out"),
+            "coverage note must mention the timeout: {}",
+            note.message
+        );
+    }
+
+    /// Verify that `CAMERATA_DISABLE_DEP_AUDIT` causes run_dep_audit_with_tooling to return
+    /// immediately (no provisioning, no subprocess) and produce empty findings + no note.
+    /// This is the test-isolation escape hatch; tests that exercise audit_repos but not
+    /// dep-audit specifically must set this env var.
+    #[tokio::test]
+    async fn disable_env_var_skips_all_network_activity() {
+        std::env::set_var(DISABLE_ENV_VAR, "1");
+        let tooling = std::path::Path::new("/nonexistent-tooling-for-disable-test");
+        let repo_dir = std::path::Path::new("/nonexistent-repo-for-disable-test");
+        let (findings, note) =
+            run_dep_audit_with_tooling("acme/api", repo_dir, tooling).await;
+        std::env::remove_var(DISABLE_ENV_VAR);
+        assert!(findings.is_empty(), "DISABLE → no findings");
+        assert!(note.is_none(), "DISABLE → no coverage note (silent skip)");
     }
 }

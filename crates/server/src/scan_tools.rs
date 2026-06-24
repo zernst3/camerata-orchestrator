@@ -226,6 +226,27 @@ pub fn group_by_tool<'a, 'r>(
     (by_tool, ungrouped)
 }
 
+/// Derive the distinct tool-name strings that `run_scan_tools` WOULD register on the
+/// job for the given rule selection, WITHOUT running any tool.  Used by the pre-declaration
+/// step in `onboard_audit_start` so the job can show the correct "N" before any tool
+/// executes.
+///
+/// Returns a `Vec<String>` of tool names in stable order (sorted, then "unrouted" last
+/// when applicable).  The result mirrors exactly what `run_scan_tools` would call
+/// `det_register_tool` with, so the pre-declared total always matches what the live
+/// pass fills in.
+pub fn preview_tool_ids_for_rules<'r>(
+    selected: &[SelectedRule],
+    lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
+) -> Vec<String> {
+    let (by_tool, ungrouped) = group_by_tool(selected, lookup);
+    let mut names: Vec<String> = by_tool.keys().map(|t| t.name().to_string()).collect();
+    if !ungrouped.is_empty() {
+        names.push("unrouted".to_string());
+    }
+    names
+}
+
 // ─── output parsers (pure, fixture-tested) ───────────────────────────────────
 
 /// Severity normalized to the `Finding.severity` vocabulary (`high`/`medium`/
@@ -976,5 +997,62 @@ mod tests {
         assert!(n.preview);
         assert_eq!(n.preview_tool.as_deref(), Some("ruff"));
         assert_ne!(n.status, "active", "a note must not be an enforced/active hit");
+    }
+
+    // ── preview_tool_ids_for_rules ────────────────────────────────────────────
+
+    /// `preview_tool_ids_for_rules` must return the same tool names that
+    /// `run_scan_tools` would register on the job, without executing any tool.
+    /// Used by the pre-declaration step so the progress denominator ("N") reflects
+    /// the full pipeline before any tool starts.
+    #[test]
+    fn preview_tool_ids_returns_distinct_tool_names() {
+        // Three mechanical rules backed by two distinct tools (clippy + ruff).
+        let rules = vec![
+            rule_with("R-1", EnforcementKind::Mechanical, false, &["clippy: unwrap_used"]),
+            rule_with("R-2", EnforcementKind::Mechanical, false, &["clippy: expect_used"]),
+            rule_with("R-3", EnforcementKind::Mechanical, false, &["Ruff: S608"]),
+        ];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("R-1"), selected("R-2"), selected("R-3")];
+        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        // Two distinct tools: clippy and ruff (order: BTreeMap order = clippy < ruff).
+        assert_eq!(ids.len(), 2, "two distinct tools for three rules: {:?}", ids);
+        assert!(ids.contains(&"clippy".to_string()), "must include clippy");
+        assert!(ids.contains(&"ruff".to_string()), "must include ruff");
+    }
+
+    #[test]
+    fn preview_tool_ids_empty_when_no_mechanical_rules() {
+        // When no mechanical rules are selected, the tool id list is empty.
+        let rules = vec![rule_with(
+            "ARCH-1",
+            EnforcementKind::Architectural,
+            false,
+            &["clippy: some_ast_check"],
+        )];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("ARCH-1")];
+        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        assert!(ids.is_empty(), "architectural rules yield no preview tool ids");
+    }
+
+    #[test]
+    fn preview_tool_ids_includes_unrouted_for_unknown_linter() {
+        // A mechanical rule whose linter is not recognized → "unrouted" in the list.
+        let rules = vec![rule_with(
+            "JAVA-1",
+            EnforcementKind::Mechanical,
+            false,
+            &["Checkstyle: com.puppycrawl.tools.checkstyle.checks.naming.ConstantNameCheck"],
+        )];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("JAVA-1")];
+        let ids = preview_tool_ids_for_rules(&sel, &lookup);
+        assert!(
+            ids.contains(&"unrouted".to_string()),
+            "an ungrouped rule must produce 'unrouted' in the id list: {:?}",
+            ids
+        );
     }
 }

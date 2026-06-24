@@ -527,11 +527,6 @@ pub async fn audit_repos(
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
-    // Coverage notes from the always-on dependency-audit pass (osv-scanner).  These are
-    // floor-level coverage notes, separate from the scan-tools preview notes that land in
-    // `report.coverage_notes` via `merge_scan_preview`.  Both sets are merged into the
-    // final report's `coverage_notes` field after the repo loop.
-    let mut dep_audit_coverage_notes: Vec<CoverageNote> = Vec::new();
     // When the deep tier is on, the WHOLE file set per repo is captured here (the deep lenses
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
@@ -583,10 +578,8 @@ pub async fn audit_repos(
             .filter(|r| is_code_auditable_rule(&r.id))
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
-        // `dir_path` is retained for the always-on dep-audit call that runs after
-        // the blocking file-read completes.  The inner `dir` binding is moved into
-        // spawn_blocking below, so we need a separate clone for the async path.
-        let dir_path = dir.clone();
+        // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
+        // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
         match tokio::task::spawn_blocking(move || read_local_repo_files(&dir))
             .await
@@ -626,34 +619,6 @@ pub async fn audit_repos(
                         jstore.add_findings(jid, floor.clone());
                     }
                     repo_findings = floor;
-                }
-
-                // ── Always-on dependency-vulnerability audit (osv-scanner) ───────────────
-                //
-                // Runs unconditionally (not gated on `run_deterministic` or any rule
-                // selection) as part of the security floor.  "Know your CVE exposure" is
-                // prerequisite-level information for any governance posture.  The call is
-                // fail-soft: if osv-scanner is unavailable (no network, unsupported
-                // platform, no Go toolchain) a CoverageNote is emitted and the scan
-                // continues without dep-audit findings.  See docs/decisions/
-                // 2026-06-23_dependency_audit_onboarding_floor.md.
-                {
-                    if let Some((jstore, jid)) = job {
-                        jstore.det_tool_running(jid, "dep-audit");
-                    }
-                    let (dep_findings, dep_note) =
-                        crate::dep_audit::run_dep_audit(spec, &dir_path).await;
-                    let dep_count = dep_findings.len();
-                    if let Some((jstore, jid)) = job {
-                        jstore.det_tool_done(jid, "dep-audit", dep_count);
-                        if !dep_findings.is_empty() {
-                            jstore.add_findings(jid, dep_findings.clone());
-                        }
-                    }
-                    repo_findings.extend(dep_findings);
-                    if let Some(note) = dep_note {
-                        dep_audit_coverage_notes.push(note);
-                    }
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -776,7 +741,9 @@ pub async fn audit_repos(
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.
-    report.coverage_notes.extend(dep_audit_coverage_notes);
+    // Dep-audit (osv-scanner) runs AFTER this function returns — in the caller
+    // (`onboard_audit_start` in lib.rs), AFTER the preview linters, so it never
+    // blocks them.  Its coverage notes are appended to the report by the caller.
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
@@ -1831,6 +1798,59 @@ mod tests {
         );
         let calls = report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0);
         assert_eq!(calls, 0, "AI also off -> zero model calls");
+    }
+
+    /// dep-audit was MOVED OUT of audit_repos and now runs AFTER the preview linters in
+    /// the caller (lib.rs `onboard_audit_start`).  This test verifies that audit_repos
+    /// itself no longer calls dep-audit: when we pass a job handle and DISABLE_DEP_AUDIT
+    /// is NOT set, the job must show ONLY the floor tool (done = 1/1) after audit_repos
+    /// returns — no "dep-audit" row.  That row is added by the caller after the linter
+    /// pass, which is tested separately.
+    ///
+    /// This is the ordering regression guard: if dep-audit ever drifts back inside
+    /// audit_repos, the floor-only assertion will fail.
+    #[tokio::test]
+    async fn audit_repos_does_not_call_dep_audit() {
+        // DISABLE_DEP_AUDIT silences the provisioning path in run_dep_audit, but that
+        // function is no longer called from audit_repos at all — so this env var is
+        // belt-and-suspenders (and matches what real test callers set for isolation).
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit");
+        let _ = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            Some((&jobs, &jid)),
+            None,
+            false,
+            true,
+            false, // run_ai_review off
+            true,  // run_deterministic on → floor runs
+            None,
+        )
+        .await;
+        let progress = jobs.det_progress(&jid).unwrap();
+        // Only the floor tool must have been registered inside audit_repos.
+        assert_eq!(
+            progress.total, 1,
+            "audit_repos must register exactly ONE tool (floor); dep-audit must NOT be inside it: {:?}",
+            progress.tools
+        );
+        assert!(
+            progress.tools.iter().any(|t| t.tool == "floor"),
+            "floor tool must be registered"
+        );
+        assert!(
+            !progress.tools.iter().any(|t| t.tool == "dep-audit"),
+            "dep-audit must NOT appear inside audit_repos tool list; it runs in the caller"
+        );
     }
 
     // ── opt_in_only gate: recommended + is_auto_recommended ───────────────────

@@ -224,6 +224,20 @@ impl JobStore {
         self.touch_activity(id);
     }
 
+    /// Pre-declare the COMPLETE set of deterministic tools the scan will run, all at once,
+    /// before any of them starts executing.  This is the "N" in the "1/N tools" progress
+    /// display: by registering every tool upfront the UI shows the true pipeline size from
+    /// the very first poll rather than growing the denominator one tool at a time.
+    ///
+    /// Each tool is registered with status `starting`; subsequent `det_tool_running` /
+    /// `det_tool_done` calls update them in place.  Idempotent: already-known tools are
+    /// skipped (their existing status/findings are not reset).
+    pub fn declare_tools(&self, id: &str, tools: &[&str]) {
+        for tool in tools {
+            self.det_register_tool(id, tool);
+        }
+    }
+
     /// Snapshot the deterministic progress (test/poll helper).
     #[must_use]
     pub fn det_progress(&self, id: &str) -> Option<DetProgress> {
@@ -495,5 +509,65 @@ mod tests {
         let idle = store.idle_ms(&id, after_ms).unwrap();
         // idle should be very small (just updated)
         assert!(idle < after_ms - before_ms + 10, "idle should be near 0 after touch");
+    }
+
+    /// `declare_tools` pre-registers the full pipeline upfront so `total` reflects the true
+    /// count BEFORE any tool starts executing.  Subsequent `det_tool_running` / `det_tool_done`
+    /// calls must update in place without double-counting (idempotent re-registration).
+    #[test]
+    fn declare_tools_predeclares_full_pipeline() {
+        let store = JobStore::new();
+        let id = store.create("audit");
+
+        // Declare the full pipeline: floor + two preview linters + dep-audit (4 tools).
+        store.declare_tools(&id, &["floor", "clippy", "semgrep", "dep-audit"]);
+
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!(p.total, 4, "total must equal the declared pipeline size");
+        assert_eq!(p.done, 0, "no tool has run yet");
+        assert_eq!(p.tools.len(), 4, "four tool rows");
+        assert!(
+            p.tools.iter().all(|t| t.status == det_status::STARTING),
+            "all declared tools start in `starting` status"
+        );
+
+        // Now run the floor — it transitions starting → running → done.
+        // The total must NOT grow (floor was already declared).
+        store.det_tool_running(&id, "floor");
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!(p.total, 4, "total unchanged after running a declared tool");
+
+        store.det_tool_done(&id, "floor", 2);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (1, 4), "one done, total still 4");
+
+        // Run the rest.
+        store.det_tool_done(&id, "clippy", 0);
+        store.det_tool_done(&id, "semgrep", 1);
+        store.det_tool_done(&id, "dep-audit", 3);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!((p.done, p.total), (4, 4), "all four done");
+    }
+
+    /// `declare_tools` is idempotent: re-declaring already-known tools (e.g. calling it
+    /// twice) must not grow the total or reset their status.
+    #[test]
+    fn declare_tools_idempotent_on_known_tools() {
+        let store = JobStore::new();
+        let id = store.create("audit");
+
+        store.declare_tools(&id, &["floor", "dep-audit"]);
+        store.det_tool_done(&id, "floor", 1);
+
+        // Re-declare the same set — total stays 2, floor stays done.
+        store.declare_tools(&id, &["floor", "dep-audit"]);
+        let p = store.det_progress(&id).unwrap();
+        assert_eq!(p.total, 2, "re-declare must not grow total");
+        assert_eq!(p.done, 1, "floor remains done after re-declare");
+        assert_eq!(
+            p.tools.iter().find(|t| t.tool == "floor").unwrap().status,
+            det_status::DONE,
+            "floor status must not be reset by re-declare"
+        );
     }
 }
