@@ -84,3 +84,6 @@ pub use coordinator::{Coordinator, CoordinatorError, RunReport};
 
 pub mod fleet;
 pub use fleet::{FleetCoordinator, FleetReport, FleetStage, StageReport};
+
+pub mod liveness;
+pub use liveness::LivenessTracker;
