@@ -551,6 +551,96 @@ fn preview_finding(
     }
 }
 
+// ─── repo-scope filter ───────────────────────────────────────────────────────
+
+/// Return `true` when `finding_path` belongs to the scanned repo's OWN source
+/// tree and should be included in the preview results.  Return `false` to DROP
+/// the finding.
+///
+/// Rules (applied in order; first match wins):
+///
+/// 1. **Special / synthetic placeholder** — paths like `"(repo)"` or
+///    `"(scan preview)"` that our own parsers inject when no real path was
+///    present are always kept.
+/// 2. **Relative path** — resolved against `repo_root`.  A linter that runs
+///    with `current_dir = repo_root` emits repo-relative paths, so any
+///    relative path is by definition inside the repo. Kept (subject to the
+///    generated-file rules below).
+/// 3. **Absolute outside the repo** — dropped.  Covers `/rustc/<hash>/…`,
+///    `~/.cargo/…`, `~/.rustup/…`, `/usr/…`, and any other system path.
+/// 4. **Build output** — `<repo_root>/target/` (Cargo), dropped.
+/// 5. **Generated files** — any path component matching `out` directly under
+///    a `build/…` segment (Cargo `OUT_DIR` pattern), or a file whose name
+///    ends with `_generated.rs` / `.generated.<ext>`, dropped.
+/// 6. **Bundled dist** — paths containing `/dist/` or `/dist-server/`
+///    components (bundled JS/CSS, server bundles), dropped.
+/// 7. Everything else within the repo: kept.
+///
+/// Pure and side-effect-free; all filtering decisions are deterministic.
+pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
+    // Rule 1: synthetic placeholders — always keep.
+    if finding_path.starts_with('(') {
+        return true;
+    }
+
+    let p = std::path::Path::new(finding_path);
+
+    // Rule 2: relative paths are repo-relative by construction → resolve, then
+    // apply the generated-file / dist rules below.
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        repo_root.join(p)
+    };
+
+    // Rule 3: absolute path outside the repo → drop.
+    if !abs.starts_with(repo_root) {
+        return false;
+    }
+
+    // The remainder of the rules apply to the path RELATIVE to repo_root.
+    let rel = abs.strip_prefix(repo_root).unwrap_or(&abs);
+
+    // Rule 4: Cargo build output directory `target/`.
+    if rel.starts_with("target") {
+        return false;
+    }
+
+    // Rules 5 & 6: inspect individual path components and the filename.
+    let path_str = rel.to_string_lossy();
+
+    // Rule 5a: Cargo OUT_DIR pattern — `build/<pkg>/out/`.
+    // Matches any segment sequence `…/out/…` that sits under a `build/` dir.
+    if path_str.contains("/out/") || path_str.starts_with("out/") {
+        return false;
+    }
+
+    // Rule 5b: generated file by name suffix.
+    if let Some(fname) = rel.file_name().and_then(|n| n.to_str()) {
+        if fname.ends_with("_generated.rs") {
+            return false;
+        }
+        // `foo.generated.ts`, `foo.generated.js`, etc.
+        if let Some(stem) = std::path::Path::new(fname).file_stem().and_then(|s| s.to_str()) {
+            if stem.ends_with(".generated") {
+                return false;
+            }
+        }
+    }
+
+    // Rule 6: bundled dist directories.
+    if path_str.contains("/dist/")
+        || path_str.starts_with("dist/")
+        || path_str.contains("/dist-server/")
+        || path_str.starts_with("dist-server/")
+    {
+        return false;
+    }
+
+    // Rule 7: within the repo and not excluded → keep.
+    true
+}
+
 // ─── tool invocation (I/O) ───────────────────────────────────────────────────
 
 /// Run a program in `dir`, capturing stdout SEPARATELY (the parsers need clean
@@ -796,6 +886,16 @@ async fn run_one_tool<'r>(
             parse_sarif(repo, ScanTool::Eslint, &stdout)
         }
     }
+    // Apply the repo-scope filter uniformly across ALL tools (clippy, ruff,
+    // eslint, semgrep).  This drops findings whose path resolves outside the
+    // scanned repo — e.g. Rust stdlib paths like `/rustc/<hash>/…`, Cargo build
+    // output under `target/`, generated files, and bundled dist directories.
+    // The filter is pure and applied here once rather than per-parser so new
+    // tool arms inherit it automatically.
+    .map(|mut findings| {
+        findings.retain(|f| is_in_repo_scope(dir, &f.path));
+        findings
+    })
 }
 
 #[cfg(test)]
@@ -1249,6 +1349,168 @@ mod tests {
             !ids.contains(&"eslint".to_string()),
             "a JS rule on a Rust-only repo must produce NO eslint tool id: {:?}",
             ids
+        );
+    }
+
+    // ── is_in_repo_scope ─────────────────────────────────────────────────────
+
+    /// Helper: build a repo root path for scoping tests.
+    fn repo(path: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(path)
+    }
+
+    /// Rust stdlib paths emitted by clippy (absolute, outside any repo) are dropped.
+    #[test]
+    fn scope_excludes_rustc_stdlib_path() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "/rustc/abcdef1234567890/library/core/src/macros/mod.rs"),
+            "rustc stdlib path must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "/rustc/abcdef1234567890/library/std/src/lib.rs"),
+            "rustc std lib path must be excluded"
+        );
+    }
+
+    /// Cargo build output under `target/` is dropped (generated, not user source).
+    #[test]
+    fn scope_excludes_target_directory() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/myproject/target/debug/build/pkg/out/v2_generated.rs"),
+            "target/debug/build path must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/myproject/target/release/libfoo.rlib"),
+            "target/release build artifact must be excluded"
+        );
+    }
+
+    /// Files inside the `target/` tree are excluded even with relative paths.
+    #[test]
+    fn scope_excludes_target_relative() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "target/debug/build/pkg/out/v2_generated.rs"),
+            "relative target/ path must be excluded"
+        );
+    }
+
+    /// User source files in `src/` are always kept.
+    #[test]
+    fn scope_keeps_src_main_rs() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            is_in_repo_scope(&root, "/home/user/myproject/src/main.rs"),
+            "src/main.rs (absolute) must be kept"
+        );
+        assert!(
+            is_in_repo_scope(&root, "src/lib.rs"),
+            "src/lib.rs (relative) must be kept"
+        );
+        assert!(
+            is_in_repo_scope(&root, "src/main.rs"),
+            "src/main.rs (relative) must be kept"
+        );
+    }
+
+    /// `dist-server/server.mjs` — bundled server output — is excluded.
+    #[test]
+    fn scope_excludes_dist_server() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/myproject/dist-server/server.mjs"),
+            "dist-server/ bundle must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "dist-server/worker.js"),
+            "relative dist-server/ path must be excluded"
+        );
+    }
+
+    /// Files under `dist/` (JS/CSS bundles) are excluded.
+    #[test]
+    fn scope_excludes_dist() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/myproject/dist/app.js"),
+            "dist/ bundle must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "dist/index.css"),
+            "relative dist/ path must be excluded"
+        );
+    }
+
+    /// Files whose name ends with `_generated.rs` are excluded (Cargo OUT_DIR
+    /// convention: proto/codegen emits these via build scripts).
+    #[test]
+    fn scope_excludes_generated_rs_suffix() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "src/v2_generated.rs"),
+            "file ending _generated.rs must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/myproject/src/proto_generated.rs"),
+            "absolute _generated.rs must be excluded"
+        );
+    }
+
+    /// Files whose name ends with `.generated.<ext>` are excluded.
+    #[test]
+    fn scope_excludes_dot_generated_ext() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "src/schema.generated.ts"),
+            "file with .generated.ts suffix must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "src/api.generated.js"),
+            "file with .generated.js suffix must be excluded"
+        );
+    }
+
+    /// Files inside an `out/` segment under a build-script path are excluded.
+    #[test]
+    fn scope_excludes_out_dir_segment() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(
+                &root,
+                "/home/user/myproject/target/debug/build/somepackage/out/bindings.rs"
+            ),
+            "OUT_DIR (build/.../out/) path must be excluded"
+        );
+    }
+
+    /// Synthetic placeholder paths that our parsers produce (`"(repo)"`,
+    /// `"(scan preview)"`) are always kept even if they look unusual.
+    #[test]
+    fn scope_keeps_synthetic_placeholders() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            is_in_repo_scope(&root, "(repo)"),
+            "synthetic (repo) placeholder must be kept"
+        );
+        assert!(
+            is_in_repo_scope(&root, "(scan preview)"),
+            "synthetic (scan preview) placeholder must be kept"
+        );
+    }
+
+    /// A file from a completely different repo / home directory is dropped.
+    #[test]
+    fn scope_excludes_different_repo() {
+        let root = repo("/home/user/myproject");
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/otherproject/src/lib.rs"),
+            "path from a different repo must be excluded"
+        );
+        assert!(
+            !is_in_repo_scope(&root, "/home/user/.cargo/registry/src/foo/src/lib.rs"),
+            "cargo registry path must be excluded"
         );
     }
 }
