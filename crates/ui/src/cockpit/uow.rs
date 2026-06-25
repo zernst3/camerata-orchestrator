@@ -291,18 +291,57 @@ pub(super) async fn cancel_audit_job(job_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The outcome of a sign-off attempt. `Blocked` carries the server's reason for a
+/// Critical-finding 409 (issue #53) so the UI can prompt the architect to waive with a
+/// justification instead of collapsing it into a dead-end "Could not sign off" toast.
+pub(super) enum SignOffOutcome {
+    Ok(Box<UowView>),
+    /// A Critical scoped-scan finding blocks sign-off until a non-empty `waive_reason`
+    /// is supplied. Carries the server's human-readable reason.
+    Blocked(String),
+    Failed,
+}
+
 /// Sign off a run (issue #21). The architect's explicit gate after reviewing the
-/// provenance; persists on the story's UoW. Returns the updated UoW on success.
-pub(super) async fn sign_off_run(run_id: &str, by: &str, note: Option<&str>) -> Option<UowView> {
-    reqwest::Client::new()
+/// provenance; persists on the story's UoW. `waive_reason`, when `Some` and non-empty,
+/// waives a Critical scoped-scan finding (issue #53) that would otherwise 409.
+///
+/// Maps the response: 2xx → the updated UoW; 409 → `Blocked(reason)` (the architect must
+/// supply a waive reason); anything else → `Failed`.
+pub(super) async fn sign_off_run(
+    run_id: &str,
+    by: &str,
+    note: Option<&str>,
+    waive_reason: Option<&str>,
+) -> SignOffOutcome {
+    let resp = match reqwest::Client::new()
         .post(format!("{}/api/runs/{}/sign-off", crate::BFF_URL, run_id))
-        .json(&serde_json::json!({ "by": by, "note": note }))
+        .json(&serde_json::json!({ "by": by, "note": note, "waive_reason": waive_reason }))
         .send()
         .await
-        .ok()?
-        .json::<UowView>()
-        .await
-        .ok()
+    {
+        Ok(r) => r,
+        Err(_) => return SignOffOutcome::Failed,
+    };
+    if resp.status().as_u16() == 409 {
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| {
+                "Sign-off is blocked by a Critical security finding. Supply a waiver reason."
+                    .to_string()
+            });
+        return SignOffOutcome::Blocked(reason);
+    }
+    if !resp.status().is_success() {
+        return SignOffOutcome::Failed;
+    }
+    match resp.json::<UowView>().await.ok() {
+        Some(uow) => SignOffOutcome::Ok(Box::new(uow)),
+        None => SignOffOutcome::Failed,
+    }
 }
 
 /// Map a run status string to a label + badge CSS modifier.
