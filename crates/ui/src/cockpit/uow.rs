@@ -4034,6 +4034,9 @@ pub(super) fn UowStepRunControls(
                                 },
                                 if stopping() { "Stopping…" } else { "■ Stop run" }
                             }
+                            // In-progress indicator: the Bombe turns while the run is live,
+                            // matching the draft-story Send's working affordance.
+                            crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
                             span { class: "section-hint", "Cancels the running agent and stops this run." }
                         }
                     }

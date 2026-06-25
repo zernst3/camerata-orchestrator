@@ -3464,6 +3464,8 @@ html, body {
 }
 .authoring-msg.user .authoring-msg-text { background: var(--accent-wash); border-color: #e5c9bd; }
 .authoring-input-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
+/* Active-run Stop row: button + Bombe spinner + hint, aligned on one baseline. */
+.uow-run-stop-row { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
 .authoring-input {
   flex: 1; resize: vertical; font: inherit; font-size: 13.5px; line-height: 1.5; color: var(--ink);
   border: 1px solid var(--line); border-radius: 10px; background: var(--paper); padding: 9px 11px;
