@@ -3104,4 +3104,74 @@ mod tests {
         assert_eq!(env.idle_ms, Some(5000));
         assert!(!env.cancel_requested);
     }
+
+    // ── Decisions-review surface helpers (pure) ───────────────────────────────────
+
+    #[test]
+    fn is_placeholder_note_detects_live_mode_off_and_empty() {
+        use super::uow::is_placeholder_note;
+        assert!(is_placeholder_note(
+            "Investigation pending — live mode is off, so no analysis agent ran."
+        ));
+        assert!(is_placeholder_note("  "));
+        assert!(is_placeholder_note(""));
+        // A real note is NOT a placeholder.
+        assert!(!is_placeholder_note(
+            "The export must exclude archived members; chose cursor pagination."
+        ));
+    }
+
+    #[test]
+    fn slugify_decision_label_is_kebab_and_safe() {
+        use super::uow::slugify_decision_label;
+        assert_eq!(
+            slugify_decision_label("Auth strategy: JWT vs session"),
+            "auth-strategy-jwt-vs-session"
+        );
+        assert_eq!(slugify_decision_label("  Trim --- me  "), "trim-me");
+        // No alphanumerics → a stable fallback (never an empty artifact-id segment).
+        assert_eq!(slugify_decision_label("???"), "decision");
+        assert_eq!(slugify_decision_label(""), "decision");
+    }
+
+    #[test]
+    fn reviewed_for_placeholder_waives_review_when_no_real_output() {
+        use super::uow::reviewed_for_placeholder;
+        // Real output: the note-review requirement stands.
+        assert!(!reviewed_for_placeholder(false, false));
+        assert!(reviewed_for_placeholder(true, false));
+        // No real output (placeholder/absent): review requirement is waived.
+        assert!(reviewed_for_placeholder(false, true));
+        assert!(reviewed_for_placeholder(true, true));
+    }
+
+    #[test]
+    fn investigation_review_view_deserializes_outcome_tag() {
+        use super::uow::{DecisionOutcomeView, InvestigationReviewView};
+        let json = r#"{
+            "story_id": "S-1",
+            "note_present": true,
+            "note": { "story_id": "S-1", "note": "analysis", "reviewed": true,
+                      "provenance": { "actor": "ai", "at": "2026-06-24T00:00:00Z" } },
+            "decisions": [
+                { "artifact_id": "S-1/decision/a", "story_id": "S-1", "label": "A",
+                  "question": "Q?", "rationale": "R", "alternatives_considered": [],
+                  "outcome": { "state": "approved" },
+                  "provenance": { "actor": "user", "at": "2026-06-24T00:00:00Z" } },
+                { "artifact_id": "S-1/decision/b", "story_id": "S-1", "label": "B",
+                  "question": "", "rationale": "", "alternatives_considered": [],
+                  "outcome": { "state": "rejected", "reason": "needs work" },
+                  "provenance": { "actor": "user", "at": "2026-06-24T00:00:00Z" } }
+            ]
+        }"#;
+        let v: InvestigationReviewView = serde_json::from_str(json).unwrap();
+        assert!(v.note_present);
+        assert!(v.note.unwrap().reviewed);
+        assert_eq!(v.decisions.len(), 2);
+        assert_eq!(v.decisions[0].outcome, DecisionOutcomeView::Approved);
+        match &v.decisions[1].outcome {
+            DecisionOutcomeView::Rejected { reason } => assert_eq!(reason, "needs work"),
+            other => panic!("expected rejected, got {other:?}"),
+        }
+    }
 }

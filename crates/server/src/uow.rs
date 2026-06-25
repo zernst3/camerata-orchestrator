@@ -700,6 +700,30 @@ impl UowStore {
         uow
     }
 
+    /// Set (or clear) the `parent_id` on an existing DRAFT UoW. The architect picks the
+    /// parent issue from the authoring screen itself (rather than up front in the nav), so
+    /// this updates the stored value the publish step later consumes to create a native
+    /// GitHub sub-issue link. `parent_id = None` clears any previously-set parent. Returns
+    /// the updated UoW (a no-op clone when the story id is unknown). Persists.
+    pub fn set_draft_parent(&self, story_id: &str, parent_id: Option<String>) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    authoring: Some(AuthoringState::default()),
+                    ..Default::default()
+                });
+            uow.parent_id = parent_id;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
     /// Append a chat turn to a draft UoW's authoring state and overwrite the current
     /// draft title/body. The first user message is also recorded as the
     /// `requirements_prompt` (when it is still empty). Materializes an authoring state
@@ -1241,6 +1265,27 @@ impl UowStore {
                 .ok()
         })??;
         Some(rev.version)
+    }
+
+    /// Mark a story's current investigation note as REVIEWED by the architect, persisting
+    /// the reviewed copy as a new revision (provenance → User) and appending a history
+    /// entry. Returns the new revision version, or `None` when there is no note to review
+    /// (or no artifact store attached). This is the ROUTE-B check the development gate
+    /// relies on alongside the decision gate.
+    pub fn mark_investigation_reviewed(&self, story_id: &str) -> Option<i64> {
+        let note = self.investigation_note_for(story_id)?;
+        if note.reviewed {
+            // Already reviewed: nothing to persist, but report success-ish (no new rev).
+            return None;
+        }
+        let reviewed = note.mark_reviewed(chrono::Utc::now());
+        let version = self.set_investigation_note(&reviewed)?;
+        self.append_history(
+            story_id,
+            "note",
+            "Investigation note marked reviewed by the architect.",
+        );
+        Some(version)
     }
 
     /// Read a story's current investigation note from the central [`ArtifactStore`],

@@ -167,6 +167,12 @@ pub async fn execute_investigation_run(
     story_desc: String,
     model: String,
 ) {
+    // Honor a cancel that arrived before the executor got scheduled: leave the run in its
+    // terminal Cancelled state (set by RunStore::cancel) and do nothing.
+    if runs.is_cancelled(&run_id) {
+        return;
+    }
+
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -491,7 +497,23 @@ async fn run_one_investigation_pass(
         },
     );
 
-    match driver.run(&role, &task).await {
+    // Last cancel check before the (potentially long) agent subprocess. A cancel after
+    // this point aborts the spawned task (RunStore::cancel), dropping the driver future
+    // and killing the kill_on_drop child — so this guard plus the abort together cover the
+    // whole window.
+    if runs.is_cancelled(&run_id) {
+        return;
+    }
+
+    let agent_result = driver.run(&role, &task).await;
+
+    // If a cancel landed while the agent was running (and somehow the task wasn't aborted),
+    // do not record a note or advance to AwaitingQa — leave the terminal Cancelled state.
+    if runs.is_cancelled(&run_id) {
+        return;
+    }
+
+    match agent_result {
         Ok(outcome) => {
             // Phase 3b: did the agent raise a clarifying question this pass? If so, PAUSE
             // — post the question into the 3a store (auto-saved), persist the resume
@@ -796,6 +818,40 @@ mod tests {
         assert!(resume_prompt.contains("CAM-7"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn investigation_run_honors_cancel_before_start() {
+        // A cancel that landed before the executor ran leaves the run terminal Cancelled
+        // and does NOT advance it to AwaitingQa or record a placeholder note.
+        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let clarifications = ClarificationStore::new();
+        let resume = ClarifyResumeStore::new();
+        let run_id = runs.create("CAM-INV-CANCEL", "live", crate::run::RunKind::Watched);
+
+        // Cancel BEFORE the executor runs (simulates a Stop that beat the spawn).
+        runs.cancel(&run_id);
+
+        execute_investigation_run(
+            runs.clone(),
+            uow.clone(),
+            clarifications.clone(),
+            resume.clone(),
+            run_id.clone(),
+            "CAM-INV-CANCEL".to_string(),
+            "A story".to_string(),
+            "Some description.".to_string(),
+            "claude-opus-4-8".to_string(),
+        )
+        .await;
+
+        let run = runs.get(&run_id).expect("run exists");
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.done);
+        // No placeholder investigation event was recorded (the executor returned early).
+        assert!(!run.events.iter().any(|e| e.detail.contains("live mode off")));
     }
 
     #[tokio::test]
