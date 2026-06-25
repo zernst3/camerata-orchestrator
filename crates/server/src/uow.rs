@@ -784,19 +784,55 @@ impl UowStore {
             .collect()
     }
 
-    /// UoWs whose repo is in `repos` (the active project's repos).
+    /// UoWs whose repo is in `repos`, resolved purely by repo (NO project-id scoping).
     ///
     /// The repo is resolved from the UoW's `work_item` link when present (a draft that
     /// has been published/linked to a real issue carries the work item's `owner/repo#num`
     /// id there, while its KEY stays the original `draft-…` id), and otherwise from the
     /// `story_id` key. This keeps a LINKED draft visible under its work item's project
     /// while still EXCLUDING an unlinked draft whose id has no resolvable repo.
-    pub fn list_for_project(&self, repos: &[String]) -> Vec<UnitOfWork> {
+    ///
+    /// Use this for repo-only sweeps (e.g. the startup worktree teardown that unions every
+    /// project's repos): a blank draft has no worktree and no resolvable repo, so it must
+    /// NOT be included. For an active-project view that should also include that project's
+    /// own blank drafts, use [`Self::list_for_project`].
+    pub fn list_for_repos(&self, repos: &[String]) -> Vec<UnitOfWork> {
         self.mem
             .lock()
             .expect("uow mutex poisoned")
             .values()
             .filter(|u| {
+                let repo = u
+                    .work_item
+                    .as_deref()
+                    .and_then(crate::repo_from_story_id)
+                    .or_else(|| crate::repo_from_story_id(&u.story_id));
+                repo.is_some_and(|r| repos.iter().any(|p| p == &r))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// UoWs visible to the project `project_id` whose repos are `repos`.
+    ///
+    /// A UoW is included when EITHER:
+    /// - it was created by this project (`u.project_id == Some(project_id)`) — this is what
+    ///   brings a brand-new blank draft (no `work_item`, `draft-<uuid>` key, no resolvable
+    ///   repo) into its OWN project's view, OR
+    /// - its repo (resolved `work_item` → else `story_id`) is in `repos` — the normal
+    ///   repo-resident UoW path.
+    ///
+    /// Cross-project isolation is preserved: another project's draft has a DIFFERENT
+    /// `project_id` and no in-`repos` repo, so it is excluded here.
+    pub fn list_for_project(&self, project_id: &str, repos: &[String]) -> Vec<UnitOfWork> {
+        self.mem
+            .lock()
+            .expect("uow mutex poisoned")
+            .values()
+            .filter(|u| {
+                if u.project_id.as_deref() == Some(project_id) {
+                    return true;
+                }
                 let repo = u
                     .work_item
                     .as_deref()
