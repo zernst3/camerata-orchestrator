@@ -507,6 +507,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/history", post(uow_append_history))
         // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
+        .route(
+            "/api/uow/:story_id/investigation",
+            get(uow_get_investigation),
+        )
+        .route(
+            "/api/uow/:story_id/investigation/review",
+            post(uow_mark_investigation_reviewed),
+        )
         .route("/api/uow/:story_id/branches", post(uow_list_branches))
         .route("/api/uow/:story_id/update-branch", post(uow_update_branch))
         // ── Per-UoW PR lifecycle (Decision 2) ─────────────────────────────────
@@ -7353,6 +7361,50 @@ async fn uow_set_decisions(
     Json(state.uow.set_decisions(&story_id, decisions))
 }
 
+/// The decisions-review payload for a story (`GET /api/uow/:story_id/investigation`): the
+/// investigation note (or `None` when none has been recorded) and the current decision
+/// records. Powers the cockpit's decisions-review surface so the architect can read the
+/// investigation output, mark it reviewed, and approve/reject each decision before the
+/// Investigating → DecisionsApproved transition. `note_present` distinguishes "no note at
+/// all" (e.g. live mode off produced only a placeholder, or the run errored) from an empty
+/// note string, so the UI can surface an explicit "no output" state.
+#[derive(serde::Serialize)]
+struct InvestigationReviewResponse {
+    story_id: String,
+    note_present: bool,
+    note: Option<camerata_worktracker::investigation::InvestigationArtifact>,
+    decisions: Vec<camerata_worktracker::investigation::DecisionRecord>,
+}
+
+/// `GET /api/uow/:story_id/investigation` — the investigation note + decision records for
+/// the decisions-review surface. Read-only.
+async fn uow_get_investigation(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<InvestigationReviewResponse> {
+    let note = state.uow.investigation_note_for(&story_id);
+    let decisions = state.uow.decisions_for(&story_id);
+    Json(InvestigationReviewResponse {
+        story_id,
+        note_present: note.is_some(),
+        note,
+        decisions,
+    })
+}
+
+/// `POST /api/uow/:story_id/investigation/review` — mark the story's investigation note
+/// reviewed by the architect (ROUTE-B). Returns `{ ok, version }`; `ok=false` when there
+/// is no note to review (or it was already reviewed).
+async fn uow_mark_investigation_reviewed(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.uow.mark_investigation_reviewed(&story_id) {
+        Some(version) => Json(serde_json::json!({ "ok": true, "version": version })),
+        None => Json(serde_json::json!({ "ok": false })),
+    }
+}
+
 /// Helper: map a lifecycle [`crate::lifecycle::TransitionError`] to a 409 CONFLICT with
 /// its human-readable message, so the cockpit surfaces exactly why a stage move was
 /// blocked instead of a generic 500.
@@ -9027,6 +9079,132 @@ mod tests {
             state.uow.get_or_create(story).stage,
             lifecycle::UowStage::Investigating
         );
+    }
+
+    // ── Decisions-review surface (GET investigation + mark-reviewed) ──────────────
+
+    /// A seeded AppState with an in-memory artifact store attached, so investigation
+    /// notes (which are store-backed only) round-trip in tests.
+    async fn seeded_with_artifacts() -> AppState {
+        let mut state = AppState::seeded();
+        let store = camerata_persistence::SqliteStore::open("sqlite::memory:")
+            .await
+            .expect("in-memory artifact store");
+        let store: std::sync::Arc<dyn camerata_persistence::ArtifactStore> =
+            std::sync::Arc::new(store);
+        state.uow = state.uow.with_artifacts(store);
+        state
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_investigation_reports_note_present_and_decisions() {
+        let state = seeded_with_artifacts().await;
+        let story = "REVIEW-1";
+
+        // No note yet, no decisions → note_present=false, empty decisions.
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{story}/investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["note_present"], false);
+        assert!(json["note"].is_null());
+        assert_eq!(json["decisions"].as_array().unwrap().len(), 0);
+
+        // Record a real (non-placeholder) note + one approved decision.
+        let note = camerata_worktracker::investigation::InvestigationArtifact::ai_authored(
+            story,
+            "Real analysis: the export must exclude archived members.",
+            chrono::Utc::now(),
+        );
+        state.uow.set_investigation_note(&note);
+        let app2 = router(state.clone());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/decisions"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(approved_decision_json(story).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Now GET returns the note + decision.
+        let app3 = router(state.clone());
+        let resp3 = app3
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{story}/investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json3 = body_json(resp3).await;
+        assert_eq!(json3["note_present"], true);
+        assert!(json3["note"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("archived members"));
+        assert_eq!(json3["note"]["reviewed"], false);
+        assert_eq!(json3["decisions"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mark_investigation_reviewed_flips_the_flag() {
+        let state = seeded_with_artifacts().await;
+        let story = "REVIEW-2";
+        let note = camerata_worktracker::investigation::InvestigationArtifact::ai_authored(
+            story,
+            "Some analysis.",
+            chrono::Utc::now(),
+        );
+        state.uow.set_investigation_note(&note);
+
+        // Mark reviewed → ok=true.
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/investigation/review"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+
+        // The persisted note is now reviewed.
+        let stored = state.uow.investigation_note_for(story).unwrap();
+        assert!(stored.reviewed);
+
+        // A second review (already reviewed) → ok=false (no new revision).
+        let app2 = router(state.clone());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/investigation/review"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["ok"], false);
     }
 
     // ── UoW Increment 1: tiered dev run + model-aware investigation ───────────────

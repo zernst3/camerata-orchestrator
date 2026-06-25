@@ -1267,6 +1267,27 @@ impl UowStore {
         Some(rev.version)
     }
 
+    /// Mark a story's current investigation note as REVIEWED by the architect, persisting
+    /// the reviewed copy as a new revision (provenance → User) and appending a history
+    /// entry. Returns the new revision version, or `None` when there is no note to review
+    /// (or no artifact store attached). This is the ROUTE-B check the development gate
+    /// relies on alongside the decision gate.
+    pub fn mark_investigation_reviewed(&self, story_id: &str) -> Option<i64> {
+        let note = self.investigation_note_for(story_id)?;
+        if note.reviewed {
+            // Already reviewed: nothing to persist, but report success-ish (no new rev).
+            return None;
+        }
+        let reviewed = note.mark_reviewed(chrono::Utc::now());
+        let version = self.set_investigation_note(&reviewed)?;
+        self.append_history(
+            story_id,
+            "note",
+            "Investigation note marked reviewed by the architect.",
+        );
+        Some(version)
+    }
+
     /// Read a story's current investigation note from the central [`ArtifactStore`],
     /// or `None` when no store is attached, no note has been recorded, or the latest
     /// revision is a deletion.

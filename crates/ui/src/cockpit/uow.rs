@@ -1318,6 +1318,162 @@ pub(super) fn filter_mention_candidates(users: &[String], partial: &str) -> Vec<
         .collect()
 }
 
+// ── Decisions-review surface (Investigating stage) ───────────────────────────────
+
+/// The provenance of an investigation artifact / decision revision (who + when).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+pub(super) struct RevisionProvenanceView {
+    #[serde(default)]
+    pub actor: String,
+    #[serde(default)]
+    pub at: String,
+}
+
+/// A story's investigation note as the BFF serializes it
+/// (`camerata_worktracker::investigation::InvestigationArtifact`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+pub(super) struct InvestigationNoteView {
+    #[serde(default)]
+    pub story_id: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub reviewed: bool,
+    #[serde(default)]
+    pub provenance: RevisionProvenanceView,
+}
+
+/// A decision record's approval outcome. The wire form is an internally-tagged enum
+/// (`{ "state": "pending" | "approved" | "rejected", "reason"? }`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(super) enum DecisionOutcomeView {
+    Pending,
+    Approved,
+    Rejected {
+        #[serde(default)]
+        reason: String,
+    },
+}
+
+impl Default for DecisionOutcomeView {
+    fn default() -> Self {
+        DecisionOutcomeView::Pending
+    }
+}
+
+impl DecisionOutcomeView {
+    fn label(&self) -> &'static str {
+        match self {
+            DecisionOutcomeView::Pending => "Pending",
+            DecisionOutcomeView::Approved => "Approved",
+            DecisionOutcomeView::Rejected { .. } => "Rejected",
+        }
+    }
+    fn css(&self) -> &'static str {
+        match self {
+            DecisionOutcomeView::Pending => "neutral",
+            DecisionOutcomeView::Approved => "done",
+            DecisionOutcomeView::Rejected { .. } => "error",
+        }
+    }
+    fn is_approved(&self) -> bool {
+        matches!(self, DecisionOutcomeView::Approved)
+    }
+}
+
+/// One decision record (mirrors `camerata_worktracker::investigation::DecisionRecord`).
+/// Round-trips through serde so the UI can POST the full set back to `/decisions`.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug)]
+pub(super) struct DecisionRecordView {
+    pub artifact_id: String,
+    pub story_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub alternatives_considered: Vec<String>,
+    pub outcome: DecisionOutcomeView,
+    #[serde(default)]
+    pub provenance: RevisionProvenanceView,
+}
+
+/// The `GET /api/uow/:id/investigation` envelope.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+pub(super) struct InvestigationReviewView {
+    #[serde(default)]
+    pub story_id: String,
+    #[serde(default)]
+    pub note_present: bool,
+    #[serde(default)]
+    pub note: Option<InvestigationNoteView>,
+    #[serde(default)]
+    pub decisions: Vec<DecisionRecordView>,
+}
+
+/// Fetch the investigation note + decisions for the decisions-review surface.
+pub(super) async fn fetch_investigation_review(story_id: &str) -> Option<InvestigationReviewView> {
+    reqwest::get(format!(
+        "{}/api/uow/{}/investigation",
+        crate::BFF_URL,
+        enc_seg(story_id)
+    ))
+    .await
+    .ok()?
+    .json::<InvestigationReviewView>()
+    .await
+    .ok()
+}
+
+/// Replace the full decision-record set for a story (`POST /api/uow/:id/decisions`). The
+/// server stores them as the source of truth the development gate reads. Returns `true`
+/// on a 2xx.
+pub(super) async fn post_decisions(story_id: &str, decisions: &[DecisionRecordView]) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/decisions",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(decisions)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Mark the story's investigation note reviewed (`POST /api/uow/:id/investigation/review`).
+/// Returns `true` when the server reports `ok` (a new reviewed revision was written).
+pub(super) async fn mark_investigation_reviewed(story_id: &str) -> bool {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/investigation/review",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .send()
+        .await
+    {
+        Ok(r) => r.json().await.unwrap_or(serde_json::json!({})),
+        Err(_) => return false,
+    };
+    v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
+}
+
+/// Whether an investigation note's text is the token-free placeholder (live mode off /
+/// no real agent output). Used to surface an explicit "no output" state instead of a
+/// silent Investigating with a meaningless note. Pure.
+pub(super) fn is_placeholder_note(note: &str) -> bool {
+    let n = note.to_ascii_lowercase();
+    n.contains("live mode is off")
+        || n.contains("live mode off")
+        || n.contains("investigation pending")
+        || note.trim().is_empty()
+}
+
 /// Which sub-view of the Governed Development page is selected in the left nav:
 /// the top-level Issue Management panel, or a specific UoW's dev controls.
 #[derive(Clone, PartialEq, Eq)]
@@ -2512,6 +2668,16 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
             }
 
+            // ── Decisions-review surface (Investigating stage) ────────────────
+            // After Begin investigation the stage is Investigating; this is where the
+            // architect reads the investigation note, records/approves decisions, and
+            // (when ready) advances via the "Approve decisions" transition above. Without
+            // this surface "Approve decisions" was a dead end (the gate 409s with no
+            // approved decisions) and the investigation output was invisible.
+            if stage == Some(UowStage::Investigating) {
+                DecisionsReviewPanel { story_id: uow_key.clone(), uow_refresh }
+            }
+
             // ── AI-assisted "Update branch" (GitHub PR "Update branch", gated) ─
             // Targets THIS UoW's branch: pick a source branch (local or origin) and
             // merge it INTO the UoW branch. A clean merge commits; a conflict is
@@ -3292,6 +3458,338 @@ pub(super) fn UowPrControl(
             }
         }
     }
+}
+
+/// The decisions-review surface, shown at the Investigating stage. It makes the
+/// otherwise-invisible investigation output actionable:
+///
+/// - Renders the investigation NOTE (Markdown). When the note is the token-free
+///   placeholder (live mode off) or absent, it shows an EXPLICIT "no output" state with
+///   the reason — never a silent Investigating.
+/// - Lists the proposed DECISION records with per-decision Approve / Reject controls
+///   (each POSTs the full updated set to `/decisions`, matching the server's shape).
+/// - Lets the architect ADD a decision manually (needed when the agent surfaced none, so
+///   the development gate — which requires ≥1 approved decision — can be satisfied).
+/// - A "Mark investigation reviewed" control (ROUTE-B).
+///
+/// Once the note is reviewed AND every decision is approved, the architect uses the
+/// existing "Approve decisions" transition (rendered by [`UowStepRunControls`]) to advance
+/// to DecisionsApproved. This panel keeps the data model consistent: it always POSTs the
+/// complete decision set the server stores.
+#[component]
+pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // Local refresh tick so an approve/reject/add re-reads without bouncing the whole UoW.
+    let local_refresh = use_signal(|| 0u32);
+    let review_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = local_refresh();
+            // Also re-read when the parent UoW refreshes (e.g. after the run completes).
+            let _dep2 = uow_refresh();
+            async move { fetch_investigation_review(&sid).await }
+        })
+    };
+    let review = review_res.read().clone().flatten().unwrap_or_default();
+
+    let note = review.note.clone();
+    let note_text = note.as_ref().map(|n| n.note.clone()).unwrap_or_default();
+    let reviewed = note.as_ref().map(|n| n.reviewed).unwrap_or(false);
+    let no_real_output = !review.note_present || is_placeholder_note(&note_text);
+    let note_html = crate::md::md_to_html(&note_text);
+    let decisions = review.decisions.clone();
+    let all_approved =
+        !decisions.is_empty() && decisions.iter().all(|d| d.outcome.is_approved());
+
+    // New-decision composer state.
+    let mut new_label = use_signal(String::new);
+    let mut new_question = use_signal(String::new);
+    let mut new_rationale = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+
+    rsx! {
+        div { class: "uow-decisions-review",
+            p { class: "uow-step-h", "Investigation & decisions" }
+
+            // ── Investigation note ─────────────────────────────────────────────
+            if no_real_output {
+                div { class: "uow-investigation-empty",
+                    p { class: "uow-investigation-empty-h", "Investigation produced no output" }
+                    p { class: "section-hint",
+                        if review.note_present {
+                            "The investigation ran without a live agent (live mode is off), so it recorded a placeholder instead of a real analysis. Enable CAMERATA_LIVE_BUILD=1 and re-run Begin investigation for a real note — or record the decisions below manually to proceed."
+                        } else {
+                            "No investigation note has been recorded yet. If the run just finished, give it a moment and refresh; otherwise record the decisions below manually to proceed."
+                        }
+                    }
+                }
+            } else {
+                div { class: "uow-investigation-note",
+                    div { class: "uow-investigation-note-head",
+                        span { class: "uow-field-label", "Investigation note" }
+                        if reviewed {
+                            span { class: "wi-state done", "REVIEWED" }
+                        } else {
+                            span { class: "wi-state neutral", "UNREVIEWED" }
+                        }
+                    }
+                    div { class: "chat-md", dangerous_inner_html: "{note_html}" }
+                    if !reviewed {
+                        button {
+                            class: "btn-secondary",
+                            disabled: busy(),
+                            onclick: {
+                                let sid = story_id.clone();
+                                move |_| {
+                                    let sid = sid.clone();
+                                    let mut local_refresh = local_refresh;
+                                    let toasts = toasts;
+                                    busy.set(true);
+                                    spawn(async move {
+                                        if mark_investigation_reviewed(&sid).await {
+                                            local_refresh += 1;
+                                        } else {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not mark the note reviewed (it may already be reviewed).".to_string(),
+                                            );
+                                        }
+                                        busy.set(false);
+                                    });
+                                }
+                            },
+                            "Mark investigation reviewed"
+                        }
+                    }
+                }
+            }
+
+            // ── Decisions ──────────────────────────────────────────────────────
+            div { class: "uow-decisions",
+                p { class: "uow-field-label", "Decisions ({decisions.len()})" }
+                if decisions.is_empty() {
+                    p { class: "section-hint",
+                        "No decisions recorded yet. The development gate requires at least one APPROVED decision. Add one below."
+                    }
+                }
+                for (i, d) in decisions.iter().enumerate() {
+                    {
+                        let (olabel, ocss) = (d.outcome.label(), d.outcome.css());
+                        let decisions_for_approve = decisions.clone();
+                        let decisions_for_reject = decisions.clone();
+                        let sid_a = story_id.clone();
+                        let sid_r = story_id.clone();
+                        rsx! {
+                            div { key: "{d.artifact_id}", class: "uow-decision-card",
+                                div { class: "uow-decision-head",
+                                    span { class: "uow-decision-label", "{d.label}" }
+                                    span { class: "wi-state {ocss}", "{olabel}" }
+                                }
+                                if !d.question.is_empty() {
+                                    p { class: "uow-decision-q", "Q: {d.question}" }
+                                }
+                                if !d.rationale.is_empty() {
+                                    p { class: "uow-decision-rationale", "{d.rationale}" }
+                                }
+                                if let DecisionOutcomeView::Rejected { reason } = &d.outcome {
+                                    if !reason.is_empty() {
+                                        p { class: "uow-decision-reject-reason", "Rejected: {reason}" }
+                                    }
+                                }
+                                div { class: "uow-decision-actions",
+                                    if !d.outcome.is_approved() {
+                                        button {
+                                            class: "btn-secondary",
+                                            disabled: busy(),
+                                            onclick: move |_| {
+                                                let sid = sid_a.clone();
+                                                let mut updated = decisions_for_approve.clone();
+                                                updated[i].outcome = DecisionOutcomeView::Approved;
+                                                let mut local_refresh = local_refresh;
+                                                let toasts = toasts;
+                                                busy.set(true);
+                                                spawn(async move {
+                                                    if post_decisions(&sid, &updated).await {
+                                                        local_refresh += 1;
+                                                    } else {
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Warning,
+                                                            "Could not approve the decision.".to_string(),
+                                                        );
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            },
+                                            "Approve"
+                                        }
+                                    }
+                                    if d.outcome.is_approved() {
+                                        button {
+                                            class: "btn-secondary",
+                                            disabled: busy(),
+                                            onclick: move |_| {
+                                                let sid = sid_r.clone();
+                                                let mut updated = decisions_for_reject.clone();
+                                                updated[i].outcome = DecisionOutcomeView::Rejected {
+                                                    reason: "Needs changes".to_string(),
+                                                };
+                                                let mut local_refresh = local_refresh;
+                                                let toasts = toasts;
+                                                busy.set(true);
+                                                spawn(async move {
+                                                    if post_decisions(&sid, &updated).await {
+                                                        local_refresh += 1;
+                                                    } else {
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Warning,
+                                                            "Could not update the decision.".to_string(),
+                                                        );
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            },
+                                            "Needs changes"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Add a decision manually ─────────────────────────────────────
+                div { class: "uow-decision-add",
+                    p { class: "uow-field-label", "Add a decision" }
+                    input {
+                        class: "uow-decision-input",
+                        r#type: "text",
+                        placeholder: "Label (e.g. Auth strategy: JWT vs session)",
+                        value: "{new_label}",
+                        oninput: move |e| new_label.set(e.value()),
+                    }
+                    input {
+                        class: "uow-decision-input",
+                        r#type: "text",
+                        placeholder: "Question / ambiguity",
+                        value: "{new_question}",
+                        oninput: move |e| new_question.set(e.value()),
+                    }
+                    textarea {
+                        class: "uow-decision-input",
+                        rows: 2,
+                        placeholder: "Rationale / chosen option",
+                        value: "{new_rationale}",
+                        oninput: move |e| new_rationale.set(e.value()),
+                    }
+                    button {
+                        class: "btn-run",
+                        disabled: busy() || new_label().trim().is_empty(),
+                        onclick: {
+                            let sid = story_id.clone();
+                            let existing = decisions.clone();
+                            move |_| {
+                                let sid = sid.clone();
+                                let label = new_label().trim().to_string();
+                                if label.is_empty() { return; }
+                                // Build the new record, mirroring the server's DecisionRecord
+                                // shape. The artifact_id follows the documented convention
+                                // "{story_id}/decision/{slug}". Architect-authored, so it
+                                // starts Approved (the architect is recording a settled call).
+                                let slug = slugify_decision_label(&label);
+                                let rec = DecisionRecordView {
+                                    artifact_id: format!("{sid}/decision/{slug}"),
+                                    story_id: sid.clone(),
+                                    label,
+                                    question: new_question().trim().to_string(),
+                                    rationale: new_rationale().trim().to_string(),
+                                    alternatives_considered: Vec::new(),
+                                    outcome: DecisionOutcomeView::Approved,
+                                    provenance: RevisionProvenanceView::default(),
+                                };
+                                let mut updated = existing.clone();
+                                updated.push(rec);
+                                let mut local_refresh = local_refresh;
+                                let toasts = toasts;
+                                busy.set(true);
+                                spawn(async move {
+                                    if post_decisions(&sid, &updated).await {
+                                        new_label.set(String::new());
+                                        new_question.set(String::new());
+                                        new_rationale.set(String::new());
+                                        local_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "Could not add the decision.".to_string(),
+                                        );
+                                    }
+                                    busy.set(false);
+                                });
+                            }
+                        },
+                        "Add decision (approved)"
+                    }
+                }
+
+                // ── Readiness hint for the Approve-decisions transition ─────────
+                {
+                    let ready = reviewed && all_approved && !no_real_output;
+                    let ready_placeholder = reviewed_for_placeholder(reviewed, no_real_output) && all_approved;
+                    if ready || ready_placeholder {
+                        rsx! {
+                            p { class: "uow-decisions-ready",
+                                "Ready — use \"Approve decisions\" below to advance to Decisions approved."
+                            }
+                        }
+                    } else {
+                        rsx! {
+                            p { class: "section-hint",
+                                "To advance: every decision must be Approved"
+                                if !no_real_output { " and the investigation note marked reviewed" }
+                                "."
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// kebab-case slug for a decision label (alnum runs → hyphens, lowercased, trimmed).
+/// Mirrors the `"{story_id}/decision/{slug}"` artifact-id convention. Pure + testable.
+pub(super) fn slugify_decision_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut prev_dash = false;
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "decision".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Whether the note-review requirement is satisfied for the readiness hint. When the
+/// investigation produced no real output (placeholder / absent), there is no meaningful
+/// note to review, so the note-review requirement is treated as satisfied and only the
+/// decision gate governs readiness. Pure.
+pub(super) fn reviewed_for_placeholder(reviewed: bool, no_real_output: bool) -> bool {
+    reviewed || no_real_output
 }
 
 /// The lifecycle strip + the run control for the CURRENT phase, rendered inline with
