@@ -2389,10 +2389,18 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                     disabled: refreshing(),
                     onclick: move |_| {
                         let wid = item.read().id.clone();
+                        let toasts = toasts;
                         refreshing.set(true);
                         spawn(async move {
-                            if let Some(updated) = refresh_work_item(&wid).await {
-                                item.set(updated);
+                            match refresh_work_item(&wid).await {
+                                Some(updated) => item.set(updated),
+                                // Surface the failure (no token, 404, transport) instead of
+                                // silently stopping the spinner so dogfooding isn't left guessing.
+                                None => crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Warning,
+                                    "Could not re-pull the work item from the tracker (check the GitHub token / that the issue still exists).".to_string(),
+                                ),
                             }
                             refreshing.set(false);
                         });
