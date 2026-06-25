@@ -89,7 +89,10 @@ pub async fn propose_ai(
     llm: &crate::llm::Llm,
     model: &str,
     grounding: Option<&str>,
-    repo_dir: Option<&std::path::Path>,
+    // MULTI-REPO READ: the local clones of ALL the active project's repos (a project has
+    // several). The first is the cwd; every clone is added read-only via `--add-dir` so the
+    // decomposer can scan across all repos. Empty = digest-only.
+    repo_dirs: &[std::path::PathBuf],
 ) -> Vec<ProposedChild> {
     let kinds: Vec<String> = practice
         .children
@@ -122,8 +125,8 @@ pub async fn propose_ai(
     let mut req = crate::llm::LlmRequest::new(user)
         .with_model(model)
         .with_system(system);
-    if let Some(dir) = repo_dir {
-        req = req.with_repo_read(dir);
+    if !repo_dirs.is_empty() {
+        req = req.with_repo_read_dirs(repo_dirs.iter().cloned());
     }
     let Ok(resp) = llm.complete(req).await else {
         return propose(parent, practice);

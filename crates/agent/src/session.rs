@@ -156,12 +156,22 @@ pub struct SessionSpawn {
 ///  2. it sets the gateway's `CAMERATA_WORKTREE_ROOT` write-jail so `gated_write`
 ///     (the ONLY write path) refuses targets outside it.
 ///
-/// Reads are ungated; writes stay gated + jailed. Pass `Some(repo_dir)` for any
-/// in-project agent so it can consult the real code; the write gate is unaffected.
+/// `read_dirs` is the MULTI-REPO read scope: a project has MULTIPLE repos, so this is
+/// the OTHER project-repo clones the agent should also be able to READ (each emitted as
+/// its own `--add-dir`). For a write-class UoW agent this lets it read sibling repos
+/// (e.g. a frontend UoW reading the backend's API) while still WRITING only to its
+/// single `worktree`. CRITICAL: `read_dirs` widens READS ONLY — it does NOT touch the
+/// `CAMERATA_WORKTREE_ROOT` write jail, so `gated_write` still refuses any target outside
+/// the single `worktree`. Pass an empty slice for the single-repo / no-extra-scope case.
+///
+/// Reads are ungated; writes stay gated + jailed. Pass `Some(repo_dir)` + the project's
+/// repo clones for any in-project agent so it can consult the real code across all repos;
+/// the write gate is unaffected.
 pub fn prepare_session(
     gateway_bin: &Path,
     role: &Role,
     worktree: Option<&Path>,
+    read_dirs: &[PathBuf],
 ) -> Result<SessionSpawn, SessionError> {
     // Create a RAII temp dir.  Dropped (and thus removed from disk) when the
     // returned SessionSpawn goes out of scope.
@@ -200,6 +210,12 @@ pub fn prepare_session(
     let mut driver = ClaudeCliDriver::new(mcp_config.display().to_string());
     if let Some(wt) = worktree {
         driver = driver.with_worktree(wt);
+    }
+    // MULTI-REPO READ scope: add each OTHER project-repo clone as a read-only `--add-dir`.
+    // This widens READS only (a UoW agent reading sibling repos); the write jail above
+    // (CAMERATA_WORKTREE_ROOT) is independent and unchanged, so these dirs are NOT writable.
+    if !read_dirs.is_empty() {
+        driver = driver.with_read_dirs(read_dirs.iter().cloned());
     }
 
     // A deterministic session id derived from the role + tempdir name; the live
@@ -296,7 +312,7 @@ mod tests {
     fn prepare_session_writes_both_files_and_wires_driver() {
         // prepare_session now creates its own TempDir; no caller-supplied path needed.
         let spawn =
-            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None).unwrap();
+            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[]).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(
@@ -320,7 +336,7 @@ mod tests {
         // gateway write-jail env is set too, but it is independent — the driver-side
         // `--add-dir` is what grants the read window.
         let wt = std::env::temp_dir().join("cam-prepare-wt-readscope");
-        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt))
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt), &[])
             .unwrap();
         let args = spawn.driver.build_args(&role(), "task");
         let idx = args
@@ -337,5 +353,57 @@ mod tests {
         assert!(allowed.split(' ').any(|t| t == "Read"));
         assert!(allowed.split(' ').any(|t| t == "Grep"));
         assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
+    }
+
+    #[test]
+    fn prepare_session_adds_sibling_repos_to_read_scope_but_not_write_jail() {
+        // MULTI-REPO INVARIANT: a project has several repos. A write-class UoW agent is
+        // bound to ONE worktree (cwd + write jail) but must be able to READ the OTHER
+        // project repos. prepare_session emits each sibling repo as its own `--add-dir`
+        // (read scope) while the gateway write jail (CAMERATA_WORKTREE_ROOT) stays the
+        // single worktree — so the siblings are readable but NOT writable.
+        let wt = std::env::temp_dir().join("cam-uow-frontend-worktree");
+        let backend = std::env::temp_dir().join("cam-sibling-backend-repo");
+        let shared = std::env::temp_dir().join("cam-sibling-shared-repo");
+        let spawn = prepare_session(
+            Path::new("/bin/camerata-gateway"),
+            &role(),
+            Some(&wt),
+            &[backend.clone(), shared.clone()],
+        )
+        .unwrap();
+
+        // READ scope: every dir (worktree + both siblings) appears as an `--add-dir`.
+        let args = spawn.driver.build_args(&role(), "task");
+        let add_dirs: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.as_str() == "--add-dir" && *i + 1 < args.len())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert!(add_dirs.iter().any(|d| **d == wt.display().to_string()));
+        assert!(add_dirs.iter().any(|d| **d == backend.display().to_string()));
+        assert!(add_dirs.iter().any(|d| **d == shared.display().to_string()));
+
+        // WRITE jail: the gateway's CAMERATA_WORKTREE_ROOT is ONLY the worktree — never a
+        // sibling repo. This is the gate guarantee: extra read dirs do not widen writes.
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&spawn.mcp_config).unwrap()).unwrap();
+        let jail = cfg["mcpServers"][MCP_SERVER_KEY]["env"][WORKTREE_ROOT_ENV]
+            .as_str()
+            .expect("write jail set");
+        assert_eq!(jail, wt.display().to_string());
+        assert_ne!(jail, backend.display().to_string());
+        assert_ne!(jail, shared.display().to_string());
+
+        // And the only write tool exposed is the gated one — no built-in Write/Edit/Bash.
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
+        assert!(!allowed.split(' ').any(|t| t == "Write"));
+        assert!(!allowed.split(' ').any(|t| t == "Edit"));
+        assert!(!allowed.split(' ').any(|t| t == "Bash"));
     }
 }

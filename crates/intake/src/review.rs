@@ -292,6 +292,11 @@ pub struct ClaudeRefinementReviewer {
     /// this is a planning call with NO write tools and NO governance gateway, so it writes
     /// nothing. `None` = no repo bound (digest-only, e.g. a generic CLI demo).
     repo_dir: Option<std::path::PathBuf>,
+    /// ADDITIONAL local repo clones the reviewer may READ — the OTHER repos in the active
+    /// project (a project has MULTIPLE repos). Each is added as its own read-only `--add-dir`
+    /// on top of `repo_dir` (the cwd), so review can scan ACROSS all the project's repos.
+    /// READ-ONLY, same posture as `repo_dir`. Empty = primary repo only.
+    extra_repo_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Default for ClaudeRefinementReviewer {
@@ -314,6 +319,7 @@ impl ClaudeRefinementReviewer {
             model,
             grounding: None,
             repo_dir: None,
+            extra_repo_dirs: Vec::new(),
         }
     }
 
@@ -328,6 +334,7 @@ impl ClaudeRefinementReviewer {
                 model: m,
                 grounding: None,
                 repo_dir: None,
+                extra_repo_dirs: Vec::new(),
             }
         }
     }
@@ -346,6 +353,28 @@ impl ClaudeRefinementReviewer {
     /// call with no write tools and no gateway, so binding a repo adds no write path.
     pub fn with_repo_dir(mut self, repo_dir: impl Into<std::path::PathBuf>) -> Self {
         self.repo_dir = Some(repo_dir.into());
+        self
+    }
+
+    /// Bind ALL the active project's local repo clones (a project has MULTIPLE repos). The
+    /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
+    /// is added as its own read-only `--add-dir`, so review can scan ACROSS every repo.
+    /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
+    pub fn with_repo_dirs(
+        mut self,
+        dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        let mut iter = dirs.into_iter();
+        match iter.next() {
+            Some(primary) => {
+                self.repo_dir = Some(primary);
+                self.extra_repo_dirs = iter.collect();
+            }
+            None => {
+                self.repo_dir = None;
+                self.extra_repo_dirs = Vec::new();
+            }
+        }
         self
     }
 
@@ -466,6 +495,14 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
             .kill_on_drop(true);
         if let Some(dir) = &self.repo_dir {
             cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
+            // — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
         }
         let out = cmd.output().await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {

@@ -145,6 +145,10 @@ pub async fn execute_update_branch_run(
     token: Option<String>,
     model: String,
     grounding: Option<String>,
+    // MULTI-REPO READ scope: the local clones of ALL the active project's repos, added
+    // READ-ONLY via `--add-dir`. The resolver writes only to `dir` (the repo being merged);
+    // sibling repos are readable so it can reconcile cross-repo conflicts.
+    read_dirs: Vec<std::path::PathBuf>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -249,6 +253,7 @@ pub async fn execute_update_branch_run(
             resolve_conflicts_and_commit(
                 &runs, &uow, &run_id, &story_id, &dir, &target_branch, &mref, &conflicts, &model,
                 grounding.as_deref(),
+                &read_dirs,
                 start_seq,
             )
             .await;
@@ -270,6 +275,8 @@ async fn resolve_conflicts_and_commit(
     conflicts: &[String],
     model: &str,
     grounding: Option<&str>,
+    // MULTI-REPO READ scope: ALL the active project's local repo clones, added read-only.
+    read_dirs: &[std::path::PathBuf],
     start_seq: usize,
 ) {
     let seq = AtomicUsize::new(start_seq);
@@ -328,7 +335,14 @@ async fn resolve_conflicts_and_commit(
     // Jail the agent's writes to the repo dir via the session worktree: gated_write (layer-1)
     // is its only mutation path, and it is confined to the repo being merged.
     // The session temp dir is RAII-managed inside SessionSpawn._dir (ARCH-RESOURCE-LIFECYCLE-1).
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir)) {
+    // MULTI-REPO READ: sibling project-repo clones are added READ-ONLY; they don't widen the
+    // write jail (still `dir`). Drop `dir` to avoid a dup `--add-dir`.
+    let sibling_read_dirs: Vec<std::path::PathBuf> = read_dirs
+        .iter()
+        .filter(|d| d.as_path() != dir)
+        .cloned()
+        .collect();
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir), &sibling_read_dirs) {
         Ok(s) => s,
         Err(e) => {
             abort_and_fail(format!("could not prepare the resolver session: {e}")).await;

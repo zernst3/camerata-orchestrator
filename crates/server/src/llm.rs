@@ -127,6 +127,15 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
                 .arg("--add-dir")
                 .arg(dir)
                 .current_dir(dir);
+            // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
+            // added as its own read-only `--add-dir` so a project-level model can scan across
+            // all of them. READ-only — no write/exec tool is offered either way. Skip any that
+            // duplicate the cwd dir.
+            for extra in &req.repo_read_extra_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
         }
         // Pure single-shot completion (audit / decompose / escalation / API-shaped calls):
         // disable ALL built-in tools via an allowlist of nothing (covers unnamed/future
@@ -283,6 +292,13 @@ pub struct LlmRequest {
     /// API backend (no filesystem) and by any call that leaves it `None` (e.g. the audit /
     /// decompose / escalation calls keep their full `--tools ""` lockdown unchanged).
     pub repo_read_dir: Option<std::path::PathBuf>,
+    /// ADDITIONAL local repo clones the model may READ — the OTHER repos in the active
+    /// project (a project has MULTIPLE repos). On the CLI backend each is emitted as its own
+    /// read-only `--add-dir` on top of `repo_read_dir` (the cwd), so a project-level model
+    /// (story-author / decompose / intake) can scan ACROSS all the project's repos, not just
+    /// the primary. READ-ONLY and non-agentic — same posture as `repo_read_dir`. Empty by
+    /// default; ignored on the API backend.
+    pub repo_read_extra_dirs: Vec<std::path::PathBuf>,
 }
 
 impl LlmRequest {
@@ -295,6 +311,7 @@ impl LlmRequest {
             max_tokens: 4096,
             cache_prefix_len: None,
             repo_read_dir: None,
+            repo_read_extra_dirs: Vec::new(),
         }
     }
 
@@ -306,6 +323,30 @@ impl LlmRequest {
     pub fn with_repo_read(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
         let d = dir.into();
         self.repo_read_dir = if d.as_os_str().is_empty() { None } else { Some(d) };
+        self
+    }
+
+    /// Grant the CLI-backend model ON-DEMAND READ across ALL the active project's repo clones
+    /// (a project has MULTIPLE repos). The FIRST dir becomes the cwd + primary `--add-dir`
+    /// (same as [`Self::with_repo_read`]); every other dir is added as its own read-only
+    /// `--add-dir`. Use this for project-level models (story-author / decompose / intake) so
+    /// they can scan across every repo. READ-ONLY and non-agentic. Empty input is a no-op
+    /// (leaves the full `--tools ""` lockdown). No-op on the API backend (no filesystem).
+    pub fn with_repo_read_dirs(
+        mut self,
+        dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        let mut iter = dirs.into_iter().filter(|d| !d.as_os_str().is_empty());
+        match iter.next() {
+            Some(primary) => {
+                self.repo_read_dir = Some(primary);
+                self.repo_read_extra_dirs = iter.collect();
+            }
+            None => {
+                self.repo_read_dir = None;
+                self.repo_read_extra_dirs = Vec::new();
+            }
+        }
         self
     }
 

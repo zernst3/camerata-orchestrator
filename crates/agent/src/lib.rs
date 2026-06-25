@@ -267,6 +267,14 @@ pub struct ClaudeCliDriver {
     /// process cwd AND is passed via `--add-dir`, scoping the agent to its
     /// worktree. When `None` the agent inherits the orchestrator's cwd.
     pub worktree: Option<PathBuf>,
+    /// Additional directories the agent may READ (each emitted as its own `--add-dir`).
+    /// A project contains MULTIPLE repos; these are the OTHER project repo clones so a
+    /// worktree-bound (write-class) agent can read across all of them while still only
+    /// writing to its single worktree. For project-level agents this carries the union of
+    /// all the project's repo clones. READ-ONLY: `--add-dir` widens read scope only; the
+    /// write gate (`gated_write` jailed to `CAMERATA_WORKTREE_ROOT`) is untouched, so these
+    /// dirs are NOT writable. Deduped against `worktree` when args are built.
+    pub extra_read_dirs: Vec<PathBuf>,
     /// Optional model id (e.g. `claude-sonnet-4-6`) passed via `--model`. When `None`
     /// the CLI uses its configured default. Lets a caller (a routine, the fleet) run a
     /// run on a chosen model.
@@ -301,6 +309,7 @@ impl ClaudeCliDriver {
                 .map(|s| s.to_string())
                 .collect(),
             worktree: None,
+            extra_read_dirs: Vec::new(),
             model: None,
             resume_session_id: None,
             orchestrator: false,
@@ -338,6 +347,17 @@ impl ClaudeCliDriver {
     /// its cwd and `--add-dir` scope. Builder form.
     pub fn with_worktree(mut self, worktree: impl Into<PathBuf>) -> Self {
         self.worktree = Some(worktree.into());
+        self
+    }
+
+    /// Add additional READ-ONLY directories (the OTHER repos in the active project) to the
+    /// agent's scope: each is emitted as its own `--add-dir`. A project has MULTIPLE repos;
+    /// this is what lets, e.g., a frontend UoW read the backend repo's API surface. Builder
+    /// form. READ-ONLY by construction: `--add-dir` widens reads, never writes — the write
+    /// gate (`gated_write` jailed to `CAMERATA_WORKTREE_ROOT`) is unaffected, so these dirs
+    /// cannot be written. Safe to pass dirs that overlap `worktree`; they're deduped.
+    pub fn with_read_dirs(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.extra_read_dirs = dirs.into_iter().collect();
         self
     }
 
@@ -387,6 +407,20 @@ impl ClaudeCliDriver {
         if let Some(wt) = &self.worktree {
             args.push("--add-dir".to_string());
             args.push(wt.display().to_string());
+        }
+
+        // Multi-repo READ scope: a project has MULTIPLE repos, so each OTHER project-repo
+        // clone gets its own `--add-dir` here, letting this agent READ across all of them
+        // (e.g. a frontend UoW reading the backend's API) on top of its worktree. This is
+        // READ-only — `--add-dir` widens reads, never writes; `gated_write` stays jailed to
+        // the single worktree (CAMERATA_WORKTREE_ROOT), so the extra dirs are not writable.
+        // Deduped against `worktree` so we never emit a duplicate `--add-dir` for the cwd.
+        for dir in &self.extra_read_dirs {
+            if self.worktree.as_deref() == Some(dir.as_path()) {
+                continue;
+            }
+            args.push("--add-dir".to_string());
+            args.push(dir.display().to_string());
         }
 
         // Run on a chosen model when set (else the CLI default).
