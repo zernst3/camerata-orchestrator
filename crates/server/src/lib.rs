@@ -6395,6 +6395,11 @@ struct UowAuthorReq {
     /// The next message in the clarification chat. The first message is the free-text
     /// requirements; subsequent ones answer the AI's clarifying questions.
     message: String,
+    /// Optional per-turn model override (the UI's model selector beside Send). When
+    /// present and non-empty it takes precedence over the project's StoryAuthoring step
+    /// model; when absent we fall back to the project-configured model (back-compat).
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The system prompt that turns the LLM into a story-authoring assistant. It produces a
@@ -6510,8 +6515,12 @@ async fn uow_author(
     let llm = state.llm();
     // Story authoring is a NON-FLEET step: its model comes from the active project's
     // per-step config (no env/const fallback once a project exists). The project-less edge
-    // (no active project) is the only place the DEFAULT_MODEL floor applies.
-    let model = step_model(&state, crate::project::StepKind::StoryAuthoring);
+    // (no active project) is the only place the DEFAULT_MODEL floor applies. An explicit
+    // per-turn override from the UI's model selector wins when supplied.
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => step_model(&state, crate::project::StepKind::StoryAuthoring),
+    };
     let request = crate::llm::LlmRequest::new(prompt)
         .with_model(model)
         .with_system(STORY_AUTHOR_SYSTEM);
