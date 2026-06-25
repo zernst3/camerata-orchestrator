@@ -264,6 +264,37 @@ impl AppState {
         crate::grounding::assemble(rule_section, &repo_digests, &unresolved)
     }
 
+    /// Resolve the active project's primary local repo clone — the directory an in-project
+    /// agent should run in so it has ON-DEMAND READ ACCESS to the entire repo (cwd +
+    /// `--add-dir`). Returns the first of the active project's repos whose local clone
+    /// exists on disk.
+    ///
+    /// ISOLATION: resolves ONLY the active project's repos (machine-local override path or
+    /// `<workspace_root>/<owner>/<repo>`); never another project's clone. Returns `None`
+    /// when there is no active project or none of its repos resolve to an existing folder
+    /// (the agent then falls back to grounding-digest-only, read-window-less, as before).
+    ///
+    /// This grants READ access only; it does NOT touch the write gate. Callers thread the
+    /// result into `prepare_session(..., Some(dir))`, which binds cwd + `--add-dir` for
+    /// reads AND the gateway write-jail — `gated_write` stays the only (gated) write path.
+    pub(crate) fn active_repo_dir(&self) -> Option<std::path::PathBuf> {
+        let project = self.projects.active()?;
+        let workspace_root = self.settings.workspace_root();
+        for repo in &project.repos {
+            let override_path = self.settings.repo_path(repo);
+            if let Some(dir) = crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            ) {
+                if dir.is_dir() {
+                    return Some(dir);
+                }
+            }
+        }
+        None
+    }
+
     /// Store the last completed scan report for the given project. Called the instant a
     /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
     /// poisoning: recovers the inner value rather than panicking the handler.
@@ -1674,6 +1705,10 @@ async fn answer_clarification(
                 let uow = state.uow.clone();
                 let clarifications = state.clarifications.clone();
                 let resume = state.clarify_resume.clone();
+                // ON-DEMAND REPO READ (the invariant): re-resolve the active project's local
+                // clone so the RESUMED agent also runs with the repo as cwd + `--add-dir`
+                // and keeps full read access. Read-only; the write gate is unchanged.
+                let repo_dir = state.active_repo_dir();
                 tokio::spawn(async move {
                     crate::investigation_run::resume_investigation_after_clarification(
                         runs,
@@ -1682,6 +1717,7 @@ async fn answer_clarification(
                         resume,
                         ctx,
                         answer_summary,
+                        repo_dir,
                     )
                     .await;
                 });
@@ -5087,12 +5123,14 @@ async fn decompose_propose(
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
     let grounding = state.project_grounding().await;
+    let repo_dir = state.active_repo_dir();
     let children = crate::decompose::propose_ai(
         &parent,
         &Practice::default_feature(),
         &llm,
         &model,
         grounding.as_deref(),
+        repo_dir.as_deref(),
     )
     .await;
     Ok(Json(children))
@@ -6629,9 +6667,18 @@ async fn uow_author(
         Some(grounding) => format!("{STORY_AUTHOR_SYSTEM}\n\n{grounding}"),
         None => STORY_AUTHOR_SYSTEM.to_string(),
     };
-    let request = crate::llm::LlmRequest::new(prompt)
+    // ON-DEMAND REPO READ (the core invariant, beyond the digest): when the active project's
+    // repo is local, let the story-authoring model SCAN the actual codebase (cwd + --add-dir
+    // + read-only built-ins on the CLI backend) instead of relying only on the inlined
+    // digest. This is what stops the context-less-product-owner failure (asking about auth
+    // for an app that has none): it can read the real dependencies/code. READ-ONLY — no write
+    // path is added. Degrades to digest-only on the API backend / when no repo is local.
+    let mut request = crate::llm::LlmRequest::new(prompt)
         .with_model(model)
         .with_system(system);
+    if let Some(repo_dir) = state.active_repo_dir() {
+        request = request.with_repo_read(repo_dir);
+    }
     let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
@@ -7605,6 +7652,11 @@ async fn uow_begin_investigation(
     // GROUNDING (the invariant): hand the investigation agent the project's rule context +
     // repo digest so it analyzes the ACTUAL project (it can also read the repo clone).
     let grounding = state.project_grounding().await;
+    // ON-DEMAND REPO READ (the core invariant): resolve the active project's local clone so
+    // the investigation agent runs WITH the repo as its cwd + `--add-dir` and can scan/read
+    // any file it needs, not just the digest. Read-only — the write gate is unchanged. None
+    // when the repo isn't local (the agent then has the digest only, as before).
+    let repo_dir = state.active_repo_dir();
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
     let run_id = state.runs.create(&story_id, "investigation", crate::run::RunKind::Watched);
@@ -7631,6 +7683,7 @@ async fn uow_begin_investigation(
                 desc,
                 model,
                 grounding,
+                repo_dir,
             )
             .await;
             runs_for_clear.clear_abort(&rid_for_clear);

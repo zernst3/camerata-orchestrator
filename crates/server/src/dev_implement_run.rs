@@ -14,11 +14,20 @@
 //! [`camerata_fleet::governed_role`] + [`camerata_agent::prepare_session`] machinery as
 //! pr_resolve_run and update_branch_run:
 //!
-//! - `--allowedTools` = gated tools only (`gated_write` is the only write path).
+//! - `--allowedTools` = the read-only built-ins (Read/Grep/Glob/LS) PLUS `gated_write`
+//!   (`gated_write` is the only WRITE path).
 //! - `Task`, `Write`, `Bash`, `Edit`, `MultiEdit`, `NotebookEdit` are DISALLOWED.
 //! - The repo dir passed as the session worktree jails writes to the UoW's worktree.
 //!
 //! Worktrees change WHERE the agent works, not WHETHER it is gated.
+//!
+//! # On-demand full-repo read (the invariant) — quintuply important here
+//!
+//! The implementer WRITES code, so it must be able to read the real codebase first.
+//! `prepare_session(..., Some(dir))` binds the agent's cwd + `--add-dir` to the UoW's
+//! worktree, so its read-only built-ins (Read/Grep/Glob/LS) can open ANY file in the
+//! repo before/while it writes — not just the digest in the prompt. Reads are ungated;
+//! the only write path remains the jailed `gated_write`.
 //!
 //! # No-code-first gate
 //!
@@ -668,6 +677,57 @@ mod tests {
     fn implement_prompt_handles_empty_decisions() {
         let p = implement_prompt("s/r#1", "T", "D", "b", &[], None);
         assert!(p.contains("no approved decisions"));
+    }
+
+    // ── 2b. READ ACCESS assertion (the invariant) ──────────────────────────────
+
+    /// The implementer is bound to the worktree via `prepare_session(..., Some(dir))`, which
+    /// must give it FULL on-demand repo read: cwd + `--add-dir <worktree>` plus the read-only
+    /// built-ins (Read/Grep/Glob/LS). It must be able to open any file before/while writing.
+    /// The write gate is unchanged: `gated_write` is still the only write tool and every
+    /// escape built-in stays denied.
+    #[test]
+    fn implementer_has_full_repo_read_and_unchanged_write_gate() {
+        use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
+        use camerata_core::{Role, RuleId};
+
+        let wt = std::env::temp_dir().join("cam-devimpl-readscope");
+        let role = Role {
+            name: "BrownfieldImplementer".to_string(),
+            rule_subset: vec![RuleId("GOV-1".to_string())],
+            allowed_paths: vec!["crates/".to_string()],
+        };
+        let spawn = prepare_session(std::path::Path::new("/bin/camerata-gateway"), &role, Some(&wt))
+            .expect("session prepares");
+        let args = spawn.driver.build_args(&role, "implement");
+
+        // cwd + --add-dir bound to the worktree → on-demand read of the whole repo.
+        let add_idx = args
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir present so the agent can read the whole worktree");
+        assert_eq!(args[add_idx + 1], wt.display().to_string());
+
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for read_tool in ["Read", "Grep", "Glob", "LS"] {
+            assert!(
+                allowed.split(' ').any(|t| t == read_tool),
+                "{read_tool} must be available so the implementer can read any file"
+            );
+        }
+        // Write gate unchanged: gated_write only; escape built-ins denied + absent.
+        assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
+        let disallowed = {
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(disallowed.split(' ').any(|t| t == tool));
+            assert!(!allowed.split(' ').any(|t| t == tool));
+        }
     }
 
     // ── 3. GATE UNCHANGED assertion ────────────────────────────────────────────

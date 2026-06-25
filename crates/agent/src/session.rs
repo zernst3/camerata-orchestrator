@@ -148,6 +148,16 @@ pub struct SessionSpawn {
 /// `SessionSpawn::_dir`.  Callers that previously constructed and passed a
 /// manual temp path should simply remove that construction — `prepare_session`
 /// handles it.
+///
+/// `worktree`, when `Some`, does TWO independent things:
+///  1. it binds the returned driver's cwd + `--add-dir` to that directory, giving
+///     the agent ON-DEMAND READ ACCESS to the entire repo (Read/Grep/Glob/LS plus
+///     `--add-dir` directory scope), and
+///  2. it sets the gateway's `CAMERATA_WORKTREE_ROOT` write-jail so `gated_write`
+///     (the ONLY write path) refuses targets outside it.
+///
+/// Reads are ungated; writes stay gated + jailed. Pass `Some(repo_dir)` for any
+/// in-project agent so it can consult the real code; the write gate is unaffected.
 pub fn prepare_session(
     gateway_bin: &Path,
     role: &Role,
@@ -178,7 +188,19 @@ pub fn prepare_session(
         source,
     })?;
 
-    let driver = ClaudeCliDriver::new(mcp_config.display().to_string());
+    // Bind the driver to the worktree when one is given: this sets the child process
+    // cwd AND passes `--add-dir <worktree>`, which is what gives the agent ON-DEMAND
+    // READ ACCESS to the entire repo it is working in (Read/Grep/Glob/LS resolve against
+    // it, and `--add-dir` lifts the directory-scope restriction). The gateway's
+    // `CAMERATA_WORKTREE_ROOT` write-jail (set in the mcp-config above) is INDEPENDENT and
+    // unchanged: `gated_write` remains the only write path and is still confined to this
+    // worktree. Reads are ungated; writes stay gated + jailed. Previously the driver's
+    // worktree was left unbound here, so worktree runs inherited the orchestrator cwd and
+    // had no `--add-dir` — the agent could not reliably read the repo it was editing.
+    let mut driver = ClaudeCliDriver::new(mcp_config.display().to_string());
+    if let Some(wt) = worktree {
+        driver = driver.with_worktree(wt);
+    }
 
     // A deterministic session id derived from the role + tempdir name; the live
     // session id reported by `claude` is captured separately in the AgentOutcome.
@@ -285,6 +307,35 @@ mod tests {
         let args = spawn.driver.build_args(&role(), "task");
         let allowed_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
         assert!(args[allowed_idx + 1].contains(GATED_WRITE_TOOL));
+        // No worktree passed -> the driver has no --add-dir (orchestrator cwd; read scope
+        // is whatever the caller's cwd is). The worktree-bound case is asserted below.
+        assert!(!args.iter().any(|a| a == "--add-dir"));
         // spawn._dir (TempDir) cleans up on drop — no manual remove_dir_all needed.
+    }
+
+    #[test]
+    fn prepare_session_binds_driver_worktree_for_read_scope() {
+        // THE INVARIANT: when a worktree dir is passed, prepare_session binds the driver's
+        // cwd + `--add-dir` to it so the agent has on-demand READ access to that repo. The
+        // gateway write-jail env is set too, but it is independent — the driver-side
+        // `--add-dir` is what grants the read window.
+        let wt = std::env::temp_dir().join("cam-prepare-wt-readscope");
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt))
+            .unwrap();
+        let args = spawn.driver.build_args(&role(), "task");
+        let idx = args
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir present when a worktree is bound");
+        assert_eq!(args[idx + 1], wt.display().to_string());
+        // The read-only built-ins ride alongside (Read/Grep/Glob/LS) — the agent can open
+        // any file under the repo. The write gate is untouched.
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        assert!(allowed.split(' ').any(|t| t == "Read"));
+        assert!(allowed.split(' ').any(|t| t == "Grep"));
+        assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
     }
 }

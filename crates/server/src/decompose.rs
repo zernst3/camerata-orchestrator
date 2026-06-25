@@ -89,6 +89,7 @@ pub async fn propose_ai(
     llm: &crate::llm::Llm,
     model: &str,
     grounding: Option<&str>,
+    repo_dir: Option<&std::path::Path>,
 ) -> Vec<ProposedChild> {
     let kinds: Vec<String> = practice
         .children
@@ -115,9 +116,15 @@ pub async fn propose_ai(
     );
     // Decomposition is a NON-FLEET step: the model is resolved by the caller from the
     // active project's per-step config (no env/const fallback once a project exists).
-    let req = crate::llm::LlmRequest::new(user)
+    // ON-DEMAND REPO READ (the invariant): when the project's clone is local, let the
+    // decomposer SCAN the real codebase (read-only built-ins + cwd/--add-dir on the CLI
+    // backend) so children reflect the actual stack/structure, not just the digest. READ-ONLY.
+    let mut req = crate::llm::LlmRequest::new(user)
         .with_model(model)
         .with_system(system);
+    if let Some(dir) = repo_dir {
+        req = req.with_repo_read(dir);
+    }
     let Ok(resp) = llm.complete(req).await else {
         return propose(parent, practice);
     };
