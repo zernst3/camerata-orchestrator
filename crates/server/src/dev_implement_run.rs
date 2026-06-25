@@ -710,6 +710,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             1,
             false,
+            None,
         )
         .await;
 

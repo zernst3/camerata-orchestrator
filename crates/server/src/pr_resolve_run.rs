@@ -322,6 +322,7 @@ mod tests {
             vec!["clippy".to_string()],
             None,
             "claude-opus-4-8".to_string(),
+            None,
         )
         .await;
 

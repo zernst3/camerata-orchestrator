@@ -863,6 +863,7 @@ mod tests {
             "A story".to_string(),
             "Some description.".to_string(),
             "claude-opus-4-8".to_string(),
+            None,
         )
         .await;
 
@@ -893,6 +894,7 @@ mod tests {
             "A story".to_string(),
             "Some description.".to_string(),
             "claude-opus-4-8".to_string(),
+            None,
         )
         .await;
 

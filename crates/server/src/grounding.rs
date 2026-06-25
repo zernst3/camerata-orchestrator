@@ -167,21 +167,46 @@ pub fn render_repo_digest(repo: &str, dir: &Path) -> Option<String> {
         s.push_str("\n```\n");
     }
 
-    // High-signal docs: README* + CLAUDE.md / AGENTS.md / CONVENTIONS.md, truncated.
+    // High-signal docs: README* + CLAUDE.md / AGENTS.md / CONVENTIONS.md at the repo root,
+    // truncated. Read DIRECTLY from disk (not via `files`): the file reader only returns
+    // code-extension files, so Markdown docs would otherwise be invisible. Secret files are
+    // never doc basenames, so no redaction concern here.
     let mut seen_doc = false;
-    for (p, content) in files.iter() {
-        let base = p.rsplit('/').next().unwrap_or(p);
-        let is_readme = base.to_ascii_lowercase().starts_with("readme");
-        let is_doc = DOC_BASENAMES.iter().any(|d| base.eq_ignore_ascii_case(d));
-        // Only top-level docs (depth <= 1) to keep it high-signal.
-        if (is_readme || is_doc) && p.matches('/').count() <= 1 {
-            if !seen_doc {
-                s.push('\n');
-                seen_doc = true;
+    let mut emit_doc = |s: &mut String, name: &str, content: &str| {
+        if !seen_doc {
+            s.push('\n');
+            seen_doc = true;
+        }
+        s.push_str(&format!("Doc `{name}`:\n"));
+        s.push_str(&truncate(content.trim(), MAX_DOC_CHARS));
+        s.push_str("\n\n");
+    };
+    // README* (case-insensitive, any extension) at the root, first match wins.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut readmes: Vec<(String, std::path::PathBuf)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.to_ascii_lowercase().starts_with("readme") && e.path().is_file() {
+                    Some((name, e.path()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        readmes.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some((name, path)) = readmes.first() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                emit_doc(&mut s, name, &content);
             }
-            s.push_str(&format!("Doc `{p}`:\n"));
-            s.push_str(&truncate(content.trim(), MAX_DOC_CHARS));
-            s.push_str("\n\n");
+        }
+    }
+    for doc in DOC_BASENAMES {
+        let path = dir.join(doc);
+        if path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                emit_doc(&mut s, doc, &content);
+            }
         }
     }
 

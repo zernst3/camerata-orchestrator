@@ -484,6 +484,7 @@ mod tests {
             MergeSourceKind::Local,
             None,
             "claude-opus-4-8".to_string(),
+            None,
         )
         .await;
 
@@ -543,6 +544,7 @@ mod tests {
             MergeSourceKind::Local,
             None,
             String::new(),
+            None,
         )
         .await;
 
