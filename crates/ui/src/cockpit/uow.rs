@@ -3141,13 +3141,26 @@ pub(super) async fn poll_run_to_done(
     mut active_run: Signal<Option<RunView>>,
     mut uow_refresh: Signal<u32>,
 ) {
+    let mut misses = 0u32;
     loop {
-        if let Some(rv) = fetch_run(&run_id).await {
-            let done = rv.done;
-            active_run.set(Some(rv));
-            if done {
-                uow_refresh += 1;
-                break;
+        match fetch_run(&run_id).await {
+            Some(rv) => {
+                misses = 0;
+                let done = rv.done;
+                active_run.set(Some(rv));
+                if done {
+                    uow_refresh += 1;
+                    break;
+                }
+            }
+            None => {
+                // The run vanished or never registered — don't poll forever. Refresh once
+                // so the UI reconciles to the real server state, then stop.
+                misses += 1;
+                if misses >= 5 {
+                    uow_refresh += 1;
+                    break;
+                }
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -3972,6 +3985,11 @@ pub(super) fn UowStepRunControls(
     // Busy flag for the Stop control (shown while a run is active).
     let mut stopping = use_signal(|| false);
 
+    // Busy flag for "Begin investigation": disables the button + shows the Bombe while the
+    // begin request is in flight, so a double-click can't fire a SECOND begin (the first
+    // already advanced the stage server-side, and the second would 409).
+    let mut starting = use_signal(|| false);
+
     rsx! {
         div { class: "uow-lifecycle",
             span { class: "uow-field-label", "Lifecycle" }
@@ -4063,14 +4081,29 @@ pub(super) fn UowStepRunControls(
                         div { class: "run-control-row",
                             button {
                                 class: "btn-run",
+                                disabled: starting(),
                                 onclick: move |_| {
+                                    // Guard: ignore re-clicks while a begin is already in flight.
+                                    if starting() {
+                                        return;
+                                    }
+                                    starting.set(true);
                                     let sid = sid_begin.clone();
                                     let md = invest_model();
                                     let mut uow_refresh = uow_refresh;
+                                    let mut starting = starting;
                                     spawn(async move {
                                         match begin_investigation_run(&sid, &md).await {
                                             crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
-                                                poll_run_to_done(rid, active_run, uow_refresh).await
+                                                // The server advances Intake → Investigating BEFORE it
+                                                // returns, so refresh the lifecycle IMMEDIATELY — the
+                                                // stage + control flip to Investigating right now, not
+                                                // when the run finishes. A live-off placeholder run
+                                                // completes instantly with nothing to stream; without
+                                                // this immediate bump the stale Intake button stayed up
+                                                // and a second click 409'd. Then stream the run.
+                                                uow_refresh += 1;
+                                                poll_run_to_done(rid, active_run, uow_refresh).await;
                                             }
                                             // The UoW was not at Intake (e.g. a prior begin already
                                             // advanced it but the displayed button was stale). Surface
@@ -4092,9 +4125,15 @@ pub(super) fn UowStepRunControls(
                                                 );
                                             }
                                         }
+                                        starting.set(false);
                                     });
                                 },
-                                "▶ Begin investigation"
+                                if starting() {
+                                    crate::bombe::BombeSpinner {}
+                                    span { "Starting\u{2026}" }
+                                } else {
+                                    "\u{25b6} Begin investigation"
+                                }
                             }
                             ModelSelect { models: models.clone(), selected: invest_model }
                         }
