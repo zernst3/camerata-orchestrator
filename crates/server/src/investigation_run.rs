@@ -6,6 +6,14 @@
 //! any code is written. It is read-oriented: it does not scaffold a worktree or write
 //! code. It is NOT the development fleet — investigation analyzes, development builds.
 //!
+//! # On-demand full-repo read (the invariant)
+//!
+//! The agent runs WITH the active project's local clone as its cwd + `--add-dir`, so its
+//! read-only built-ins (Read/Grep/Glob/LS) can open ANY file in the repo it is
+//! investigating — not just the digest inlined into the prompt. Truth comes from reading
+//! the actual code, never from assumptions. This is READ access only; the write path is
+//! still `gated_write` (jailed to the same repo), Task/Write/Bash disallowed by the driver.
+//!
 //! # Why a real, single agent (not the fleet)
 //!
 //! The development fleet (`live_fleet::execute_live_run`) scaffolds a crate and spawns
@@ -185,6 +193,11 @@ pub async fn execute_investigation_run(
     story_desc: String,
     model: String,
     grounding: Option<String>,
+    repo_dir: Option<std::path::PathBuf>,
+    // MULTI-REPO READ scope: the local clones of ALL the active project's repos. A project
+    // has several repos; the investigation agent runs with `repo_dir` (the primary) as its
+    // cwd but must be able to READ across all of them, so each is added via `--add-dir`.
+    read_dirs: Vec<std::path::PathBuf>,
 ) {
     // Honor a cancel that arrived before the executor got scheduled: leave the run in its
     // terminal Cancelled state (set by RunStore::cancel) and do nothing.
@@ -242,6 +255,8 @@ pub async fn execute_investigation_run(
         story_desc,
         model,
         task,
+        repo_dir,
+        read_dirs,
         next_seq,
     )
     .await;
@@ -261,6 +276,9 @@ pub async fn resume_investigation_after_clarification(
     resume: ClarifyResumeStore,
     ctx: ClarifyResumeContext,
     answer_summary: String,
+    repo_dir: Option<std::path::PathBuf>,
+    // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only --add-dir).
+    read_dirs: Vec<std::path::PathBuf>,
 ) {
     let seq = AtomicUsize::new(usize::MAX / 2); // resume events sort after the originals
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -293,6 +311,8 @@ pub async fn resume_investigation_after_clarification(
         ctx.story_desc,
         ctx.model,
         task,
+        repo_dir,
+        read_dirs,
         next_seq,
     )
     .await;
@@ -411,6 +431,8 @@ async fn run_one_investigation_pass(
     story_desc: String,
     model: String,
     task: String,
+    repo_dir: Option<std::path::PathBuf>,
+    read_dirs: Vec<std::path::PathBuf>,
     next_seq: impl Fn() -> usize,
 ) {
     let gateway_bin = match locate_gateway_bin() {
@@ -457,13 +479,21 @@ async fn run_one_investigation_pass(
         }
     };
 
-    // No worktree jail: investigation is read-oriented. The agent's write path is still
-    // the gateway only (Task/Write/Bash disallowed by the driver). prepare_session wires
-    // the gated MCP config; with no worktree the agent inherits the orchestrator cwd for
-    // read scope.
+    // ON-DEMAND REPO READ (the core invariant): bind the agent to the active project's
+    // local clone. `prepare_session(..., Some(dir))` sets the driver's cwd + `--add-dir`
+    // so the read-only built-ins (Read/Grep/Glob/LS) can open ANY file in the repo being
+    // investigated — not just the digest in the prompt. It ALSO sets the gateway write-jail
+    // to that dir; that is independent and does not loosen anything. The agent's only write
+    // path is still `gated_write` (Task/Write/Bash disallowed by the driver), now confined
+    // to the project repo. When the repo isn't local (`None`), the agent inherits the
+    // orchestrator cwd and works from the digest only — degraded, but still gated.
     // The session temp dir is RAII-managed inside SessionSpawn._dir (ARCH-RESOURCE-LIFECYCLE-1);
     // a unique dir is created per prepare_session call so a resume's sink never collides.
-    let spawn = match prepare_session(&gateway_bin, &role, None) {
+    // MULTI-REPO READ: cwd/write-jail stay the primary repo (`repo_dir`); ALL the project's
+    // repo clones are added as read-only `--add-dir` so the investigation agent can read
+    // across every repo. The write jail is NOT widened (still `repo_dir`); the primary is
+    // deduped against the cwd inside the driver.
+    let spawn = match prepare_session(&gateway_bin, &role, repo_dir.as_deref(), &read_dirs) {
         Ok(s) => s,
         Err(e) => {
             runs.push_event(
@@ -697,7 +727,7 @@ mod tests {
             allowed_paths: vec!["crates/".to_string()],
         };
         // prepare_session now creates its own RAII TempDir internally (ARCH-RESOURCE-LIFECYCLE-1).
-        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None)
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None, &[])
             .expect("session prepares");
         let driver = spawn.driver.with_clarification(true);
         let args = driver.build_args(&role, "analyze");
@@ -864,6 +894,8 @@ mod tests {
             "Some description.".to_string(),
             "claude-opus-4-8".to_string(),
             None,
+            None,
+            Vec::new(),
         )
         .await;
 
@@ -895,6 +927,8 @@ mod tests {
             "Some description.".to_string(),
             "claude-opus-4-8".to_string(),
             None,
+            None,
+            Vec::new(),
         )
         .await;
 

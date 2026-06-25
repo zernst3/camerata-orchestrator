@@ -493,8 +493,11 @@ pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     let mut spawns = Vec::with_capacity(total);
     for role in roles.iter() {
         // Pass the worktree so the gateway is jailed to it (CAMERATA_WORKTREE_ROOT):
-        // gated_write refuses any target outside the worktree, in code.
-        let spawn = prepare_session(gateway_bin, role, Some(&worktree))?;
+        // gated_write refuses any target outside the worktree, in code. No extra read dirs:
+        // greenfield fleet builds scaffold into this throwaway worktree and have no other
+        // project-repo clones to read across (the multi-repo read scope is for in-project
+        // brownfield agents, threaded from the server's AppState::active_repo_dirs()).
+        let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[])?;
         spawns.push(spawn);
     }
     let drivers: Vec<_> = spawns
@@ -759,7 +762,9 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
             is_orchestrator.push(true);
             orch_spawns.push(orch);
         } else {
-            let spawn = prepare_session(gateway_bin, role, Some(&worktree))?;
+            // No extra read dirs: greenfield fleet builds scaffold into this throwaway
+            // worktree (multi-repo read scope is for in-project brownfield agents).
+            let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[])?;
             mcp_config_paths.push(spawn.mcp_config.display().to_string());
             is_orchestrator.push(false);
             tiered_spawns.push(spawn);

@@ -159,14 +159,24 @@ pub trait TranslationDriver: Send + Sync {
 /// `&dyn TranslationDriver` and tests can swap in a fake.
 pub struct LlmTranslator {
     pub llm: crate::llm::Llm,
+    /// MULTI-REPO READ: the local clones of ALL the active project's repos. When non-empty,
+    /// the translator runs WITH the first as cwd and every clone added read-only via
+    /// `--add-dir` (CLI backend), so it can read the real code across all the project's repos
+    /// while restating the human's decision — not just the inlined grounding digest.
+    /// READ-ONLY and non-agentic — no write/exec tool is offered. Empty = digest-only (the
+    /// prior behavior; e.g. the API backend or no local clone).
+    pub repo_dirs: Vec<std::path::PathBuf>,
 }
 
 #[async_trait::async_trait]
 impl TranslationDriver for LlmTranslator {
     async fn complete(&self, system: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
-        let req = crate::llm::LlmRequest::new(prompt)
+        let mut req = crate::llm::LlmRequest::new(prompt)
             .with_system(system)
             .with_model(model);
+        if !self.repo_dirs.is_empty() {
+            req = req.with_repo_read_dirs(self.repo_dirs.iter().cloned());
+        }
         let resp = self.llm.complete(req).await?;
         Ok(resp.text)
     }

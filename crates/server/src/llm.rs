@@ -113,15 +113,47 @@ pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// OAuth/keychain, which would break the subscription-based CLI the local app relies on.
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     cmd.arg("--strict-mcp-config")
-        .arg("--tools")
-        .arg("")
         .arg("--disable-slash-commands")
         .arg("--permission-mode")
         .arg("dontAsk");
+    match &req.repo_read_dir {
+        // ON-DEMAND REPO READ (THE INVARIANT): the model may scan the bound repo. Swap the
+        // `--tools ""` lockdown for the READ-ONLY built-ins and run WITH the repo as cwd +
+        // `--add-dir`. Still non-agentic: slash-commands off, NO write/exec tool offered, so
+        // this grants READ only — it cannot mutate the repo, spawn, or run shell.
+        Some(dir) => {
+            cmd.arg("--allowedTools")
+                .arg(READ_ONLY_TOOLS.join(" "))
+                .arg("--add-dir")
+                .arg(dir)
+                .current_dir(dir);
+            // MULTI-REPO READ: a project has several repos. Each OTHER project-repo clone is
+            // added as its own read-only `--add-dir` so a project-level model can scan across
+            // all of them. READ-only — no write/exec tool is offered either way. Skip any that
+            // duplicate the cwd dir.
+            for extra in &req.repo_read_extra_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        // Pure single-shot completion (audit / decompose / escalation / API-shaped calls):
+        // disable ALL built-in tools via an allowlist of nothing (covers unnamed/future
+        // tools too). Unchanged from the original hardening.
+        None => {
+            cmd.arg("--tools").arg("");
+        }
+    }
     if let Some(system) = &req.system {
         cmd.arg("--system-prompt").arg(system);
     }
 }
+
+/// The read-only built-in tools granted on the CLI backend when a request opts into
+/// on-demand repo read ([`LlmRequest::with_repo_read`]). Read-class only: these cannot
+/// mutate the repo, so they add no write path. Kept in sync with
+/// `camerata_agent::READONLY_BUILTINS`.
+pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS"];
 
 // ── In-flight subprocess registry (shutdown hook) ──────────────────────────────
 // `kill_on_drop(true)` reaps subprocesses when their future is dropped (graceful runtime
@@ -251,6 +283,22 @@ pub struct LlmRequest {
     /// Min cacheable prefix: 2048 tokens (Sonnet) / 4096 tokens (Opus/Haiku). Our digests
     /// far exceed this, so a valid `cache_prefix_len` always meets the floor.
     pub cache_prefix_len: Option<usize>,
+    /// Optional local repo clone the model may READ on demand (THE INVARIANT: every
+    /// in-project agent gets on-demand full-repo read, not just a digest). On the CLI
+    /// backend this swaps the hardened `--tools ""` lockdown for the READ-ONLY built-ins
+    /// (Read/Grep/Glob/LS) and runs WITH this dir as cwd + `--add-dir`, so the model can
+    /// scan any file. It stays NON-AGENTIC: slash-commands are still off and NO write/exec
+    /// tool is offered, so this grants read only — it cannot mutate the repo. Ignored by the
+    /// API backend (no filesystem) and by any call that leaves it `None` (e.g. the audit /
+    /// decompose / escalation calls keep their full `--tools ""` lockdown unchanged).
+    pub repo_read_dir: Option<std::path::PathBuf>,
+    /// ADDITIONAL local repo clones the model may READ — the OTHER repos in the active
+    /// project (a project has MULTIPLE repos). On the CLI backend each is emitted as its own
+    /// read-only `--add-dir` on top of `repo_read_dir` (the cwd), so a project-level model
+    /// (story-author / decompose / intake) can scan ACROSS all the project's repos, not just
+    /// the primary. READ-ONLY and non-agentic — same posture as `repo_read_dir`. Empty by
+    /// default; ignored on the API backend.
+    pub repo_read_extra_dirs: Vec<std::path::PathBuf>,
 }
 
 impl LlmRequest {
@@ -262,7 +310,44 @@ impl LlmRequest {
             prompt: prompt.into(),
             max_tokens: 4096,
             cache_prefix_len: None,
+            repo_read_dir: None,
+            repo_read_extra_dirs: Vec::new(),
         }
+    }
+
+    /// Grant the CLI-backend model ON-DEMAND READ access to a local repo clone: it runs with
+    /// `dir` as cwd + `--add-dir` and the read-only built-ins (Read/Grep/Glob/LS) enabled, so
+    /// it can scan any file rather than relying only on the inlined digest. READ-ONLY and
+    /// non-agentic — no write/exec tool is offered, slash-commands stay off. No-op on the API
+    /// backend (no filesystem). An empty path is treated as `None`.
+    pub fn with_repo_read(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        let d = dir.into();
+        self.repo_read_dir = if d.as_os_str().is_empty() { None } else { Some(d) };
+        self
+    }
+
+    /// Grant the CLI-backend model ON-DEMAND READ across ALL the active project's repo clones
+    /// (a project has MULTIPLE repos). The FIRST dir becomes the cwd + primary `--add-dir`
+    /// (same as [`Self::with_repo_read`]); every other dir is added as its own read-only
+    /// `--add-dir`. Use this for project-level models (story-author / decompose / intake) so
+    /// they can scan across every repo. READ-ONLY and non-agentic. Empty input is a no-op
+    /// (leaves the full `--tools ""` lockdown). No-op on the API backend (no filesystem).
+    pub fn with_repo_read_dirs(
+        mut self,
+        dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        let mut iter = dirs.into_iter().filter(|d| !d.as_os_str().is_empty());
+        match iter.next() {
+            Some(primary) => {
+                self.repo_read_dir = Some(primary);
+                self.repo_read_extra_dirs = iter.collect();
+            }
+            None => {
+                self.repo_read_dir = None;
+                self.repo_read_extra_dirs = Vec::new();
+            }
+        }
+        self
     }
 
     pub fn with_system(mut self, system: impl Into<String>) -> Self {
@@ -1256,6 +1341,26 @@ pub fn reassemble_batch_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_repo_read_binds_dir_and_default_is_none() {
+        let req = LlmRequest::new("hi").with_repo_read("/tmp/repo");
+        assert_eq!(req.repo_read_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        // Empty path is treated as None (no read window).
+        assert!(LlmRequest::new("hi").with_repo_read("").repo_read_dir.is_none());
+        // Default request leaves the lockdown in place (repo_read_dir None).
+        assert!(LlmRequest::new("hi").repo_read_dir.is_none());
+    }
+
+    #[test]
+    fn read_only_tools_contain_no_writers() {
+        for t in READ_ONLY_TOOLS {
+            assert!(["Read", "Glob", "Grep", "LS"].contains(t));
+        }
+        for forbidden in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit"] {
+            assert!(!READ_ONLY_TOOLS.contains(&forbidden));
+        }
+    }
 
     #[test]
     fn backend_selection_rules() {

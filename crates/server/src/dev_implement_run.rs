@@ -14,11 +14,20 @@
 //! [`camerata_fleet::governed_role`] + [`camerata_agent::prepare_session`] machinery as
 //! pr_resolve_run and update_branch_run:
 //!
-//! - `--allowedTools` = gated tools only (`gated_write` is the only write path).
+//! - `--allowedTools` = the read-only built-ins (Read/Grep/Glob/LS) PLUS `gated_write`
+//!   (`gated_write` is the only WRITE path).
 //! - `Task`, `Write`, `Bash`, `Edit`, `MultiEdit`, `NotebookEdit` are DISALLOWED.
 //! - The repo dir passed as the session worktree jails writes to the UoW's worktree.
 //!
 //! Worktrees change WHERE the agent works, not WHETHER it is gated.
+//!
+//! # On-demand full-repo read (the invariant) — quintuply important here
+//!
+//! The implementer WRITES code, so it must be able to read the real codebase first.
+//! `prepare_session(..., Some(dir))` binds the agent's cwd + `--add-dir` to the UoW's
+//! worktree, so its read-only built-ins (Read/Grep/Glob/LS) can open ANY file in the
+//! repo before/while it writes — not just the digest in the prompt. Reads are ungated;
+//! the only write path remains the jailed `gated_write`.
 //!
 //! # No-code-first gate
 //!
@@ -160,6 +169,11 @@ pub async fn execute_dev_implement_run(
     max_iterations: usize,
     skip_layer2: bool,
     grounding: Option<String>,
+    // MULTI-REPO READ scope: the local clones of ALL the active project's repos. The
+    // implementer's cwd + write jail stay this UoW's worktree (`dir`); these extra dirs are
+    // added READ-ONLY via `--add-dir` so it can read sibling repos (e.g. the backend's API
+    // when implementing a frontend UoW). Filtered to exclude `dir` itself.
+    read_dirs: Vec<std::path::PathBuf>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -263,7 +277,15 @@ pub async fn execute_dev_implement_run(
     // Jail the agent's writes to the worktree via the session worktree: gated_write
     // (layer-1) is its ONLY mutation path, confined to this UoW's worktree.
     // The session temp dir is RAII-managed inside SessionSpawn._dir (ARCH-RESOURCE-LIFECYCLE-1).
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path())) {
+    // MULTI-REPO READ: sibling project-repo clones are added READ-ONLY (`--add-dir`); they do
+    // NOT widen the write jail (still `dir`). Drop `dir` from the list to avoid a dup add-dir.
+    let sibling_read_dirs: Vec<std::path::PathBuf> = read_dirs
+        .iter()
+        .filter(|d| d.as_path() != dir.as_path())
+        .cloned()
+        .collect();
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs)
+    {
         Ok(s) => s,
         Err(e) => {
             fail(
@@ -670,6 +692,76 @@ mod tests {
         assert!(p.contains("no approved decisions"));
     }
 
+    // ── 2b. READ ACCESS assertion (the invariant) ──────────────────────────────
+
+    /// The implementer is bound to the worktree via `prepare_session(..., Some(dir))`, which
+    /// must give it FULL on-demand repo read: cwd + `--add-dir <worktree>` plus the read-only
+    /// built-ins (Read/Grep/Glob/LS). It must be able to open any file before/while writing.
+    /// The write gate is unchanged: `gated_write` is still the only write tool and every
+    /// escape built-in stays denied.
+    #[test]
+    fn implementer_has_full_repo_read_and_unchanged_write_gate() {
+        use camerata_agent::{prepare_session, GATED_WRITE_TOOL};
+        use camerata_core::{Role, RuleId};
+
+        let wt = std::env::temp_dir().join("cam-devimpl-readscope");
+        let role = Role {
+            name: "BrownfieldImplementer".to_string(),
+            rule_subset: vec![RuleId("GOV-1".to_string())],
+            allowed_paths: vec!["crates/".to_string()],
+        };
+        // A SECOND project repo the frontend UoW must be able to READ (not write).
+        let sibling = std::env::temp_dir().join("cam-devimpl-sibling-backend");
+        let spawn = prepare_session(
+            std::path::Path::new("/bin/camerata-gateway"),
+            &role,
+            Some(&wt),
+            std::slice::from_ref(&sibling),
+        )
+        .expect("session prepares");
+        let args = spawn.driver.build_args(&role, "implement");
+
+        // cwd + --add-dir bound to the worktree → on-demand read of the whole repo.
+        let add_idx = args
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir present so the agent can read the whole worktree");
+        assert_eq!(args[add_idx + 1], wt.display().to_string());
+
+        // MULTI-REPO READ: the sibling project repo is also added as a read scope.
+        let add_dirs: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.as_str() == "--add-dir" && *i + 1 < args.len())
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert!(
+            add_dirs.iter().any(|d| **d == sibling.display().to_string()),
+            "the sibling project repo must be readable via --add-dir"
+        );
+
+        let allowed = {
+            let i = args.iter().position(|a| a == "--allowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for read_tool in ["Read", "Grep", "Glob", "LS"] {
+            assert!(
+                allowed.split(' ').any(|t| t == read_tool),
+                "{read_tool} must be available so the implementer can read any file"
+            );
+        }
+        // Write gate unchanged: gated_write only; escape built-ins denied + absent.
+        assert!(allowed.split(' ').any(|t| t == GATED_WRITE_TOOL));
+        let disallowed = {
+            let i = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            args[i + 1].clone()
+        };
+        for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
+            assert!(disallowed.split(' ').any(|t| t == tool));
+            assert!(!allowed.split(' ').any(|t| t == tool));
+        }
+    }
+
     // ── 3. GATE UNCHANGED assertion ────────────────────────────────────────────
 
     /// The brownfield implement run uses `governed_role` + `prepare_session(..., Some(worktree))`
@@ -711,6 +803,7 @@ mod tests {
             1,
             false,
             None,
+            Vec::new(),
         )
         .await;
 

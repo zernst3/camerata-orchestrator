@@ -3,17 +3,17 @@
 //!
 //! THE INVARIANT (`docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md`):
 //! every agent invoked on behalf of a project MUST be grounded in (a) the project's
-//! RULE context (its committed ruleset / selected rules) and (b) the project's REPO
-//! context (a digest of its local clone: detected stack, dependency highlights, the
-//! high-signal docs, and a shallow tree). No exceptions, regardless of which feature
-//! invokes it.
+//! RULE context (its committed ruleset / selected rules) and (b) on-demand READ ACCESS to
+//! the ENTIRE project repo — every file — not merely the digest below. The digest (detected
+//! stack, dependency highlights, high-signal docs, a shallow tree) is the cheap always-on
+//! BASELINE; the authoritative window is the agent reading the actual files from its working
+//! directory when it needs to. No exceptions, regardless of which feature invokes it.
 //!
-//! Motivation: the story-authoring / clarification agent used to behave like a
-//! context-less product owner — for a Rust Dioxus + Axum + SQLx app with NO auth it
-//! asked where to persist a preference across "logged-in users / devices / auth",
-//! proving it had zero knowledge of the repo. The whole point of "use an agent to
-//! draft the story" is that it understands the actual codebase. This module gives
-//! every agent that window.
+//! Motivation: an in-project agent used to behave like a context-less product owner —
+//! reasoning about capabilities and structure the project did not have, because it could
+//! only see a fixed summary. The fix is twofold: hand it the digest for orientation AND give
+//! it on-demand read of the real codebase so it can confirm facts by reading, never by
+//! assuming. The whole point of "use an agent" is that it understands the actual code.
 //!
 //! ISOLATION: the digest reads ONLY the repos passed in (the active project's repos),
 //! resolved via [`crate::workspace::resolve_repo_dir`] (machine-local override path or
@@ -251,11 +251,13 @@ pub fn assemble(
     }
     let mut s = String::from(
         "=== PROJECT GROUNDING ===\n\
-         The following is the ACTUAL project you are working on. Ground every answer in \
-         these facts — its real stack, dependencies, structure, and rules. Do NOT assume \
-         capabilities the repo does not have (for example, do not ask about authentication \
-         or multi-user/multi-device persistence unless the dependencies or code show an \
-         auth/session system actually exists).\n\n",
+         The following is a DIGEST of the actual project you are working on — its real \
+         stack, dependencies, structure, and rules. This digest is a cheap orientation, \
+         NOT the whole truth: you also have READ ACCESS to the full project repo from your \
+         working directory. Before assuming anything about what the project does or how it \
+         is built, CONSULT THE ACTUAL CODE AND CONFIG by reading the relevant files. Ground \
+         every answer in what the repo actually contains, never in assumed capabilities or \
+         structure.\n\n",
     );
     if let Some(rules) = rule_section {
         s.push_str(&rules);
@@ -315,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_includes_anti_hallucination_guidance() {
+    fn assemble_directs_the_agent_to_read_the_real_code() {
         let out = assemble(
             Some("=== PROJECT RULES ===\nRULE-1\n".to_string()),
             &["--- repo: o/r ---\nLanguages: Rust\n".to_string()],
@@ -323,7 +325,14 @@ mod tests {
         )
         .expect("some");
         assert!(out.contains("PROJECT GROUNDING"));
-        assert!(out.contains("do not ask about authentication"));
+        // Neutral framing: the agent has full repo read and must consult the actual code,
+        // rather than the old symptom-specific "do not ask about authentication" guidance.
+        assert!(out.contains("READ ACCESS to the full project repo"));
+        assert!(out.contains("CONSULT THE ACTUAL CODE"));
+        assert!(
+            !out.to_lowercase().contains("authentication"),
+            "the auth-specific anti-hallucination guidance must be gone"
+        );
         assert!(out.contains("RULE-1"));
         assert!(out.contains("Languages: Rust"));
         assert!(out.contains("END PROJECT GROUNDING"));

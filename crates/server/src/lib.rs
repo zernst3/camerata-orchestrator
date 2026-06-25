@@ -264,6 +264,60 @@ impl AppState {
         crate::grounding::assemble(rule_section, &repo_digests, &unresolved)
     }
 
+    /// Resolve the active project's PRIMARY local repo clone — the first of the active
+    /// project's repos whose local clone exists on disk. Used as the cwd for project-level
+    /// agents that aren't bound to one specific repo. For the full read scope (which covers
+    /// EVERY repo in the project) see [`Self::active_repo_dirs`].
+    ///
+    /// ISOLATION: resolves ONLY the active project's repos (machine-local override path or
+    /// `<workspace_root>/<owner>/<repo>`); never another project's clone. Returns `None`
+    /// when there is no active project or none of its repos resolve to an existing folder
+    /// (the agent then falls back to grounding-digest-only, read-window-less, as before).
+    ///
+    /// This grants READ access only; it does NOT touch the write gate. Callers thread the
+    /// result into `prepare_session(..., Some(dir))`, which binds cwd + `--add-dir` for
+    /// reads AND the gateway write-jail — `gated_write` stays the only (gated) write path.
+    pub(crate) fn active_repo_dir(&self) -> Option<std::path::PathBuf> {
+        self.active_repo_dirs().into_iter().next()
+    }
+
+    /// Resolve the local clones of ALL of the active project's repos — the UNION read scope
+    /// for in-project agents. A project contains MULTIPLE distinct repos (e.g. a frontend
+    /// and a backend); every in-project agent should be able to READ across all of them
+    /// (e.g. a frontend UoW reading the backend's API surface), so this returns one
+    /// `PathBuf` per repo whose local clone exists on disk, in `project.repos` order.
+    ///
+    /// Repos that don't resolve to an existing folder are skipped (the agent simply lacks a
+    /// read window into those); the result is empty when there is no active project or none
+    /// of its repos resolve.
+    ///
+    /// ISOLATION: resolves ONLY the ACTIVE project's repos (machine-local override path or
+    /// `<workspace_root>/<owner>/<repo>`); never another project's clone. This is the read
+    /// scope only — callers pass it to `prepare_session(.., cwd, &dirs)` /
+    /// `with_repo_read_dirs(..)` to add each dir via `--add-dir`. It does NOT widen the
+    /// write gate: `gated_write` jailed to the single UoW worktree (CAMERATA_WORKTREE_ROOT)
+    /// remains the only write path, so the extra repos are READ-ONLY.
+    pub(crate) fn active_repo_dirs(&self) -> Vec<std::path::PathBuf> {
+        let Some(project) = self.projects.active() else {
+            return Vec::new();
+        };
+        let workspace_root = self.settings.workspace_root();
+        let mut dirs = Vec::new();
+        for repo in &project.repos {
+            let override_path = self.settings.repo_path(repo);
+            if let Some(dir) = crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            ) {
+                if dir.is_dir() && !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+        dirs
+    }
+
     /// Store the last completed scan report for the given project. Called the instant a
     /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
     /// poisoning: recovers the inner value rather than panicking the handler.
@@ -1056,6 +1110,10 @@ async fn start_governed_run(
             // GROUNDING (the invariant): rule + repo digest for the implementer (computed
             // before the spawn so it can move into the task).
             let grounding = state.project_grounding().await;
+            // MULTI-REPO READ scope: ALL the active project's local repo clones. The
+            // implementer writes only to its worktree; these are added READ-ONLY so it can
+            // read sibling repos.
+            let read_dirs = state.active_repo_dirs();
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -1073,6 +1131,7 @@ async fn start_governed_run(
                     max_iterations,
                     skip_layer2,
                     grounding,
+                    read_dirs,
                 )
                 .await
             });
@@ -1674,6 +1733,12 @@ async fn answer_clarification(
                 let uow = state.uow.clone();
                 let clarifications = state.clarifications.clone();
                 let resume = state.clarify_resume.clone();
+                // ON-DEMAND REPO READ (the invariant): re-resolve the active project's local
+                // clone so the RESUMED agent also runs with the repo as cwd + `--add-dir`
+                // and keeps full read access. Read-only; the write gate is unchanged.
+                let repo_dir = state.active_repo_dir();
+                // MULTI-REPO READ scope: ALL the active project's repo clones (read-only).
+                let read_dirs = state.active_repo_dirs();
                 tokio::spawn(async move {
                     crate::investigation_run::resume_investigation_after_clarification(
                         runs,
@@ -1682,6 +1747,8 @@ async fn answer_clarification(
                         resume,
                         ctx,
                         answer_summary,
+                        repo_dir,
+                        read_dirs,
                     )
                     .await;
                 });
@@ -5087,12 +5154,15 @@ async fn decompose_propose(
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
     let grounding = state.project_grounding().await;
+    // MULTI-REPO READ: ALL the active project's local repo clones (read-only across all).
+    let repo_dirs = state.active_repo_dirs();
     let children = crate::decompose::propose_ai(
         &parent,
         &Practice::default_feature(),
         &llm,
         &model,
         grounding.as_deref(),
+        &repo_dirs,
     )
     .await;
     Ok(Json(children))
@@ -5418,6 +5488,8 @@ async fn answer_escalation(
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
     let driver = crate::escalation::LlmTranslator {
         llm: state.llm(),
+        // MULTI-REPO READ: let the translator read across ALL the active project's repo clones.
+        repo_dirs: state.active_repo_dirs(),
     };
     // Escalation translation is a NON-FLEET step: the model comes from the active project's
     // per-step config (no env/const fallback once a project exists), replacing the prior
@@ -6629,9 +6701,21 @@ async fn uow_author(
         Some(grounding) => format!("{STORY_AUTHOR_SYSTEM}\n\n{grounding}"),
         None => STORY_AUTHOR_SYSTEM.to_string(),
     };
-    let request = crate::llm::LlmRequest::new(prompt)
+    // ON-DEMAND REPO READ (the core invariant, beyond the digest): when the active project's
+    // repo is local, let the story-authoring model SCAN the actual codebase (cwd + --add-dir
+    // + read-only built-ins on the CLI backend) instead of relying only on the inlined
+    // digest. This is what stops the context-less-product-owner failure (asking about auth
+    // for an app that has none): it can read the real dependencies/code. READ-ONLY — no write
+    // path is added. Degrades to digest-only on the API backend / when no repo is local.
+    let mut request = crate::llm::LlmRequest::new(prompt)
         .with_model(model)
         .with_system(system);
+    // MULTI-REPO READ: a project has several repos. Grant the story-author model read across
+    // ALL the active project's repo clones (cwd = primary, the rest as read-only `--add-dir`).
+    let repo_dirs = state.active_repo_dirs();
+    if !repo_dirs.is_empty() {
+        request = request.with_repo_read_dirs(repo_dirs);
+    }
     let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
@@ -7605,6 +7689,15 @@ async fn uow_begin_investigation(
     // GROUNDING (the invariant): hand the investigation agent the project's rule context +
     // repo digest so it analyzes the ACTUAL project (it can also read the repo clone).
     let grounding = state.project_grounding().await;
+    // ON-DEMAND REPO READ (the core invariant): resolve the active project's local clone so
+    // the investigation agent runs WITH the repo as its cwd + `--add-dir` and can scan/read
+    // any file it needs, not just the digest. Read-only — the write gate is unchanged. None
+    // when the repo isn't local (the agent then has the digest only, as before).
+    let repo_dir = state.active_repo_dir();
+    // MULTI-REPO READ scope: ALL the active project's local repo clones — the union read
+    // window for the investigation agent (cwd stays the primary `repo_dir`; each repo is
+    // added read-only via `--add-dir`).
+    let read_dirs = state.active_repo_dirs();
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
     let run_id = state.runs.create(&story_id, "investigation", crate::run::RunKind::Watched);
@@ -7631,6 +7724,8 @@ async fn uow_begin_investigation(
                 desc,
                 model,
                 grounding,
+                repo_dir,
+                read_dirs,
             )
             .await;
             runs_for_clear.clear_abort(&rid_for_clear);
@@ -7782,6 +7877,8 @@ async fn uow_update_branch(
         let src = req.source_branch.clone();
         // GROUNDING (the invariant): rule + repo digest for the conflict resolver.
         let grounding = state.project_grounding().await;
+        // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
+        let read_dirs = state.active_repo_dirs();
         tokio::spawn(async move {
             crate::update_branch_run::execute_update_branch_run(
                 runs,
@@ -7796,6 +7893,7 @@ async fn uow_update_branch(
                 token,
                 model,
                 grounding,
+                read_dirs,
             )
             .await;
         });
@@ -8051,6 +8149,8 @@ async fn uow_pr_resolve(
         let pr_number = info.number;
         // GROUNDING (the invariant): rule + repo digest for the PR-feedback resolver.
         let grounding = state.project_grounding().await;
+        // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
+        let read_dirs = state.active_repo_dirs();
         tokio::spawn(async move {
             crate::pr_resolve_run::execute_pr_resolve_run(
                 runs,
@@ -8066,6 +8166,7 @@ async fn uow_pr_resolve(
                 Some(token),
                 model,
                 grounding,
+                read_dirs,
             )
             .await;
         });

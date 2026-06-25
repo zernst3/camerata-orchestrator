@@ -281,10 +281,22 @@ pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
 pub struct ClaudeRefinementReviewer {
     model: String,
     /// The PROJECT-GROUNDING block (repo digest + rule context) injected into the prompt.
-    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. This is
-    /// a bare-LLM call, so the block is its only window onto the actual codebase. Set via
-    /// [`Self::with_grounding`]; `None` = ungrounded (e.g. a generic CLI demo, no repo).
+    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. The
+    /// digest is the cheap always-on baseline; on-demand full-repo read (below) is the
+    /// authoritative window. Set via [`Self::with_grounding`]; `None` = ungrounded.
     grounding: Option<String>,
+    /// The active project's local repo clone. When set, the review call runs WITH this
+    /// directory as its cwd + `--add-dir` and the read-only built-ins (Read/Grep/Glob/LS)
+    /// enabled, so the reviewer can SCAN ANY FILE in the repo while reviewing — not just the
+    /// digest. THE INVARIANT: on-demand full-repo read for every in-project agent. READ-ONLY:
+    /// this is a planning call with NO write tools and NO governance gateway, so it writes
+    /// nothing. `None` = no repo bound (digest-only, e.g. a generic CLI demo).
+    repo_dir: Option<std::path::PathBuf>,
+    /// ADDITIONAL local repo clones the reviewer may READ — the OTHER repos in the active
+    /// project (a project has MULTIPLE repos). Each is added as its own read-only `--add-dir`
+    /// on top of `repo_dir` (the cwd), so review can scan ACROSS all the project's repos.
+    /// READ-ONLY, same posture as `repo_dir`. Empty = primary repo only.
+    extra_repo_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Default for ClaudeRefinementReviewer {
@@ -306,6 +318,8 @@ impl ClaudeRefinementReviewer {
         Self {
             model,
             grounding: None,
+            repo_dir: None,
+            extra_repo_dirs: Vec::new(),
         }
     }
 
@@ -319,6 +333,8 @@ impl ClaudeRefinementReviewer {
             Self {
                 model: m,
                 grounding: None,
+                repo_dir: None,
+                extra_repo_dirs: Vec::new(),
             }
         }
     }
@@ -328,6 +344,37 @@ impl ClaudeRefinementReviewer {
     pub fn with_grounding(mut self, grounding: impl Into<String>) -> Self {
         let g = grounding.into();
         self.grounding = if g.trim().is_empty() { None } else { Some(g) };
+        self
+    }
+
+    /// Bind the active project's local repo clone so the review call can READ any file in it
+    /// on demand (cwd + `--add-dir` + read-only built-ins). Builder-style. THE INVARIANT:
+    /// on-demand full-repo read for every in-project agent. READ-ONLY — this is a planning
+    /// call with no write tools and no gateway, so binding a repo adds no write path.
+    pub fn with_repo_dir(mut self, repo_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.repo_dir = Some(repo_dir.into());
+        self
+    }
+
+    /// Bind ALL the active project's local repo clones (a project has MULTIPLE repos). The
+    /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
+    /// is added as its own read-only `--add-dir`, so review can scan ACROSS every repo.
+    /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
+    pub fn with_repo_dirs(
+        mut self,
+        dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        let mut iter = dirs.into_iter();
+        match iter.next() {
+            Some(primary) => {
+                self.repo_dir = Some(primary);
+                self.extra_repo_dirs = iter.collect();
+            }
+            None => {
+                self.repo_dir = None;
+                self.extra_repo_dirs = Vec::new();
+            }
+        }
         self
     }
 
@@ -430,20 +477,34 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
         let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
-        let out = tokio::process::Command::new("claude")
-            .arg("-p")
+        // READ-ONLY, ungoverned review call: no MCP gateway, no write tools. THE INVARIANT:
+        // when a repo clone is bound, run WITH it as cwd + `--add-dir` and the read-only
+        // built-ins (Read/Grep/Glob/LS) enabled, so the reviewer can scan ANY file in the
+        // real codebase while reviewing, not just the inlined digest. No write path is added
+        // (no write/exec tool is offered).
+        let mut cmd = tokio::process::Command::new("claude");
+        cmd.arg("-p")
             .arg(&prompt)
             .arg("--model")
             .arg(&self.model)
             .arg("--allowedTools")
-            .arg("")
+            .arg(crate::engine::READ_ONLY_TOOLS.join(" "))
             .arg("--dangerously-skip-permissions")
             .arg("--output-format")
             .arg("json")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(ReviewError::Spawn)?;
+            .kill_on_drop(true);
+        if let Some(dir) = &self.repo_dir {
+            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the reviewer can scan across all the project's repos. READ-only
+            // — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        let out = cmd.output().await.map_err(ReviewError::Spawn)?;
         if !out.status.success() {
             return Err(ReviewError::NonZeroExit {
                 status: out.status.to_string(),
@@ -606,6 +667,13 @@ mod tests {
 
     fn form_with_owner() -> IntakeForm {
         IntakeForm::sample_app()
+    }
+
+    #[test]
+    fn with_repo_dir_binds_the_repo_for_on_demand_read() {
+        let rv = ClaudeRefinementReviewer::new().with_repo_dir("/tmp/repo");
+        assert_eq!(rv.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        assert!(ClaudeRefinementReviewer::new().repo_dir.is_none());
     }
 
     fn session_with_role_story(ctx: RefinementContext) -> RefinementSession {

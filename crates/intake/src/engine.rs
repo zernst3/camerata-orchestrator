@@ -470,6 +470,12 @@ impl LeadEngineer for StubLeadEngineer {
 /// runtime for CLI / one-off invocations.
 pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
 
+/// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
+/// reviewer) allow so the agent can SCAN the bound repo on demand. These cannot mutate the
+/// repo, so offering them adds NO write path to a call that has no gateway and no write tool.
+/// Kept in sync with `camerata_agent::READONLY_BUILTINS` (the governed agents' read set).
+pub const READ_ONLY_TOOLS: &[&str] = &["Read", "Glob", "Grep", "LS"];
+
 /// The REAL lead engineer: a headless `claude -p` call that evaluates the form
 /// as a staff engineer and returns a strict-JSON [`ModelOutput`] (checklist,
 /// confidence, suggestions, honesty verdict, and optionally a plan).
@@ -481,10 +487,22 @@ pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
 pub struct ClaudeLeadEngineer {
     model: String,
     /// The PROJECT-GROUNDING block (repo digest + rule context) injected into the prompt.
-    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. This is
-    /// a bare-LLM call, so the block is its ONLY window onto the actual codebase. Set via
-    /// [`Self::with_grounding`]; `None` = ungrounded (e.g. a generic CLI demo, no repo).
+    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. The
+    /// digest is the cheap always-on baseline; on-demand full-repo read (below) is the
+    /// authoritative window. Set via [`Self::with_grounding`]; `None` = ungrounded.
     grounding: Option<String>,
+    /// The active project's local repo clone. When set, the planning call runs WITH this
+    /// directory as its cwd + `--add-dir` and the read-only built-ins (Read/Grep/Glob/LS)
+    /// enabled, so the lead engineer can SCAN ANY FILE in the repo while planning — not just
+    /// the digest. THE INVARIANT: on-demand full-repo read for every in-project agent. This
+    /// is READ-ONLY: this is a planning call with NO write tools and NO governance gateway,
+    /// so it writes nothing. `None` = no repo bound (digest-only, e.g. a generic CLI demo).
+    repo_dir: Option<std::path::PathBuf>,
+    /// ADDITIONAL local repo clones the lead engineer may READ — the OTHER repos in the
+    /// active project (a project has MULTIPLE repos). Each is added as its own read-only
+    /// `--add-dir` on top of `repo_dir` (the cwd), so planning can scan ACROSS all the
+    /// project's repos. READ-ONLY, same posture as `repo_dir`. Empty = primary repo only.
+    extra_repo_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Default for ClaudeLeadEngineer {
@@ -541,6 +559,8 @@ impl ClaudeLeadEngineer {
         Self {
             model,
             grounding: None,
+            repo_dir: None,
+            extra_repo_dirs: Vec::new(),
         }
     }
 
@@ -554,6 +574,8 @@ impl ClaudeLeadEngineer {
             Self {
                 model: m,
                 grounding: None,
+                repo_dir: None,
+                extra_repo_dirs: Vec::new(),
             }
         }
     }
@@ -563,6 +585,37 @@ impl ClaudeLeadEngineer {
     pub fn with_grounding(mut self, grounding: impl Into<String>) -> Self {
         let g = grounding.into();
         self.grounding = if g.trim().is_empty() { None } else { Some(g) };
+        self
+    }
+
+    /// Bind the active project's local repo clone so the planning call can READ any file in
+    /// it on demand (cwd + `--add-dir` + read-only built-ins). Builder-style. THE INVARIANT:
+    /// on-demand full-repo read for every in-project agent. READ-ONLY — this is a planning
+    /// call with no write tools and no gateway, so binding a repo adds no write path.
+    pub fn with_repo_dir(mut self, repo_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.repo_dir = Some(repo_dir.into());
+        self
+    }
+
+    /// Bind ALL the active project's local repo clones (a project has MULTIPLE repos). The
+    /// FIRST becomes the cwd + primary `--add-dir` (like [`Self::with_repo_dir`]); every other
+    /// is added as its own read-only `--add-dir`, so planning can scan ACROSS every repo.
+    /// Builder-style. READ-ONLY — no write tools, no gateway. Empty input clears the binding.
+    pub fn with_repo_dirs(
+        mut self,
+        dirs: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        let mut iter = dirs.into_iter();
+        match iter.next() {
+            Some(primary) => {
+                self.repo_dir = Some(primary);
+                self.extra_repo_dirs = iter.collect();
+            }
+            None => {
+                self.repo_dir = None;
+                self.extra_repo_dirs = Vec::new();
+            }
+        }
         self
     }
 
@@ -750,22 +803,35 @@ impl LeadEngineer for ClaudeLeadEngineer {
     async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
         let prompt = Self::build_prompt(form, self.grounding.as_deref());
 
-        // A read-only, JSON-output, ungoverned planning call. No MCP config and
-        // no write tools: the lead engineer reasons and plans, it does not build.
-        let out = tokio::process::Command::new("claude")
-            .arg("-p")
+        // A READ-ONLY, JSON-output, ungoverned planning call. There is NO MCP gateway and
+        // NO write tools — the lead engineer reasons and plans, it does not build. THE
+        // INVARIANT: when a repo clone is bound, the call runs WITH it as cwd + `--add-dir`
+        // and the read-only built-ins (Read/Grep/Glob/LS) enabled, so the engineer can scan
+        // ANY file in the real codebase while planning, not just the inlined digest. Reads
+        // are inherently safe here: no write/exec tool is offered, so this adds no write path.
+        let mut cmd = tokio::process::Command::new("claude");
+        cmd.arg("-p")
             .arg(&prompt)
             .arg("--model")
             .arg(&self.model)
             .arg("--allowedTools")
-            .arg("") // no tools: pure reasoning over the brief we inlined
+            .arg(READ_ONLY_TOOLS.join(" "))
             .arg("--dangerously-skip-permissions")
             .arg("--output-format")
             .arg("json")
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(LeadEngineerError::Spawn)?;
+            .kill_on_drop(true);
+        if let Some(dir) = &self.repo_dir {
+            cmd.current_dir(dir).arg("--add-dir").arg(dir);
+            // MULTI-REPO READ: add each OTHER project-repo clone as its own read-only
+            // `--add-dir` so the lead engineer can scan across all the project's repos.
+            // READ-only — no write tool is offered. Skip any that duplicate the cwd.
+            for extra in &self.extra_repo_dirs {
+                if extra != dir {
+                    cmd.arg("--add-dir").arg(extra);
+                }
+            }
+        }
+        let out = cmd.output().await.map_err(LeadEngineerError::Spawn)?;
 
         if !out.status.success() {
             return Err(LeadEngineerError::NonZeroExit {
@@ -841,6 +907,29 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::form::IntakeForm;
+
+    #[test]
+    fn read_only_tools_are_read_class_only_no_writers() {
+        // The planning calls offer ONLY read-class built-ins so they can scan the repo;
+        // no write/exec/spawn tool may be present (these calls have no gateway either).
+        for t in READ_ONLY_TOOLS {
+            assert!(["Read", "Glob", "Grep", "LS"].contains(t), "unexpected tool {t}");
+        }
+        for forbidden in ["Write", "Edit", "Bash", "Task", "MultiEdit", "NotebookEdit"] {
+            assert!(
+                !READ_ONLY_TOOLS.contains(&forbidden),
+                "{forbidden} must never be in the planning read-tool set"
+            );
+        }
+    }
+
+    #[test]
+    fn with_repo_dir_binds_the_repo_for_on_demand_read() {
+        let le = ClaudeLeadEngineer::new().with_repo_dir("/tmp/repo");
+        assert_eq!(le.repo_dir.as_deref(), Some(std::path::Path::new("/tmp/repo")));
+        // Default (no repo) leaves it unbound (digest-only fallback).
+        assert!(ClaudeLeadEngineer::new().repo_dir.is_none());
+    }
 
     #[tokio::test]
     async fn stub_produces_a_buildable_plan_for_the_sample_form() {

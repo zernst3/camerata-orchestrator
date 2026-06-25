@@ -531,12 +531,19 @@ Key behavior:
 - `ClaudeCliDriver::new(mcp_config_path)` — stores the path to the MCP config
   JSON. The config tells Claude Code where to connect for the governed write tool.
 - `with_worktree(path)` — binds the agent to a git worktree: `current_dir` +
-  `--add-dir` in the CLI invocation, scoping the agent to its isolated working
-  directory.
+  `--add-dir` in the CLI invocation, scoping the agent's cwd to its isolated
+  working directory.
+- `with_read_dirs(dirs)` — adds extra READ-ONLY directories, each emitted as its
+  own `--add-dir` (deduped against the cwd worktree). This is the **multi-repo
+  read scope**: a project contains MULTIPLE repos, so an agent bound to one
+  worktree gets the OTHER project repo clones added here as read windows. It
+  widens READS only — `--add-dir` never grants writes, so `gated_write` (jailed
+  to `CAMERATA_WORKTREE_ROOT` = the single worktree) stays the only write path.
+  See the decision `2026-06-25_all-agents-grounded-in-repo-and-rules.md`.
 - `build_args(role, task)` — pure (does not spawn) function that constructs the
   full `claude` argv: `-p <task>`, `--strict-mcp-config`, `--mcp-config`,
   `--allowedTools`, `--disallowedTools`, `--dangerously-skip-permissions`,
-  `--output-format json`.
+  `--output-format json`, and one `--add-dir` per worktree + extra read dir.
 - `run(role, task)` — spawns the process, streams stdout line-by-line with
   inactivity and total-ceiling timeouts (see §4a), and parses the JSON output via
   `serde_json`. Fields extracted: `session_id`, `result`, `total_cost_usd`,
@@ -545,9 +552,19 @@ Key behavior:
 `GenericCliDriver` (`crates/agent/src/generic.rs`) is a more general variant.
 
 `SessionSpawn` (`crates/agent/src/session.rs`) handles the per-session prep:
-`prepare_session` writes the MCP config JSON and the rules file to temp paths;
-`RULES_FILE_ENV` is the env var name (`CAMERATA_RULES_FILE`) passed to the gate
-process.
+`prepare_session(gateway_bin, role, worktree, read_dirs)` writes the MCP config
+JSON and the rules file to temp paths; `RULES_FILE_ENV` is the env var name
+(`CAMERATA_RULES_FILE`) passed to the gate process. The `worktree` arg sets BOTH
+the driver cwd + primary `--add-dir` AND the gateway's `CAMERATA_WORKTREE_ROOT`
+write jail; the `read_dirs` slice is the **multi-repo read scope** — the other
+project repo clones, each added as a read-only `--add-dir` (it does NOT widen the
+write jail). The server computes `read_dirs` from
+`AppState::active_repo_dirs()` (the local clones of EVERY repo in the active
+project; isolation-safe — active project only). Write-class unit-of-work agents
+(`dev_implement_run`, `update_branch_run`, `pr_resolve_run`) keep cwd + jail on
+their single worktree and add the OTHER repos read-only; project-level agents
+(investigation, intake, story-author, decompose, escalation) use the primary
+clone as cwd and add-dir all of them.
 
 ---
 
