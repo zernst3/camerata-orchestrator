@@ -906,6 +906,35 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 }
                             }
                         }
+                        // Layer 3b: pulled issues indicator — shown when GitHub issues
+                        // have been pulled into the session and handed to the assistant.
+                        {
+                            let pis = props.pulled_issues_section.as_deref().filter(|s| !s.trim().is_empty());
+                            let pis_dot_style = if pis.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let pis_label = if let Some(sec) = pis {
+                                // Count issue lines: an issue spine renders each item on a line
+                                // starting with "#" (e.g. "#42 …") or "- " (Epic/child bullets).
+                                let n = sec
+                                    .lines()
+                                    .map(|l| l.trim_start())
+                                    .filter(|l| l.starts_with('#') || l.starts_with("- "))
+                                    .count();
+                                if n > 0 {
+                                    format!("Pulled issues ({n})")
+                                } else {
+                                    "Pulled issues (loaded)".to_string()
+                                }
+                            } else {
+                                "Pulled issues (none pulled yet)".to_string()
+                            };
+                            rsx! {
+                                div {
+                                    style: "display:flex;align-items:center;gap:.4rem;",
+                                    span { style: "{pis_dot_style}", "\u{25cf}" }
+                                    span { "{pis_label}" }
+                                }
+                            }
+                        }
                         // Layer 3c: scan results indicator — shown when a scan has been run.
                         {
                             let scan_dot_style = if scan_section.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
@@ -943,6 +972,23 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     style: "display:flex;align-items:center;gap:.4rem;",
                                     span { style: "{sel_dot_style}", "\u{25cf}" }
                                     span { "{sel_label}" }
+                                }
+                            }
+                        }
+                        // Layer 3e: committed ruleset indicator — present post-onboard,
+                        // once the project's governing rules have been applied.
+                        {
+                            let rs_dot_style = if ruleset_summary.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let rs_label = if ruleset_summary.is_some() {
+                                "Project ruleset (committed)"
+                            } else {
+                                "Project ruleset (none yet)"
+                            };
+                            rsx! {
+                                div {
+                                    style: "display:flex;align-items:center;gap:.4rem;",
+                                    span { style: "{rs_dot_style}", "\u{25cf}" }
+                                    span { "{rs_label}" }
                                 }
                             }
                         }
