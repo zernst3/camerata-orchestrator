@@ -1466,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn list_for_project_scopes_by_repo_and_excludes_unresolvable() {
+    fn list_for_repos_scopes_by_repo_and_excludes_unresolvable() {
         let store = UowStore::new();
 
         // Two repos belonging to two different projects, plus a draft id with no repo.
@@ -1476,23 +1476,70 @@ mod tests {
         store.get_or_create("CAM-DRAFT"); // no `#`, no resolvable repo
 
         // Scoping to acme/alpha returns only its two UoWs.
-        let alpha = store.list_for_project(&["acme/alpha".to_string()]);
+        let alpha = store.list_for_repos(&["acme/alpha".to_string()]);
         assert_eq!(alpha.len(), 2);
         assert!(alpha.iter().all(|u| u.story_id.starts_with("acme/alpha#")));
 
         // Scoping to other/beta returns only its one UoW.
-        let beta = store.list_for_project(&["other/beta".to_string()]);
+        let beta = store.list_for_repos(&["other/beta".to_string()]);
         assert_eq!(beta.len(), 1);
         assert_eq!(beta[0].story_id, "other/beta#7");
 
         // A project with both repos sees both repos' UoWs but never the draft.
         let both = store
-            .list_for_project(&["acme/alpha".to_string(), "other/beta".to_string()]);
+            .list_for_repos(&["acme/alpha".to_string(), "other/beta".to_string()]);
         assert_eq!(both.len(), 3);
         assert!(both.iter().all(|u| u.story_id != "CAM-DRAFT"));
 
         // Empty repo list → nothing.
-        assert!(store.list_for_project(&[]).is_empty());
+        assert!(store.list_for_repos(&[]).is_empty());
+    }
+
+    #[test]
+    fn list_for_project_scopes_drafts_by_creating_project_and_repos_by_repo() {
+        let store = UowStore::new();
+
+        // A blank draft created while project A is active (no work item, no resolvable
+        // repo). It carries project_id = Some("projA").
+        let draft_a = store.create_blank_with_parent(None, Some("projA".to_string()));
+        // A blank draft created while project B is active.
+        let draft_b = store.create_blank_with_parent(None, Some("projB".to_string()));
+        // A repo-resident UoW (its repo resolves from the story id).
+        store.get_or_create("acme/alpha#1");
+
+        // Project A (repos: acme/alpha) sees ITS OWN draft and the repo-resident UoW,
+        // but NOT project B's draft.
+        let a_view = store.list_for_project("projA", &["acme/alpha".to_string()]);
+        assert!(
+            a_view.iter().any(|u| u.story_id == draft_a.story_id),
+            "projA must see its own draft"
+        );
+        assert!(
+            a_view.iter().any(|u| u.story_id == "acme/alpha#1"),
+            "projA must see its repo-resident UoW"
+        );
+        assert!(
+            !a_view.iter().any(|u| u.story_id == draft_b.story_id),
+            "projA must NOT see projB's draft (cross-project isolation)"
+        );
+
+        // The draft scopes ONLY to its creating project even with an empty repo list:
+        // projA's draft appears in projA's view, NOT in projB's.
+        let a_only = store.list_for_project("projA", &[]);
+        assert!(a_only.iter().any(|u| u.story_id == draft_a.story_id));
+        assert!(!a_only.iter().any(|u| u.story_id == draft_b.story_id));
+
+        let b_only = store.list_for_project("projB", &[]);
+        assert!(b_only.iter().any(|u| u.story_id == draft_b.story_id));
+        assert!(
+            !b_only.iter().any(|u| u.story_id == draft_a.story_id),
+            "projB must NOT see projA's draft"
+        );
+
+        // Repo-resident UoWs still scope by repo: projB (repos: other/beta) does not see
+        // acme/alpha#1, and projA (repos: acme/alpha) does.
+        let b_with_repo = store.list_for_project("projB", &["other/beta".to_string()]);
+        assert!(!b_with_repo.iter().any(|u| u.story_id == "acme/alpha#1"));
     }
 
     #[test]
