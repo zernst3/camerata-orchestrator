@@ -1103,6 +1103,37 @@ pub(super) async fn comment_on_work_item(work_item_id: &str, body: &str) -> Opti
     }
 }
 
+/// Set (link) a parent issue for a work item (`POST /api/workitems/set-parent`). Returns
+/// `Ok(())` on success or `Err(message)` with the server's reason on failure. The number
+/// is sent as a string; the server normalizes `"42"` / `"#42"`.
+pub(super) async fn set_work_item_parent(
+    work_item_id: &str,
+    parent_number: &str,
+) -> Result<(), String> {
+    let res = reqwest::Client::new()
+        .post(format!("{}/api/workitems/set-parent", crate::BFF_URL))
+        .json(&serde_json::json!({
+            "work_item_id": work_item_id,
+            "parent_number": parent_number,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let v: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("bad response: {e}"))?;
+    if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("could not set parent")
+            .to_string())
+    }
+}
+
 /// Read the COMMENTS on a work item (`POST /api/workitems/comments`). Degrades to an
 /// empty list (server returns `{ comments: [] }` token-less / on error).
 pub(super) async fn fetch_work_item_comments(work_item_id: &str) -> Vec<WorkItemComment> {
@@ -1438,6 +1469,19 @@ pub(super) fn IssueManagementPanel(
                     on_close: EventHandler::new(move |_| detail_id.set(None)),
                     uows_refresh,
                     sel,
+                    // After a "Set parent" succeeds, re-pull so the parent-driven grouping
+                    // updates (the same path the "Pull work items" button uses).
+                    on_set_parent: EventHandler::new({
+                        let proj_id = proj_id.clone();
+                        move |_| {
+                            let proj_id = proj_id.clone();
+                            spawn(async move {
+                                let pulled = pull_work_items().await.unwrap_or_default();
+                                *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                pull_seq += 1;
+                            });
+                        }
+                    }),
                 }
             }
         }
@@ -1582,9 +1626,18 @@ pub(super) fn WorkItemDetail(
     uows_refresh: Signal<u32>,
     sel: Signal<GovDevSel>,
     #[props(default = true)] show_uow_action: bool,
+    /// Called after a successful "Set parent" so the caller can re-pull / re-group the
+    /// work items (the grouping is parent-driven). `None` (the default) hides the
+    /// "Set parent" affordance — used where there's no pulled-items context to refresh.
+    #[props(default)]
+    on_set_parent: Option<EventHandler<()>>,
 ) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let (state_label, state_cls) = work_item_state_badge(&item.state);
     let existing = existing_uow_for(&uows, &item.id).cloned();
+    // "Set parent" affordance state: the typed parent number + an in-flight flag.
+    let mut parent_input = use_signal(String::new);
+    let mut setting_parent = use_signal(|| false);
     // Fetch this work item's comments once per item id (re-fetches if the id changes).
     let comments_res = {
         let wid = item.id.clone();
@@ -1622,6 +1675,68 @@ pub(super) fn WorkItemDetail(
                 }
                 if !item.url.is_empty() {
                     a { class: "wi-detail-link", href: "{item.url}", target: "_blank", "Open issue \u{2197}" }
+                }
+
+                // ── Set parent (native GitHub sub-issue link) ─────────────────────
+                // Shown only when the caller can refresh the grouping after a change.
+                // The current parent (when set) is surfaced so re-parenting is informed.
+                if let Some(on_set_parent) = on_set_parent {
+                    div { class: "wi-set-parent",
+                        p { class: "wi-set-parent-h", "Parent issue" }
+                        if let Some(pn) = item.parent_number {
+                            p { class: "section-hint", "Currently a sub-issue of #{pn}. Enter a number to re-parent." }
+                        } else {
+                            p { class: "section-hint", "No parent. Enter an issue number to make this a sub-issue." }
+                        }
+                        div { class: "wi-set-parent-row",
+                            input {
+                                class: "govdev-parent-id-input",
+                                r#type: "text",
+                                placeholder: "e.g. 42 or #42",
+                                disabled: setting_parent(),
+                                value: "{parent_input}",
+                                oninput: move |e| parent_input.set(e.value()),
+                            }
+                            button {
+                                class: "btn-edit-sm",
+                                disabled: setting_parent() || parent_input().trim().is_empty(),
+                                onclick: {
+                                    let wid = item.id.clone();
+                                    move |_| {
+                                        let wid = wid.clone();
+                                        let number = parent_input().trim().to_string();
+                                        let toasts = toasts;
+                                        let on_set_parent = on_set_parent;
+                                        setting_parent.set(true);
+                                        spawn(async move {
+                                            match set_work_item_parent(&wid, &number).await {
+                                                Ok(()) => {
+                                                    crate::toast::push_toast(
+                                                        toasts,
+                                                        crate::toast::ToastKind::Info,
+                                                        format!("Set parent to #{}.", number.trim_start_matches('#')),
+                                                    );
+                                                    parent_input.set(String::new());
+                                                    setting_parent.set(false);
+                                                    // Re-pull so the grouping reflects the new linkage.
+                                                    on_set_parent.call(());
+                                                }
+                                                Err(msg) => {
+                                                    crate::toast::push_toast(
+                                                        toasts,
+                                                        crate::toast::ToastKind::Warning,
+                                                        msg,
+                                                    );
+                                                    setting_parent.set(false);
+                                                }
+                                            }
+                                        });
+                                    }
+                                },
+                                if setting_parent() { "Setting…" } else { "Set parent" }
+                            }
+                        }
+                    }
                 }
 
                 // ── Comments thread (read-only, fetched for this item) ────────────
