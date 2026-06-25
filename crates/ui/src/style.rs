@@ -1282,6 +1282,8 @@ html, body {
   padding: 7px 9px; resize: vertical; background: var(--surface); color: var(--ink);
 }
 .clarify-q-other-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+/* Submit row: button + Bombe submitting indicator on one baseline. */
+.clarify-q-submit-row { display: flex; gap: 10px; align-items: center; }
 .authoring-clarify { margin: 10px 0; }
 .needs-you { margin: 14px 0 4px; }
 
@@ -1447,6 +1449,16 @@ html, body {
 .btn-secondary:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); }
 .btn-secondary.danger:hover { border-color: #c0392b; color: #c0392b; }
 .btn-secondary:disabled { opacity: .45; cursor: not-allowed; }
+/* Stop control for an in-flight run/send. Matches .btn-secondary geometry but reads as a
+   cancel affordance: a muted red outline that warms on hover. Used by the live-run Stop,
+   the audit Stop, and the story-authoring Send's Stop. */
+.btn-stop {
+  border: 1px solid #d9b3ad; background: var(--surface); color: #c0392b;
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 8px;
+  cursor: pointer; transition: border-color .15s var(--ease), background .15s var(--ease);
+}
+.btn-stop:hover:not(:disabled) { border-color: #c0392b; background: #fdf0ee; }
+.btn-stop:disabled { opacity: .45; cursor: not-allowed; }
 /* "+N" chip on a findings "type" cell: N other rule ids the server merged into this row
    (also_matches). Muted so it reads as a secondary annotation, not a second rule. */
 .finding-also-count { color: var(--accent); font-weight: 700; font-size: 11px; cursor: help; }
@@ -3454,6 +3466,8 @@ html, body {
 }
 .authoring-msg.user .authoring-msg-text { background: var(--accent-wash); border-color: #e5c9bd; }
 .authoring-input-row { display: flex; gap: 10px; align-items: flex-end; margin-top: 10px; }
+/* Active-run Stop row: button + Bombe spinner + hint, aligned on one baseline. */
+.uow-run-stop-row { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
 .authoring-input {
   flex: 1; resize: vertical; font: inherit; font-size: 13.5px; line-height: 1.5; color: var(--ink);
   border: 1px solid var(--line); border-radius: 10px; background: var(--paper); padding: 9px 11px;

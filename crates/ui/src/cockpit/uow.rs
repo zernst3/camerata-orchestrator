@@ -1103,11 +1103,21 @@ pub(super) async fn fetch_authoring_uow(story_id: &str) -> Option<AuthoringUowVi
 }
 
 /// Send a message to the story-authoring assistant (`POST /api/uow/:id/author`). Returns
-/// the updated authoring UoW (with the refreshed draft + chat).
-pub(super) async fn post_author_message(story_id: &str, message: &str) -> Option<AuthoringUowView> {
+/// the updated authoring UoW (with the refreshed draft + chat). `model` is the per-turn
+/// model override from the UI selector; an empty string defers to the server's project
+/// StoryAuthoring step model (back-compat).
+pub(super) async fn post_author_message(
+    story_id: &str,
+    message: &str,
+    model: &str,
+) -> Option<AuthoringUowView> {
+    let mut body = serde_json::json!({ "message": message });
+    if !model.trim().is_empty() {
+        body["model"] = serde_json::Value::String(model.trim().to_string());
+    }
     reqwest::Client::new()
         .post(format!("{}/api/uow/{}/author", crate::BFF_URL, enc_seg(story_id)))
-        .json(&serde_json::json!({ "message": message }))
+        .json(&body)
         .send()
         .await
         .ok()?
@@ -2226,6 +2236,34 @@ pub(super) fn StoryAuthoringPanel(
     let mut sending = use_signal(|| false);
     let mut publishing = use_signal(|| false);
 
+    // ── Send model selector (mirrors the investigation control) ─────────────────
+    // The model option list (same source the run controls use) and the chosen model for
+    // the authoring/clarification send. Seeded from the active project's strongest tier
+    // once it loads, before the user touches it; editable per-turn.
+    let run_models_res = use_resource(fetch_audit_models);
+    let run_models_snap = run_models_res.read().clone().flatten();
+    let mut send_model = use_signal(String::new);
+    {
+        let strongest = active_proj
+            .read()
+            .clone()
+            .flatten()
+            .map(|p| p.tier_map.strongest.clone())
+            .unwrap_or_default();
+        use_effect(use_reactive(&strongest, move |strongest| {
+            if send_model.peek().is_empty() && !strongest.is_empty() {
+                send_model.set(strongest);
+            }
+        }));
+    }
+
+    // ── Stop handle for the in-flight author send ───────────────────────────────
+    // The author send is a single synchronous LLM completion on the server (NOT a tracked,
+    // cancellable run), so there is no run-id to POST /cancel. Stop therefore aborts the
+    // in-flight request task locally and resets the UI to idle. We keep the spawned task's
+    // handle so the Stop button can cancel it.
+    let mut send_task = use_signal(|| Option::<dioxus::core::Task>::None);
+
     // ── Parent issue (moved here from the nav) ──────────────────────────────────
     // Seeded once from the draft's stored parent_id; the architect edits it here and
     // it persists to the draft on change (the publish step creates the sub-issue link).
@@ -2315,6 +2353,7 @@ pub(super) fn StoryAuthoringPanel(
                                     let id = id.clone();
                                     let q = summary_q.clone();
                                     let mut refresh = refresh;
+                                    let md = send_model();
                                     spawn(async move {
                                         // Re-read the now-answered clarification to get its summary,
                                         // then feed it back as the author's reply.
@@ -2325,7 +2364,7 @@ pub(super) fn StoryAuthoringPanel(
                                             .and_then(|c| c.answer)
                                             .unwrap_or_default();
                                         if !answer_text.trim().is_empty() {
-                                            let _ = post_author_message(&id, &answer_text).await;
+                                            let _ = post_author_message(&id, &answer_text, &md).await;
                                         }
                                         refresh += 1;
                                     });
@@ -2355,9 +2394,11 @@ pub(super) fn StoryAuthoringPanel(
                             let toasts = toasts;
                             let msg = message().trim().to_string();
                             if msg.is_empty() { return; }
+                            let md = send_model();
                             sending.set(true);
-                            spawn(async move {
-                                match post_author_message(&id, &msg).await {
+                            // Track the spawned task so the Stop button can abort it.
+                            let task = spawn(async move {
+                                match post_author_message(&id, &msg, &md).await {
                                     Some(_) => {
                                         message.set(String::new());
                                         refresh += 1;
@@ -2371,10 +2412,32 @@ pub(super) fn StoryAuthoringPanel(
                                     }
                                 }
                                 sending.set(false);
+                                send_task.set(None);
                             });
+                            send_task.set(Some(task));
                         }
                     },
                     if sending() { "Drafting…" } else { "Send" }
+                }
+                // Model selector — mirrors the investigation "Begin investigation" control.
+                ModelSelect { models: run_models_snap.clone(), selected: send_model }
+                // In-progress indicator: the Bombe turns while the assistant drafts.
+                if sending() {
+                    crate::bombe::BombeSpinner { title: "Camerata is drafting\u{2026}".to_string() }
+                }
+                // Stop button — shown only while a send is in flight. The author send is not
+                // a tracked run, so Stop aborts the in-flight request task and resets to idle.
+                if sending() {
+                    button {
+                        class: "btn-stop",
+                        onclick: move |_| {
+                            if let Some(task) = send_task.take() {
+                                task.cancel();
+                            }
+                            sending.set(false);
+                        },
+                        "\u{25a0} Stop"
+                    }
                 }
             }
 
@@ -3971,6 +4034,9 @@ pub(super) fn UowStepRunControls(
                                 },
                                 if stopping() { "Stopping…" } else { "■ Stop run" }
                             }
+                            // In-progress indicator: the Bombe turns while the run is live,
+                            // matching the draft-story Send's working affordance.
+                            crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
                             span { class: "section-hint", "Cancels the running agent and stops this run." }
                         }
                     }
