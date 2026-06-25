@@ -5928,7 +5928,15 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
     };
     let mut items: Vec<crate::workitems::WorkItem> = Vec::new();
     for repo in &project.repos {
-        match crate::github_issues::list_open_issues(repo, &token).await {
+        // Prefer the GraphQL path: it carries the sub-issue `parent` linkage the REST
+        // issues-list response omits (root cause of every issue showing "(no parent)").
+        // FALL BACK to the parent-less REST list on any GraphQL failure (auth scope, API
+        // error, network) so the pull still works — just without parent grouping.
+        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await {
+            Ok(issues) => Ok(issues),
+            Err(_) => crate::github_issues::list_open_issues(repo, &token).await,
+        };
+        match fetched {
             Ok(issues) => {
                 for issue in issues {
                     // The list path returns IssueSummary (no state/labels); open issues
