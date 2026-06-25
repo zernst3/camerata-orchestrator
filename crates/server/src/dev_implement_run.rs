@@ -803,6 +803,7 @@ mod tests {
             1,
             false,
             None,
+            Vec::new(),
         )
         .await;
 

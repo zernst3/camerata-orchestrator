@@ -895,6 +895,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             None,
+            Vec::new(),
         )
         .await;
 
@@ -927,6 +928,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             None,
+            Vec::new(),
         )
         .await;
 

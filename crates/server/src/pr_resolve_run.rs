@@ -335,6 +335,7 @@ mod tests {
             None,
             "claude-opus-4-8".to_string(),
             None,
+            Vec::new(),
         )
         .await;
 
