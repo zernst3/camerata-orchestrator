@@ -133,6 +133,72 @@ cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local d
 - **Persistence:** a versioned store (SQLite now, Postgres later behind the same trait seam) so every user/AI edit is saved with full history.
 - **UI:** a Dioxus desktop app; tabular surfaces dogfood [Chorale](../rust-chorale).
 
+## The crate dependency graph
+
+The real `[dependencies]` graph between the library crates — a strict DAG the compiler
+enforces (a cycle between crates does not compile). Read it bottom-up: `camerata-core` and
+the leaf utilities depend on nothing; adapters and capabilities build on the floor;
+`camerata-server` is the composition root; `camerata-ui` / `camerata-cli` are thin binaries
+on top.
+
+```mermaid
+graph TD
+    ui["camerata-ui<br/>Dioxus desktop · bin"]
+    cli["camerata-cli<br/>demos + gate-probe · bin"]
+    server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
+    fleet["camerata-fleet<br/>tiered governed run"]
+    gateway["camerata-gateway<br/>Layer-1 gate · MCP"]
+    agent["camerata-agent<br/>claude -p driver"]
+    checks["camerata-checks<br/>Layer-2 runner"]
+    intake["camerata-intake<br/>lead-engineer / clarify"]
+    maintenance["camerata-maintenance<br/>standing ops · staged"]
+    persistence["camerata-persistence<br/>versioned store"]
+    worktracker["camerata-worktracker<br/>board adapter · port"]
+    deploy["camerata-deploy<br/>cloud deploy · staged"]
+    core["camerata-core<br/>domain + ports · ZERO model calls"]
+    rules["camerata-rules<br/>rule corpus"]
+    liveness["camerata-liveness<br/>stall detection"]
+    linter["camerata-linter-registry<br/>linter-id map"]
+
+    ui --> server
+    ui --> worktracker
+    server --> gateway
+    server --> fleet
+    server --> intake
+    server --> agent
+    server --> checks
+    server --> persistence
+    server --> worktracker
+    server --> rules
+    server --> liveness
+    server --> core
+    fleet --> agent
+    fleet --> checks
+    fleet --> gateway
+    fleet --> intake
+    fleet --> rules
+    fleet --> core
+    gateway --> agent
+    gateway --> rules
+    gateway --> core
+    agent --> worktracker
+    agent --> liveness
+    agent --> core
+    checks --> rules
+    checks --> liveness
+    checks --> core
+    intake --> core
+    persistence --> core
+    rules --> core
+    cli -.->|links libs for demos| server
+    cli -.-> maintenance
+    cli -.-> deploy
+```
+
+The dashed `camerata-cli` edges are its demo/probe harness reaching each subsystem directly;
+`camerata-linter-registry` is used by the maintainer-only `corpus-verifier` tool, so it has
+no app-crate edge. Full crate map + the runtime model in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §1.
+
 ## How an AI agent fits behind the gate
 
 The orchestrator makes zero model calls; it prepares a session and spawns a `claude -p` agent behind the `AgentDriver` seam. The agent can READ the project's repos, but its built-in write tools are disallowed — its only way to write is the gateway's MCP tool, which denies or allows each write before it executes (layer 1). Allowed writes land in an isolated worktree; layer-2 checks bounce failures back. The agent uses your own local Claude login (Camerata holds no model credentials), and the gate is model-agnostic.

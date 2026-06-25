@@ -13,7 +13,7 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace. The shipped app is 15 crates under
+Camerata is a single Rust workspace. The shipped app is 16 crates under
 `crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
 dependency of any app crate). All load-bearing code is Rust; the only optional
 non-Rust piece is a future TypeScript AST sidecar described in
@@ -38,11 +38,98 @@ non-Rust piece is a future TypeScript AST sidecar described in
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
 | `camerata-deploy` | lib | Tier-2 BYO-infra publish: `DeployTarget` seam + local + Azure adapter. |
 | `camerata-linter-registry` | lib | Citation validator: canonical linter rule-id lists per tool, plus a corpus-scan report used to ground `mechanical` rules to real linter ids (`Verification::Grounded`). |
+| `camerata-liveness` | lib | Run-liveness / stall detection primitive (progress-based, not wall-clock) shared by the agent runtime, the layer-2 runner, and the server for the watched/routine stall thresholds and cancellation. |
 
 > The maintainer-only `tools/corpus-verifier` (a separate workspace member,
 > not a `crates/` member) promotes rules `grounded → verified` via a branch + PR.
 > It is the only write path to `verified` and is never a dependency of the
 > shipped app.
+
+### The crate dependency graph (the real DAG)
+
+This is the actual `[dependencies]` graph between the library crates (test-only
+`[dev-dependencies]` are excluded — those can point "back up" for integration tests
+without forming a real cycle).
+
+```mermaid
+graph TD
+    %% Binaries (thin entry points)
+    ui["camerata-ui<br/>Dioxus desktop · bin"]
+    cli["camerata-cli<br/>demos + gate-probe · bin"]
+
+    %% Composition root
+    server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
+
+    %% Capabilities
+    fleet["camerata-fleet<br/>tiered governed run"]
+    gateway["camerata-gateway<br/>Layer-1 gate / MCP · lib+bin"]
+    agent["camerata-agent<br/>claude -p driver"]
+    checks["camerata-checks<br/>Layer-2 runner"]
+    intake["camerata-intake<br/>lead-engineer / clarify"]
+    maintenance["camerata-maintenance<br/>standing ops · staged"]
+
+    %% Infrastructure / adapters
+    persistence["camerata-persistence<br/>versioned store"]
+    worktracker["camerata-worktracker<br/>board adapter · port"]
+    deploy["camerata-deploy<br/>cloud deploy seam · staged"]
+
+    %% Domain + utilities (the floor)
+    core["camerata-core<br/>domain types + ports · ZERO model calls"]
+    rules["camerata-rules<br/>rule corpus"]
+    liveness["camerata-liveness<br/>stall detection"]
+    linter["camerata-linter-registry<br/>linter-id map"]
+
+    ui --> server
+    ui --> worktracker
+
+    server --> gateway
+    server --> fleet
+    server --> intake
+    server --> agent
+    server --> checks
+    server --> persistence
+    server --> worktracker
+    server --> rules
+    server --> liveness
+    server --> core
+
+    fleet --> agent
+    fleet --> checks
+    fleet --> gateway
+    fleet --> intake
+    fleet --> rules
+    fleet --> core
+
+    gateway --> agent
+    gateway --> rules
+    gateway --> core
+
+    agent --> worktracker
+    agent --> liveness
+    agent --> core
+
+    checks --> rules
+    checks --> liveness
+    checks --> core
+
+    intake --> core
+    persistence --> core
+    rules --> core
+
+    cli -.->|links every lib for its demos| server
+    cli -.-> maintenance
+    cli -.-> deploy
+```
+
+Read it bottom-up. `camerata-core` and the leaf utilities (`liveness`, `linter-registry`)
+depend on nothing. Adapters (`persistence`, `worktracker`, `deploy`) and capabilities
+(`agent`, `gateway`, `checks`, `intake`, `fleet`) build on the floor. `camerata-server` is
+the **composition root** that wires them behind the Axum BFF, and `camerata-ui` /
+`camerata-cli` are thin binaries on top. Every arrow points down the stack: the graph is a
+DAG, and the compiler enforces it — a cycle between library crates does not compile.
+(`camerata-cli` links the libraries directly to drive its demos/probes — those edges are
+dashed; `camerata-linter-registry` is consumed by the maintainer-only `corpus-verifier`
+tool, so it carries no app-crate edge.)
 
 ### Process and runtime model
 
