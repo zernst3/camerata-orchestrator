@@ -1282,6 +1282,8 @@ html, body {
   padding: 7px 9px; resize: vertical; background: var(--surface); color: var(--ink);
 }
 .clarify-q-other-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+/* Submit row: button + Bombe submitting indicator on one baseline. */
+.clarify-q-submit-row { display: flex; gap: 10px; align-items: center; }
 .authoring-clarify { margin: 10px 0; }
 .needs-you { margin: 14px 0 4px; }
 

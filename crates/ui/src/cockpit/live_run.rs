@@ -134,6 +134,9 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                                     r#type: if multi { "checkbox" } else { "radio" },
                                     name: "clarify-{cid}",
                                     checked,
+                                    // Lock the options the instant a submit is in flight so the
+                                    // answer can't be changed mid-submit (matches the button lock).
+                                    disabled: submitting(),
                                     onchange: {
                                         let label = label.clone();
                                         move |_| {
@@ -170,34 +173,45 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                         rows: 2,
                         placeholder: "Type a different answer…",
                         value: "{other}",
+                        // Lock the free-text input while the submit is in flight.
+                        disabled: submitting(),
                         oninput: move |e| other.set(e.value()),
                     }
                 }
             }
-            button {
-                class: "btn-run",
-                disabled: submitting() || !can_submit,
-                onclick: {
-                    let cid = cid.clone();
-                    move |_| {
+            div { class: "clarify-q-submit-row",
+                button {
+                    class: "btn-run",
+                    disabled: submitting() || !can_submit,
+                    onclick: {
                         let cid = cid.clone();
-                        let sel = selected();
-                        let ft = {
-                            let t = other().trim().to_string();
-                            if t.is_empty() { None } else { Some(t) }
-                        };
-                        let on_answered = on_answered;
-                        submitting.set(true);
-                        spawn(async move {
-                            let ok = answer_clarification(&cid, sel, ft).await;
-                            submitting.set(false);
-                            if ok {
-                                on_answered.call(());
-                            }
-                        });
-                    }
-                },
-                if submitting() { "Submitting…" } else { "Submit answer" }
+                        move |_| {
+                            // Lock IMMEDIATELY on click (synchronous, before the await) so a
+                            // double-click can't fire a second submit and the inputs lock at once.
+                            if submitting() { return; }
+                            let cid = cid.clone();
+                            let sel = selected();
+                            let ft = {
+                                let t = other().trim().to_string();
+                                if t.is_empty() { None } else { Some(t) }
+                            };
+                            let on_answered = on_answered;
+                            submitting.set(true);
+                            spawn(async move {
+                                let ok = answer_clarification(&cid, sel, ft).await;
+                                submitting.set(false);
+                                if ok {
+                                    on_answered.call(());
+                                }
+                            });
+                        }
+                    },
+                    if submitting() { "Submitting…" } else { "Submit answer" }
+                }
+                // Submitting indicator: the Bombe turns while the answer is in flight.
+                if submitting() {
+                    crate::bombe::BombeSpinner { title: "Submitting your answer\u{2026}".to_string() }
+                }
             }
         }
     }
