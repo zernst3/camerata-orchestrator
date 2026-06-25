@@ -489,6 +489,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/comment", post(workitems_comment))
         .route("/api/workitems/comments", post(workitems_comments))
         .route("/api/workitems/assignees", post(workitems_assignees))
+        .route("/api/workitems/set-parent", post(workitems_set_parent))
         .route("/api/uows", get(uows_list))
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
@@ -5928,7 +5929,15 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
     };
     let mut items: Vec<crate::workitems::WorkItem> = Vec::new();
     for repo in &project.repos {
-        match crate::github_issues::list_open_issues(repo, &token).await {
+        // Prefer the GraphQL path: it carries the sub-issue `parent` linkage the REST
+        // issues-list response omits (root cause of every issue showing "(no parent)").
+        // FALL BACK to the parent-less REST list on any GraphQL failure (auth scope, API
+        // error, network) so the pull still works — just without parent grouping.
+        let fetched = match crate::github_issues::list_open_issues_with_parents(repo, &token).await {
+            Ok(issues) => Ok(issues),
+            Err(_) => crate::github_issues::list_open_issues(repo, &token).await,
+        };
+        match fetched {
             Ok(issues) => {
                 for issue in issues {
                     // The list path returns IssueSummary (no state/labels); open issues
@@ -6053,6 +6062,110 @@ async fn workitems_assignees(
     match crate::github_issues::get_assignees(&repo, &token).await {
         Ok(users) => Json(serde_json::json!({ "users": users })),
         Err(_) => Json(serde_json::json!({ "users": [] })),
+    }
+}
+
+/// `POST /api/workitems/set-parent` body `{ work_item_id, parent_number }` — make an
+/// existing work item (the CHILD) a native GitHub sub-issue of `parent_number` (in the
+/// child's own repo). This is the "Set parent" affordance from the work-item modal: it
+/// fixes the orphaned-issue case where a pulled issue has no parent linkage yet.
+///
+/// `parent_number` accepts a JSON number or string (`42` or `"42"`/`"#42"`); it is
+/// normalized to a bare number. Resolves the child's GitHub database id (the large `id`
+/// the sub-issue API requires) from its per-repo number, then links it under the parent.
+///
+/// Returns `{ ok: true }` on success, `{ ok: false, message }` on any failure (no token,
+/// malformed id, bad parent number, GitHub error). Never panics.
+#[derive(serde::Deserialize)]
+struct WorkItemSetParentReq {
+    work_item_id: String,
+    /// The parent issue number — a JSON number or a string (`"#42"` is accepted).
+    parent_number: serde_json::Value,
+}
+
+async fn workitems_set_parent(
+    State(_state): State<AppState>,
+    Json(req): Json<WorkItemSetParentReq>,
+) -> Json<serde_json::Value> {
+    // Normalize parent_number from either a JSON number or a string.
+    let parent_raw = match &req.parent_number {
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("parent_number must be a number or string, got `{other}`"),
+            }));
+        }
+    };
+    let Some(parent_str) = crate::github_issues::normalize_parent_number(&parent_raw) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("`{parent_raw}` is not a valid issue number"),
+        }));
+    };
+    let parent_number: u64 = match parent_str.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("`{parent_str}` is not a valid issue number"),
+            }));
+        }
+    };
+
+    let Some(token) = github_token() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to set a parent.",
+        }));
+    };
+
+    let (repo, number) = match parse_github_work_item_id(&req.work_item_id) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": e.0.to_string(),
+            }));
+        }
+    };
+    let Some(coord) = camerata_worktracker::RepoCoord::parse(&repo) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("work item repo is not `owner/repo`: `{repo}`"),
+        }));
+    };
+
+    // Resolve the CHILD issue's GitHub database id (distinct from its per-repo number),
+    // which the sub-issue link endpoint requires as `sub_issue_id`.
+    let child_db_id =
+        match crate::github_issues::fetch_issue_db_id(&coord.owner, &coord.repo, number, &token)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not resolve issue #{number}: {e}"),
+                }));
+            }
+        };
+
+    match crate::github_issues::link_sub_issue(
+        &coord.owner,
+        &coord.repo,
+        parent_number,
+        child_db_id,
+        &token,
+    )
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "message": format!("could not set parent #{parent_number}: {e}"),
+        })),
     }
 }
 

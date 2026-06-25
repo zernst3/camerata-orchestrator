@@ -86,6 +86,171 @@ pub fn parse_open_issues(json: &str) -> anyhow::Result<Vec<IssueSummary>> {
         .collect())
 }
 
+// ── GraphQL open-issues-with-parents path (issue #20 follow-up) ────────────────
+//
+// The REST issues-list response does NOT include the sub-issue `parent` field, so
+// every pulled issue lands under "(no parent)". GitHub's GraphQL API DOES expose
+// `Issue.parent`, so we read the open-issue list (with parent linkage) from there.
+// On ANY GraphQL failure the caller falls back to the REST list (parent-less) so the
+// pull still works.
+
+/// The GraphQL query that lists OPEN issues with their parent linkage, one page at a
+/// time. `$after` is null for the first page and the prior `endCursor` thereafter.
+const OPEN_ISSUES_WITH_PARENTS_QUERY: &str = r#"query($owner:String!,$name:String!,$after:String){
+  repository(owner:$owner,name:$name){
+    issues(states:OPEN, first:100, after:$after, orderBy:{field:CREATED_AT,direction:DESC}){
+      pageInfo{ hasNextPage endCursor }
+      nodes{ number title state url parent { number } }
+    }
+  }
+}"#;
+
+/// A single GraphQL issue node's `parent` member (only `number` is read).
+#[derive(Debug, Deserialize)]
+struct GqlParent {
+    number: u64,
+}
+
+/// One GraphQL issue node. GraphQL never returns PRs from `repository.issues`, so
+/// there is no `pull_request` filter to apply here (unlike the REST list).
+#[derive(Debug, Deserialize)]
+struct GqlIssueNode {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    parent: Option<GqlParent>,
+}
+
+/// `pageInfo` for one issues page.
+#[derive(Debug, Deserialize)]
+struct GqlPageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+/// The `issues` connection for one page.
+#[derive(Debug, Deserialize)]
+struct GqlIssuesConnection {
+    #[serde(rename = "pageInfo")]
+    page_info: GqlPageInfo,
+    nodes: Vec<GqlIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlRepository {
+    issues: GqlIssuesConnection,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlData {
+    repository: Option<GqlRepository>,
+}
+
+/// A GraphQL `errors[]` entry (only the human message is read).
+#[derive(Debug, Deserialize)]
+struct GqlError {
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlResponse {
+    #[serde(default)]
+    data: Option<GqlData>,
+    #[serde(default)]
+    errors: Option<Vec<GqlError>>,
+}
+
+/// Parse ONE GraphQL open-issues page into `(summaries, page_info)`. Surfaces a GraphQL
+/// `errors[]` array as an error so the caller can fall back. Pure (no I/O), so it is
+/// unit-testable against a fixture without a network call or a token.
+fn parse_graphql_issues_page(json: &str) -> anyhow::Result<(Vec<IssueSummary>, GqlPageInfo)> {
+    let resp: GqlResponse = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("parse_graphql_issues_page: {e}"))?;
+    if let Some(errors) = resp.errors {
+        if !errors.is_empty() {
+            let msgs = errors
+                .into_iter()
+                .map(|e| e.message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!("GitHub GraphQL errors: {msgs}");
+        }
+    }
+    let repo = resp
+        .data
+        .and_then(|d| d.repository)
+        .ok_or_else(|| anyhow::anyhow!("GraphQL response missing repository data"))?;
+    let conn = repo.issues;
+    let summaries = conn
+        .nodes
+        .into_iter()
+        .map(|n| IssueSummary {
+            number: n.number,
+            title: n.title,
+            // GraphQL's issues connection doesn't carry the body here (we only ask for
+            // number/title/state/url/parent); the pull view doesn't render it, and the
+            // refresh path re-fetches the full issue when a body is needed.
+            body: String::new(),
+            url: n.url.unwrap_or_default(),
+            parent_number: n.parent.map(|p| p.number),
+        })
+        .collect();
+    Ok((summaries, conn.page_info))
+}
+
+/// Fetch the OPEN issues for `owner/repo` via the GitHub **GraphQL** API, including the
+/// sub-issue `parent` linkage that the REST list omits. Paginates until `hasNextPage` is
+/// false. Returns the parsed summaries (each carrying `parent_number` when set).
+///
+/// `repo` must be `owner/name`. On ANY failure (non-2xx HTTP, a GraphQL `errors[]` array,
+/// a network error, a malformed body) this returns an error so the caller can FALL BACK to
+/// the parent-less REST list path. Never panics. The transport carries the required
+/// `User-Agent` and `Authorization: Bearer <token>` headers (mirroring `list_open_issues`).
+pub async fn list_open_issues_with_parents(
+    repo: &str,
+    token: &str,
+) -> anyhow::Result<Vec<IssueSummary>> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = "https://api.github.com/graphql";
+
+    let mut all: Vec<IssueSummary> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "query": OPEN_ISSUES_WITH_PARENTS_QUERY,
+            "variables": {
+                "owner": coord.owner,
+                "name": coord.repo,
+                "after": after,
+            },
+        }))
+        .map_err(|e| anyhow::anyhow!("encode GraphQL request: {e}"))?;
+        let resp = transport.post(url, &payload).await?;
+        if !(200..300).contains(&resp.status) {
+            anyhow::bail!("GitHub GraphQL issues: HTTP {}", resp.status);
+        }
+        let (page, page_info) = parse_graphql_issues_page(&resp.body)?;
+        all.extend(page);
+        if page_info.has_next_page {
+            match page_info.end_cursor {
+                Some(cursor) => after = Some(cursor),
+                // hasNextPage true but no cursor: stop rather than loop forever.
+                None => break,
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(all)
+}
+
 /// Fetch the OPEN issues for `owner/repo` via the GitHub REST API, authenticated
 /// with the supplied token. Returns the parsed summaries on success.
 ///
@@ -562,6 +727,67 @@ mod tests {
         ]"#;
         let issues = parse_open_issues(json).expect("parse");
         assert_eq!(issues[0].parent_number, None);
+    }
+
+    #[test]
+    fn parse_graphql_issues_page_maps_parent_linkage() {
+        // A parented child (#11 → parent #10) and an un-parented issue (#10). Asserts
+        // parent_number is populated from the GraphQL `parent { number }` node.
+        let json = r#"{
+            "data": {
+                "repository": {
+                    "issues": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "title": "Epic: auth overhaul",
+                                "state": "OPEN",
+                                "url": "https://github.com/o/r/issues/10",
+                                "parent": null
+                            },
+                            {
+                                "number": 11,
+                                "title": "Sub-task: token refresh",
+                                "state": "OPEN",
+                                "url": "https://github.com/o/r/issues/11",
+                                "parent": { "number": 10 }
+                            }
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let (issues, page_info) = parse_graphql_issues_page(json).expect("parse");
+        assert!(!page_info.has_next_page);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].number, 10);
+        assert_eq!(issues[0].parent_number, None, "the Epic has no parent");
+        assert_eq!(issues[0].url, "https://github.com/o/r/issues/10");
+        assert_eq!(issues[1].number, 11);
+        assert_eq!(
+            issues[1].parent_number,
+            Some(10),
+            "the sub-issue carries the parent Epic's number"
+        );
+    }
+
+    #[test]
+    fn parse_graphql_issues_page_surfaces_errors_array() {
+        // A GraphQL response carrying an `errors` array must be an Err so the caller
+        // falls back to the REST path rather than treating it as an empty list.
+        let json = r#"{
+            "data": null,
+            "errors": [ { "message": "Could not resolve to a Repository with the name 'o/r'." } ]
+        }"#;
+        assert!(parse_graphql_issues_page(json).is_err());
+    }
+
+    #[test]
+    fn parse_graphql_issues_page_rejects_missing_repository() {
+        // A well-formed-but-empty data block (no repository) is an error, not a panic.
+        let json = r#"{ "data": { "repository": null } }"#;
+        assert!(parse_graphql_issues_page(json).is_err());
     }
 
     #[test]
