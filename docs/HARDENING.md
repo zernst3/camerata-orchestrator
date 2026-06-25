@@ -70,6 +70,18 @@ absolute paths (`/work/session-1/rules.json`, `/etc/passwd`) entirely.
   alongside `/etc/passwd`, sibling-crate, and `..`-climb cases; absolute-inside and
   relative-under-root remain allowed. The invariant cannot silently regress on a refactor.
 
+**Multi-repo read scope rides on this jail.** Since `--add-dir` only widens the
+`claude` process's read scope (its built-in writers are denylisted) and never
+constrains or widens the gateway, adding the OTHER repos in a multi-repo project to
+an agent's read scope (the "every agent reads all the project's repos" invariant —
+see `docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md`) is safe by
+the SAME argument that closed this gap. The agent can READ every project repo, but
+`gated_write` is still jailed to its single `CAMERATA_WORKTREE_ROOT` worktree, so a
+write to a sibling repo is structurally outside the jail and refused.
+`session.rs::prepare_session_adds_sibling_repos_to_read_scope_but_not_write_jail`
+asserts exactly this: the sibling repo is in the read scope while the write jail
+stays the single worktree.
+
 ## 3. Two "blocked" signals are distinct — OPEN
 
 A `permission_denial` (the model reached for `Bash`/`Write`/`Task` — an ESCAPE attempt)
