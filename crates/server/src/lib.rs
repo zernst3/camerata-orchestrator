@@ -495,6 +495,10 @@ pub fn router(state: AppState) -> Router {
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
         .route("/api/uow/:story_id/author", post(uow_author))
+        .route(
+            "/api/uow/:story_id/set-draft-parent",
+            post(uow_set_draft_parent),
+        )
         .route("/api/uow/:story_id/publish", post(uow_publish))
         .route("/api/uow", get(uow_list))
         .route("/api/uow/:story_id", get(uow_get))
@@ -6350,6 +6354,32 @@ async fn uow_blank(
     let project_id = state.projects.active().map(|p| p.id);
     let uow = state.uow.create_blank_with_parent(parent_id, project_id);
     Json(serde_json::json!({ "uow_id": uow.story_id }))
+}
+
+/// Body for `POST /api/uow/:story_id/set-draft-parent`. Optional `parent_id` (accepts
+/// `"42"` or `"#42"`); absent / empty / null clears any previously-set parent.
+#[derive(serde::Deserialize, Default)]
+struct SetDraftParentReq {
+    #[serde(default)]
+    parent_id: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/set-draft-parent` — set or clear the parent issue on a DRAFT
+/// UoW. The parent is picked on the authoring screen (not up front in the nav); the value
+/// is normalized and stored on the draft, and the publish step later creates the native
+/// GitHub sub-issue link. Invalid / empty input clears the parent (a typo never blocks).
+/// Returns the updated UoW.
+async fn uow_set_draft_parent(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    body: Option<Json<SetDraftParentReq>>,
+) -> Json<crate::uow::UnitOfWork> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let parent_id = req
+        .parent_id
+        .as_deref()
+        .and_then(crate::github_issues::normalize_parent_number);
+    Json(state.uow.set_draft_parent(&story_id, parent_id))
 }
 
 #[derive(serde::Deserialize)]

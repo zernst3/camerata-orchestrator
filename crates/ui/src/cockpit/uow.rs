@@ -1026,6 +1026,10 @@ pub(super) struct AuthoringUowView {
     pub authoring: Option<AuthoringStateView>,
     #[serde(default)]
     pub work_item: Option<String>,
+    /// The normalized parent issue number stored on the draft (set from the authoring
+    /// screen). `None` → no parent link will be created at publish time.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// Create a blank draft UoW to author a story (`POST /api/uow/blank`). When
@@ -1048,6 +1052,30 @@ pub(super) async fn create_blank_uow(parent_id: Option<String>) -> Option<String
     v.get("uow_id")
         .and_then(|x| x.as_str())
         .map(String::from)
+}
+
+/// Set (or clear) a draft UoW's parent issue (`POST /api/uow/:id/set-draft-parent`). An
+/// empty / whitespace-only `parent_id` clears the parent (sent as null). Returns `true`
+/// on a 2xx. The parent is picked on the authoring screen; the publish step consumes the
+/// stored value to create a native GitHub sub-issue link.
+pub(super) async fn set_draft_parent(story_id: &str, parent_id: &str) -> bool {
+    let pid = parent_id.trim();
+    let body = if pid.is_empty() {
+        serde_json::json!({ "parent_id": null })
+    } else {
+        serde_json::json!({ "parent_id": pid })
+    };
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/set-draft-parent",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&body)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// Fetch a draft UoW's current authoring state (`GET /api/uow/:id`).
@@ -1898,34 +1926,15 @@ pub(super) fn CreateOrOpenUow(
 /// UoW (`POST /api/uow/blank`) and selects it so the authoring panel opens. The inverse of
 /// "create from issue": author the story first, then publish it to the board.
 ///
-/// An optional "Parent ID" text input allows the architect to set a parent GitHub issue
-/// number (e.g. "42" or "#42"). When set, the draft UoW carries it through to publish
-/// time, where a native GitHub sub-issue link is created. Empty → no parent.
+/// The "Parent ID (optional)" field moved OUT of the nav and INTO the authoring screen
+/// (see [`StoryAuthoringPanel`]), so the nav card is now just this button. The draft is
+/// created with no parent; the architect sets the parent (if any) on the authoring screen.
 #[component]
 pub(super) fn NewAuthoredUowButton(uows_refresh: Signal<u32>, sel: Signal<GovDevSel>) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut working = use_signal(|| false);
-    // The parent issue number typed by the architect before hitting "New Unit of Work".
-    let mut parent_id = use_signal(String::new);
     rsx! {
         div { class: "govdev-new-uow-area",
-            // Parent ID input: optional, sits just above the action button.
-            div { class: "govdev-parent-id-row",
-                label {
-                    r#for: "new-uow-parent-id",
-                    class: "govdev-parent-id-label",
-                    "Parent ID (optional)"
-                }
-                input {
-                    id: "new-uow-parent-id",
-                    class: "govdev-parent-id-input",
-                    r#type: "text",
-                    placeholder: "e.g. 42 or #42",
-                    disabled: working(),
-                    value: "{parent_id}",
-                    oninput: move |e| parent_id.set(e.value()),
-                }
-            }
             button {
                 class: "govdev-nav-top",
                 disabled: working(),
@@ -1933,12 +1942,10 @@ pub(super) fn NewAuthoredUowButton(uows_refresh: Signal<u32>, sel: Signal<GovDev
                     let mut sel = sel;
                     let mut uows_refresh = uows_refresh;
                     let toasts = toasts;
-                    // Capture the current parent_id value before entering the async block.
-                    let pid_val = parent_id().trim().to_string();
-                    let pid = if pid_val.is_empty() { None } else { Some(pid_val) };
                     working.set(true);
                     spawn(async move {
-                        match create_blank_uow(pid).await {
+                        // Create with no parent; the parent is set on the authoring screen.
+                        match create_blank_uow(None).await {
                             Some(id) => {
                                 uows_refresh += 1;
                                 sel.set(GovDevSel::Uow(id));
@@ -1997,16 +2004,25 @@ pub(super) fn StoryAuthoringPanel(
             async move { fetch_authoring_uow(&id).await }
         })
     };
-    let st = state_res
-        .read()
-        .clone()
-        .flatten()
-        .and_then(|u| u.authoring)
-        .unwrap_or_default();
+    let full = state_res.read().clone().flatten().unwrap_or_default();
+    let st = full.authoring.clone().unwrap_or_default();
 
     let mut message = use_signal(String::new);
     let mut sending = use_signal(|| false);
     let mut publishing = use_signal(|| false);
+
+    // ── Parent issue (moved here from the nav) ──────────────────────────────────
+    // Seeded once from the draft's stored parent_id; the architect edits it here and
+    // it persists to the draft on change (the publish step creates the sub-issue link).
+    let mut parent_id = use_signal(String::new);
+    let mut parent_seeded = use_signal(|| false);
+    if !parent_seeded() {
+        if let Some(pid) = full.parent_id.clone() {
+            parent_id.set(pid);
+        }
+        parent_seeded.set(true);
+    }
+    let mut saving_parent = use_signal(|| false);
     // The selected target repo (defaults to the first project repo when present).
     let mut target_repo = use_signal(String::new);
     if target_repo().is_empty() {
@@ -2155,6 +2171,53 @@ pub(super) fn StoryAuthoringPanel(
                     div { class: "chat-md", dangerous_inner_html: "{body_html}" }
                 } else {
                     p { class: "section-hint", "No draft yet — send a message to start the draft." }
+                }
+            }
+
+            // ── Parent issue (optional) ───────────────────────────────────────
+            // Moved here from the left nav: set a parent GitHub issue number so the
+            // published story is created as a native sub-issue of it. Persists to the
+            // draft on change; empty clears the parent.
+            div { class: "authoring-parent",
+                p { class: "uow-dev-section-h", "Parent issue (optional)" }
+                div { class: "govdev-parent-id-row",
+                    label {
+                        r#for: "authoring-parent-id",
+                        class: "govdev-parent-id-label",
+                        "Parent ID"
+                    }
+                    input {
+                        id: "authoring-parent-id",
+                        class: "govdev-parent-id-input",
+                        r#type: "text",
+                        placeholder: "e.g. 42 or #42",
+                        disabled: saving_parent(),
+                        value: "{parent_id}",
+                        oninput: move |e| parent_id.set(e.value()),
+                        // Persist on blur so the draft carries the parent into publish.
+                        onblur: {
+                            let id = uow_id.clone();
+                            move |_| {
+                                let id = id.clone();
+                                let val = parent_id();
+                                let toasts = toasts;
+                                saving_parent.set(true);
+                                spawn(async move {
+                                    if !set_draft_parent(&id, &val).await {
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "Could not save the parent issue on the draft.".to_string(),
+                                        );
+                                    }
+                                    saving_parent.set(false);
+                                });
+                            }
+                        },
+                    }
+                }
+                p { class: "section-hint",
+                    "Sets a parent GitHub issue. On publish, this story is created as a native sub-issue. Leave blank for no parent."
                 }
             }
 
