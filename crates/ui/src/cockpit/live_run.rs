@@ -422,6 +422,11 @@ pub(super) fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> El
     });
     let mut signing = use_signal(|| false);
     let mut signed = use_signal(|| false);
+    // When sign-off is blocked by a Critical scoped-scan finding (issue #53) the server
+    // 409s until a non-empty waiver reason is supplied. We surface a waiver box on the
+    // first block and re-submit WITH the reason; empty stays blocked.
+    let mut waive_required = use_signal(|| false);
+    let mut waive_reason = use_signal(String::new);
 
     let prov = prov_res.read().clone().flatten();
 
@@ -463,35 +468,68 @@ pub(super) fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> El
                 if signed() {
                     span { class: "run-signoff-done", "✓ Signed off" }
                 } else {
+                    // When a Critical finding blocks sign-off, the architect must justify
+                    // the waiver before re-submitting (the server rejects an empty reason).
+                    if waive_required() {
+                        textarea {
+                            class: "uow-waive-reason",
+                            placeholder: "A Critical security finding blocks sign-off. Explain why it is acceptable to ship…",
+                            value: "{waive_reason}",
+                            oninput: move |e| waive_reason.set(e.value()),
+                        }
+                    }
                     button {
                         class: "btn-run",
-                        disabled: signing(),
+                        // While a waiver is required, only enable once a reason is typed.
+                        disabled: signing() || (waive_required() && waive_reason().trim().is_empty()),
                         onclick: move |_| {
                             let rid = run_id.clone();
                             let toasts = toasts;
                             let mut uow_refresh = uow_refresh;
+                            let waive = waive_reason().trim().to_string();
+                            let waive_opt = if waive.is_empty() { None } else { Some(waive) };
                             signing.set(true);
                             spawn(async move {
-                                let ok = sign_off_run(&rid, "architect", None).await.is_some();
-                                signing.set(false);
-                                if ok {
-                                    signed.set(true);
-                                    uow_refresh += 1;
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Info,
-                                        "Run signed off.".to_string(),
-                                    );
-                                } else {
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Warning,
-                                        "Could not sign off the run.".to_string(),
-                                    );
+                                match sign_off_run(&rid, "architect", None, waive_opt.as_deref()).await {
+                                    SignOffOutcome::Ok(_) => {
+                                        signing.set(false);
+                                        signed.set(true);
+                                        waive_required.set(false);
+                                        uow_refresh += 1;
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Info,
+                                            "Run signed off.".to_string(),
+                                        );
+                                    }
+                                    SignOffOutcome::Blocked(reason) => {
+                                        signing.set(false);
+                                        // Reveal the waiver box and surface the precise reason.
+                                        waive_required.set(true);
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            reason,
+                                        );
+                                    }
+                                    SignOffOutcome::Failed => {
+                                        signing.set(false);
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "Could not sign off the run.".to_string(),
+                                        );
+                                    }
                                 }
                             });
                         },
-                        if signing() { "Signing off…" } else { "✓ Sign off this run" }
+                        if signing() {
+                            "Signing off…"
+                        } else if waive_required() {
+                            "✓ Sign off with waiver"
+                        } else {
+                            "✓ Sign off this run"
+                        }
                     }
                 }
                 span { class: "section-hint", "Camerata never auto-opens a PR or signs off. Review the provenance, then sign off explicitly." }

@@ -669,15 +669,34 @@ async fn start_dev_run(
     }
 }
 
+/// The outcome of starting an INVESTIGATION run. Distinguishes the three cases the
+/// caller must react to differently:
+/// - `Started(run_id)` — the stage moved Intake → Investigating and a run was created;
+///   the caller drives the live agent activity on it.
+/// - `Blocked(reason)` — the server 409'd (the UoW was NOT at Intake, e.g. a prior
+///   begin already advanced it). The caller surfaces the precise reason AND refreshes
+///   the UoW so the now-stale "Begin investigation" button is replaced by the control
+///   for the real stage. This is the fix for the "Could not begin the investigation
+///   run" toast that appeared when the displayed button was stale (the stage signal had
+///   defaulted to Intake while the fetch was still loading / had failed).
+/// - `Failed` — a transport / decode error (no run created, no reason available).
+pub(crate) enum BeginInvestigationOutcome {
+    Started(String),
+    Blocked(String),
+    Failed,
+}
+
 /// Start an INVESTIGATION run for a story (the intake → investigating transition,
 /// run from the `Intake` step).
 ///
-/// `POST /api/uow/:story_id/begin-investigation` with body `{ "model": "<id>" }`;
-/// the server transitions the stage and returns `{ "run_id", "story_id" }`. Returns
-/// the run id on success (to drive the live agent activity) or `None` on any
-/// transport / decode failure or a missing `run_id`.
-async fn begin_investigation_run(story_id: &str, model: &str) -> Option<String> {
-    reqwest::Client::new()
+/// `POST /api/uow/:story_id/begin-investigation` with body `{ "model": "<id>" }`.
+/// On 2xx the server returns `{ "run_id", "story_id" }`; on a blocked transition it
+/// 409s with `{ "reason": "<why>" }`. Maps the response into a
+/// [`BeginInvestigationOutcome`] so the caller can react precisely (start / surface the
+/// block reason + refresh / report a transport failure) instead of collapsing every
+/// non-success into a single generic toast.
+async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+    let resp = match reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/begin-investigation",
             crate::BFF_URL,
@@ -686,13 +705,32 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> Option<String> 
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
-        .ok()?
+    {
+        Ok(r) => r,
+        Err(_) => return BeginInvestigationOutcome::Failed,
+    };
+    if resp.status().as_u16() == 409 {
+        // The server returns { "reason": "<why>" } for a blocked transition.
+        let reason = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+            .unwrap_or_else(|| "The investigation could not begin from the current stage.".to_string());
+        return BeginInvestigationOutcome::Blocked(reason);
+    }
+    if !resp.status().is_success() {
+        return BeginInvestigationOutcome::Failed;
+    }
+    match resp
         .json::<serde_json::Value>()
         .await
-        .ok()?
-        .get("run_id")
-        .and_then(|r| r.as_str())
-        .map(String::from)
+        .ok()
+        .and_then(|v| v.get("run_id").and_then(|r| r.as_str().map(String::from)))
+    {
+        Some(run_id) => BeginInvestigationOutcome::Started(run_id),
+        None => BeginInvestigationOutcome::Failed,
+    }
 }
 
 /// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit
