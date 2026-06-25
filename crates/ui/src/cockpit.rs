@@ -2539,23 +2539,19 @@ mod tests {
         let standalone = make_wi(99, None);
         let rows = build_work_item_rows(&[root, child, standalone]);
         assert_eq!(rows.len(), 3);
-        // All rows have exactly 1 hierarchy column at max_depth=1. Wait — max_depth
-        // = 1 (child has depth 1) so hierarchy_cols length = max_depth + 1 = 2.
-        assert_eq!(rows[0].hierarchy_cols.len(), 2, "root row has 2 cols");
-        assert_eq!(rows[1].hierarchy_cols.len(), 2, "child row has 2 cols");
-        assert_eq!(rows[2].hierarchy_cols.len(), 2, "standalone row has 2 cols");
+        // max_depth = 1 (child has depth 1) → tiers = 1 → exactly ONE grouping column
+        // per row (no phantom extra tier for a flat epic→children tree).
+        assert_eq!(rows[0].hierarchy_cols.len(), 1, "root row has 1 col");
+        assert_eq!(rows[1].hierarchy_cols.len(), 1, "child row has 1 col");
+        assert_eq!(rows[2].hierarchy_cols.len(), 1, "standalone row has 1 col");
 
-        // Root (number 10, it has children): lvl0 = own label, lvl1 = own label (padded).
+        // Root (number 10, has children): grouped under its own label.
         assert_eq!(rows[0].hierarchy_cols[0], "#10: Issue 10");
-        assert_eq!(rows[0].hierarchy_cols[1], "#10: Issue 10");
-
-        // Child (number 11): lvl0 = parent label, lvl1 = own label (padded).
+        // Child (number 11, leaf): grouped under its PARENT's label — a ROW in the
+        // parent's group, NOT a phantom one-item subgroup named after itself.
         assert_eq!(rows[1].hierarchy_cols[0], "#10: Issue 10");
-        assert_eq!(rows[1].hierarchy_cols[1], "#11: Issue 11");
-
-        // Standalone: lvl0 = "(no parent)", lvl1 = "(no parent)".
+        // Standalone.
         assert_eq!(rows[2].hierarchy_cols[0], "(no parent)");
-        assert_eq!(rows[2].hierarchy_cols[1], "(no parent)");
     }
 
     #[test]
@@ -2568,30 +2564,28 @@ mod tests {
         let items = [root, child, grandchild, standalone];
         let rows = build_work_item_rows(&items);
         assert_eq!(rows.len(), 4);
-        // max_depth = 2, so each row has 3 hierarchy cols.
+        // max_depth = 2 → tiers = 2 → each row has 2 hierarchy cols (one per ancestor
+        // tier; the item itself is the row, not an extra tier).
         for row in &rows {
-            assert_eq!(row.hierarchy_cols.len(), 3, "all rows have 3 cols at max_depth=2");
+            assert_eq!(row.hierarchy_cols.len(), 2, "all rows have 2 cols at max_depth=2");
         }
 
-        // Root (number 1, depth=0): all cols = own label.
+        // Root (number 1, depth 0, has children): own label in both tiers.
         assert_eq!(rows[0].hierarchy_cols[0], "#1: Issue 1");
         assert_eq!(rows[0].hierarchy_cols[1], "#1: Issue 1");
-        assert_eq!(rows[0].hierarchy_cols[2], "#1: Issue 1");
 
-        // Child (number 2, depth=1): lvl0=root, lvl1=own, lvl2=own (padded).
+        // Child (number 2, depth 1, IS a parent of 3): lvl0=root, lvl1=own — it heads
+        // its own subgroup so its grandchild nests under it.
         assert_eq!(rows[1].hierarchy_cols[0], "#1: Issue 1");
         assert_eq!(rows[1].hierarchy_cols[1], "#2: Issue 2");
-        assert_eq!(rows[1].hierarchy_cols[2], "#2: Issue 2");
 
-        // Grandchild (number 3, depth=2): lvl0=root, lvl1=child, lvl2=own.
+        // Grandchild (number 3, depth 2, leaf): lvl0=root, lvl1=its parent (#2).
         assert_eq!(rows[2].hierarchy_cols[0], "#1: Issue 1");
         assert_eq!(rows[2].hierarchy_cols[1], "#2: Issue 2");
-        assert_eq!(rows[2].hierarchy_cols[2], "#3: Issue 3");
 
         // Standalone: all cols = "(no parent)".
         assert_eq!(rows[3].hierarchy_cols[0], "(no parent)");
         assert_eq!(rows[3].hierarchy_cols[1], "(no parent)");
-        assert_eq!(rows[3].hierarchy_cols[2], "(no parent)");
     }
 
     #[test]
@@ -2602,11 +2596,10 @@ mod tests {
         let orphan = make_wi(20, Some(99));
         let rows = build_work_item_rows(&[orphan]);
         assert_eq!(rows.len(), 1);
-        // max_depth = 1 (orphan has depth 1), so 2 cols.
-        assert_eq!(rows[0].hierarchy_cols.len(), 2);
+        // max_depth = 1 (orphan has depth 1) → tiers = 1 → one col. The orphan is a row
+        // under its not-pulled parent's group, not a self-subgroup.
+        assert_eq!(rows[0].hierarchy_cols.len(), 1);
         assert_eq!(rows[0].hierarchy_cols[0], "#99: (not pulled)");
-        // lvl1 is padded with the item's own label.
-        assert_eq!(rows[0].hierarchy_cols[1], "#20: Issue 20");
     }
 
     #[test]

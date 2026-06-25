@@ -634,48 +634,59 @@ pub(super) fn build_work_item_rows(items: &[WorkItem]) -> Vec<WorkItemRow> {
         })
         .collect();
 
-    // Phase 2: determine max depth across all items.
-    // An item at depth D has D ancestors (root has 0, child has 1, grandchild has 2, …).
+    // Phase 2: determine max ancestor depth (root=0, child=1, grandchild=2, …).
     let max_depth = metas.iter().map(|m| m.ancestors.len()).max().unwrap_or(0);
+    // One grouping tier per real ancestor level; at least one so the table always has
+    // a group column (the "(no parent)" bucket when everything is standalone). Using
+    // `max_depth` (not `max_depth + 1`) is what stops a flat epic→children tree from
+    // rendering an extra phantom tier.
+    let tiers = max_depth.max(1);
 
-    // Phase 3: build rows — one `hierarchy_cols` Vec per item, length = max_depth + 1.
+    // Issues that are themselves the parent of something in the pulled set.
+    let parents: std::collections::HashSet<u64> =
+        items.iter().filter_map(|it| it.parent_number).collect();
+
+    // Phase 3: build rows — `hierarchy_cols` length = `tiers` for every row.
     metas
         .into_iter()
         .map(|m| {
             let depth = m.ancestors.len(); // 0 for root / standalone
-            // Assemble hierarchy labels for levels 0..=max_depth.
-            let mut cols: Vec<String> = Vec::with_capacity(max_depth + 1);
+            let mut cols: Vec<String> = Vec::with_capacity(tiers);
             if depth == 0 {
-                // Standalone or root with no ancestors in the pulled set.
-                // Level 0 = item's own label if it has children, else "(no parent)".
-                let is_parent = items.iter().any(|it| it.parent_number == Some(m.item.number));
-                let root_label = if is_parent || m.item.parent_number.is_some() {
-                    // It is itself a root-level parent, or its parent was not pulled.
+                // Root parent, standalone, or orphan (its parent wasn't pulled).
+                let label = if parents.contains(&m.item.number) || m.item.parent_number.is_some()
+                {
                     issue_group_label(m.item)
                 } else {
                     "(no parent)".to_string()
                 };
-                // Repeat the same label across all levels so Chorale places it under
-                // the single "(no parent)" group at every depth tier.
-                for _ in 0..=max_depth {
-                    cols.push(root_label.clone());
+                for _ in 0..tiers {
+                    cols.push(label.clone());
                 }
             } else {
-                // Build label per ancestor level.
+                // One column per ancestor (root-first).
                 for ancestor_num in &m.ancestors {
                     let label = by_number
                         .get(ancestor_num)
-                        .copied() // HashMap<u64, &WorkItem>.get() yields Option<&&WorkItem>; copy the inner &.
+                        .copied()
                         .map(issue_group_label)
                         .unwrap_or_else(|| format!("#{ancestor_num}: (not pulled)"));
                     cols.push(label);
                 }
-                // Remaining levels (item is shallower than max_depth): repeat the
-                // item's own group label so it stays under its real parent group.
-                let own_label = issue_group_label(m.item);
-                while cols.len() <= max_depth {
-                    cols.push(own_label.clone());
+                // Pad shallow items to `tiers`. A PARENT repeats its OWN label so its
+                // descendants nest under it (it heads its own subgroup). A LEAF repeats
+                // its DIRECT PARENT's label (the last ancestor) so it stays a ROW in the
+                // parent's group instead of forming a phantom one-item subgroup named
+                // after itself — the bug that made every leaf look like its own child.
+                let pad = if parents.contains(&m.item.number) {
+                    issue_group_label(m.item)
+                } else {
+                    cols.last().cloned().unwrap_or_else(|| issue_group_label(m.item))
+                };
+                while cols.len() < tiers {
+                    cols.push(pad.clone());
                 }
+                cols.truncate(tiers);
             }
             WorkItemRow { work_item: m.item.clone(), hierarchy_cols: cols }
         })

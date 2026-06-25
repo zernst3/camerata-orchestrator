@@ -100,7 +100,7 @@ const OPEN_ISSUES_WITH_PARENTS_QUERY: &str = r#"query($owner:String!,$name:Strin
   repository(owner:$owner,name:$name){
     issues(states:OPEN, first:100, after:$after, orderBy:{field:CREATED_AT,direction:DESC}){
       pageInfo{ hasNextPage endCursor }
-      nodes{ number title state url parent { number } }
+      nodes{ number title state url body parent { number } }
     }
   }
 }"#;
@@ -119,6 +119,8 @@ struct GqlIssueNode {
     title: String,
     #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     parent: Option<GqlParent>,
 }
@@ -193,9 +195,8 @@ fn parse_graphql_issues_page(json: &str) -> anyhow::Result<(Vec<IssueSummary>, G
             number: n.number,
             title: n.title,
             // GraphQL's issues connection doesn't carry the body here (we only ask for
-            // number/title/state/url/parent); the pull view doesn't render it, and the
-            // refresh path re-fetches the full issue when a body is needed.
-            body: String::new(),
+            // body now comes from the GraphQL node so the detail modal can render it.
+            body: n.body.unwrap_or_default(),
             url: n.url.unwrap_or_default(),
             parent_number: n.parent.map(|p| p.number),
         })
