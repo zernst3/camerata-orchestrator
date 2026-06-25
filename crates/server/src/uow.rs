@@ -292,6 +292,17 @@ pub struct UnitOfWork {
     /// field round-trip unchanged.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// The id of the project that CREATED this UoW, when it is a project-scoped draft.
+    ///
+    /// A brand-new blank draft has no `work_item` and a `draft-<uuid>` `story_id`, so it
+    /// resolves to NO repo and would be excluded from every project's list by repo
+    /// resolution alone. Stamping the creating project's id here lets
+    /// [`UowStore::list_for_project`] include a draft in its OWN project's view while still
+    /// excluding it from any OTHER project's view (whose id differs and which shares none of
+    /// the draft's non-existent repo). `None` for a normal UoW that resolves by repo, and
+    /// for legacy `uow.json` records written before this field existed (back-compat).
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
@@ -656,14 +667,20 @@ impl UowStore {
     /// reference is carried on the spine story, so the key is never re-mapped (see the
     /// build decision doc). Persists immediately. Returns the created UoW.
     pub fn create_blank(&self) -> UnitOfWork {
-        self.create_blank_with_parent(None)
+        self.create_blank_with_parent(None, None)
     }
 
-    /// Create a blank DRAFT UoW with an optional `parent_id`. When `parent_id` is
-    /// `Some`, the normalized number string is stored on the UoW and carried through to
-    /// the publish step, where a native GitHub sub-issue link is created. Otherwise
-    /// identical to [`Self::create_blank`].
-    pub fn create_blank_with_parent(&self, parent_id: Option<String>) -> UnitOfWork {
+    /// Create a blank DRAFT UoW with an optional `parent_id` and an optional
+    /// `project_id`. When `parent_id` is `Some`, the normalized number string is stored on
+    /// the UoW and carried through to the publish step, where a native GitHub sub-issue link
+    /// is created. When `project_id` is `Some`, the draft is scoped to that project so it
+    /// appears in that project's `list_for_project` view (and only that project's) even
+    /// though it has no resolvable repo yet. Otherwise identical to [`Self::create_blank`].
+    pub fn create_blank_with_parent(
+        &self,
+        parent_id: Option<String>,
+        project_id: Option<String>,
+    ) -> UnitOfWork {
         let id = format!("draft-{}", Self::next_draft_token());
         let now = Self::now_rfc3339();
         let uow = {
@@ -672,6 +689,7 @@ impl UowStore {
                 story_id: id.clone(),
                 authoring: Some(AuthoringState::default()),
                 parent_id,
+                project_id,
                 updated: now,
                 ..Default::default()
             };
@@ -766,19 +784,55 @@ impl UowStore {
             .collect()
     }
 
-    /// UoWs whose repo is in `repos` (the active project's repos).
+    /// UoWs whose repo is in `repos`, resolved purely by repo (NO project-id scoping).
     ///
     /// The repo is resolved from the UoW's `work_item` link when present (a draft that
     /// has been published/linked to a real issue carries the work item's `owner/repo#num`
     /// id there, while its KEY stays the original `draft-…` id), and otherwise from the
     /// `story_id` key. This keeps a LINKED draft visible under its work item's project
     /// while still EXCLUDING an unlinked draft whose id has no resolvable repo.
-    pub fn list_for_project(&self, repos: &[String]) -> Vec<UnitOfWork> {
+    ///
+    /// Use this for repo-only sweeps (e.g. the startup worktree teardown that unions every
+    /// project's repos): a blank draft has no worktree and no resolvable repo, so it must
+    /// NOT be included. For an active-project view that should also include that project's
+    /// own blank drafts, use [`Self::list_for_project`].
+    pub fn list_for_repos(&self, repos: &[String]) -> Vec<UnitOfWork> {
         self.mem
             .lock()
             .expect("uow mutex poisoned")
             .values()
             .filter(|u| {
+                let repo = u
+                    .work_item
+                    .as_deref()
+                    .and_then(crate::repo_from_story_id)
+                    .or_else(|| crate::repo_from_story_id(&u.story_id));
+                repo.is_some_and(|r| repos.iter().any(|p| p == &r))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// UoWs visible to the project `project_id` whose repos are `repos`.
+    ///
+    /// A UoW is included when EITHER:
+    /// - it was created by this project (`u.project_id == Some(project_id)`) — this is what
+    ///   brings a brand-new blank draft (no `work_item`, `draft-<uuid>` key, no resolvable
+    ///   repo) into its OWN project's view, OR
+    /// - its repo (resolved `work_item` → else `story_id`) is in `repos` — the normal
+    ///   repo-resident UoW path.
+    ///
+    /// Cross-project isolation is preserved: another project's draft has a DIFFERENT
+    /// `project_id` and no in-`repos` repo, so it is excluded here.
+    pub fn list_for_project(&self, project_id: &str, repos: &[String]) -> Vec<UnitOfWork> {
+        self.mem
+            .lock()
+            .expect("uow mutex poisoned")
+            .values()
+            .filter(|u| {
+                if u.project_id.as_deref() == Some(project_id) {
+                    return true;
+                }
                 let repo = u
                     .work_item
                     .as_deref()
@@ -1412,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn list_for_project_scopes_by_repo_and_excludes_unresolvable() {
+    fn list_for_repos_scopes_by_repo_and_excludes_unresolvable() {
         let store = UowStore::new();
 
         // Two repos belonging to two different projects, plus a draft id with no repo.
@@ -1422,23 +1476,70 @@ mod tests {
         store.get_or_create("CAM-DRAFT"); // no `#`, no resolvable repo
 
         // Scoping to acme/alpha returns only its two UoWs.
-        let alpha = store.list_for_project(&["acme/alpha".to_string()]);
+        let alpha = store.list_for_repos(&["acme/alpha".to_string()]);
         assert_eq!(alpha.len(), 2);
         assert!(alpha.iter().all(|u| u.story_id.starts_with("acme/alpha#")));
 
         // Scoping to other/beta returns only its one UoW.
-        let beta = store.list_for_project(&["other/beta".to_string()]);
+        let beta = store.list_for_repos(&["other/beta".to_string()]);
         assert_eq!(beta.len(), 1);
         assert_eq!(beta[0].story_id, "other/beta#7");
 
         // A project with both repos sees both repos' UoWs but never the draft.
         let both = store
-            .list_for_project(&["acme/alpha".to_string(), "other/beta".to_string()]);
+            .list_for_repos(&["acme/alpha".to_string(), "other/beta".to_string()]);
         assert_eq!(both.len(), 3);
         assert!(both.iter().all(|u| u.story_id != "CAM-DRAFT"));
 
         // Empty repo list → nothing.
-        assert!(store.list_for_project(&[]).is_empty());
+        assert!(store.list_for_repos(&[]).is_empty());
+    }
+
+    #[test]
+    fn list_for_project_scopes_drafts_by_creating_project_and_repos_by_repo() {
+        let store = UowStore::new();
+
+        // A blank draft created while project A is active (no work item, no resolvable
+        // repo). It carries project_id = Some("projA").
+        let draft_a = store.create_blank_with_parent(None, Some("projA".to_string()));
+        // A blank draft created while project B is active.
+        let draft_b = store.create_blank_with_parent(None, Some("projB".to_string()));
+        // A repo-resident UoW (its repo resolves from the story id).
+        store.get_or_create("acme/alpha#1");
+
+        // Project A (repos: acme/alpha) sees ITS OWN draft and the repo-resident UoW,
+        // but NOT project B's draft.
+        let a_view = store.list_for_project("projA", &["acme/alpha".to_string()]);
+        assert!(
+            a_view.iter().any(|u| u.story_id == draft_a.story_id),
+            "projA must see its own draft"
+        );
+        assert!(
+            a_view.iter().any(|u| u.story_id == "acme/alpha#1"),
+            "projA must see its repo-resident UoW"
+        );
+        assert!(
+            !a_view.iter().any(|u| u.story_id == draft_b.story_id),
+            "projA must NOT see projB's draft (cross-project isolation)"
+        );
+
+        // The draft scopes ONLY to its creating project even with an empty repo list:
+        // projA's draft appears in projA's view, NOT in projB's.
+        let a_only = store.list_for_project("projA", &[]);
+        assert!(a_only.iter().any(|u| u.story_id == draft_a.story_id));
+        assert!(!a_only.iter().any(|u| u.story_id == draft_b.story_id));
+
+        let b_only = store.list_for_project("projB", &[]);
+        assert!(b_only.iter().any(|u| u.story_id == draft_b.story_id));
+        assert!(
+            !b_only.iter().any(|u| u.story_id == draft_a.story_id),
+            "projB must NOT see projA's draft"
+        );
+
+        // Repo-resident UoWs still scope by repo: projB (repos: other/beta) does not see
+        // acme/alpha#1, and projA (repos: acme/alpha) does.
+        let b_with_repo = store.list_for_project("projB", &["other/beta".to_string()]);
+        assert!(!b_with_repo.iter().any(|u| u.story_id == "acme/alpha#1"));
     }
 
     #[test]

@@ -596,8 +596,10 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             // ISOLATION: only sweep UoWs whose repo belongs to a known project. The
             // global `list()` would resolve and act on every project's UoWs even when
             // none is active/onboarded; scope to the union of all projects' in-scope
-            // repos via `list_for_project`, and skip the pass entirely when there are
-            // no project repos to sweep.
+            // repos via `list_for_repos`, and skip the pass entirely when there are
+            // no project repos to sweep. This is a REPO-ONLY sweep (not a single active
+            // project's view): use `list_for_repos`, NOT `list_for_project`. Blank drafts
+            // have no worktree and no resolvable repo, so they must be excluded here.
             let project_repos: Vec<String> = projects
                 .list()
                 .into_iter()
@@ -606,7 +608,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             let scoped_uows = if project_repos.is_empty() {
                 Vec::new()
             } else {
-                uow_store.list_for_project(&project_repos)
+                uow_store.list_for_repos(&project_repos)
             };
             for uow in scoped_uows {
                 if uow.stage != crate::lifecycle::UowStage::SignedOff {
@@ -5886,7 +5888,7 @@ async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfW
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    Json(state.uow.list_for_project(&p.repos))
+    Json(state.uow.list_for_project(&p.id, &p.repos))
 }
 
 /// The UoW for a story. Creates a default one if the story has no UoW yet.
@@ -6218,7 +6220,7 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
         return Ok(Json(serde_json::json!({ "uows": [] })));
     };
     let stories = state.stories.list().await.map_err(AppError)?;
-    let uows = state.uow.list_for_project(&p.repos);
+    let uows = state.uow.list_for_project(&p.id, &p.repos);
     let views: Vec<UowView> = uows
         .into_iter()
         .map(|u| {
@@ -6271,7 +6273,7 @@ async fn uow_from_workitem(
     let already = match state.projects.active() {
         Some(p) => state
             .uow
-            .list_for_project(&p.repos)
+            .list_for_project(&p.id, &p.repos)
             .iter()
             .any(|u| u.story_id == story_id),
         None => false,
@@ -6342,7 +6344,11 @@ async fn uow_blank(
         .parent_id
         .as_deref()
         .and_then(crate::github_issues::normalize_parent_number);
-    let uow = state.uow.create_blank_with_parent(parent_id);
+    // Scope the draft to the active project so it appears in that project's
+    // `list_for_project` view (and ONLY that project's) even though it has no resolvable
+    // repo yet. If there is no active project the draft is still created, just unscoped.
+    let project_id = state.projects.active().map(|p| p.id);
+    let uow = state.uow.create_blank_with_parent(parent_id, project_id);
     Json(serde_json::json!({ "uow_id": uow.story_id }))
 }
 
@@ -7927,7 +7933,7 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
             "units_of_work": [],
         }));
     };
-    let uow_list = state.uow.list_for_project(&p.repos);
+    let uow_list = state.uow.list_for_project(&p.id, &p.repos);
     let items: Vec<StoryDevContext> = uow_list
         .into_iter()
         .map(|uow| {
@@ -9713,13 +9719,20 @@ mod tests {
     /// `work_item = null` and `authoring = true`.
     #[tokio::test]
     async fn blank_uow_creates_and_lists_as_authoring() {
-        // ISOLATION (A1/A2): a blank draft has a `draft-` id with NO resolvable repo, so the
-        // project-scoped /api/uows EXCLUDES it by design. This test now verifies (a) the blank
-        // endpoint still mints a draft id, and (b) the draft does NOT leak into the scoped list
-        // (neither with no active project, nor under an unrelated active project).
+        // REGRESSION FIX (fix/draft-project-scope): a blank draft has a `draft-` id with NO
+        // resolvable repo. It is scoped to its CREATING project's id, so the project-scoped
+        // /api/uows for THAT project INCLUDES it (authoring is unblocked), while a DIFFERENT
+        // active project EXCLUDES it (cross-project isolation preserved).
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        state.projects.create("P", vec!["o/r".to_string()]).unwrap();
-        let app = router(state);
+        // P is created (and made active). Q exists too, for the isolation check.
+        let proj_p = state.projects.create("P", vec!["o/r".to_string()]).unwrap();
+        state
+            .projects
+            .create("Q", vec!["x/y".to_string()])
+            .unwrap();
+        // Make P the active project again (create made Q active last).
+        state.projects.set_active(&proj_p.id);
+        let app = router(state.clone());
 
         let resp = app
             .clone()
@@ -9738,6 +9751,39 @@ mod tests {
         let uow_id = json["uow_id"].as_str().unwrap().to_string();
         assert!(uow_id.starts_with("draft-"), "draft id, got {uow_id}");
 
+        // P is active: the draft it created APPEARS in /api/uows as an authoring draft.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/uows")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let uows = json["uows"].as_array().unwrap();
+        let found = uows
+            .iter()
+            .find(|u| u["id"] == serde_json::json!(uow_id))
+            .unwrap_or_else(|| panic!("draft must appear in its own project's /api/uows, got: {json:?}"));
+        assert_eq!(
+            found["authoring"],
+            serde_json::json!(true),
+            "the draft is surfaced as an authoring draft"
+        );
+
+        // Switch the active project to Q: the draft created under P must NOT appear.
+        state.projects.set_active(
+            &state
+                .projects
+                .list()
+                .into_iter()
+                .find(|p| p.name == "Q")
+                .unwrap()
+                .id,
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -9750,8 +9796,8 @@ mod tests {
         let json = body_json(resp).await;
         let uows = json["uows"].as_array().unwrap();
         assert!(
-            uows.iter().all(|u| u["id"] != uow_id),
-            "repo-less draft must NOT appear in the project-scoped /api/uows, got: {json:?}"
+            uows.iter().all(|u| u["id"] != serde_json::json!(uow_id)),
+            "P's draft must NOT leak into project Q's /api/uows (cross-project isolation), got: {json:?}"
         );
     }
 
@@ -11147,7 +11193,7 @@ mod tests {
         // via create_blank_with_parent to simulate a stored-but-unparseable value).
         // We bypass normalization here intentionally — the test covers the runtime guard
         // inside uow_publish's parent_link_warning arm.
-        let draft = uow_store.create_blank_with_parent(Some("not-a-number".to_string()));
+        let draft = uow_store.create_blank_with_parent(Some("not-a-number".to_string()), None);
         let draft_id = draft.story_id.clone();
         uow_store.append_authoring_turn(&draft_id, "req", "ok", "Story title", "Body");
 
