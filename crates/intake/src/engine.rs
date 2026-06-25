@@ -480,6 +480,11 @@ pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
 #[derive(Debug, Clone)]
 pub struct ClaudeLeadEngineer {
     model: String,
+    /// The PROJECT-GROUNDING block (repo digest + rule context) injected into the prompt.
+    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. This is
+    /// a bare-LLM call, so the block is its ONLY window onto the actual codebase. Set via
+    /// [`Self::with_grounding`]; `None` = ungrounded (e.g. a generic CLI demo, no repo).
+    grounding: Option<String>,
 }
 
 impl Default for ClaudeLeadEngineer {
@@ -533,7 +538,10 @@ impl ClaudeLeadEngineer {
             .ok()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_LEAD_ENGINEER_MODEL.to_string());
-        Self { model }
+        Self {
+            model,
+            grounding: None,
+        }
     }
 
     /// Construct with an explicit model id (e.g. from the server model catalog
@@ -543,8 +551,19 @@ impl ClaudeLeadEngineer {
         if m.trim().is_empty() {
             Self::new()
         } else {
-            Self { model: m }
+            Self {
+                model: m,
+                grounding: None,
+            }
         }
+    }
+
+    /// Attach the project-grounding block (repo digest + rule context). Builder-style so it
+    /// chains off `new`/`with_model`. An empty/blank block is treated as `None`.
+    pub fn with_grounding(mut self, grounding: impl Into<String>) -> Self {
+        let g = grounding.into();
+        self.grounding = if g.trim().is_empty() { None } else { Some(g) };
+        self
     }
 
     /// Build the prompt that asks the model to act as a staff engineer: maintain
@@ -553,7 +572,15 @@ impl ClaudeLeadEngineer {
     ///
     /// Pure + public so it is unit-testable without spawning a process, and so
     /// the demo can show exactly what the lead engineer was asked.
-    pub fn build_prompt(form: &IntakeForm) -> String {
+    pub fn build_prompt(form: &IntakeForm, grounding: Option<&str>) -> String {
+        // GROUNDING (the invariant): prepend the project's repo + rule digest so the lead
+        // engineer plans against the ACTUAL codebase, not a generic CRUD app. Without it
+        // this agent is blind and asks context-less questions (e.g. about auth for a
+        // no-auth app). Empty/absent = ungrounded (generic CLI demo with no repo).
+        let grounding_block = match grounding {
+            Some(g) if !g.trim().is_empty() => format!("{}\n\n", g.trim()),
+            _ => String::new(),
+        };
         format!(
             "You are a STAFF LEAD ENGINEER evaluating a Product Owner's intake \
              form for a small bespoke CRUD app. Act as an experienced Staff \
@@ -561,6 +588,7 @@ impl ClaudeLeadEngineer {
              you still need to know, score your own confidence, proactively raise \
              product-level additions the PO did not think of, and be honest when \
              the request is beyond what a governed agent team can build well.\n\n\
+             {grounding_block}\
              === INTAKE FORM ===\n{brief}\n\
              === END FORM ===\n\n\
              === YOUR JOB ===\n\
@@ -720,7 +748,7 @@ impl ClaudeLeadEngineer {
 #[async_trait]
 impl LeadEngineer for ClaudeLeadEngineer {
     async fn evaluate(&self, form: &IntakeForm) -> Result<Intake, LeadEngineerError> {
-        let prompt = Self::build_prompt(form);
+        let prompt = Self::build_prompt(form, self.grounding.as_deref());
 
         // A read-only, JSON-output, ungoverned planning call. No MCP config and
         // no write tools: the lead engineer reasons and plans, it does not build.
@@ -855,9 +883,23 @@ mod tests {
     }
 
     #[test]
+    fn prompt_injects_grounding_when_supplied() {
+        let form = IntakeForm::sample_app();
+        let grounding = "=== PROJECT GROUNDING ===\nLanguages: Rust\nFrameworks: Axum, SQLx\n";
+        let prompt = ClaudeLeadEngineer::build_prompt(&form, Some(grounding));
+        assert!(prompt.contains("PROJECT GROUNDING"));
+        assert!(prompt.contains("Axum, SQLx"));
+        assert!(prompt.contains("expense-tracker"));
+        let bare = ClaudeLeadEngineer::build_prompt(&form, None);
+        assert!(!bare.contains("PROJECT GROUNDING"));
+        assert!(bare.contains("expense-tracker"));
+        assert_eq!(ClaudeLeadEngineer::build_prompt(&form, Some("   ")), bare);
+    }
+
+    #[test]
     fn prompt_inlines_the_brief_and_demands_json() {
         let form = IntakeForm::sample_app();
-        let prompt = ClaudeLeadEngineer::build_prompt(&form);
+        let prompt = ClaudeLeadEngineer::build_prompt(&form, None);
         assert!(prompt.contains("expense-tracker"));
         assert!(prompt.contains("Expense"));
         assert!(prompt.contains("\"tasks\""));

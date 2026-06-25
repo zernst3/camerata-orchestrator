@@ -88,18 +88,25 @@ pub async fn propose_ai(
     practice: &Practice,
     llm: &crate::llm::Llm,
     model: &str,
+    grounding: Option<&str>,
 ) -> Vec<ProposedChild> {
     let kinds: Vec<String> = practice
         .children
         .iter()
         .map(|ct| format!("{} ({})", ct.kind, ct.title_suffix))
         .collect();
-    let system = "You are Camerata's lead engineer decomposing a parent work item into its \
+    let base_system = "You are Camerata's lead engineer decomposing a parent work item into its \
         component child stories. For EACH requested child-type, write a specific, grounded \
         title and a 1-3 sentence description that reflects the actual feature (not a \
         template). Return ONLY a JSON array, no prose: \
         [{\"kind\":\"...\",\"title\":\"...\",\"description\":\"...\"}]. Use exactly the \
         requested kinds, one object each.";
+    // GROUNDING (the invariant): decompose against the ACTUAL repo + rules so each child
+    // story reflects the real stack/structure (e.g. no "auth" child for a no-auth app).
+    let system = match grounding {
+        Some(g) if !g.trim().is_empty() => format!("{base_system}\n\n{g}"),
+        _ => base_system.to_string(),
+    };
     let user = format!(
         "Parent story: {}\n\nDescription: {}\n\nChild-types to produce (kind = the type): {}",
         parent.title,

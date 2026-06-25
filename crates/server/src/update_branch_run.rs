@@ -88,7 +88,14 @@ pub fn conflict_prompt(
     target_branch: &str,
     merge_ref: &str,
     conflicts: &[String],
+    grounding: Option<&str>,
 ) -> String {
+    // GROUNDING (the invariant): the resolver can read the clone, but hand it the project's
+    // rule context + repo digest so reconciliation respects the real conventions/stack.
+    let grounding_block = match grounding {
+        Some(g) if !g.trim().is_empty() => format!("{}\n\n", g.trim()),
+        _ => String::new(),
+    };
     let files = if conflicts.is_empty() {
         "(the conflicted files are listed by `git status`)".to_string()
     } else {
@@ -98,6 +105,7 @@ pub fn conflict_prompt(
         "You are the MERGE CONFLICT RESOLVER for story `{story_id}`. A `git merge \
          {merge_ref}` into the working branch `{target_branch}` left conflicts. Your job \
          is to resolve them so the merged tree is coherent and builds.\n\n\
+         {grounding_block}\
          Conflicted files: {files}\n\n\
          For each conflicted file:\n\
          1. Open it and find the conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`).\n\
@@ -136,6 +144,7 @@ pub async fn execute_update_branch_run(
     source_kind: MergeSourceKind,
     token: Option<String>,
     model: String,
+    grounding: Option<String>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -239,6 +248,7 @@ pub async fn execute_update_branch_run(
             let start_seq = seq.load(Ordering::SeqCst);
             resolve_conflicts_and_commit(
                 &runs, &uow, &run_id, &story_id, &dir, &target_branch, &mref, &conflicts, &model,
+                grounding.as_deref(),
                 start_seq,
             )
             .await;
@@ -259,6 +269,7 @@ async fn resolve_conflicts_and_commit(
     merge_ref: &str,
     conflicts: &[String],
     model: &str,
+    grounding: Option<&str>,
     start_seq: usize,
 ) {
     let seq = AtomicUsize::new(start_seq);
@@ -346,7 +357,7 @@ async fn resolve_conflicts_and_commit(
         },
     );
 
-    let task = conflict_prompt(story_id, target_branch, merge_ref, conflicts);
+    let task = conflict_prompt(story_id, target_branch, merge_ref, conflicts, grounding);
     if let Err(e) = driver.run(&role, &task).await {
         abort_and_fail(format!("conflict-resolution agent failed: {e}")).await;
         return;
@@ -414,7 +425,7 @@ mod tests {
 
     #[test]
     fn conflict_prompt_is_resolution_oriented_and_forbids_commit() {
-        let p = conflict_prompt("o/r#1", "camerata/work", "origin/main", &["src/a.rs".into()]);
+        let p = conflict_prompt("o/r#1", "camerata/work", "origin/main", &["src/a.rs".into()], None);
         assert!(p.contains("o/r#1"));
         assert!(p.contains("camerata/work"));
         assert!(p.contains("origin/main"));
@@ -473,6 +484,7 @@ mod tests {
             MergeSourceKind::Local,
             None,
             "claude-opus-4-8".to_string(),
+            None,
         )
         .await;
 
@@ -532,6 +544,7 @@ mod tests {
             MergeSourceKind::Local,
             None,
             String::new(),
+            None,
         )
         .await;
 

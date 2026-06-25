@@ -291,8 +291,14 @@ pub async fn translate_answer_ai(
     esc: &Escalation,
     answer: &str,
     model: &str,
+    grounding: Option<&str>,
 ) -> ResumePayload {
-    let system = translate_system_prompt();
+    // GROUNDING (the invariant): even the translation step is grounded in the active
+    // project's repo + rules, so the restated directive is checked against the ACTUAL stack.
+    let system = match grounding {
+        Some(g) if !g.trim().is_empty() => format!("{}\n\n{g}", translate_system_prompt()),
+        _ => translate_system_prompt(),
+    };
     let user = translate_user_prompt(esc, answer);
     match driver.complete(&system, &user, model).await {
         Ok(text) => parse_resume_payload(&text, "claude")
@@ -717,7 +723,7 @@ mod tests {
         let json = r#"{"decision":"Use Postgres","directive":"Provision a Postgres backend and continue.","confident":true}"#;
         let driver = CannedDriver(json.to_string());
         let payload =
-            translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6").await;
+            translate_answer_ai(&driver, &esc, "go with postgres", "claude-sonnet-4-6", None).await;
         assert_eq!(payload.decision, "Use Postgres");
         assert!(payload.directive.contains("Postgres"));
         assert!(payload.confident);
@@ -731,7 +737,7 @@ mod tests {
         let esc = open_escalation();
         let fenced = "Sure, here it is:\n```json\n{\"decision\":\"Cancel the run\",\"directive\":\"Abort and report.\",\"confident\":false}\n```\nThanks!";
         let driver = CannedDriver(fenced.to_string());
-        let payload = translate_answer_ai(&driver, &esc, "cancel it", "m").await;
+        let payload = translate_answer_ai(&driver, &esc, "cancel it", "m", None).await;
         assert_eq!(payload.decision, "Cancel the run");
         assert!(!payload.confident, "confident:false carried through");
         assert_eq!(payload.authored_by, "claude");
@@ -741,7 +747,7 @@ mod tests {
     async fn translate_falls_back_to_scaffold_on_unparseable_reply() {
         let esc = open_escalation();
         // Echo driver returns prose, not JSON -> the scaffold takes over (never dead-ends).
-        let payload = translate_answer_ai(&EchoDriver, &esc, "use option B", "m").await;
+        let payload = translate_answer_ai(&EchoDriver, &esc, "use option B", "m", None).await;
         assert_eq!(payload.authored_by, "scaffold");
         // The scaffold restates the human's raw answer as the decision.
         assert_eq!(payload.decision, "use option B");
@@ -755,7 +761,7 @@ mod tests {
     #[tokio::test]
     async fn translate_falls_back_to_scaffold_on_driver_error() {
         let esc = open_escalation();
-        let payload = translate_answer_ai(&FailingDriver, &esc, "approve", "m").await;
+        let payload = translate_answer_ai(&FailingDriver, &esc, "approve", "m", None).await;
         assert_eq!(payload.authored_by, "scaffold");
         assert_eq!(payload.decision, "approve");
     }
@@ -779,7 +785,7 @@ mod tests {
         let e = store.raise(req("rt-1"), "Nightly");
         let json = r#"{"decision":"Use SQLite","directive":"Switch the store to SQLite and continue.","confident":true}"#;
         let payload =
-            translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m").await;
+            translate_answer_ai(&CannedDriver(json.to_string()), &e, "sqlite please", "m", None).await;
 
         let resolved = store
             .resolve_with_payload(&e.id, "sqlite please", &payload)

@@ -63,7 +63,19 @@ pub fn implement_prompt(
     story_desc: &str,
     target_branch: &str,
     decisions: &[DecisionRecord],
+    grounding: Option<&str>,
 ) -> String {
+    // GROUNDING (the invariant): the implementer can read the repo clone, but still hand
+    // it the project's rule context + repo digest up front and tell it to consult the real
+    // code. See docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md.
+    let grounding_block = match grounding {
+        Some(g) if !g.trim().is_empty() => format!(
+            "{}\n\nApply the project rules above, and ground every change in the ACTUAL \
+             repo code you can read from the working directory.\n\n",
+            g.trim()
+        ),
+        _ => String::new(),
+    };
     let decisions_text = {
         let approved: Vec<&DecisionRecord> = decisions
             .iter()
@@ -91,6 +103,7 @@ pub fn implement_prompt(
 
     format!(
         "You are the BROWNFIELD IMPLEMENTER for story `{story_id}` (branch `{target_branch}`).\n\n\
+         {grounding_block}\
          ## Story\n\n\
          Title: {story_title}\n\
          Description: {story_desc}\n\n\
@@ -146,6 +159,7 @@ pub async fn execute_dev_implement_run(
     model: String,
     max_iterations: usize,
     skip_layer2: bool,
+    grounding: Option<String>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -289,6 +303,7 @@ pub async fn execute_dev_implement_run(
         &story_desc,
         &target_branch,
         &decisions,
+        grounding.as_deref(),
     );
 
     // Bounce-and-revise loop: up to `max_iterations` passes. On each pass, run the
@@ -585,6 +600,7 @@ mod tests {
             "Support email/password login with remember-me.",
             "camerata/story-42",
             &decisions,
+            None,
         );
 
         // Story identity.
@@ -635,6 +651,7 @@ mod tests {
             "Desc",
             "camerata/s-r-1",
             &decisions,
+            None,
         );
         assert!(
             p.contains("approved-one"),
@@ -649,7 +666,7 @@ mod tests {
     /// When there are no decisions at all, a clear note replaces the list.
     #[test]
     fn implement_prompt_handles_empty_decisions() {
-        let p = implement_prompt("s/r#1", "T", "D", "b", &[]);
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None);
         assert!(p.contains("no approved decisions"));
     }
 
@@ -693,6 +710,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             1,
             false,
+            None,
         )
         .await;
 
@@ -740,6 +758,7 @@ mod tests {
             "D",
             "camerata/story-7",
             &[approved_decision("opt-a", "Q", "R")],
+            None,
         );
         assert!(
             p.contains("camerata/story-7"),

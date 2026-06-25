@@ -28,6 +28,7 @@ pub mod eval;
 pub mod evidence;
 pub mod feature_flags;
 pub mod fix;
+pub mod grounding;
 pub mod github_issues;
 pub mod investigation_run;
 pub mod jobs;
@@ -191,6 +192,76 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Build the shared PROJECT-GROUNDING block for the ACTIVE project: its rule context
+    /// (committed ruleset + in-progress selections, via the same renderers the chat uses)
+    /// plus a bounded digest of each of its local repo clones (detected stack, dependency
+    /// highlights, high-signal docs, shallow tree). This is the single window every
+    /// in-project agent receives so none behaves like a context-less product owner. See
+    /// `docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md` and
+    /// [`crate::grounding`].
+    ///
+    /// ISOLATION: reads ONLY the active project's repos (resolved via the machine-local
+    /// override path or `<workspace_root>/<owner>/<repo>`); never another project's clone.
+    /// Returns `None` when there is no active project, or nothing at all to say.
+    ///
+    /// Async because it does (bounded) blocking file IO under `spawn_blocking`.
+    pub(crate) async fn project_grounding(&self) -> Option<String> {
+        let project = self.projects.active()?;
+
+        // ── Rule context (reuse the chat's renderers so agents see the SAME picture) ──
+        let committed = build_ruleset_summary(&project.ruleset);
+        let committed = if committed.trim().is_empty() {
+            None
+        } else {
+            Some(committed)
+        };
+        let selected = self
+            .draft
+            .load(&project.id)
+            .as_ref()
+            .and_then(render_selected_rules_for_chat);
+        let rule_section =
+            crate::grounding::render_rule_context(committed.as_deref(), selected.as_deref());
+
+        // ── Repo context: resolve each repo's local clone, then digest it off-thread ──
+        let workspace_root = self.settings.workspace_root();
+        let mut resolved: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let mut unresolved: Vec<(String, String)> = Vec::new();
+        for repo in &project.repos {
+            let override_path = self.settings.repo_path(repo);
+            match crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            ) {
+                Some(dir) if dir.is_dir() => resolved.push((repo.clone(), dir)),
+                Some(dir) => unresolved.push((
+                    repo.clone(),
+                    format!("local folder not found ({})", dir.display()),
+                )),
+                None => unresolved.push((
+                    repo.clone(),
+                    "no local path set — set a workspace root or the repo's folder".to_string(),
+                )),
+            }
+        }
+
+        let repo_digests = if resolved.is_empty() {
+            Vec::new()
+        } else {
+            tokio::task::spawn_blocking(move || {
+                resolved
+                    .iter()
+                    .filter_map(|(repo, dir)| crate::grounding::render_repo_digest(repo, dir))
+                    .collect::<Vec<String>>()
+            })
+            .await
+            .unwrap_or_default()
+        };
+
+        crate::grounding::assemble(rule_section, &repo_digests, &unresolved)
     }
 
     /// Store the last completed scan report for the given project. Called the instant a
@@ -982,6 +1053,9 @@ async fn start_governed_run(
                     .clone()
                     .unwrap_or_else(crate::model_tier::default_strongest_model),
             };
+            // GROUNDING (the invariant): rule + repo digest for the implementer (computed
+            // before the spawn so it can move into the task).
+            let grounding = state.project_grounding().await;
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -998,6 +1072,7 @@ async fn start_governed_run(
                     impl_model,
                     max_iterations,
                     skip_layer2,
+                    grounding,
                 )
                 .await
             });
@@ -5011,8 +5086,15 @@ async fn decompose_propose(
     let llm = state.llm();
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
     let model = step_model(&state, crate::project::StepKind::Decomposition);
-    let children =
-        crate::decompose::propose_ai(&parent, &Practice::default_feature(), &llm, &model).await;
+    let grounding = state.project_grounding().await;
+    let children = crate::decompose::propose_ai(
+        &parent,
+        &Practice::default_feature(),
+        &llm,
+        &model,
+        grounding.as_deref(),
+    )
+    .await;
     Ok(Json(children))
 }
 
@@ -5283,7 +5365,15 @@ async fn chat_escalation(
         .escalations
         .get(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
-    let system = crate::escalation::chat_system_prompt(&esc);
+    // GROUNDING (the invariant): the lead-engineer review chat reasons about the ACTUAL
+    // project — append the active project's repo + rule digest to the system prompt.
+    let system = match state.project_grounding().await {
+        Some(grounding) => format!(
+            "{}\n\n{grounding}",
+            crate::escalation::chat_system_prompt(&esc)
+        ),
+        None => crate::escalation::chat_system_prompt(&esc),
+    };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
     let llm = state.llm();
     let reply = match llm
@@ -5333,7 +5423,15 @@ async fn answer_escalation(
     // per-step config (no env/const fallback once a project exists), replacing the prior
     // per-routine model. DEFAULT_MODEL floor only applies with no active project.
     let model = step_model(&state, crate::project::StepKind::Escalation);
-    let payload = crate::escalation::translate_answer_ai(&driver, &esc, &req.answer, &model).await;
+    let grounding = state.project_grounding().await;
+    let payload = crate::escalation::translate_answer_ai(
+        &driver,
+        &esc,
+        &req.answer,
+        &model,
+        grounding.as_deref(),
+    )
+    .await;
     let resolved = state
         .escalations
         .resolve_with_payload(&id, &req.answer, &payload)
@@ -6512,9 +6610,19 @@ async fn uow_author(
     // per-step config (no env/const fallback once a project exists). The project-less edge
     // (no active project) is the only place the DEFAULT_MODEL floor applies.
     let model = step_model(&state, crate::project::StepKind::StoryAuthoring);
+    // GROUNDING (the invariant): the story-authoring agent is a bare-LLM call — the
+    // grounding block is its ONLY window onto the real project. Without it, it behaves
+    // like a context-less product owner (e.g. asking where to persist a preference
+    // across "logged-in users" for an app that has no auth at all). Prepend the active
+    // project's repo + rule digest to the system prompt so it drafts against the ACTUAL
+    // codebase. See docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md.
+    let system = match state.project_grounding().await {
+        Some(grounding) => format!("{STORY_AUTHOR_SYSTEM}\n\n{grounding}"),
+        None => STORY_AUTHOR_SYSTEM.to_string(),
+    };
     let request = crate::llm::LlmRequest::new(prompt)
         .with_model(model)
-        .with_system(STORY_AUTHOR_SYSTEM);
+        .with_system(system);
     let (title, body, reply, options) = match llm.complete(request).await {
         Ok(resp) => {
             let (t, b, r, opts) = parse_author_response(&resp.text);
@@ -7485,6 +7593,10 @@ async fn uow_begin_investigation(
         _ => (story_id.clone(), String::new()),
     };
 
+    // GROUNDING (the invariant): hand the investigation agent the project's rule context +
+    // repo digest so it analyzes the ACTUAL project (it can also read the repo clone).
+    let grounding = state.project_grounding().await;
+
     // Create a run the UI can poll, then kick the single gated investigation agent.
     let run_id = state.runs.create(&story_id, "investigation", crate::run::RunKind::Watched);
     {
@@ -7509,6 +7621,7 @@ async fn uow_begin_investigation(
                 title,
                 desc,
                 model,
+                grounding,
             )
             .await;
             runs_for_clear.clear_abort(&rid_for_clear);
@@ -7658,6 +7771,8 @@ async fn uow_update_branch(
         let sid = story_id.clone();
         let token = github_token();
         let src = req.source_branch.clone();
+        // GROUNDING (the invariant): rule + repo digest for the conflict resolver.
+        let grounding = state.project_grounding().await;
         tokio::spawn(async move {
             crate::update_branch_run::execute_update_branch_run(
                 runs,
@@ -7671,6 +7786,7 @@ async fn uow_update_branch(
                 source_kind,
                 token,
                 model,
+                grounding,
             )
             .await;
         });
@@ -7924,6 +8040,8 @@ async fn uow_pr_resolve(
         let rid = run_id.clone();
         let sid = story_id.clone();
         let pr_number = info.number;
+        // GROUNDING (the invariant): rule + repo digest for the PR-feedback resolver.
+        let grounding = state.project_grounding().await;
         tokio::spawn(async move {
             crate::pr_resolve_run::execute_pr_resolve_run(
                 runs,
@@ -7938,6 +8056,7 @@ async fn uow_pr_resolve(
                 failing_checks,
                 Some(token),
                 model,
+                grounding,
             )
             .await;
         });

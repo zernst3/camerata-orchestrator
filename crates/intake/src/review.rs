@@ -280,6 +280,11 @@ pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
 #[derive(Debug, Clone)]
 pub struct ClaudeRefinementReviewer {
     model: String,
+    /// The PROJECT-GROUNDING block (repo digest + rule context) injected into the prompt.
+    /// THE INVARIANT: every in-project agent is grounded in the real repo + rules. This is
+    /// a bare-LLM call, so the block is its only window onto the actual codebase. Set via
+    /// [`Self::with_grounding`]; `None` = ungrounded (e.g. a generic CLI demo, no repo).
+    grounding: Option<String>,
 }
 
 impl Default for ClaudeRefinementReviewer {
@@ -298,7 +303,10 @@ impl ClaudeRefinementReviewer {
             .ok()
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_REVIEWER_MODEL.to_string());
-        Self { model }
+        Self {
+            model,
+            grounding: None,
+        }
     }
 
     /// Construct with an explicit model id. Blank ids are treated as the
@@ -308,8 +316,19 @@ impl ClaudeRefinementReviewer {
         if m.trim().is_empty() {
             Self::new()
         } else {
-            Self { model: m }
+            Self {
+                model: m,
+                grounding: None,
+            }
         }
+    }
+
+    /// Attach the project-grounding block (repo digest + rule context). Builder-style so it
+    /// chains off `new`/`with_model`. An empty/blank block is treated as `None`.
+    pub fn with_grounding(mut self, grounding: impl Into<String>) -> Self {
+        let g = grounding.into();
+        self.grounding = if g.trim().is_empty() { None } else { Some(g) };
+        self
     }
 
     /// Render the session's stories + clarification history as a plain-language
@@ -334,12 +353,23 @@ impl ClaudeRefinementReviewer {
 
     /// Build the review prompt. Pure + public so it is unit-testable without a
     /// process.
-    pub fn build_prompt(session: &RefinementSession, form: &IntakeForm) -> String {
+    pub fn build_prompt(
+        session: &RefinementSession,
+        form: &IntakeForm,
+        grounding: Option<&str>,
+    ) -> String {
+        // GROUNDING (the invariant): prepend the project's repo + rule digest so refinement
+        // reasons about the ACTUAL codebase, not a generic app.
+        let grounding_block = match grounding {
+            Some(g) if !g.trim().is_empty() => format!("{}\n\n", g.trim()),
+            _ => String::new(),
+        };
         format!(
             "You are a STAFF LEAD ENGINEER refining a small bespoke app WITH a \
              non-technical Product Owner. You are mid-conversation: review the \
              current user stories and the clarifications so far, and return the \
              changes to make this turn.\n\n\
+             {grounding_block}\
              === ORIGINAL BRIEF ===\n{brief}\n=== END BRIEF ===\n\n\
              === CURRENT SESSION ===\n{session}\n=== END SESSION ===\n\n\
              === YOUR JOB ===\n\
@@ -399,7 +429,7 @@ impl RefinementReviewer for ClaudeRefinementReviewer {
         session: &RefinementSession,
         form: &IntakeForm,
     ) -> Result<RefinementReview, ReviewError> {
-        let prompt = Self::build_prompt(session, form);
+        let prompt = Self::build_prompt(session, form, self.grounding.as_deref());
         let out = tokio::process::Command::new("claude")
             .arg("-p")
             .arg(&prompt)
@@ -712,12 +742,24 @@ mod tests {
     #[test]
     fn prompt_includes_brief_session_and_json_shape() {
         let session = session_with_role_story(RefinementContext::PreBuild);
-        let prompt = ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner());
+        let prompt = ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), None);
         assert!(prompt.contains("STAFF LEAD ENGINEER"));
         assert!(prompt.contains("As the owner")); // story rendered into the session block
         assert!(prompt.contains("\"upserted_stories\""));
         assert!(prompt.contains("\"confidence\""));
         assert!(prompt.contains("\"verdict\""));
+        assert!(!prompt.contains("PROJECT GROUNDING"));
+    }
+
+    #[test]
+    fn prompt_injects_grounding_when_supplied() {
+        let session = session_with_role_story(RefinementContext::PreBuild);
+        let g = "=== PROJECT GROUNDING ===\nLanguages: Rust\n";
+        let prompt =
+            ClaudeRefinementReviewer::build_prompt(&session, &form_with_owner(), Some(g));
+        assert!(prompt.contains("PROJECT GROUNDING"));
+        assert!(prompt.contains("Languages: Rust"));
+        assert!(prompt.contains("STAFF LEAD ENGINEER"));
     }
 
     #[test]
