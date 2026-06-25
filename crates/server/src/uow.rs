@@ -292,6 +292,17 @@ pub struct UnitOfWork {
     /// field round-trip unchanged.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// The id of the project that CREATED this UoW, when it is a project-scoped draft.
+    ///
+    /// A brand-new blank draft has no `work_item` and a `draft-<uuid>` `story_id`, so it
+    /// resolves to NO repo and would be excluded from every project's list by repo
+    /// resolution alone. Stamping the creating project's id here lets
+    /// [`UowStore::list_for_project`] include a draft in its OWN project's view while still
+    /// excluding it from any OTHER project's view (whose id differs and which shares none of
+    /// the draft's non-existent repo). `None` for a normal UoW that resolves by repo, and
+    /// for legacy `uow.json` records written before this field existed (back-compat).
+    #[serde(default)]
+    pub project_id: Option<String>,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
