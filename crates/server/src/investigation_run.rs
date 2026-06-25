@@ -108,10 +108,28 @@ pub(crate) fn read_first_clarify_request(session_dir: &Path) -> Option<ClarifyRe
 /// the agent to ANALYZE the story and surface decisions/tradeoffs, NOT to write code, and
 /// tells it to use `ask_clarification` for any blocking product decision rather than
 /// guessing. Pure + testable.
-pub fn investigation_prompt(story_id: &str, title: &str, desc: &str) -> String {
+pub fn investigation_prompt(
+    story_id: &str,
+    title: &str,
+    desc: &str,
+    grounding: Option<&str>,
+) -> String {
+    // GROUNDING (the invariant): even though this agent can READ the repo clone directly,
+    // give it the project's rule context + a repo summary up front, and tell it to consult
+    // the actual code. See docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md.
+    let grounding_block = match grounding {
+        Some(g) if !g.trim().is_empty() => format!(
+            "{}\n\nGround your analysis in the project facts above AND in the ACTUAL repo \
+             code you can read from the working directory — do not assume capabilities the \
+             stack/dependencies don't show.\n\n",
+            g.trim()
+        ),
+        _ => String::new(),
+    };
     format!(
         "You are the INVESTIGATION agent for story `{story_id}`. Your job is to ANALYZE, \
          not to build. Do NOT write or scaffold any code.\n\n\
+         {grounding_block}\
          Story title: {title}\n\
          Story description: {desc}\n\n\
          Read the relevant context and produce a concise investigation note in Markdown that:\n\
@@ -166,6 +184,7 @@ pub async fn execute_investigation_run(
     story_title: String,
     story_desc: String,
     model: String,
+    grounding: Option<String>,
 ) {
     // Honor a cancel that arrived before the executor got scheduled: leave the run in its
     // terminal Cancelled state (set by RunStore::cancel) and do nothing.
@@ -211,7 +230,7 @@ pub async fn execute_investigation_run(
     }
 
     // Live path: build the agent + run one analysis pass with the fresh prompt.
-    let task = investigation_prompt(&story_id, &story_title, &story_desc);
+    let task = investigation_prompt(&story_id, &story_title, &story_desc, grounding.as_deref());
     run_one_investigation_pass(
         runs,
         uow,
@@ -593,7 +612,7 @@ mod tests {
 
     #[test]
     fn investigation_prompt_is_read_oriented_and_names_the_story() {
-        let p = investigation_prompt("CAM-7", "Add export", "Members CSV export.");
+        let p = investigation_prompt("CAM-7", "Add export", "Members CSV export.", None);
         assert!(p.contains("CAM-7"));
         assert!(p.contains("Add export"));
         assert!(p.contains("Members CSV export."));
@@ -754,7 +773,7 @@ mod tests {
                 "Add export",
                 "Members CSV export.",
                 "claude-opus-4-8",
-                &investigation_prompt("CAM-7", "Add export", "Members CSV export."),
+                &investigation_prompt("CAM-7", "Add export", "Members CSV export.", None),
                 req,
                 1,
             );

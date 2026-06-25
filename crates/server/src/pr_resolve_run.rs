@@ -40,7 +40,14 @@ pub fn resolve_prompt(
     target_branch: &str,
     review_comments: &[String],
     failing_checks: &[String],
+    grounding: Option<&str>,
 ) -> String {
+    // GROUNDING (the invariant): the resolver can read the clone, but hand it the project's
+    // rule context + repo digest so fixes respect the real conventions/stack.
+    let grounding_block = match grounding {
+        Some(g) if !g.trim().is_empty() => format!("{}\n\n", g.trim()),
+        _ => String::new(),
+    };
     let comments = if review_comments.is_empty() {
         "(no open review comments)".to_string()
     } else {
@@ -59,6 +66,7 @@ pub fn resolve_prompt(
         "You are the PR FEEDBACK RESOLVER for story `{story_id}` (pull request #{pr_number}, \
          working branch `{target_branch}`). Address the reviewer feedback and make the failing \
          CI checks pass.\n\n\
+         {grounding_block}\
          Open review comments:\n{comments}\n\n\
          Failing CI checks: {checks}\n\n\
          For each item:\n\
@@ -95,6 +103,7 @@ pub async fn execute_pr_resolve_run(
     failing_checks: Vec<String>,
     token: Option<String>,
     model: String,
+    grounding: Option<String>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -193,7 +202,7 @@ pub async fn execute_pr_resolve_run(
         ),
     );
 
-    let task = resolve_prompt(&story_id, pr_number, &target_branch, &review_comments, &failing_checks);
+    let task = resolve_prompt(&story_id, pr_number, &target_branch, &review_comments, &failing_checks, grounding.as_deref());
     if let Err(e) = driver.run(&role, &task).await {
         fail(&runs, &uow, format!("resolution agent failed: {e}"));
         return;
@@ -267,6 +276,7 @@ mod tests {
             "camerata/story-1",
             &["src/a.rs: fix the off-by-one".to_string()],
             &["clippy".to_string(), "build".to_string()],
+            None,
         );
         assert!(p.contains("o/r#1"));
         assert!(p.contains("#7"));
@@ -281,7 +291,7 @@ mod tests {
 
     #[test]
     fn resolve_prompt_handles_empty_feedback() {
-        let p = resolve_prompt("o/r#1", 3, "b", &[], &[]);
+        let p = resolve_prompt("o/r#1", 3, "b", &[], &[], None);
         assert!(p.contains("(no open review comments)"));
         assert!(p.contains("(no failing checks)"));
     }
