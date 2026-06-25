@@ -231,6 +231,13 @@ pub struct RunStore {
     runs: Arc<Mutex<HashMap<String, Run>>>,
     counter: Arc<AtomicUsize>,
     cancel_signals: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Abort handles for the `tokio::spawn`ed task driving each run. Aborting the task
+    /// drops the agent driver future, and the driver spawns its `claude` subprocess with
+    /// `kill_on_drop(true)`, so the child process is reaped when the task is aborted.
+    /// This is what lets a Stop request reach a run that is blocked inside a live agent
+    /// subprocess (the between-step `is_cancelled` checks only fire when the loop is
+    /// running). Registered when the run task is spawned; removed when it finishes.
+    abort_handles: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 impl RunStore {
@@ -239,6 +246,7 @@ impl RunStore {
             runs: Arc::new(Mutex::new(HashMap::new())),
             counter: Arc::new(AtomicUsize::new(0)),
             cancel_signals: Arc::new(Mutex::new(HashMap::new())),
+            abort_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -328,21 +336,53 @@ impl RunStore {
         }
     }
 
-    /// Cancel a run: set the atomic cancel signal, update status to Cancelled, and
-    /// mark `done = true`. The live-fleet executor checks `is_cancelled` to stop early.
+    /// Register the abort handle for the task driving `id`. Called right after the run
+    /// task is `tokio::spawn`ed so a later [`Self::cancel`] can abort it (reaping any live
+    /// agent subprocess via `kill_on_drop`). Replacing an existing handle is fine (a run
+    /// is driven by one task).
+    pub fn register_abort(&self, id: &str, handle: tokio::task::AbortHandle) {
+        if let Ok(mut handles) = self.abort_handles.lock() {
+            handles.insert(id.to_string(), handle);
+        }
+    }
+
+    /// Drop the abort handle for `id` (the task finished on its own). Idempotent.
+    pub fn clear_abort(&self, id: &str) {
+        if let Ok(mut handles) = self.abort_handles.lock() {
+            handles.remove(id);
+        }
+    }
+
+    /// Cancel a run: set the atomic cancel signal, abort the driving task (which drops the
+    /// agent driver future and kills its `claude` subprocess via `kill_on_drop`), update
+    /// status to Cancelled, and mark `done = true`. The run loops also check `is_cancelled`
+    /// between steps so a cancel between subprocess spawns is honored without an abort.
+    /// Idempotent: a run already done/cancelled is left in a terminal state.
     pub fn cancel(&self, id: &str) {
-        // Set the atomic cancel signal first.
+        // Set the atomic cancel signal first (between-step checks read this).
         {
             let signals = self.cancel_signals.lock().unwrap();
             if let Some(sig) = signals.get(id) {
                 sig.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        // Update the run record.
+        // Abort the driving task so a run blocked inside a live agent subprocess is reaped
+        // immediately (the dropped driver future kills the kill_on_drop child).
+        {
+            let mut handles = self.abort_handles.lock().unwrap();
+            if let Some(handle) = handles.remove(id) {
+                handle.abort();
+            }
+        }
+        // Update the run record to a terminal Cancelled state so GET /api/runs/:id reports
+        // it (the aborted task can no longer set status itself).
         let mut runs = self.runs.lock().unwrap();
         if let Some(run) = runs.get_mut(id) {
-            run.status = RunStatus::Cancelled;
-            run.done = true;
+            // Don't clobber an already-terminal failure/cancel.
+            if !run.done {
+                run.status = RunStatus::Cancelled;
+                run.done = true;
+            }
         }
     }
 
@@ -831,6 +871,50 @@ mod tests {
         let run = store.get(&id).unwrap();
         assert_eq!(run.status, RunStatus::Cancelled);
         assert!(run.done);
+        assert!(store.is_cancelled(&id));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_the_registered_task() {
+        // A run driven by a long-lived spawned task: registering its abort handle and
+        // then cancelling must abort the task (so a live agent subprocess would be reaped
+        // via kill_on_drop) AND leave the run terminal.
+        let store = RunStore::new();
+        let id = store.create("S-ABORT", "live", RunKind::Watched);
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Sleep effectively forever; aborting drops this future.
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            // Only runs if NOT aborted — the test asserts this never fires.
+            let _ = tx.send(());
+        });
+        store.register_abort(&id, handle.abort_handle());
+
+        store.cancel(&id);
+
+        // The task was aborted: awaiting it yields a cancelled JoinError.
+        assert!(handle.await.unwrap_err().is_cancelled());
+        // The run is terminal.
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.done);
+        assert!(store.is_cancelled(&id));
+        // The task body never completed.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancel_does_not_clobber_already_done_run() {
+        // A run that already failed stays failed after a late cancel (idempotent terminal).
+        let store = RunStore::new();
+        let id = store.create("S-DONE", "live", RunKind::Watched);
+        store.fail_with_reason(&id, "boom".to_string());
+        store.cancel(&id);
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Failed { reason: "boom".to_string() });
+        assert!(run.done);
+        // The cancel signal is still set (between-step checks would see it), which is fine.
         assert!(store.is_cancelled(&id));
     }
 

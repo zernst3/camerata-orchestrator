@@ -7433,7 +7433,11 @@ async fn uow_begin_investigation(
         let resume = state.clarify_resume.clone();
         let rid = run_id.clone();
         let sid = story_id.clone();
-        tokio::spawn(async move {
+        // Register the abort handle so a Stop (POST /api/runs/:id/cancel) can reap a run
+        // blocked inside the live agent subprocess (kill_on_drop). Cleared when it finishes.
+        let runs_for_clear = state.runs.clone();
+        let rid_for_clear = run_id.clone();
+        let handle = tokio::spawn(async move {
             crate::investigation_run::execute_investigation_run(
                 runs,
                 uow,
@@ -7446,7 +7450,9 @@ async fn uow_begin_investigation(
                 model,
             )
             .await;
+            runs_for_clear.clear_abort(&rid_for_clear);
         });
+        state.runs.register_abort(&run_id, handle.abort_handle());
     }
 
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()

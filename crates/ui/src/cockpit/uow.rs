@@ -270,8 +270,11 @@ pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> 
         .ok()
 }
 
-/// Send a cancel request for a dev run. Fire-and-forget: 204 = success; any other
-/// status or a network error is treated as benign (the run may already be done).
+/// Send a stop/cancel request for ANY active run (investigation / dev / update-branch /
+/// resolve). Fire-and-forget: 204 = success; any other status or a network error is
+/// treated as benign (the run may already be done). The server aborts the driving task,
+/// reaping any live agent subprocess, and marks the run `cancelled` (a terminal state the
+/// poller ends on).
 pub(super) async fn cancel_run(run_id: &str) -> bool {
     reqwest::Client::new()
         .post(format!("{}/api/runs/{}/cancel", crate::BFF_URL, run_id))
@@ -3349,6 +3352,9 @@ pub(super) fn UowStepRunControls(
     // decisions gate still apply. The architect turns it back off after the tooling lands.
     let mut bootstrap_skip_layer2 = use_signal(|| false);
 
+    // Busy flag for the Stop control (shown while a run is active).
+    let mut stopping = use_signal(|| false);
+
     rsx! {
         div { class: "uow-lifecycle",
             span { class: "uow-field-label", "Lifecycle" }
@@ -3366,6 +3372,56 @@ pub(super) fn UowStepRunControls(
                             span { class: "{cls}", title: "{s.label()}", "{s.label()}" }
                         }
                     }
+                }
+            }
+
+            // ── Stop control for an active run ────────────────────────────────
+            // Shown whenever a run is live (started + not done). Calls the cancel
+            // endpoint, which aborts the run's task (reaping any live agent subprocess)
+            // and marks the run cancelled — `poll_run_to_done` ends on that terminal
+            // state and the lifecycle refreshes.
+            {
+                let active = active_run();
+                let stoppable = active.as_ref().map(|r| !r.done).unwrap_or(false);
+                let rid = active.as_ref().map(|r| r.id.clone()).unwrap_or_default();
+                if stoppable {
+                    rsx! {
+                        div { class: "uow-run-stop-row",
+                            button {
+                                class: "btn-secondary uow-run-stop",
+                                disabled: stopping(),
+                                onclick: move |_| {
+                                    let rid = rid.clone();
+                                    let mut uow_refresh = uow_refresh;
+                                    let toasts = toasts;
+                                    stopping.set(true);
+                                    spawn(async move {
+                                        let ok = cancel_run(&rid).await;
+                                        if ok {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Info,
+                                                "Stopping the run…".to_string(),
+                                            );
+                                        } else {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not stop the run (it may have already finished).".to_string(),
+                                            );
+                                        }
+                                        // Refresh so the now-terminal run + stage re-read.
+                                        uow_refresh += 1;
+                                        stopping.set(false);
+                                    });
+                                },
+                                if stopping() { "Stopping…" } else { "■ Stop run" }
+                            }
+                            span { class: "section-hint", "Cancels the running agent and stops this run." }
+                        }
+                    }
+                } else {
+                    rsx! {}
                 }
             }
 
