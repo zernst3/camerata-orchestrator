@@ -667,14 +667,20 @@ impl UowStore {
     /// reference is carried on the spine story, so the key is never re-mapped (see the
     /// build decision doc). Persists immediately. Returns the created UoW.
     pub fn create_blank(&self) -> UnitOfWork {
-        self.create_blank_with_parent(None)
+        self.create_blank_with_parent(None, None)
     }
 
-    /// Create a blank DRAFT UoW with an optional `parent_id`. When `parent_id` is
-    /// `Some`, the normalized number string is stored on the UoW and carried through to
-    /// the publish step, where a native GitHub sub-issue link is created. Otherwise
-    /// identical to [`Self::create_blank`].
-    pub fn create_blank_with_parent(&self, parent_id: Option<String>) -> UnitOfWork {
+    /// Create a blank DRAFT UoW with an optional `parent_id` and an optional
+    /// `project_id`. When `parent_id` is `Some`, the normalized number string is stored on
+    /// the UoW and carried through to the publish step, where a native GitHub sub-issue link
+    /// is created. When `project_id` is `Some`, the draft is scoped to that project so it
+    /// appears in that project's `list_for_project` view (and only that project's) even
+    /// though it has no resolvable repo yet. Otherwise identical to [`Self::create_blank`].
+    pub fn create_blank_with_parent(
+        &self,
+        parent_id: Option<String>,
+        project_id: Option<String>,
+    ) -> UnitOfWork {
         let id = format!("draft-{}", Self::next_draft_token());
         let now = Self::now_rfc3339();
         let uow = {
@@ -683,6 +689,7 @@ impl UowStore {
                 story_id: id.clone(),
                 authoring: Some(AuthoringState::default()),
                 parent_id,
+                project_id,
                 updated: now,
                 ..Default::default()
             };

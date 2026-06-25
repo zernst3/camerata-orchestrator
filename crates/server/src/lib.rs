@@ -6342,7 +6342,11 @@ async fn uow_blank(
         .parent_id
         .as_deref()
         .and_then(crate::github_issues::normalize_parent_number);
-    let uow = state.uow.create_blank_with_parent(parent_id);
+    // Scope the draft to the active project so it appears in that project's
+    // `list_for_project` view (and ONLY that project's) even though it has no resolvable
+    // repo yet. If there is no active project the draft is still created, just unscoped.
+    let project_id = state.projects.active().map(|p| p.id);
+    let uow = state.uow.create_blank_with_parent(parent_id, project_id);
     Json(serde_json::json!({ "uow_id": uow.story_id }))
 }
 
@@ -11147,7 +11151,7 @@ mod tests {
         // via create_blank_with_parent to simulate a stored-but-unparseable value).
         // We bypass normalization here intentionally — the test covers the runtime guard
         // inside uow_publish's parent_link_warning arm.
-        let draft = uow_store.create_blank_with_parent(Some("not-a-number".to_string()));
+        let draft = uow_store.create_blank_with_parent(Some("not-a-number".to_string()), None);
         let draft_id = draft.story_id.clone();
         uow_store.append_authoring_turn(&draft_id, "req", "ok", "Story title", "Body");
 
