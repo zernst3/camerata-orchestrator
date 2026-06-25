@@ -631,6 +631,19 @@ impl UowStore {
 
     // ── public API ────────────────────────────────────────────────────────────
 
+    /// Delete a UoW entirely. Returns `true` if one was removed. Persists the removal.
+    /// The UI gates this behind an "are you sure?" confirmation.
+    pub fn delete(&self, story_id: &str) -> bool {
+        let removed = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            map.remove(story_id).is_some()
+        };
+        if removed {
+            self.flush();
+        }
+        removed
+    }
+
     /// Return the UoW for `story_id`, creating a default one if it does not exist yet.
     ///
     /// When this materializes a NEW UoW it persists immediately. Without this, a UoW

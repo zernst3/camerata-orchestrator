@@ -1057,6 +1057,17 @@ pub(super) async fn create_blank_uow(parent_id: Option<String>) -> Option<String
         .map(String::from)
 }
 
+/// Delete a UoW entirely (`DELETE /api/uow/:id`). Returns `true` on a 2xx. The UI gates
+/// this behind an "are you sure?" confirmation before calling it.
+pub(super) async fn delete_uow(story_id: &str) -> bool {
+    reqwest::Client::new()
+        .delete(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Set (or clear) a draft UoW's parent issue (`POST /api/uow/:id/set-draft-parent`). An
 /// empty / whitespace-only `parent_id` clears the parent (sent as null). Returns `true`
 /// on a 2xx. The parent is picked on the authoring screen; the publish step consumes the
@@ -1494,6 +1505,8 @@ pub(super) fn GovernedDevPage() -> Element {
     // The UoW list (left-nav cards). Re-fetched whenever this tick bumps (e.g. after a
     // UoW is created from a work item).
     let uows_refresh = use_signal(|| 0u32);
+    // Which UoW (by id) is awaiting a delete confirmation, if any. Gates the trash icon.
+    let mut confirm_delete = use_signal(|| Option::<String>::None);
     let uows_res = use_resource(move || {
         let _dep = uows_refresh();
         async move { fetch_uows().await }
@@ -1540,16 +1553,59 @@ pub(super) fn GovernedDevPage() -> Element {
                                 None => String::new(),
                             };
                             let stage = if u.authoring { "Authoring" } else { u.stage.label() };
+                            let confirming = confirm_delete() == Some(uid.clone());
+                            let uid_sel = uid.clone();
+                            let uid_trash = uid.clone();
+                            let uid_yes = uid.clone();
                             rsx! {
-                                button {
-                                    class: "{cls}",
-                                    onclick: move |_| sel.set(GovDevSel::Uow(uid.clone())),
-                                    span { class: "govdev-uow-title", "{title}" }
-                                    div { class: "govdev-uow-meta",
-                                        if !repo.is_empty() {
-                                            span { class: "govdev-uow-repo", "{repo}" }
+                                div { class: "{cls}",
+                                    div {
+                                        class: "govdev-uow-cardmain",
+                                        onclick: move |_| sel.set(GovDevSel::Uow(uid_sel.clone())),
+                                        span { class: "govdev-uow-title", "{title}" }
+                                        div { class: "govdev-uow-meta",
+                                            if !repo.is_empty() {
+                                                span { class: "govdev-uow-repo", "{repo}" }
+                                            }
+                                            span { class: "govdev-uow-stage", "{stage}" }
                                         }
-                                        span { class: "govdev-uow-stage", "{stage}" }
+                                    }
+                                    if confirming {
+                                        div { class: "govdev-uow-confirm",
+                                            span { class: "govdev-uow-confirm-q", "Delete?" }
+                                            button {
+                                                class: "govdev-uow-confirm-yes",
+                                                title: "Confirm delete",
+                                                onclick: move |_| {
+                                                    let sid = uid_yes.clone();
+                                                    let mut uows_refresh = uows_refresh;
+                                                    let mut sel = sel;
+                                                    let mut confirm_delete = confirm_delete;
+                                                    spawn(async move {
+                                                        if delete_uow(&sid).await {
+                                                            if sel() == GovDevSel::Uow(sid.clone()) {
+                                                                sel.set(GovDevSel::IssueManagement);
+                                                            }
+                                                            uows_refresh += 1;
+                                                        }
+                                                        confirm_delete.set(None);
+                                                    });
+                                                },
+                                                "Delete"
+                                            }
+                                            button {
+                                                class: "govdev-uow-confirm-no",
+                                                onclick: move |_| confirm_delete.set(None),
+                                                "Cancel"
+                                            }
+                                        }
+                                    } else {
+                                        button {
+                                            class: "govdev-uow-trash",
+                                            title: "Delete this Unit of Work",
+                                            onclick: move |_| confirm_delete.set(Some(uid_trash.clone())),
+                                            "\u{1f5d1}"
+                                        }
                                     }
                                 }
                             }

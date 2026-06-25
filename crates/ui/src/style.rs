@@ -3333,13 +3333,20 @@ html, body {
 .govdev-uow-list { display: flex; flex-direction: column; gap: 6px; }
 .govdev-uow-empty { font-size: 12px; color: var(--ink-faint); font-style: italic; margin: 0; }
 .govdev-uow-card {
-  display: flex; flex-direction: column; gap: 6px; align-items: flex-start; text-align: left;
+  display: flex; flex-direction: row; gap: 6px; align-items: center; text-align: left;
   border: 1px solid var(--line); background: var(--surface); border-radius: 9px;
-  padding: 9px 10px; cursor: pointer;
+  padding: 9px 10px;
   transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
 .govdev-uow-card:hover { border-color: var(--ink-faint); }
 .govdev-uow-card.sel { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+.govdev-uow-cardmain { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; flex: 1; min-width: 0; cursor: pointer; }
+.govdev-uow-trash { flex: none; background: none; border: none; cursor: pointer; opacity: .45; font-size: 13px; line-height: 1; padding: 4px 6px; border-radius: 6px; }
+.govdev-uow-trash:hover { opacity: 1; background: #fee2e2; }
+.govdev-uow-confirm { flex: none; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.govdev-uow-confirm-q { font-size: 10.5px; color: #b91c1c; }
+.govdev-uow-confirm-yes { font-size: 10.5px; background: #dc2626; color: #fff; border: none; border-radius: 5px; padding: 3px 7px; cursor: pointer; }
+.govdev-uow-confirm-no { font-size: 10.5px; background: #e5e7eb; color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
 .govdev-uow-title { font-size: 13px; font-weight: 600; color: var(--ink); line-height: 1.3; }
 .govdev-uow-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .govdev-uow-repo {

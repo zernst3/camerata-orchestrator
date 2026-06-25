@@ -501,7 +501,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/uow/:story_id/publish", post(uow_publish))
         .route("/api/uow", get(uow_list))
-        .route("/api/uow/:story_id", get(uow_get))
+        .route("/api/uow/:story_id", get(uow_get).delete(uow_delete))
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
         .route("/api/uow/:story_id/history", post(uow_append_history))
@@ -7443,6 +7443,15 @@ struct BeginInvestigationReq {
 ///
 /// 409 (with the precise reason) if the stage transition is illegal (e.g. the UoW is
 /// not at Intake) — surfaced before any run is started so the UI shows why.
+/// `DELETE /api/uow/:story_id` — remove a UoW entirely. The UI gates this behind an
+/// "are you sure?" confirmation. Returns `{ "ok": <removed> }`.
+async fn uow_delete(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": state.uow.delete(&story_id) }))
+}
+
 async fn uow_begin_investigation(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
