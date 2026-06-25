@@ -596,8 +596,10 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             // ISOLATION: only sweep UoWs whose repo belongs to a known project. The
             // global `list()` would resolve and act on every project's UoWs even when
             // none is active/onboarded; scope to the union of all projects' in-scope
-            // repos via `list_for_project`, and skip the pass entirely when there are
-            // no project repos to sweep.
+            // repos via `list_for_repos`, and skip the pass entirely when there are
+            // no project repos to sweep. This is a REPO-ONLY sweep (not a single active
+            // project's view): use `list_for_repos`, NOT `list_for_project`. Blank drafts
+            // have no worktree and no resolvable repo, so they must be excluded here.
             let project_repos: Vec<String> = projects
                 .list()
                 .into_iter()
@@ -606,7 +608,7 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
             let scoped_uows = if project_repos.is_empty() {
                 Vec::new()
             } else {
-                uow_store.list_for_project(&project_repos)
+                uow_store.list_for_repos(&project_repos)
             };
             for uow in scoped_uows {
                 if uow.stage != crate::lifecycle::UowStage::SignedOff {
@@ -5886,7 +5888,7 @@ async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfW
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    Json(state.uow.list_for_project(&p.repos))
+    Json(state.uow.list_for_project(&p.id, &p.repos))
 }
 
 /// The UoW for a story. Creates a default one if the story has no UoW yet.
@@ -6218,7 +6220,7 @@ async fn uows_list(State(state): State<AppState>) -> Result<Json<serde_json::Val
         return Ok(Json(serde_json::json!({ "uows": [] })));
     };
     let stories = state.stories.list().await.map_err(AppError)?;
-    let uows = state.uow.list_for_project(&p.repos);
+    let uows = state.uow.list_for_project(&p.id, &p.repos);
     let views: Vec<UowView> = uows
         .into_iter()
         .map(|u| {
@@ -6271,7 +6273,7 @@ async fn uow_from_workitem(
     let already = match state.projects.active() {
         Some(p) => state
             .uow
-            .list_for_project(&p.repos)
+            .list_for_project(&p.id, &p.repos)
             .iter()
             .any(|u| u.story_id == story_id),
         None => false,
@@ -7931,7 +7933,7 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
             "units_of_work": [],
         }));
     };
-    let uow_list = state.uow.list_for_project(&p.repos);
+    let uow_list = state.uow.list_for_project(&p.id, &p.repos);
     let items: Vec<StoryDevContext> = uow_list
         .into_iter()
         .map(|uow| {
