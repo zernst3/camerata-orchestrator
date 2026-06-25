@@ -2225,12 +2225,15 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
             async move { fetch_uow(&sid).await }
         })
     };
-    let stage = uow_for_stage
+    // The KNOWN lifecycle stage, or `None` when the UoW fetch is still loading OR
+    // failed. Critically we do NOT collapse "unknown" into the `Intake` default: doing
+    // so showed the "Begin investigation" button while the real stage was past Intake,
+    // so the click 409'd with "Could not begin the investigation run." The run control
+    // renders only once the stage is genuinely known (see `UowStepRunControls`).
+    let stage: Option<UowStage> = uow_for_stage
         .read()
-        .clone()
-        .flatten()
-        .map(|u| u.stage)
-        .unwrap_or_default();
+        .as_ref()
+        .and_then(|opt| opt.as_ref().map(|u| u.stage));
 
     // Live run state for THIS UoW (governed fleet through the gate).
     let active_run = use_signal(|| Option::<RunView>::None);
@@ -3201,7 +3204,11 @@ pub(super) fn UowPrControl(
 #[component]
 pub(super) fn UowStepRunControls(
     story_id: String,
-    stage: UowStage,
+    /// The KNOWN lifecycle stage, or `None` while the UoW fetch is still loading / has
+    /// failed. The run control renders ONLY when the stage is known, so a stale Intake
+    /// button can never appear over a UoW that is actually past Intake (the cause of the
+    /// spurious "Could not begin the investigation run." 409 toast).
+    stage: Option<UowStage>,
     uow_refresh: Signal<u32>,
     active_run: Signal<Option<RunView>>,
     models: Option<AuditModelsResp>,
@@ -3238,8 +3245,10 @@ pub(super) fn UowStepRunControls(
             div { class: "uow-lifecycle-strip",
                 for s in STAGES.iter().copied() {
                     {
-                        let reached = s.ordinal() <= stage.ordinal();
-                        let current = s == stage;
+                        // While the stage is unknown (loading/failed) light nothing — we
+                        // do not assume Intake.
+                        let reached = stage.is_some_and(|st| s.ordinal() <= st.ordinal());
+                        let current = stage == Some(s);
                         let mut cls = String::from("uow-stage-pip");
                         if reached { cls.push_str(" reached"); }
                         if current { cls.push_str(" current"); }
@@ -3251,8 +3260,16 @@ pub(super) fn UowStepRunControls(
             }
 
             // The run control for the CURRENT phase, inline with the steps. Only one
-            // shows at a time — it replaces the prior phase's control.
+            // shows at a time — it replaces the prior phase's control. Nothing renders
+            // until the stage is KNOWN, so a stale Intake button cannot appear over a
+            // UoW that is actually past Intake.
             match stage {
+                None => rsx! {
+                    div { class: "uow-step-control",
+                        p { class: "section-hint", "Loading lifecycle…" }
+                    }
+                },
+                Some(stage) => match stage {
                 // INVESTIGATION: model select + Begin investigation (Intake → Investigating).
                 UowStage::Intake => rsx! {
                     div { class: "uow-step-control",
@@ -3263,14 +3280,31 @@ pub(super) fn UowStepRunControls(
                                 onclick: move |_| {
                                     let sid = sid_begin.clone();
                                     let md = invest_model();
+                                    let mut uow_refresh = uow_refresh;
                                     spawn(async move {
                                         match begin_investigation_run(&sid, &md).await {
-                                            Some(rid) => poll_run_to_done(rid, active_run, uow_refresh).await,
-                                            None => crate::toast::push_toast(
-                                                toasts,
-                                                crate::toast::ToastKind::Warning,
-                                                "Could not begin the investigation run.".to_string(),
-                                            ),
+                                            crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
+                                                poll_run_to_done(rid, active_run, uow_refresh).await
+                                            }
+                                            // The UoW was not at Intake (e.g. a prior begin already
+                                            // advanced it but the displayed button was stale). Surface
+                                            // the server's precise reason AND refresh so the now-correct
+                                            // control replaces the stale "Begin investigation" button.
+                                            crate::cockpit::BeginInvestigationOutcome::Blocked(reason) => {
+                                                uow_refresh += 1;
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    reason,
+                                                );
+                                            }
+                                            crate::cockpit::BeginInvestigationOutcome::Failed => {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    "Could not begin the investigation run.".to_string(),
+                                                );
+                                            }
                                         }
                                     });
                                 },
@@ -3349,18 +3383,20 @@ pub(super) fn UowStepRunControls(
                         }
                     }
                 },
-                _ => rsx! {},
+                    _ => rsx! {},
+                },
             }
 
             // Architect transition: Approve decisions (Investigating → DecisionsApproved).
             // Kept where it was — enabled only at the Investigating stage (the server
-            // enforces this too; disabling avoids a guaranteed-409 click).
+            // enforces this too; disabling avoids a guaranteed-409 click). Disabled while
+            // the stage is unknown (loading/failed) so we never offer a guaranteed-409.
             div { class: "uow-lifecycle-actions",
                 button {
                     // Transition action → the onboarding SECONDARY variant (bordered),
                     // distinct from the accent primary run buttons but on the same system.
                     class: "btn-secondary",
-                    disabled: stage != UowStage::Investigating,
+                    disabled: stage != Some(UowStage::Investigating),
                     onclick: move |_| {
                         let sid = sid_approve.clone();
                         let mut uow_refresh = uow_refresh;
