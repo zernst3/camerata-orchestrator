@@ -844,6 +844,12 @@ Flags let us:
 
 Every rule in Camerata's corpus carries an `enforcement` field that answers one question: **how objectively can conformance be checked?** That single property decides where the rule is written and how it's enforced.
 
+![Camerata enforcement model — rule sources feeding the check layers](enforcement-model.svg)
+
+The diagram above is the canonical **stage** model — L1 Security · L2 Mechanical · L3 AI code review · L4 Origin/CI — and how rules feed each layer (full write-up: [`ENFORCEMENT_MODEL.md`](ENFORCEMENT_MODEL.md)). The table just below is a **different, related axis**: the rule *enforcement modalities* (how objectively a rule can be checked), which determine *what kind of wiring* a rule needs.
+
+> **Numbering note:** this section (and §14, and the `layer3_only` flag) use "Layer 3" for **CI**, which is **L4** in the canonical stage model above; the AI code reviewer is the new **L3**. The two numberings are being reconciled.
+
 ### The four-layer model
 
 | Rule tier | Blocks the agent's write (gate) | In-loop dev checks | Your repo's CI | Scan report |

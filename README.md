@@ -71,6 +71,15 @@ The technical wedge is **deterministic governance, not an AI verifier**: a real-
 
 **The honest boundary:** this is proven as a **standalone denial** and as the in-app deterministic self-check. The gate has **not** yet been exercised inside a full **live** development cycle, where an agent does real multi-step work and the loop iterates to a result. The console for that cycle is built (above); validating it live is the next milestone. The gate currently enforces a high-strictness security tier (a `..`/`.git`/`.ssh` path guard, a secret-file guard, and content heuristics for secrets / raw-SQL-concat / secrets-in-URLs; no AST yet) — deepening the enforced rule set behind the seam is incremental, not architectural.
 
+## The enforcement model (rules → layers)
+
+Rules are the single source of truth, but the layers consume them differently: **L3 reads any
+rule as prose instantly, while L2/L4 only enforce rules you wire into the pipeline** (mechanical
+rules need wiring; architectural rules need defining *then* wiring). That difference is why the
+layers can drift — the full model is in [`docs/ENFORCEMENT_MODEL.md`](docs/ENFORCEMENT_MODEL.md):
+
+![Camerata enforcement model — rule sources feeding the check layers](docs/enforcement-model.svg)
+
 ## Every agent is grounded in the real project
 
 A foundational invariant: **every agent that runs inside a project has on-demand READ access to the entire set of that project's repo clones** (a project can hold several distinct repos), plus the project's rules and a cheap always-on digest. It is not a context-less chatbot guessing at your stack — the story-author, the investigation agent, and the developer agent can all open any file in any of the project's repos before they reason or write. **Writes stay gated:** the only write path is the gateway's tool, jailed to a single Unit-of-Work worktree, so cross-repo reading never widens what an agent can change. See [`docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md`](docs/decisions/).

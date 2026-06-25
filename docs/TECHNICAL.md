@@ -159,6 +159,18 @@ replaced; disregard it for current code.
 
 ---
 
+## Enforcement model overview
+
+Camerata enforces rules across **four check layers** — **L1** Security · **L2** Mechanical ·
+**L3** AI code review · **L4** Origin/CI — bound by the rules as a single source of truth, with
+the lead orchestrator guaranteeing cross-repo contracts on top. The canonical model (rule types,
+the wiring cost, and why the layers drift) is [`ENFORCEMENT_MODEL.md`](ENFORCEMENT_MODEL.md):
+
+![Camerata enforcement model](enforcement-model.svg)
+
+> **Numbering note:** sections below predate the L3 AI reviewer and use "Layer 3" for **CI**
+> (now **L4**). Reconciliation to the canonical numbering is pending.
+
 ## 2. Layer-1 MCP gate
 
 ### What the gate is

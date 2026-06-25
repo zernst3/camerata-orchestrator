@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 884" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="aBlue" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#1d4ed8"/></marker>
+    <marker id="aPurple" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/></marker>
+    <marker id="aOrange" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#ea580c"/></marker>
+    <marker id="aAmber" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#ca8a04"/></marker>
+    <marker id="aCyan" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L7,3 L0,6 Z" fill="#0891b2"/></marker>
+  </defs>
+
+  <rect width="1100" height="884" fill="#ffffff"/>
+  <text x="550" y="30" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">Camerata Enforcement Model — Rule Sources &#8594; Check Layers</text>
+  <text x="550" y="52" text-anchor="middle" font-size="13" fill="#475569">L2/L4 run only the rules you WIRE in. L3 reviews the STORY + ALL selected rules as prose — against intent, like a human reviewer.</text>
+
+  <!-- ================= SOURCES : RULES (the corpus) ================= -->
+  <rect x="22" y="98" width="304" height="486" rx="10" fill="#f0fdfa" stroke="#0f766e" stroke-width="2"/>
+  <text x="174" y="122" text-anchor="middle" font-size="15" font-weight="700" fill="#0f766e">RULES &#183; the corpus (selected)</text>
+
+  <text x="174" y="144" text-anchor="middle" font-size="11" font-weight="700" font-style="italic" fill="#1e3a8a">deterministic-capable &#8594; wire to L2 / L4</text>
+  <rect x="38" y="150" width="272" height="80" rx="7" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+  <text x="174" y="172" text-anchor="middle" font-size="13" font-weight="700" fill="#1e3a8a">Mechanical</text>
+  <text x="174" y="190" text-anchor="middle" font-size="11.5" fill="#1e3a8a">deterministic logic exists (named linter)</text>
+  <text x="174" y="207" text-anchor="middle" font-size="11.5" fill="#1e3a8a">never runs until wired</text>
+  <text x="174" y="223" text-anchor="middle" font-size="11" font-style="italic" fill="#1d4ed8">1 step: wire in</text>
+
+  <rect x="38" y="238" width="272" height="86" rx="7" fill="#e0e7ff" stroke="#4f46e5" stroke-width="1.5"/>
+  <text x="174" y="260" text-anchor="middle" font-size="13" font-weight="700" fill="#3730a3">Architectural</text>
+  <text x="174" y="278" text-anchor="middle" font-size="11.5" fill="#3730a3">no off-the-shelf checker</text>
+  <text x="174" y="295" text-anchor="middle" font-size="11.5" fill="#3730a3">DEFINE per the app's specs,</text>
+  <text x="174" y="312" text-anchor="middle" font-size="11.5" fill="#3730a3">then WIRE &#160;(2 steps)</text>
+
+  <text x="174" y="352" text-anchor="middle" font-size="11" font-weight="700" font-style="italic" fill="#7c3aed">judgment-only &#8594; L3 (or a human) ONLY</text>
+  <rect x="38" y="358" width="272" height="82" rx="7" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="174" y="380" text-anchor="middle" font-size="13" font-weight="700" fill="#5b21b6">Structured</text>
+  <text x="174" y="398" text-anchor="middle" font-size="11.5" fill="#5b21b6">binary design contract; not lint-able</text>
+  <text x="174" y="415" text-anchor="middle" font-size="11.5" fill="#5b21b6">can't be made deterministic</text>
+  <text x="174" y="432" text-anchor="middle" font-size="10.5" font-style="italic" fill="#7c3aed">e.g. "API version in the URL prefix"</text>
+
+  <rect x="38" y="448" width="272" height="82" rx="7" fill="#faf5ff" stroke="#9333ea" stroke-width="1.5"/>
+  <text x="174" y="470" text-anchor="middle" font-size="13" font-weight="700" fill="#6b21a8">Prose</text>
+  <text x="174" y="488" text-anchor="middle" font-size="11.5" fill="#6b21a8">principle / matter of degree</text>
+  <text x="174" y="505" text-anchor="middle" font-size="11.5" fill="#6b21a8">a human (or L3) judges conformance</text>
+  <text x="174" y="522" text-anchor="middle" font-size="10.5" font-style="italic" fill="#9333ea">e.g. "interfaces small &amp; cohesive"</text>
+
+  <text x="174" y="556" text-anchor="middle" font-size="11" fill="#0f766e">all four types are read by L3 as prose &#8595;</text>
+
+  <!-- ================= WIRING GATEWAY ================= -->
+  <rect x="360" y="158" width="200" height="144" rx="10" fill="#fef9c3" stroke="#ca8a04" stroke-width="2.5"/>
+  <text x="460" y="182" text-anchor="middle" font-size="14" font-weight="700" fill="#854d0e">WIRE IN via a STORY</text>
+  <text x="460" y="202" text-anchor="middle" font-size="11" fill="#854d0e">.camerata/checks.toml + CI</text>
+  <text x="460" y="219" text-anchor="middle" font-size="11" fill="#854d0e">(architectural: define first)</text>
+  <line x1="378" y1="232" x2="542" y2="232" stroke="#ca8a04" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="460" y="254" text-anchor="middle" font-size="12" font-weight="700" fill="#854d0e">the rules you wire in =</text>
+  <text x="460" y="271" text-anchor="middle" font-size="12" font-weight="700" fill="#854d0e">the SSOT for L2 &amp; L4</text>
+  <text x="460" y="291" text-anchor="middle" font-size="10.5" font-style="italic" fill="#a16207">structured/prose can't come here</text>
+
+  <!-- ================= STORY (this UoW) ================= -->
+  <rect x="360" y="360" width="200" height="110" rx="10" fill="#ecfeff" stroke="#0891b2" stroke-width="2.5"/>
+  <text x="460" y="384" text-anchor="middle" font-size="14" font-weight="700" fill="#155e75">STORY &#183; this UoW</text>
+  <text x="460" y="404" text-anchor="middle" font-size="11.5" fill="#155e75">requirements &#183; acceptance</text>
+  <text x="460" y="421" text-anchor="middle" font-size="11.5" fill="#155e75">contract &#183; integrations</text>
+  <text x="460" y="445" text-anchor="middle" font-size="10.5" font-style="italic" fill="#0891b2">what a human reviewer reads —</text>
+  <text x="460" y="460" text-anchor="middle" font-size="10.5" font-style="italic" fill="#0891b2">but NOT the implementer's reasoning</text>
+
+  <!-- ================= LAYERS ================= -->
+  <rect x="620" y="98" width="456" height="50" rx="9" fill="#e2e8f0" stroke="#475569" stroke-width="1.5"/>
+  <text x="638" y="120" font-size="14" font-weight="700" fill="#334155">L1 &#183; SECURITY</text>
+  <text x="638" y="138" font-size="12" fill="#334155">deny-before-write &#183; mechanical &#183; standalone — nothing feeds it</text>
+
+  <rect x="620" y="164" width="456" height="82" rx="9" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2"/>
+  <text x="638" y="187" font-size="14" font-weight="700" fill="#1e3a8a">L2 &#183; MECHANICAL</text>
+  <text x="846" y="187" font-size="11.5" fill="#1e40af">local &#183; deterministic &#183; runs the WIRED set</text>
+  <text x="638" y="210" font-size="12" fill="#1e3a8a">lint / build / structure + wired architectural checks</text>
+  <text x="638" y="231" font-size="12" font-style="italic" fill="#1d4ed8">bounces locally (fail-closed)</text>
+
+  <rect x="620" y="262" width="456" height="150" rx="9" fill="#f5f3ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="638" y="285" font-size="14" font-weight="700" fill="#5b21b6">L3 &#183; CODE REVIEW</text>
+  <text x="846" y="285" font-size="11.5" fill="#6d28d9">local &#183; AI &#183; OPT-IN &#183; model-selectable</text>
+  <text x="638" y="308" font-size="12" fill="#5b21b6">reads the STORY (requirements &#183; contract &#183; integrations)</text>
+  <text x="638" y="325" font-size="12" fill="#5b21b6">+ ALL selected rules + the diff</text>
+  <text x="638" y="347" font-size="12" font-weight="700" fill="#5b21b6">checks the code meets the rules AND the story's intent —</text>
+  <text x="638" y="364" font-size="12" font-weight="700" fill="#5b21b6">like a human reviewer, but blind to the implementer's reasoning</text>
+  <text x="638" y="386" font-size="12" fill="#5b21b6">covers what L2/L4 structurally can't &#183; when off, you review &#183; bounces</text>
+  <text x="638" y="404" font-size="11.5" font-weight="700" fill="#7c3aed">included in Camerata &#183; no wiring needed</text>
+
+  <rect x="620" y="430" width="456" height="158" rx="9" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
+  <text x="638" y="453" font-size="14" font-weight="700" fill="#9a3412">L4 &#183; ORIGIN</text>
+  <text x="846" y="453" font-size="11.5" fill="#c2410c">remote &#183; GitHub PR / CI &#183; USER-OWNED</text>
+  <text x="638" y="476" font-size="12" fill="#9a3412">runs the same wired SSOT checks in CI — but YOU maintain it</text>
+  <text x="638" y="498" font-size="12" fill="#9a3412">+ extra checks beyond the SSOT</text>
+  <text x="638" y="520" font-size="12" fill="#9a3412">+ optional user-built AI reviewer —</text>
+  <text x="638" y="537" font-size="12" font-weight="700" fill="#9a3412">SEPARATE from L3; Camerata does NOT set this up</text>
+  <text x="638" y="559" font-size="11.5" font-style="italic" fill="#c2410c">you own this pipeline</text>
+
+  <!-- ================= ARROWS ================= -->
+  <!-- Mechanical -> Wire -->
+  <path d="M310 190 Q336 192 358 200" fill="none" stroke="#1d4ed8" stroke-width="1.8" marker-end="url(#aBlue)"/>
+  <text x="316" y="176" font-size="10.5" fill="#1d4ed8">wire in</text>
+  <!-- Architectural -> Wire -->
+  <path d="M310 280 Q336 272 358 254" fill="none" stroke="#4f46e5" stroke-width="1.8" marker-end="url(#aPurple)"/>
+  <text x="314" y="298" font-size="10.5" fill="#4f46e5">define + wire</text>
+
+  <!-- Wire -> L2 (the SSOT) -->
+  <path d="M560 212 Q592 210 616 208" fill="none" stroke="#ca8a04" stroke-width="2.6" marker-end="url(#aAmber)"/>
+  <text x="556" y="196" font-size="11" font-weight="700" fill="#854d0e">wired set = SSOT</text>
+
+  <!-- ALL rules -> L3 (prose, no wiring) -->
+  <path d="M326 505 Q470 545 614 398" fill="none" stroke="#7c3aed" stroke-width="2.4" marker-end="url(#aPurple)"/>
+  <text x="338" y="586" font-size="11.5" font-weight="700" fill="#7c3aed">ALL selected rules &#8594; L3 as prose</text>
+  <text x="338" y="603" font-size="10.5" fill="#7c3aed">(structured + prose go nowhere else)</text>
+
+  <!-- STORY -> L3 -->
+  <path d="M560 402 Q592 376 614 348" fill="none" stroke="#0891b2" stroke-width="2.2" marker-end="url(#aCyan)"/>
+
+  <!-- Wire (SSOT) -> L4 directly (same SSOT; user-maintained CI) -->
+  <path d="M556 286 Q602 312 602 392 Q602 458 616 458" fill="none" stroke="#ea580c" stroke-width="2.2" stroke-dasharray="6 4" marker-end="url(#aOrange)"/>
+
+  <!-- ================= LEGEND ================= -->
+  <rect x="22" y="700" width="486" height="168" rx="9" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="38" y="724" font-size="13" font-weight="700" fill="#0f172a">Legend</text>
+  <rect x="38" y="736" width="22" height="13" rx="2" fill="#dbeafe" stroke="#1d4ed8"/>
+  <text x="70" y="747" font-size="12" fill="#334155">Deterministic-capable rules — can be wired to L2 / L4</text>
+  <rect x="38" y="760" width="22" height="13" rx="2" fill="#f5f3ff" stroke="#7c3aed"/>
+  <text x="70" y="771" font-size="12" fill="#334155">Judgment-only rules — L3 (or a human); never L2/L4</text>
+  <rect x="38" y="784" width="22" height="13" rx="2" fill="#ecfeff" stroke="#0891b2"/>
+  <text x="70" y="795" font-size="12" fill="#334155">Story / spec — L3 reviews code against it (intent), like a human</text>
+  <line x1="38" y1="814" x2="60" y2="814" stroke="#ea580c" stroke-width="2.5" stroke-dasharray="6 4"/>
+  <text x="70" y="818" font-size="12" fill="#334155">User-managed — Camerata doesn't fully own it (drift risk)</text>
+  <text x="38" y="844" font-size="11.5" font-style="italic" fill="#64748b">L1 (grey) is standalone. The wired set — not the whole corpus — is the SSOT for L2 &amp; L4.</text>
+  <text x="38" y="861" font-size="11.5" font-style="italic" fill="#64748b">L3 isn't redundant with L2/L4: it covers what they structurally can't, plus story intent.</text>
+
+  <!-- ================= DRIFT ================= -->
+  <rect x="524" y="700" width="552" height="168" rx="9" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5"/>
+  <text x="540" y="724" font-size="13" font-weight="700" fill="#b91c1c">&#9888; Why the layers can drift (and from what)</text>
+  <text x="540" y="748" font-size="12" fill="#7f1d1d">L2 &#8596; L3 &#160; a rule works in L3 as prose immediately, but L2 needs it</text>
+  <text x="540" y="765" font-size="12" fill="#7f1d1d">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; wired first (and architectural rules defined per spec first).</text>
+  <text x="540" y="789" font-size="12" fill="#7f1d1d">L2 &#8596; L4 &#160; Camerata generates CI from the wired set, but you maintain</text>
+  <text x="540" y="806" font-size="12" fill="#7f1d1d">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; origin — let it lapse and they diverge.</text>
+  <text x="540" y="830" font-size="12" fill="#7f1d1d">L4 alone &#160; extra origin checks + a user-built AI reviewer (&#8800; L3)</text>
+  <text x="540" y="847" font-size="12" fill="#7f1d1d">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160; live entirely outside Camerata.</text>
+</svg>
