@@ -780,6 +780,10 @@ pub async fn execute_dev_implement_run(
         Some(dir.clone()),
         false, // worker — not orchestrator
         rate_limiter.clone(),
+        // Stable per-run session id → OpenRouter sticky routing + KV-cache warmth.
+        // The story_id is stable across all iterations of this run's bounce-and-revise
+        // loop (same story, same session id, cache stays warm). It changes between runs.
+        Some(story_id.as_str()),
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1677,6 +1681,7 @@ mod tests {
                 output_tokens: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                or_cache_discount: None,
             })
         }
         async fn complete_streaming(
@@ -1709,6 +1714,7 @@ mod tests {
                 output_tokens: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                or_cache_discount: None,
             })
         }
         async fn complete_streaming(

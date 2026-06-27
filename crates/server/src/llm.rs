@@ -403,6 +403,12 @@ pub struct LlmResponse {
     /// when prompt caching is active; zero otherwise.
     #[serde(default)]
     pub cache_creation_input_tokens: u64,
+    /// OpenRouter response-level cache discount (0.0–1.0) when `X-OpenRouter-Cache: true`
+    /// is set. `1.0` means the full response was served from cache (no model cost);
+    /// `0.0` means no discount; `None` when the field was absent (non-OR backend or
+    /// caching not enabled). Use this to track savings in the usage ledger / UI.
+    #[serde(default)]
+    pub or_cache_discount: Option<f64>,
 }
 
 /// Pull the full token accounting from a Claude `usage` object (CLI JSON or API response).
@@ -670,6 +676,7 @@ impl Llm {
             output_tokens,
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,
+            or_cache_discount: None,
         })
     }
 
@@ -853,6 +860,7 @@ impl Llm {
             output_tokens: usage_out,
             cache_read_input_tokens: usage_cache_read,
             cache_creation_input_tokens: usage_cache_creation,
+            or_cache_discount: None,
         })
     }
 
@@ -966,6 +974,7 @@ impl Llm {
             output_tokens,
             cache_read_input_tokens: cache_read,
             cache_creation_input_tokens: cache_creation,
+            or_cache_discount: None,
         })
     }
 }
@@ -1304,6 +1313,7 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
                     output_tokens,
                     cache_read_input_tokens: cache_read,
                     cache_creation_input_tokens: cache_creation,
+                    or_cache_discount: None,
                 }),
                 error: None,
             });
@@ -1365,18 +1375,42 @@ pub struct OpenRouterCompleter {
     api_key: String,
     /// Shared per-provider rate limiter. Awaited before every HTTP call.
     limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+    /// Stable session id for this completer instance. Sent as `session_id` in the
+    /// OpenRouter request body to activate sticky routing + caching from the first
+    /// request. Derived from the UoW/run id where available; otherwise a per-instance
+    /// random token. Identical across all calls made by this instance so the router
+    /// routes them to the same backend slot and the KV cache stays warm.
+    session_id: String,
 }
 
 impl OpenRouterCompleter {
     /// Construct an `OpenRouterCompleter` for the agentic driver path.
     ///
     /// Used by `api_agent_driver::build_agent_driver` to wire the per-call rate limiter
-    /// and key without going through `build_completer`.
+    /// and key without going through `build_completer`. A stable `session_id` is
+    /// generated here; callers with an existing run/UoW id can set it via
+    /// [`Self::with_session_id`] to keep the cached prefix warm across retries.
     pub(crate) fn for_agent(
         api_key: String,
         limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
     ) -> Self {
-        Self { api_key, limiter }
+        Self {
+            api_key,
+            limiter,
+            session_id: new_session_token(),
+        }
+    }
+
+    /// Override the session id. Builder form; call after [`Self::for_agent`] when a
+    /// stable per-run id (e.g. a UoW story id) is available. The id must be stable
+    /// across the SAME run so OpenRouter keeps routing to the same backend slot; it
+    /// MUST change between independent runs to avoid cross-run cache pollution.
+    pub(crate) fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        let s = id.into();
+        if !s.trim().is_empty() {
+            self.session_id = s;
+        }
+        self
     }
 
     /// Expose the resolved API key for callers in the same crate that need to post
@@ -1385,21 +1419,55 @@ impl OpenRouterCompleter {
         self.api_key.clone()
     }
 
+    /// Expose the session id so the `ApiAgentDriver` can embed it in direct HTTP calls
+    /// that bypass the `Completer` trait (the tool-schema path).
+    pub(crate) fn session_id_for_agent(&self) -> String {
+        self.session_id.clone()
+    }
+
     /// Call OpenRouter's `/api/v1/chat/completions` endpoint and return the completion.
     ///
     /// Awaits the per-provider rate limiter before issuing the HTTP request so concurrent
     /// callers self-throttle to the configured RPM cap (default 20 RPM for "openrouter").
+    ///
+    /// Caching controls (confirmed facts, verified against OpenRouter docs):
+    /// - `session_id` in the request body → sticky routing to the same backend, which
+    ///   makes the KV cache warm from the FIRST request (no cold-start per-call).
+    /// - `cache_control: {type:"ephemeral"}` on the system message block → per-block
+    ///   prompt-cache breakpoint for Anthropic-compatible models routed via OpenRouter.
+    /// - `X-OpenRouter-Cache: true` header → response-level caching (full response
+    ///   replay on identical requests). `cache_discount` in the response body tracks
+    ///   savings (1.0 = fully cached; 0.0 = no discount).
     async fn call_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        self.call_api_inner(req, model, false).await
+    }
+
+    /// Internal call path, parameterised by `bust_cache`. When `bust_cache = true` the
+    /// `X-OpenRouter-Cache-Clear: true` header is added alongside `X-OpenRouter-Cache:
+    /// true` to force a fresh model call even when a cached response exists (use on a
+    /// looping/stuck retry).
+    async fn call_api_inner(
+        &self,
+        req: &LlmRequest,
+        model: &str,
+        bust_cache: bool,
+    ) -> anyhow::Result<LlmResponse> {
         // Acquire a slot before hitting the wire. Unlimited providers (Anthropic, etc.)
         // return immediately; rate-limited ones park until a refill token is available.
         self.limiter.acquire("openrouter").await;
-        // Build the messages array. System prompt goes as a separate "system" role message
-        // when present (the OpenAI-compatible schema used by OpenRouter supports this).
+
+        // Build the messages array. The system message gets a `cache_control` breakpoint
+        // so Anthropic-compatible models behind OpenRouter cache the static prefix once
+        // and serve it cheaply on subsequent calls within the same session.
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if let Some(system) = &req.system {
             messages.push(serde_json::json!({
                 "role": "system",
-                "content": system
+                "content": [{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                }]
             }));
         }
         messages.push(serde_json::json!({
@@ -1411,14 +1479,27 @@ impl OpenRouterCompleter {
             "model": model,
             "max_tokens": req.max_tokens,
             "messages": messages,
+            // Sticky routing: tells OpenRouter to route this session to the same backend
+            // slot so the KV cache stays warm from request #1. Must be stable within a
+            // run and distinct across independent runs.
+            "session_id": self.session_id,
         });
 
-        let resp = reqwest::Client::new()
+        let mut builder = reqwest::Client::new()
             .post("https://openrouter.ai/api/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", "https://camerata.ai")
             .header("X-Title", "Camerata")
+            // Enable OpenRouter response-level caching. `cache_discount` in the response
+            // body reports savings (0.0–1.0). This is in addition to per-block prompt caching.
+            .header("X-OpenRouter-Cache", "true");
+        if bust_cache {
+            // Force a fresh model call — use on stuck-loop or bad-cached-response retries.
+            builder = builder.header("X-OpenRouter-Cache-Clear", "true");
+        }
+
+        let resp = builder
             .json(&body)
             .send()
             .await
@@ -1446,6 +1527,17 @@ impl OpenRouterCompleter {
         let output_tokens = v["usage"]["completion_tokens"].as_u64();
         // The response may echo back the model id (useful for wildcard/routing models).
         let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+        // `cache_discount` (0.0–1.0): how much of the cost was covered by the OR cache.
+        // Log it so we can track savings without requiring a separate metrics system.
+        let or_cache_discount = v["cache_discount"].as_f64();
+        if let Some(d) = or_cache_discount {
+            if d > 0.0 {
+                eprintln!(
+                    "[camerata-server/llm] OpenRouter cache_discount={d:.2} for session={} model={model_returned}",
+                    self.session_id
+                );
+            }
+        }
 
         Ok(LlmResponse {
             text: output,
@@ -1456,6 +1548,7 @@ impl OpenRouterCompleter {
             output_tokens,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            or_cache_discount,
         })
     }
 }
@@ -1489,6 +1582,19 @@ impl Completer for OpenRouterCompleter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// Generate a stable per-instance session token. Combines timestamp nanoseconds +
+/// a process-local counter for uniqueness within a process; cheap + collision-free.
+fn new_session_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("cam-{nanos:x}-{n:x}")
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -1542,7 +1648,11 @@ pub fn build_completer(
                          set — add it via Settings → Credentials before using this model"
                     )
                 })?;
-            Ok(std::sync::Arc::new(OpenRouterCompleter { api_key: key, limiter }))
+            Ok(std::sync::Arc::new(OpenRouterCompleter {
+            api_key: key,
+            limiter,
+            session_id: new_session_token(),
+        }))
         }
         // "claude" or any unrecognised provider: use the existing Anthropic Llm.
         _ => Ok(llm),
@@ -1912,6 +2022,7 @@ malformed line, not json
                     output_tokens: Some(5),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    or_cache_discount: None,
                 }),
                 error: None,
             },
@@ -1931,6 +2042,7 @@ malformed line, not json
                     output_tokens: Some(8),
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    or_cache_discount: None,
                 }),
                 error: None,
             },

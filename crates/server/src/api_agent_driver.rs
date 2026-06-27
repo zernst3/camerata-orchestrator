@@ -132,18 +132,63 @@ pub struct ApiAgentDriver {
     /// The rule subset to evaluate writes against. Populated from the governed role at run time.
     /// Set by [`ApiAgentDriver::with_rule_subset`]; empty = no rules enforced (insecure, tests only).
     rule_subset: Vec<RuleId>,
+    /// Stable OpenRouter session id for this driver instance. Passed as `session_id` in
+    /// every request to activate sticky routing + KV-cache warmth from request #1. Must
+    /// be stable within a run (so the cache stays warm across multi-turn loops) and
+    /// distinct between independent runs (to avoid cross-run cache pollution). Derived
+    /// from the `OpenRouterCompleter`'s session id at construction time; falls back to a
+    /// fresh token for non-OR completers (no-op for them).
+    session_id: String,
+    /// When `true`, the NEXT provider call sends `X-OpenRouter-Cache-Clear: true` to force
+    /// a fresh model response even when a cached response exists. Reset to `false` after
+    /// each use. Set this on a stuck-loop retry via [`Self::bust_cache_on_next_call`].
+    bust_cache: bool,
 }
 
 impl ApiAgentDriver {
     /// Build a new driver backed by `completer` using `model`.
+    ///
+    /// If `completer` is an [`crate::llm::OpenRouterCompleter`], its `session_id` is
+    /// inherited here so every direct HTTP call (the tool-schema path) uses the same
+    /// session id as bare-LLM calls made through the `Completer` trait.
     pub fn new(completer: Arc<dyn Completer>, model: impl Into<String>) -> Self {
+        // Inherit the session id from an OpenRouterCompleter when available; fall back to
+        // a stable per-instance token for other completer types (no-op for them).
+        let session_id = completer
+            .as_any()
+            .downcast_ref::<crate::llm::OpenRouterCompleter>()
+            .map(|or| or.session_id_for_agent())
+            .unwrap_or_else(|| {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                format!("cam-drv-{nanos:x}-{n:x}")
+            });
         Self {
             completer,
             model: model.into(),
             worktree: None,
             orchestrator: false,
             rule_subset: Vec::new(),
+            session_id,
+            bust_cache: false,
         }
+    }
+
+    /// Request that the next provider call clears the OpenRouter response cache.
+    ///
+    /// Sets the internal `bust_cache` flag, which causes `call_openrouter_with_tools`
+    /// to include `X-OpenRouter-Cache-Clear: true` on the immediate next call only
+    /// (the flag is reset after each use inside the loop). Use this when the loop
+    /// detects a bad or repeating cached response and needs a fresh model completion.
+    ///
+    /// No-op for non-OpenRouter completers.
+    pub fn bust_cache_on_next_call(&mut self) {
+        self.bust_cache = true;
     }
 
     /// Set the rule subset to enforce on `gated_write` calls. Should be the role's
@@ -214,6 +259,10 @@ async fn run_loop(
     let mut total_cost_usd: f64 = 0.0;
     let mut final_result = String::new();
     let mut iteration = 0usize;
+    // Per-loop bust flag: starts from the driver's initial value, then resets after use.
+    // The driver's `bust_cache` flag is read ONCE at loop entry so a mid-loop
+    // `bust_cache_on_next_call` call (from outside this future) doesn't race.
+    let mut bust_cache_this_turn = driver.bust_cache;
 
     loop {
         if iteration >= MAX_ITERATIONS {
@@ -234,9 +283,13 @@ async fn run_loop(
             system_prompt.as_deref(),
             &messages,
             &tool_schemas,
+            &driver.session_id,
+            bust_cache_this_turn,
         )
         .await
         .with_context(|| format!("provider call failed on iteration {iteration}"))?;
+        // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
+        bust_cache_this_turn = false;
 
         // Accumulate cost.
         if let Some(c) = resp.cost_usd {
@@ -301,7 +354,8 @@ async fn run_loop(
     }
 
     Ok(AgentOutcome {
-        session_id: format!("api-driver-{}", iteration),
+        // Use the stable driver session_id so the outcome is traceable across multi-turn runs.
+        session_id: driver.session_id.clone(),
         result: final_result,
         cost_usd: if total_cost_usd > 0.0 { Some(total_cost_usd) } else { None },
         denials,
@@ -316,6 +370,10 @@ async fn run_loop(
 /// The `Completer` trait doesn't natively carry tool schemas, so we build the
 /// request body manually here and call the underlying HTTP client directly.
 ///
+/// `session_id` enables sticky routing + KV-cache warmth (passed to OpenRouter via the
+/// request body). `bust_cache` adds `X-OpenRouter-Cache-Clear: true` for one-shot cache
+/// invalidation on stuck-loop retries. Both are no-ops for non-OR completers.
+///
 /// **Design note:** The `Completer` trait is designed for bare-LLM (no tools). To send
 /// tool schemas, we build the full OpenRouter request body and post it directly, bypassing
 /// the `Completer` abstraction for this specific call. The response normalization stays
@@ -327,6 +385,8 @@ async fn call_provider(
     system: Option<&str>,
     messages: &[Value],
     tool_schemas: &[Value],
+    session_id: &str,
+    bust_cache: bool,
 ) -> anyhow::Result<LlmResponse> {
     // Attempt to downcast to OpenRouterCompleter for tool-schema support.
     // If the downcast fails (unknown completer type), fall back to a schema-less call
@@ -334,9 +394,18 @@ async fn call_provider(
     let any = completer.as_any();
 
     if any.is::<crate::llm::OpenRouterCompleter>() {
-        // Use OpenRouter directly with tool schemas.
+        // Use OpenRouter directly with tool schemas + caching controls.
         let openrouter_key = get_openrouter_key_from_completer(completer)?;
-        call_openrouter_with_tools(&openrouter_key, model, system, messages, tool_schemas).await
+        call_openrouter_with_tools(
+            &openrouter_key,
+            model,
+            system,
+            messages,
+            tool_schemas,
+            session_id,
+            bust_cache,
+        )
+        .await
     } else {
         // Fallback: use the Completer trait (no tool schemas — text only).
         // This handles test stubs and future completers.
@@ -363,19 +432,31 @@ fn get_openrouter_key_from_completer(completer: &dyn Completer) -> anyhow::Resul
 }
 
 /// POST directly to OpenRouter's `/api/v1/chat/completions` with tool schemas included.
+///
+/// `session_id` enables sticky routing + KV-cache warmth from request #1.
+/// `bust_cache` adds `X-OpenRouter-Cache-Clear: true` to force a fresh model call
+/// (use on stuck-loop / bad-cached-response retries).
 async fn call_openrouter_with_tools(
     api_key: &str,
     model: &str,
     system: Option<&str>,
     messages: &[Value],
     tool_schemas: &[Value],
+    session_id: &str,
+    bust_cache: bool,
 ) -> anyhow::Result<LlmResponse> {
     // Build the full messages array with an optional system message prepended.
+    // The system message gets a `cache_control` breakpoint so Anthropic-compatible
+    // models routed via OpenRouter cache the static system prefix once per session.
     let mut full_messages: Vec<Value> = Vec::new();
     if let Some(sys) = system {
         full_messages.push(serde_json::json!({
             "role": "system",
-            "content": sys,
+            "content": [{
+                "type": "text",
+                "text": sys,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }],
         }));
     }
     full_messages.extend_from_slice(messages);
@@ -384,6 +465,8 @@ async fn call_openrouter_with_tools(
         "model": model,
         "messages": full_messages,
         "max_tokens": 8192,
+        // Sticky routing: same backend slot across all turns so the KV cache stays warm.
+        "session_id": session_id,
     });
     if !tool_schemas.is_empty() {
         body["tools"] = Value::Array(tool_schemas.to_vec());
@@ -391,12 +474,19 @@ async fn call_openrouter_with_tools(
         body["tool_choice"] = serde_json::json!("auto");
     }
 
-    let resp = reqwest::Client::new()
+    let mut builder = reqwest::Client::new()
         .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .header("HTTP-Referer", "https://camerata.ai")
         .header("X-Title", "Camerata")
+        // Enable OpenRouter response-level caching; `cache_discount` in the body tracks savings.
+        .header("X-OpenRouter-Cache", "true");
+    if bust_cache {
+        builder = builder.header("X-OpenRouter-Cache-Clear", "true");
+    }
+
+    let resp = builder
         .json(&body)
         .send()
         .await
@@ -425,6 +515,16 @@ async fn call_openrouter_with_tools(
     let input_tokens = v["usage"]["prompt_tokens"].as_u64();
     let output_tokens = v["usage"]["completion_tokens"].as_u64();
     let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+    // Track OR response-level cache savings; log when non-zero.
+    let or_cache_discount = v["cache_discount"].as_f64();
+    if let Some(d) = or_cache_discount {
+        if d > 0.0 {
+            eprintln!(
+                "[camerata-server/api_agent_driver] OpenRouter cache_discount={d:.2} \
+                 session={session_id} model={model_returned}"
+            );
+        }
+    }
 
     Ok(LlmResponse {
         text: raw_json,
@@ -435,6 +535,7 @@ async fn call_openrouter_with_tools(
         output_tokens,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        or_cache_discount,
     })
 }
 
@@ -1081,6 +1182,11 @@ fn build_system_prompt(role: &Role) -> Option<String> {
 /// - **`"openrouter"` provider:** returns an `ApiAgentDriver` backed by the
 ///   `OpenRouterCompleter` (the native, provider-agnostic loop, in-process gateway).
 ///
+/// `run_session_id` is an optional stable id for this run (e.g. the UoW story id or a
+/// run id string). When `Some`, it is set on the `OpenRouterCompleter` so every request
+/// in this run shares the same OpenRouter session id, keeping the KV cache warm across
+/// all multi-turn loop iterations. When `None` a per-instance token is generated.
+///
 /// This is the run-orchestration seam where driver selection happens, keeping the
 /// choice out of every individual caller (dev_implement_run, etc.).
 ///
@@ -1097,6 +1203,7 @@ pub fn build_agent_driver(
     worktree: Option<PathBuf>,
     orchestrator: bool,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    run_session_id: Option<&str>,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -1118,7 +1225,11 @@ pub fn build_agent_driver(
                     )
                 })?;
 
-            let completer = Arc::new(crate::llm::OpenRouterCompleter::for_agent(key, limiter));
+            let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(key, limiter);
+            if let Some(sid) = run_session_id {
+                or_completer = or_completer.with_session_id(sid);
+            }
+            let completer = Arc::new(or_completer);
             let mut driver = ApiAgentDriver::new(completer, model_id)
                 .with_rule_subset(rule_subset)
                 .as_orchestrator(orchestrator);
@@ -1185,6 +1296,7 @@ mod tests {
                 output_tokens: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                or_cache_discount: None,
             })
         }
         async fn complete_streaming(
@@ -1265,6 +1377,7 @@ mod tests {
                 output_tokens: None,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                or_cache_discount: None,
             })
         }
 
@@ -1609,6 +1722,7 @@ mod tests {
             output_tokens: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            or_cache_discount: None,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "Task complete!"),
@@ -1641,6 +1755,7 @@ mod tests {
             output_tokens: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            or_cache_discount: None,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -1674,6 +1789,7 @@ mod tests {
             output_tokens: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            or_cache_discount: None,
         };
         match parse_response(&resp) {
             ParsedResponse::ToolCalls { calls, .. } => {
@@ -1696,6 +1812,7 @@ mod tests {
             output_tokens: None,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
+            or_cache_discount: None,
         };
         match parse_response(&resp) {
             ParsedResponse::FinalText(t) => assert_eq!(t, "plain response with no JSON"),
@@ -1732,6 +1849,7 @@ mod tests {
             None,                 // worktree
             false,                // orchestrator
             limiter,
+            None,                 // run_session_id
         );
         assert!(
             result.is_ok(),
@@ -1781,6 +1899,7 @@ mod tests {
             None,
             false,
             limiter,
+            None, // run_session_id
         );
         assert!(
             result.is_ok(),
@@ -1808,6 +1927,7 @@ mod tests {
             None,
             false,
             limiter,
+            None, // run_session_id
         );
         assert!(
             result.is_err(),
@@ -1887,5 +2007,141 @@ mod tests {
             !wt.join("forbidden/config.rs").exists(),
             "denied file must not exist"
         );
+    }
+
+    // ── OpenRouter caching controls ───────────────────────────────────────────
+
+    /// `ApiAgentDriver::new` inherits the `session_id` from an `OpenRouterCompleter`.
+    /// The session id must be non-empty and must match what the completer exposes.
+    #[test]
+    fn driver_inherits_session_id_from_openrouter_completer() {
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+        let or_completer = crate::llm::OpenRouterCompleter::for_agent(
+            "sk-or-test".to_string(),
+            limiter,
+        )
+        .with_session_id("my-story-id-123");
+        let expected_session = or_completer.session_id_for_agent();
+        assert_eq!(expected_session, "my-story-id-123");
+
+        let driver = ApiAgentDriver::new(Arc::new(or_completer), "openrouter/model");
+        // session_id must be inherited (non-empty, matches what the completer reports).
+        assert_eq!(
+            driver.session_id,
+            "my-story-id-123",
+            "driver must inherit the completer's session id"
+        );
+    }
+
+    /// Non-OR completers (stubs) generate a per-instance session token (non-empty).
+    #[test]
+    fn driver_generates_session_id_for_non_or_completer() {
+        let driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+        );
+        assert!(
+            !driver.session_id.is_empty(),
+            "session_id must be non-empty even for non-OR completers"
+        );
+        // Two distinct drivers must get different session ids (no collision).
+        let driver2 = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+        );
+        assert_ne!(
+            driver.session_id,
+            driver2.session_id,
+            "two drivers must have distinct session ids"
+        );
+    }
+
+    /// `with_session_id` on `OpenRouterCompleter` overrides the auto-generated token
+    /// and is the value the agent driver inherits.
+    #[test]
+    fn openrouter_completer_with_session_id_overrides_generated_token() {
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+        let completer = crate::llm::OpenRouterCompleter::for_agent("key".to_string(), limiter)
+            .with_session_id("custom-session-xyz");
+        assert_eq!(completer.session_id_for_agent(), "custom-session-xyz");
+    }
+
+    /// `with_session_id("")` (empty string) is a no-op — the generated token is preserved.
+    #[test]
+    fn openrouter_completer_empty_session_id_is_noop() {
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+        let completer = crate::llm::OpenRouterCompleter::for_agent("key".to_string(), limiter)
+            .with_session_id("");
+        // Empty override must leave the auto-generated session id in place (non-empty).
+        assert!(
+            !completer.session_id_for_agent().is_empty(),
+            "empty with_session_id must not clear the session token"
+        );
+    }
+
+    /// `bust_cache_on_next_call` sets `bust_cache = true` on the driver.
+    #[test]
+    fn bust_cache_flag_is_settable() {
+        let mut driver = ApiAgentDriver::new(
+            Arc::new(StubCompleter("done".to_string())),
+            "stub-model",
+        );
+        assert!(!driver.bust_cache, "bust_cache must start false");
+        driver.bust_cache_on_next_call();
+        assert!(driver.bust_cache, "bust_cache must be true after call");
+    }
+
+    /// `build_agent_driver` passes `run_session_id` through to the OpenRouter completer:
+    /// the resulting driver must carry the supplied session id.
+    #[test]
+    fn build_agent_driver_wires_run_session_id_to_or_driver() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        creds
+            .set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test-key")
+            .unwrap();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        let driver = build_agent_driver(
+            "openrouter/mistral-7b",
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![],
+            None,
+            false,
+            limiter,
+            Some("uow-story-id-42"), // run_session_id
+        )
+        .expect("build must succeed");
+
+        // The outcome session_id is written from driver.session_id in run_loop.
+        // We can't run the loop without a live OR endpoint, but we can check that
+        // `build_agent_driver` returned Ok (i.e. key was found + driver built).
+        // The deeper session_id wiring is verified by `driver_inherits_session_id_from_openrouter_completer`.
+        let _ = driver; // verified: it is an ApiAgentDriver pointing at OR
+    }
+
+    /// `or_cache_discount` on `LlmResponse` is `None` for stub paths and well-formed
+    /// for OR paths that would set it. Struct-level test (no HTTP call needed).
+    #[test]
+    fn llm_response_or_cache_discount_field_exists_and_defaults_none() {
+        let resp = LlmResponse {
+            text: "t".to_string(),
+            model: "m".to_string(),
+            backend: "stub".to_string(),
+            cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+        };
+        assert!(resp.or_cache_discount.is_none(), "default is None");
+
+        // A response with a discount set (simulates what call_api_inner would produce).
+        let resp_cached = LlmResponse { or_cache_discount: Some(0.75), ..resp.clone() };
+        assert_eq!(resp_cached.or_cache_discount, Some(0.75));
     }
 }

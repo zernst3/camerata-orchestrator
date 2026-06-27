@@ -24,6 +24,16 @@
 //! BUDGET: the whole block is bounded. The digest truncates docs, caps the file tree,
 //! and reads at most a small set of manifests per repo. The result is a compact prose
 //! block, not the repo's source.
+//!
+//! PREFIX STABILITY (OpenRouter / API driver cache behaviour):
+//! The pure functions in this module (`render_rule_context`, `render_repo_digest`,
+//! `assemble`) are deterministic given the same inputs, but they are NOT called here on
+//! every LLM turn. The `ApiAgentDriver::run_loop` calls `build_system_prompt(role)` ONCE
+//! before entering the turn loop; the resulting string is then reused verbatim for every
+//! turn's `system` field. This means the static prefix (rules + repo digest) is identical
+//! across all turns, which allows OpenRouter's per-block `cache_control` breakpoint in
+//! `call_openrouter_with_tools` to take effect from the second turn onward. No
+//! regeneration happens inside the loop, so there is no prefix-instability problem to fix.
 
 use std::path::Path;
 
