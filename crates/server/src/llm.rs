@@ -1368,6 +1368,23 @@ pub struct OpenRouterCompleter {
 }
 
 impl OpenRouterCompleter {
+    /// Construct an `OpenRouterCompleter` for the agentic driver path.
+    ///
+    /// Used by `api_agent_driver::build_agent_driver` to wire the per-call rate limiter
+    /// and key without going through `build_completer`.
+    pub(crate) fn for_agent(
+        api_key: String,
+        limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+    ) -> Self {
+        Self { api_key, limiter }
+    }
+
+    /// Expose the resolved API key for callers in the same crate that need to post
+    /// directly with tool schemas (the `ApiAgentDriver`'s agentic HTTP call).
+    pub(crate) fn api_key_for_agent(&self) -> String {
+        self.api_key.clone()
+    }
+
     /// Call OpenRouter's `/api/v1/chat/completions` endpoint and return the completion.
     ///
     /// Awaits the per-provider rate limiter before issuing the HTTP request so concurrent

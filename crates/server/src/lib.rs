@@ -14,6 +14,7 @@
 //! land in later phases, behind the same router.
 
 pub mod ai_audit;
+pub mod api_agent_driver;
 pub mod arm;
 pub mod auto_fire;
 pub mod dep_audit;
