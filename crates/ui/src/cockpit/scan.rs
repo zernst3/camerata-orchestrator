@@ -3153,14 +3153,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 .and_then(|m| m.models.iter().find(|o| o.id == id).map(|o| (o.price_in, o.price_out)))
                                 .unwrap_or(fallback)
                         };
-                        let (a_in, a_out) = price(&audit_model(), (3.0, 15.0));
-                        let (c_in, c_out) = price(&calibration_model(), (a_in, a_out));
+                        // When AI scan is off, every model price is zeroed — no LLM calls
+                        // means no token spend. The deep tier also requires AI, so it too is
+                        // zeroed. This ensures the estimate correctly shows $0 (or "<$0.01")
+                        // when the user has selected deterministic-only mode.
+                        let ai_on = run_ai_review();
+                        let (a_in, a_out) = if ai_on { price(&audit_model(), (3.0, 15.0)) } else { (0.0, 0.0) };
+                        let (c_in, c_out) = if ai_on { price(&calibration_model(), (a_in, a_out)) } else { (0.0, 0.0) };
                         let sel = selected_count();
                         // Mirror the request flags the audit will actually send: incremental
                         // scope (only changed files cost tokens unless Full scan is ticked) and
                         // the deep SOC-2/security tier (three extra whole-repo passes).
                         let incremental = !audit_full_scan();
-                        let deep = audit_deep();
+                        // Deep tier only runs with AI; force it off in the estimate when AI is off.
+                        let deep = audit_deep() && ai_on;
                         let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };

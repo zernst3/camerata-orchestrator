@@ -85,14 +85,16 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         id: "claude-opus-4-8",
         context: 200_000,
         weight: 10,
-        price_in: 15.0,
-        price_out: 75.0,
+        // Anthropic list price: $5 / $25 per million tokens (input / output).
+        price_in: 5.0,
+        price_out: 25.0,
     },
     RegistryEntryStatic {
         display: "Sonnet 4.6",
         id: "claude-sonnet-4-6",
         context: 200_000,
         weight: 3,
+        // Anthropic list price: $3 / $15 per million tokens (input / output).
         price_in: 3.0,
         price_out: 15.0,
     },
@@ -101,8 +103,9 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         id: "claude-haiku-4-5-20251001",
         context: 200_000,
         weight: 1,
-        price_in: 0.8,
-        price_out: 4.0,
+        // Anthropic list price: $1 / $5 per million tokens (input / output).
+        price_in: 1.0,
+        price_out: 5.0,
     },
 ];
 
@@ -449,6 +452,82 @@ mod tests {
         assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
         assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
+    }
+
+    // ── Claude static list prices ─────────────────────────────────────────────
+    //
+    // These pins ensure the registry carries the correct Anthropic list prices so
+    // that the onboarding cost estimator produces meaningful (non-zero) estimates.
+    // If Anthropic changes list pricing, update CLAUDE_REGISTRY_MODELS AND these
+    // tests together.
+
+    #[test]
+    fn claude_opus_carries_list_price_5_25() {
+        let entries = claude_entries();
+        let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
+        assert!(
+            (opus.price_in - 5.0).abs() < f64::EPSILON,
+            "Opus 4.8 price_in must be $5/M, got {}",
+            opus.price_in
+        );
+        assert!(
+            (opus.price_out - 25.0).abs() < f64::EPSILON,
+            "Opus 4.8 price_out must be $25/M, got {}",
+            opus.price_out
+        );
+    }
+
+    #[test]
+    fn claude_sonnet_carries_list_price_3_15() {
+        let entries = claude_entries();
+        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-4-6").unwrap();
+        assert!(
+            (sonnet.price_in - 3.0).abs() < f64::EPSILON,
+            "Sonnet 4.6 price_in must be $3/M, got {}",
+            sonnet.price_in
+        );
+        assert!(
+            (sonnet.price_out - 15.0).abs() < f64::EPSILON,
+            "Sonnet 4.6 price_out must be $15/M, got {}",
+            sonnet.price_out
+        );
+    }
+
+    #[test]
+    fn claude_haiku_carries_list_price_1_5() {
+        let entries = claude_entries();
+        let haiku = entries
+            .iter()
+            .find(|e| e.id == "claude-haiku-4-5-20251001")
+            .unwrap();
+        assert!(
+            (haiku.price_in - 1.0).abs() < f64::EPSILON,
+            "Haiku 4.5 price_in must be $1/M, got {}",
+            haiku.price_in
+        );
+        assert!(
+            (haiku.price_out - 5.0).abs() < f64::EPSILON,
+            "Haiku 4.5 price_out must be $5/M, got {}",
+            haiku.price_out
+        );
+    }
+
+    /// All Claude models must carry non-zero prices so the estimator produces meaningful
+    /// (non-zero) dollar figures when those models are selected for AI scanning.
+    #[test]
+    fn all_claude_entries_have_nonzero_prices() {
+        for e in claude_entries() {
+            assert!(
+                e.price_in > 0.0,
+                "{} must have price_in > 0 (estimator needs real prices)",
+                e.id
+            );
+            assert!(
+                e.price_out > 0.0,
+                "{} must have price_out > 0 (estimator needs real prices)",
+                e.id
+            );
+        }
     }
 
     // ── coding_score ──────────────────────────────────────────────────────────

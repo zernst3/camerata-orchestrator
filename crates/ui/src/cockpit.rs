@@ -2285,6 +2285,66 @@ mod tests {
         );
     }
 
+    // ── estimate_audit_cost — AI-scan-off and free-model pricing ─────────────
+
+    /// When AI scan is off (run_ai_review=false), the UI passes 0.0 for all model prices.
+    /// estimate_audit_cost must return $0 in that case (no LLM calls, no token spend).
+    #[test]
+    fn ai_scan_off_zero_prices_yields_zero_dollars() {
+        // Simulate the UI's behaviour when run_ai_review() is false: both model prices
+        // are clamped to (0.0, 0.0) before calling estimate_audit_cost.
+        let (toks, dollars, _passes) =
+            estimate_audit_cost(350_000, 30, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
+        assert_eq!(
+            dollars, 0.0,
+            "zero prices must produce $0 estimate (AI scan off): got {dollars}"
+        );
+        // Token count is still computed (for informational display) even at $0.
+        assert!(toks > 0, "token count should still be non-zero even when prices are zero");
+    }
+
+    /// A free OpenRouter model has price_in=0.0 and price_out=0.0.  Passing those values
+    /// must produce a $0 estimate (the model is free, so no cost regardless of token count).
+    #[test]
+    fn free_model_zero_prices_yields_zero_dollars() {
+        let (_, dollars, _) =
+            estimate_audit_cost(200_000, 15, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
+        assert_eq!(
+            dollars, 0.0,
+            "free model (price_in=price_out=0) must yield $0 estimate: got {dollars}"
+        );
+    }
+
+    /// A paid model with known registry prices must produce a non-zero estimate, and the
+    /// estimate must scale with price: doubling the model price doubles the dollar figure.
+    #[test]
+    fn paid_model_registry_prices_produce_nonzero_and_scale_linearly() {
+        let (_, dollars_base, _) =
+            estimate_audit_cost(200_000, 15, "parallel", 1.0, 5.0, 1.0, 5.0, false, false, false);
+        let (_, dollars_double, _) =
+            estimate_audit_cost(200_000, 15, "parallel", 2.0, 10.0, 2.0, 10.0, false, false, false);
+        assert!(dollars_base > 0.0, "paid model must yield non-zero estimate: {dollars_base}");
+        // Doubling prices must double the dollar figure (the function is linear in price).
+        let ratio = dollars_double / dollars_base;
+        assert!(
+            (ratio - 2.0).abs() < 0.001,
+            "doubling model prices must double the estimate: ratio={ratio:.4}"
+        );
+    }
+
+    /// Sonnet 4.6 registry prices ($3/$15 per M) produce a meaningful estimate for a
+    /// medium-sized repo scan — sanity-checks the default fallback used by the UI.
+    #[test]
+    fn sonnet_registry_price_estimate_is_positive() {
+        // Sonnet 4.6 list price: $3 in / $15 out per million tokens.
+        let (_, dollars, _) =
+            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
+        assert!(
+            dollars > 0.0,
+            "Sonnet-priced estimate must be positive for a 350k-char, 30-rule scan: {dollars}"
+        );
+    }
+
     // ── selection_key() unit tests ────────────────────────────────────────────
 
     use super::{selection_key, SINGLE_REPO_SELECTION_KEY};
