@@ -166,7 +166,7 @@ html, body {
   padding: 40px 32px 88px;
   animation: rise .7s var(--ease) both;
 }
-.page-wide { max-width: 860px; }
+.page-wide { max-width: 90%; width: 90%; }
 
 @keyframes rise {
   from { opacity: 0; transform: translateY(14px); }
@@ -958,7 +958,7 @@ html, body {
 /* ===================================================================== */
 /* The enterprise cockpit — a dense, single-pane control surface.        */
 /* ===================================================================== */
-.cockpit { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; background: var(--paper); }
+.cockpit { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; background: transparent; }
 
 /* Top bar */
 .cockpit-topbar { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -1161,7 +1161,7 @@ html, body {
 .cockpit-body { flex: 1; display: grid; grid-template-columns: 250px 1fr 290px; min-height: 0; }
 .cockpit-rail, .cockpit-inspector { padding: 14px; overflow-y: auto; }
 .cockpit-rail { border-right: 1px solid var(--line); background: #fbfaf7; }
-.cockpit-inspector { border-left: 1px solid var(--line); background: #fbfaf7; }
+.cockpit-inspector { border-left: 1px solid var(--line); background: rgba(20,18,17,0.97); }
 .cockpit-rail-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--ink-faint); margin: 0 0 8px; }
 .cockpit-rail-label.needs { margin-top: 20px; color: var(--accent-ink); }
 
@@ -1389,7 +1389,7 @@ html, body {
 .cockpit-notice {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 8px; text-align: center;
-  padding: 40px; background: var(--paper);
+  padding: 40px; background: transparent;
 }
 
 /* Cockpit internal nav: control surface vs routines (both architect tools). */
@@ -3552,7 +3552,7 @@ html, body {
   justify-content: center;
   align-items: center;
   pointer-events: none;
-  opacity: 0.38;       /* Bletchley raised value */
+  opacity: 0.5;        /* Bletchley raised value */
   transition: opacity 0.5s ease;
 }
 .bombe-bg-machine.bombe-running {

@@ -82,7 +82,7 @@ pub fn CredentialsSettings() -> Element {
 
     rsx! {
         div { class: "credentials-panel",
-            h2 { class: "credentials-title", "Credentials" }
+            h2 { class: "credentials-title", "Settings" }
             p { class: "credentials-intro",
                 "Keys are stored in the OS keychain — never in files or the repo. "
                 "The full value is write-only: only the first 4 characters are shown after saving."

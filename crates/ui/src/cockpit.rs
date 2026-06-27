@@ -1287,7 +1287,7 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
             button {
                 class: cls(CockpitView::Credentials),
                 onclick: move |_| view.set(CockpitView::Credentials),
-                "Credentials"
+                "Settings"
             }
             // Persistent cumulative usage meter, pinned to the right of the nav row.
             UsageMeter {}
