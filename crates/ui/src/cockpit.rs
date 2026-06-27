@@ -23,7 +23,7 @@ pub(crate) use dioxus::prelude::*;
 // `pub(crate) use` so submodules inherit these via `use super::*;`.
 pub(crate) use chorale_core::{
     BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
-    RenderKind, RowId, TableState,
+    RenderKind, RowId, TableState, Theme,
 };
 pub(crate) use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
 

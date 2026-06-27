@@ -2169,6 +2169,7 @@ pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>)
             sort_enabled: true,
             filter_enabled: true,
             sticky_header: true,
+            theme: Theme::Dark,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(id) = id_map.get(&rid) {
                     on_open.call(id.clone());

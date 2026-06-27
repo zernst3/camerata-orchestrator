@@ -137,7 +137,7 @@ pub(super) fn CustomRulesTable(
     use_hook(move || handle.set_grouping(vec![ColumnId("domain")]));
 
     rsx! {
-        Table { handle, sort_enabled: true, selection_enabled: true }
+        Table { handle, sort_enabled: true, selection_enabled: true, theme: Theme::Dark }
         button {
             class: "btn-restart",
             onclick: move |_| {
@@ -804,6 +804,7 @@ pub(super) fn ProjectRulesTable(
             filter_enabled: true,
             selection_enabled: true,
             sticky_header: true,
+            theme: Theme::Dark,
             row_cell_renderers: applied_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(row) = id_map_click.get(&rid) {
@@ -1053,6 +1054,7 @@ pub(super) fn AllRulesTable(
             sort_enabled: true,
             filter_enabled: true,
             sticky_header: true,
+            theme: Theme::Dark,
             row_cell_renderers: corpus_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
@@ -3416,6 +3418,7 @@ pub(super) fn ProposedRulesTable(
             sort_enabled: true,
             selection_enabled: true,
             filter_enabled: true,
+            theme: Theme::Dark,
             row_cell_renderers: rule_type_renderers,
             // 0.2.3: expand-all / collapse-all control in the grouped header. The table is
             // grouped by domain and mounts collapsed, so this lets the architect open every

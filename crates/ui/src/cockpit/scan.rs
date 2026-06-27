@@ -1686,6 +1686,7 @@ pub(super) fn FindingsTable(
             // 0.2.3: an expand-all / collapse-all control in the grouped header (the
             // findings table groups by rule -> file), so a long audit collapses at once.
             group_expand_toggle: true,
+            theme: Theme::Dark,
             row_cell_renderers: row_renderers,
             // Critical (security-floor) rows get a red full-row highlight via the 0.2.3
             // conditional row-styling hook — replaces the old per-cell stripe renderer.
