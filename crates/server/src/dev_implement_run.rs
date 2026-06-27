@@ -59,6 +59,7 @@ use camerata_core::{AgentDriver, RuleId};
 use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::DecisionRecord;
 
+use crate::api_agent_driver::build_agent_driver;
 use crate::llm::Completer;
 use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
@@ -623,6 +624,12 @@ pub async fn execute_dev_implement_run(
     // the primary repo's worktree runs Layer-2; full per-repo L2 needs live multi-repo
     // fan-out + per-repo toolchain runners, deferred until live fleet wiring).
     repo_worktrees: Vec<RepoWorktree>,
+    // Provider-dispatch context: used by `build_agent_driver` to select between the
+    // ClaudeCliDriver (claude provider) and ApiAgentDriver (openrouter provider).
+    // Passed from AppState so the live run picks the right driver for `model`.
+    registry: crate::model_registry::ModelRegistry,
+    credential_store: Arc<dyn crate::credentials::CredentialStore>,
+    rate_limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -758,7 +765,32 @@ pub async fn execute_dev_implement_run(
             return;
         }
     };
-    let driver = spawn.driver.with_model(&model);
+    // Select driver based on model's provider: ClaudeCliDriver for "claude" provider
+    // (subscription path, no per-token cost), ApiAgentDriver for "openrouter" provider
+    // (native in-process loop, Layer-1 enforced via gateway lib).
+    // TODO(provider-agnostic-followup): agentic-level tier-chain fallback and
+    // orchestrator-via-API delegate/fan_out dispatch are not yet implemented.
+    let mcp_config_path = spawn.mcp_config.display().to_string();
+    let driver: Arc<dyn AgentDriver> = match build_agent_driver(
+        &model,
+        &registry,
+        credential_store.as_ref(),
+        &mcp_config_path,
+        role.rule_subset.clone(),
+        Some(dir.clone()),
+        false, // worker — not orchestrator
+        rate_limiter.clone(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            fail(
+                &runs,
+                &uow,
+                format!("could not build agent driver for model `{model}`: {e}"),
+            );
+            return;
+        }
+    };
 
     event(
         &runs,
@@ -1363,6 +1395,9 @@ mod tests {
             None,       // L3 not enabled in this test
             None,       // integration gate not enabled in this test
             Vec::new(), // single-repo: no multi-repo worktrees
+            crate::model_registry::ModelRegistry::new(),
+            std::sync::Arc::new(crate::credentials::MemoryCredentialStore::new()),
+            std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
         )
         .await;
 

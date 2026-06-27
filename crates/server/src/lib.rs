@@ -1309,6 +1309,10 @@ async fn start_governed_run(
                 }
             };
 
+            // Clone the provider-dispatch context before the move closure captures it.
+            let impl_registry = state.model_registry.clone();
+            let impl_creds = state.credential_store.clone();
+            let impl_limiter = state.rate_limiter.clone();
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -1330,6 +1334,9 @@ async fn start_governed_run(
                     l3_bundle,
                     integration_gate_bundle,
                     repo_worktrees,
+                    impl_registry,
+                    impl_creds,
+                    impl_limiter,
                 )
                 .await
             });

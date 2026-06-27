@@ -1149,6 +1149,7 @@ mod tests {
     use super::*;
     use camerata_core::Role;
     use camerata_gateway::{enforced_gate_rules, gov1_rule};
+    use crate::credentials::CredentialStore as _;
     use std::sync::Arc;
 
     // ── test helpers ─────────────────────────────────────────────────────────
@@ -1700,6 +1701,123 @@ mod tests {
             ParsedResponse::FinalText(t) => assert_eq!(t, "plain response with no JSON"),
             _ => panic!("expected FinalText"),
         }
+    }
+
+    // ── driver selection (build_agent_driver) ────────────────────────────────
+
+    /// Verify that a model with provider "claude" selects ClaudeCliDriver.
+    ///
+    /// We can't inspect the concrete type behind `Arc<dyn AgentDriver>` directly,
+    /// so we test the selection indirectly: for a "claude" provider model with no
+    /// OpenRouter key in the credential store, `build_agent_driver` must succeed
+    /// (the ClaudeCliDriver path never reads credentials). For an "openrouter"
+    /// model WITH a valid key it must also succeed (ApiAgentDriver path).
+    #[test]
+    fn driver_selection_claude_provider_succeeds_without_openrouter_key() {
+        // Registry with only the static Claude entries (no OpenRouter entries).
+        let registry = crate::model_registry::ModelRegistry::new();
+        // Credential store with NO OpenRouter key set.
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        // Pick any Claude model id (it's in the static registry with provider = "claude").
+        let model_id = "claude-sonnet-4-6";
+
+        let result = build_agent_driver(
+            model_id,
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json", // mcp_config_path — not opened for this test
+            vec![],               // rule_subset
+            None,                 // worktree
+            false,                // orchestrator
+            limiter,
+        );
+        assert!(
+            result.is_ok(),
+            "claude provider model must select ClaudeCliDriver without needing a credential"
+        );
+    }
+
+    /// Build a minimal `RegistryEntry` for use in tests (only id + provider matter for
+    /// driver selection; the remaining fields are zeroed/empty).
+    fn openrouter_test_entry(id: &str) -> crate::model_registry::RegistryEntry {
+        crate::model_registry::RegistryEntry {
+            id: id.to_string(),
+            provider: "openrouter".to_string(),
+            display: "Test OpenRouter Model".to_string(),
+            free: true,
+            tool_use: true,
+            context: 4096,
+            coding: 0.5,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+            caching: false,
+        }
+    }
+
+    /// Verify that a model with provider "openrouter" selects ApiAgentDriver when
+    /// the OpenRouter key is present in the credential store.
+    #[test]
+    fn driver_selection_openrouter_provider_succeeds_with_key() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        // Seed an OpenRouter model into the registry.
+        registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
+
+        // Credential store WITH an OpenRouter key.
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        creds
+            .set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test-key")
+            .unwrap();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        let result = build_agent_driver(
+            "openrouter/mistral-7b",
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![],
+            None,
+            false,
+            limiter,
+        );
+        assert!(
+            result.is_ok(),
+            "openrouter provider model with key must select ApiAgentDriver"
+        );
+    }
+
+    /// Verify that a model with provider "openrouter" returns an error when the
+    /// OpenRouter key is NOT set in the credential store.
+    #[test]
+    fn driver_selection_openrouter_provider_errors_without_key() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
+
+        // No key in the credential store.
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        let result = build_agent_driver(
+            "openrouter/mistral-7b",
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![],
+            None,
+            false,
+            limiter,
+        );
+        assert!(
+            result.is_err(),
+            "openrouter model without credential must return an error"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("OPENROUTER_API_KEY"),
+            "error message must mention OPENROUTER_API_KEY: {err}"
+        );
     }
 
     // ── end-to-end with stub completer ────────────────────────────────────────
