@@ -3461,7 +3461,7 @@ html, body {
 .wi-detail-actions { margin-top: 12px; }
 
 /* UoW dev controls */
-.uow-dev { max-width: 920px; }
+.uow-dev { max-width: 1400px; }
 .uow-dev-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 .uow-dev-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
 .uow-dev-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
@@ -4467,6 +4467,30 @@ select:focus {
   padding: 12px 16px;
   border-bottom: 1.5px solid var(--line);
   background: rgba(26,24,22, var(--opacity-mid));
+}
+
+/* Status "Status: <value>" inline pair */
+.uow-phase-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.uow-status-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.uow-status-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 999px;
+  padding: 2px 9px;
 }
 
 /* The three-tab flex band */

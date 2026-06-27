@@ -3037,9 +3037,9 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
 
             // ── Top bar: status · pull · phase selector · stop ────────────────
             div { class: "uow-phase-topbar",
-                // Status (informational only)
+                // Status (informational only — derived from lifecycle stage, not a control)
                 div { class: "uow-phase-status",
-                    span { class: "uow-field-label", "Status" }
+                    span { class: "uow-status-label", "Status:" }
                     span { class: "uow-status-badge", "{status_label}" }
                 }
 
@@ -3722,11 +3722,6 @@ pub(super) fn InvestigationPhaseView(
     #[props(default = OversightMode::Interactive)]
     oversight: OversightMode,
 ) -> Element {
-    // Pass a no-op dev-tier through to UowStepRunControls (it only uses invest_model here).
-    let dev_strongest = use_signal(String::new);
-    let dev_balanced = use_signal(String::new);
-    let dev_fast = use_signal(String::new);
-
     let toasts_inv = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     // Clarification refresh counter — bumped on each answer.
@@ -3828,7 +3823,7 @@ pub(super) fn InvestigationPhaseView(
 
     rsx! {
         div { class: "uow-phase-body",
-            // Lifecycle strip + run controls (Begin investigation / Approve decisions)
+            // Begin investigation run control (Investigation & Refinement phase only — §4.1)
             UowStepRunControls {
                 story_id: story_id.clone(),
                 stage,
@@ -3836,9 +3831,6 @@ pub(super) fn InvestigationPhaseView(
                 active_run,
                 models: models.clone(),
                 invest_model,
-                dev_strongest,
-                dev_balanced,
-                dev_fast,
             }
 
             // Agent activity for the active run
@@ -4139,11 +4131,18 @@ pub(super) fn DevelopmentPhaseView(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
-    // Pass a no-op invest_model through to UowStepRunControls (it only uses dev tiers here).
-    let invest_model = use_signal(String::new);
+    // story_id clone for the dev-run button (must be captured by value in the closure).
+    let story_id_dev = story_id.clone();
 
-    // Derive stage and has_branch from the shared uow_for_stage resource.
-    let stage: Option<UowStage> = uow_for_stage
+    // One-time BOOTSTRAP toggle (default OFF, per-run, NOT persisted): when on, this dev
+    // run skips ONLY the layer-2 post-task lint/test bounce so a brownfield repo can land
+    // the linters/checkers layer-2 needs. The security gate (layer 1) + the no-code-first
+    // decisions gate still apply. The architect turns it back off after the tooling lands.
+    let mut bootstrap_skip_layer2 = use_signal(|| false);
+
+    // Derive stage from the shared uow_for_stage resource (informational; not used to gate
+    // Begin Development — §5.1: the button is always available unless the contract block applies).
+    let _stage: Option<UowStage> = uow_for_stage
         .read()
         .as_ref()
         .and_then(|opt| opt.as_ref().map(|u| u.stage));
@@ -4366,19 +4365,77 @@ pub(super) fn DevelopmentPhaseView(
                 }
             }
 
-            // ── §2: Development run controls (Begin Development — always available unless
-            //         the contract block applies) ─────────────────────────────────────────
+            // ── §2: Begin Development — always available (§5.1), contract block applied above
+            // The one precondition is the contract gate; if that doesn't apply we always
+            // show the development run control regardless of whether Intake / Investigation
+            // have run. No lifecycle-stage gating here — the architect says "go" and the
+            // orchestrator enforces the contract/Layer-1 rules at run time.
             if !show_contract_block {
-                UowStepRunControls {
-                    story_id: story_id.clone(),
-                    stage,
-                    uow_refresh,
-                    active_run,
-                    models: models.clone(),
-                    invest_model,
-                    dev_strongest,
-                    dev_balanced,
-                    dev_fast,
+                div { class: "uow-step-control",
+                    p { class: "uow-step-h", "Development" }
+                    div { class: "uow-tier-grid",
+                        div { class: "uow-tier-field",
+                            span { class: "uow-field-label", "Strongest" }
+                            ModelSelect { models: models.clone(), selected: dev_strongest }
+                        }
+                        div { class: "uow-tier-field",
+                            span { class: "uow-field-label", "Balanced" }
+                            ModelSelect { models: models.clone(), selected: dev_balanced }
+                        }
+                        div { class: "uow-tier-field",
+                            span { class: "uow-field-label", "Fast" }
+                            ModelSelect { models: models.clone(), selected: dev_fast }
+                        }
+                    }
+                    p { class: "section-hint", "The strongest tier orchestrates and delegates simpler work to the balanced and fast tiers." }
+                    // One-time bootstrap escape hatch (default OFF, per-run). Skips ONLY
+                    // layer-2; the security gate (layer 1) still applies.
+                    label { class: "uow-bootstrap-toggle",
+                        input {
+                            r#type: "checkbox",
+                            checked: bootstrap_skip_layer2(),
+                            onchange: move |e| bootstrap_skip_layer2.set(e.checked()),
+                        }
+                        span { class: "uow-bootstrap-text",
+                            span { class: "uow-bootstrap-label", "Bootstrap run — skip layer-2 checks" }
+                            span { class: "uow-bootstrap-hint",
+                                "For the run that installs the linters/checkers layer-2 needs. The security gate (layer 1) still applies. Turn off afterward."
+                            }
+                        }
+                    }
+                    div { class: "run-control-row",
+                        button {
+                            class: "btn-run",
+                            onclick: move |_| {
+                                let sid = story_id_dev.clone();
+                                let tm = TierMapView {
+                                    strongest: dev_strongest(),
+                                    balanced: vec![dev_balanced()],
+                                    fast: vec![dev_fast()],
+                                };
+                                let skip_l2 = bootstrap_skip_layer2();
+                                let toasts = toasts;
+                                spawn(async move {
+                                    match start_dev_run(&sid, &tm, skip_l2).await {
+                                        StartRunOutcome::Started(rid) => {
+                                            poll_run_to_done(rid, active_run, uow_refresh).await
+                                        }
+                                        StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            reason,
+                                        ),
+                                        StartRunOutcome::Failed => crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "Could not start the governed development run.".to_string(),
+                                        ),
+                                    }
+                                });
+                            },
+                            "\u{25b6} Begin Development"
+                        }
+                    }
                 }
             }
 
@@ -5909,34 +5966,10 @@ pub(super) fn UowStepRunControls(
     active_run: Signal<Option<RunView>>,
     models: Option<AuditModelsResp>,
     invest_model: Signal<String>,
-    dev_strongest: Signal<String>,
-    dev_balanced: Signal<String>,
-    dev_fast: Signal<String>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
-    // The full ordered progression, rendered as a strip with the reached stages lit.
-    const STAGES: &[UowStage] = &[
-        UowStage::Intake,
-        UowStage::Investigating,
-        UowStage::DecisionsApproved,
-        UowStage::Development,
-        UowStage::AwaitingQa,
-        UowStage::SignedOff,
-    ];
-
     let sid_begin = story_id.clone();
-    let sid_approve = story_id.clone();
-    let sid_dev = story_id.clone();
-
-    // One-time BOOTSTRAP toggle (default OFF, per-run, NOT persisted): when on, this dev
-    // run skips ONLY the layer-2 post-task lint/test bounce so a brownfield repo can land
-    // the linters/checkers layer-2 needs. The security gate (layer 1) + the no-code-first
-    // decisions gate still apply. The architect turns it back off after the tooling lands.
-    let mut bootstrap_skip_layer2 = use_signal(|| false);
-
-    // Busy flag for the Stop control (shown while a run is active).
-    let mut stopping = use_signal(|| false);
 
     // Busy flag for "Begin investigation": disables the button + shows the Bombe while the
     // begin request is in flight, so a double-click can't fire a SECOND begin (the first
@@ -5944,257 +5977,85 @@ pub(super) fn UowStepRunControls(
     let mut starting = use_signal(|| false);
 
     rsx! {
-        div { class: "uow-lifecycle",
-            span { class: "uow-field-label", "Lifecycle" }
-            div { class: "uow-lifecycle-strip",
-                for s in STAGES.iter().copied() {
-                    {
-                        // While the stage is unknown (loading/failed) light nothing — we
-                        // do not assume Intake.
-                        let reached = stage.is_some_and(|st| s.ordinal() <= st.ordinal());
-                        let current = stage == Some(s);
-                        let mut cls = String::from("uow-stage-pip");
-                        if reached { cls.push_str(" reached"); }
-                        if current { cls.push_str(" current"); }
-                        rsx! {
-                            span { class: "{cls}", title: "{s.label()}", "{s.label()}" }
-                        }
-                    }
+        // ── Begin investigation: model select + run button ─────────────────────
+        // Shown only in the Investigation & Refinement phase (§4.1). Nothing renders
+        // until the stage is known so a stale button cannot fire a 409.
+        match stage {
+            None => rsx! {
+                div { class: "uow-step-control",
+                    p { class: "section-hint", "Loading…" }
                 }
-            }
-
-            // ── Stop control for an active run ────────────────────────────────
-            // Shown whenever a run is live (started + not done). Calls the cancel
-            // endpoint, which aborts the run's task (reaping any live agent subprocess)
-            // and marks the run cancelled — `poll_run_to_done` ends on that terminal
-            // state and the lifecycle refreshes.
-            {
-                let active = active_run();
-                let stoppable = active.as_ref().map(|r| !r.done).unwrap_or(false);
-                let rid = active.as_ref().map(|r| r.id.clone()).unwrap_or_default();
-                if stoppable {
-                    rsx! {
-                        div { class: "uow-run-stop-row",
-                            button {
-                                class: "btn-secondary uow-run-stop",
-                                disabled: stopping(),
-                                onclick: move |_| {
-                                    let rid = rid.clone();
-                                    let mut uow_refresh = uow_refresh;
-                                    let toasts = toasts;
-                                    stopping.set(true);
-                                    spawn(async move {
-                                        let ok = cancel_run(&rid).await;
-                                        if ok {
-                                            crate::toast::push_toast(
-                                                toasts,
-                                                crate::toast::ToastKind::Info,
-                                                "Stopping the run…".to_string(),
-                                            );
-                                        } else {
-                                            crate::toast::push_toast(
-                                                toasts,
-                                                crate::toast::ToastKind::Warning,
-                                                "Could not stop the run (it may have already finished).".to_string(),
-                                            );
-                                        }
-                                        // Refresh so the now-terminal run + stage re-read.
-                                        uow_refresh += 1;
-                                        stopping.set(false);
-                                    });
-                                },
-                                if stopping() { "Stopping…" } else { "■ Stop run" }
-                            }
-                            // In-progress: the background Bombe machine activates via
-                            // the global loading guard in poll_run_to_done above.
-                            span { class: "section-hint", "Cancels the running agent and stops this run." }
-                        }
-                    }
-                } else {
-                    rsx! {}
-                }
-            }
-
-            // The run control for the CURRENT phase, inline with the steps. Only one
-            // shows at a time — it replaces the prior phase's control. Nothing renders
-            // until the stage is KNOWN, so a stale Intake button cannot appear over a
-            // UoW that is actually past Intake.
-            match stage {
-                None => rsx! {
-                    div { class: "uow-step-control",
-                        p { class: "section-hint", "Loading lifecycle…" }
-                    }
-                },
-                Some(stage) => match stage {
-                // INVESTIGATION: model select + Begin investigation (Intake → Investigating).
-                UowStage::Intake => rsx! {
-                    div { class: "uow-step-control",
-                        p { class: "uow-step-h", "Investigation" }
-                        div { class: "run-control-row",
-                            button {
-                                class: "btn-run",
-                                disabled: starting(),
-                                onclick: move |_| {
-                                    // Guard: ignore re-clicks while a begin is already in flight.
-                                    if starting() {
-                                        return;
-                                    }
-                                    starting.set(true);
-                                    let sid = sid_begin.clone();
-                                    let md = invest_model();
-                                    let mut uow_refresh = uow_refresh;
-                                    let mut starting = starting;
-                                    spawn(async move {
-                                        // Loading guard: Bombe machine runs while the investigation is in flight.
-                                        let _guard = crate::loading::LoadingGuard::new();
-                                        match begin_investigation_run(&sid, &md).await {
-                                            crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
-                                                // The server advances Intake → Investigating BEFORE it
-                                                // returns, so refresh the lifecycle IMMEDIATELY — the
-                                                // stage + control flip to Investigating right now, not
-                                                // when the run finishes. A live-off placeholder run
-                                                // completes instantly with nothing to stream; without
-                                                // this immediate bump the stale Intake button stayed up
-                                                // and a second click 409'd. Then stream the run.
-                                                uow_refresh += 1;
-                                                poll_run_to_done(rid, active_run, uow_refresh).await;
-                                            }
-                                            // The UoW was not at Intake (e.g. a prior begin already
-                                            // advanced it but the displayed button was stale). Surface
-                                            // the server's precise reason AND refresh so the now-correct
-                                            // control replaces the stale "Begin investigation" button.
-                                            crate::cockpit::BeginInvestigationOutcome::Blocked(reason) => {
-                                                uow_refresh += 1;
-                                                crate::toast::push_toast(
-                                                    toasts,
-                                                    crate::toast::ToastKind::Warning,
-                                                    reason,
-                                                );
-                                            }
-                                            crate::cockpit::BeginInvestigationOutcome::Failed => {
-                                                crate::toast::push_toast(
-                                                    toasts,
-                                                    crate::toast::ToastKind::Warning,
-                                                    "Could not begin the investigation run.".to_string(),
-                                                );
-                                            }
-                                        }
-                                        starting.set(false);
-                                    });
-                                },
+            },
+            Some(UowStage::Intake) => rsx! {
+                div { class: "uow-step-control",
+                    p { class: "uow-step-h", "Investigation" }
+                    div { class: "run-control-row",
+                        button {
+                            class: "btn-run",
+                            disabled: starting(),
+                            onclick: move |_| {
+                                // Guard: ignore re-clicks while a begin is already in flight.
                                 if starting() {
-                                    span { "Starting\u{2026}" }
-                                } else {
-                                    "\u{25b6} Begin investigation"
+                                    return;
                                 }
-                            }
-                            ModelSelect { models: models.clone(), selected: invest_model }
-                        }
-                        p { class: "section-hint", "Runs an investigation pass, then advances the stage to Investigating." }
-                    }
-                },
-                // DECISIONS APPROVED → ready to run development: 3 tier selects + run.
-                UowStage::DecisionsApproved => rsx! {
-                    div { class: "uow-step-control",
-                        p { class: "uow-step-h", "Development" }
-                        div { class: "uow-tier-grid",
-                            div { class: "uow-tier-field",
-                                span { class: "uow-field-label", "Strongest" }
-                                ModelSelect { models: models.clone(), selected: dev_strongest }
-                            }
-                            div { class: "uow-tier-field",
-                                span { class: "uow-field-label", "Balanced" }
-                                ModelSelect { models: models.clone(), selected: dev_balanced }
-                            }
-                            div { class: "uow-tier-field",
-                                span { class: "uow-field-label", "Fast" }
-                                ModelSelect { models: models.clone(), selected: dev_fast }
-                            }
-                        }
-                        p { class: "section-hint", "The strongest tier orchestrates and delegates simpler work to the balanced and fast tiers." }
-                        // One-time bootstrap escape hatch (default OFF, per-run). Skips ONLY
-                        // layer-2; the security gate (layer 1) still applies.
-                        label { class: "uow-bootstrap-toggle",
-                            input {
-                                r#type: "checkbox",
-                                checked: bootstrap_skip_layer2(),
-                                onchange: move |e| bootstrap_skip_layer2.set(e.checked()),
-                            }
-                            span { class: "uow-bootstrap-text",
-                                span { class: "uow-bootstrap-label", "Bootstrap run — skip layer-2 checks" }
-                                span { class: "uow-bootstrap-hint",
-                                    "For the run that installs the linters/checkers layer-2 needs. The security gate (layer 1) still applies. Turn off afterward."
-                                }
-                            }
-                        }
-                        div { class: "run-control-row",
-                            button {
-                                class: "btn-run",
-                                onclick: move |_| {
-                                    let sid = sid_dev.clone();
-                                    let tm = TierMapView {
-                                        strongest: dev_strongest(),
-                                        balanced: vec![dev_balanced()],
-                                        fast: vec![dev_fast()],
-                                    };
-                                    let skip_l2 = bootstrap_skip_layer2();
-                                    spawn(async move {
-                                        match start_dev_run(&sid, &tm, skip_l2).await {
-                                            StartRunOutcome::Started(rid) => {
-                                                poll_run_to_done(rid, active_run, uow_refresh).await
-                                            }
-                                            StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                starting.set(true);
+                                let sid = sid_begin.clone();
+                                let md = invest_model();
+                                let mut uow_refresh = uow_refresh;
+                                let mut starting = starting;
+                                spawn(async move {
+                                    // Loading guard: Bombe machine runs while the investigation is in flight.
+                                    let _guard = crate::loading::LoadingGuard::new();
+                                    match begin_investigation_run(&sid, &md).await {
+                                        crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
+                                            // The server advances Intake → Investigating BEFORE it
+                                            // returns, so refresh the lifecycle IMMEDIATELY — the
+                                            // stage + control flip to Investigating right now, not
+                                            // when the run finishes. A live-off placeholder run
+                                            // completes instantly with nothing to stream; without
+                                            // this immediate bump the stale Intake button stayed up
+                                            // and a second click 409'd. Then stream the run.
+                                            uow_refresh += 1;
+                                            poll_run_to_done(rid, active_run, uow_refresh).await;
+                                        }
+                                        // The UoW was not at Intake (e.g. a prior begin already
+                                        // advanced it but the displayed button was stale). Surface
+                                        // the server's precise reason AND refresh so the now-correct
+                                        // control replaces the stale "Begin investigation" button.
+                                        crate::cockpit::BeginInvestigationOutcome::Blocked(reason) => {
+                                            uow_refresh += 1;
+                                            crate::toast::push_toast(
                                                 toasts,
                                                 crate::toast::ToastKind::Warning,
                                                 reason,
-                                            ),
-                                            StartRunOutcome::Failed => crate::toast::push_toast(
+                                            );
+                                        }
+                                        crate::cockpit::BeginInvestigationOutcome::Failed => {
+                                            crate::toast::push_toast(
                                                 toasts,
                                                 crate::toast::ToastKind::Warning,
-                                                "Could not start the governed development run.".to_string(),
-                                            ),
+                                                "Could not begin the investigation run.".to_string(),
+                                            );
                                         }
-                                    });
-                                },
-                                "▶ Run development (governed)"
+                                    }
+                                    starting.set(false);
+                                });
+                            },
+                            if starting() {
+                                span { "Starting\u{2026}" }
+                            } else {
+                                "\u{25b6} Begin investigation"
                             }
                         }
+                        ModelSelect { models: models.clone(), selected: invest_model }
                     }
-                },
-                    _ => rsx! {},
-                },
-            }
-
-            // Architect transition: Approve decisions (Investigating → DecisionsApproved).
-            // Kept where it was — enabled only at the Investigating stage (the server
-            // enforces this too; disabling avoids a guaranteed-409 click). Disabled while
-            // the stage is unknown (loading/failed) so we never offer a guaranteed-409.
-            div { class: "uow-lifecycle-actions",
-                button {
-                    // Transition action → the onboarding SECONDARY variant (bordered),
-                    // distinct from the accent primary run buttons but on the same system.
-                    class: "btn-secondary",
-                    disabled: stage != Some(UowStage::Investigating),
-                    onclick: move |_| {
-                        let sid = sid_approve.clone();
-                        let mut uow_refresh = uow_refresh;
-                        spawn(async move {
-                            match post_uow_transition(&sid, "approve-decisions").await {
-                                TransitionOutcome::Ok => { uow_refresh += 1; }
-                                TransitionOutcome::Blocked(reason) => crate::toast::push_toast(
-                                    toasts, crate::toast::ToastKind::Warning, reason,
-                                ),
-                                TransitionOutcome::Failed => crate::toast::push_toast(
-                                    toasts,
-                                    crate::toast::ToastKind::Warning,
-                                    "Could not advance the lifecycle stage.".to_string(),
-                                ),
-                            }
-                        });
-                    },
-                    "Approve decisions"
+                    p { class: "section-hint", "Runs an investigation pass, then advances the stage to Investigating." }
                 }
-            }
+            },
+            // All other stages (Investigating, DecisionsApproved, Development, …): no
+            // investigation run control is shown here — the investigation is already
+            // underway or complete.
+            Some(_) => rsx! {},
         }
     }
 }
