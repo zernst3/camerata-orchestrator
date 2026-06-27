@@ -148,9 +148,10 @@ pub fn CredentialsSettings() -> Element {
 /// the Dioxus context (provided by `loading::provide_loading_context`).
 #[component]
 fn BombeSettings() -> Element {
-    // Consume bombe control signals from context.
-    let mut enabled = use_context::<BombeEnabled>();
-    let mut preview = use_context::<BombePreview>();
+    // Consume bombe control signals from context.  The newtypes are unwrapped
+    // to their inner Signal<bool> for direct read/write access.
+    let mut enabled = use_context::<BombeEnabled>().0;
+    let mut preview = use_context::<BombePreview>().0;
 
     // On mount: read the persisted enabled value from localStorage and
     // initialise the signal.  Runs once (empty deps).

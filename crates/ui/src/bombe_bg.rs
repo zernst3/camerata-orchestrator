@@ -62,11 +62,11 @@ pub fn BombeBg() -> Element {
         None => 0,
     };
     let enabled = match try_consume_context::<BombeEnabled>() {
-        Some(s) => *s.read(),
+        Some(s) => *s.0.read(),
         None => true,
     };
     let preview = match try_consume_context::<BombePreview>() {
-        Some(s) => *s.read(),
+        Some(s) => *s.0.read(),
         None => false,
     };
 

@@ -54,9 +54,9 @@ pub const GLOBAL_CSS: &str = r#"
      (chorale exposes these as overridable CSS variables.) */
   --chorale-accent:            var(--accent);
   --chorale-accent-contrast:   #1a1816;
-  /* tables use SOLID dark (not the translucent --surface) so cells stay opaque + readable
-     regardless of any layer behind them; other glass panels stay translucent for the bombe. */
-  --chorale-surface:           #16130f;
+  /* tables use SLIGHTLY TRANSLUCENT dark so the bombe peeks through while cells stay readable.
+     Input bg and popovers stay solid for readability / no see-through dropdowns. */
+  --chorale-surface:           rgba(22,19,15,0.86);
   --chorale-text:              var(--ink);
   --chorale-text-muted:        var(--ink-soft);
   --chorale-text-subtle:       var(--ink-faint);
@@ -64,10 +64,10 @@ pub const GLOBAL_CSS: &str = r#"
   --chorale-border:            var(--line);
   --chorale-divider:           var(--line);
   --chorale-separator-color:   var(--line);
-  --chorale-header-bg:         #100d0b;
+  --chorale-header-bg:         rgba(16,13,11,0.9);
   --chorale-group-header-bg:   var(--accent-wash);
   --chorale-group-header-border: var(--line);
-  --chorale-toolbar-bg:        #16130f;
+  --chorale-toolbar-bg:        rgba(22,19,15,0.86);
   --chorale-input-bg:          #0e0c0b;
   --chorale-input-border:      var(--line);
   --chorale-button-bg:         #1f1b17;
@@ -2241,10 +2241,15 @@ html, body {
 }
 .wi-detail-modal .rule-modal-close:hover { background: var(--accent-wash); color: var(--ink); }
 .wi-detail-modal .wi-detail-head { padding-right: 44px; }
-/* Strip the system webview's native button chrome (beveled/gray) that showed through on
-   chorale's inline-styled pager buttons after interaction — appearance isn't set inline,
-   so this stylesheet rule wins and lets chorale's own border/bg render consistently. */
-.chorale-root button { -webkit-appearance: none; appearance: none; }
+/* Strip the system webview's native button chrome (beveled/gray / blue focus glow) that
+   shows through on chorale's inline-styled pager buttons on initial render AND after
+   page-change re-renders.  appearance + box-shadow are not set inline, so this stylesheet
+   rule wins and lets chorale's own border/bg/shadow render consistently on every render. */
+.chorale-root button {
+  -webkit-appearance: none; appearance: none;
+  box-shadow: none;   /* kill native focus glow that persists after page-change clicks */
+  outline: none;      /* belt-and-suspenders: wry sometimes retains focus outline on re-render */
+}
 .chorale-root button:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 .rule-modal-title-row {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;

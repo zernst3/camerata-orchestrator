@@ -44,20 +44,30 @@ pub type LoadingCount = Signal<usize>;
 /// Global animation enabled/disabled toggle.  Persisted to localStorage
 /// under key `camerata.bombe.enabled` by the Settings panel.
 /// Default: `true` (animations on).
-pub type BombeEnabled = Signal<bool>;
+///
+/// Newtype (not a type alias) so Dioxus context can distinguish it from
+/// `BombePreview` — both wrap `Signal<bool>` but type aliases resolve to the
+/// same type and collide in the context map.
+#[derive(Clone, Copy)]
+pub struct BombeEnabled(pub Signal<bool>);
 
 /// Transient preview flag: lets Settings fire a Play/Pause preview WITHOUT
 /// touching the real loading count or the enabled toggle.
 /// Default: `false` (no preview active).
-pub type BombePreview = Signal<bool>;
+///
+/// Newtype (not a type alias) so Dioxus context can distinguish it from
+/// `BombeEnabled` — both wrap `Signal<bool>` but type aliases resolve to the
+/// same type and collide in the context map.
+#[derive(Clone, Copy)]
+pub struct BombePreview(pub Signal<bool>);
 
 /// Provide the global loading count + bombe control signals into the Dioxus
 /// context.  Call once at the app root before any child that might consume
 /// them.
 pub fn provide_loading_context() {
     use_context_provider(|| Signal::new(0usize));
-    use_context_provider(|| Signal::new(true));   // BombeEnabled — on by default
-    use_context_provider(|| Signal::new(false));  // BombePreview — no preview
+    use_context_provider(|| BombeEnabled(Signal::new(true)));   // on by default
+    use_context_provider(|| BombePreview(Signal::new(false)));  // no preview
 }
 
 /// RAII guard that increments the loading count on creation and decrements
