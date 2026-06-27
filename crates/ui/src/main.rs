@@ -14,6 +14,7 @@ mod agent_activity;
 mod bombe_bg;
 mod chat;
 mod cockpit;
+mod credentials;
 pub mod loading;
 pub mod md;
 mod routines;

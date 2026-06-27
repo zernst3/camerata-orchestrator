@@ -82,6 +82,9 @@ camerata-checks = { path = "../checks" }
 camerata-persistence = { path = "../persistence" }
 # RAII temp-dir cleanup for per-run scaffold dirs and session dirs (ARCH-RESOURCE-LIFECYCLE-1).
 tempfile = "3"
+# OS-keychain credential storage for app-wide secrets (OpenRouter key, GitHub token).
+# Uses macOS Keychain / Windows Credential Manager / libsecret on Linux.
+keyring = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

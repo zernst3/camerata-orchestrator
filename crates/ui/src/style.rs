@@ -4781,4 +4781,102 @@ select:focus {
   background: rgba(202,138,4,0.05);
 }
 
+/* ── Credentials panel ──────────────────────────────────────────────────────── */
+
+.credentials-panel {
+  padding: 24px 28px;
+  max-width: 660px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+}
+.credentials-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.credentials-intro {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.credentials-field-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.credentials-field-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.credentials-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.credentials-badge-set {
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(22,163,74,0.18);
+  color: var(--good);
+  border-radius: var(--r-sm);
+  padding: 2px 7px;
+  letter-spacing: 0.03em;
+}
+.credentials-badge-unset {
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--line-soft);
+  color: var(--ink-faint);
+  border-radius: var(--r-sm);
+  padding: 2px 7px;
+}
+.credentials-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+.credentials-masked {
+  margin: 0;
+  font-size: 12px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  color: var(--ink-soft);
+  background: var(--accent-wash);
+  border-radius: var(--r-sm);
+  padding: 3px 8px;
+  display: inline-block;
+}
+.credentials-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.credentials-input {
+  flex: 1;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font-size: 13px;
+  padding: 7px 10px;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.credentials-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
+.credentials-save-btn {
+  flex-shrink: 0;
+}
+
 "#;

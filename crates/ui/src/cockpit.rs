@@ -787,6 +787,8 @@ enum CockpitView {
     Workspace,
     /// In-app documentation viewer: USER_GUIDE.md and TECHNICAL.md rendered as markdown.
     Docs,
+    /// App-wide credentials (OpenRouter key, GitHub token) stored in the OS keychain.
+    Credentials,
 }
 
 /// The top-level screen of the enterprise app: the projects home, or inside a project.
@@ -1249,6 +1251,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 onclick: move |_| view.set(CockpitView::Docs),
                 "Docs"
             }
+            button {
+                class: cls(CockpitView::Credentials),
+                onclick: move |_| view.set(CockpitView::Credentials),
+                "Credentials"
+            }
             // Persistent cumulative usage meter, pinned to the right of the nav row.
             UsageMeter {}
         }
@@ -1629,6 +1636,17 @@ pub fn CockpitApp() -> Element {
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     DocsView {}
+                }
+            }
+        };
+    }
+    if view() == CockpitView::Credentials {
+        return rsx! {
+            div { class: "cockpit",
+                AppUpdateBanner {}
+                CockpitNav { view }
+                div { class: "cockpit-scroll",
+                    crate::credentials::CredentialsSettings {}
                 }
             }
         };

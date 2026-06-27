@@ -58,6 +58,7 @@ pub mod terminal;
 /// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
+pub mod credentials;
 pub mod workflow_gen;
 pub mod transcript;
 pub mod uow;
@@ -154,6 +155,11 @@ pub struct AppState {
     /// (prevented-merges dataset). Write-only in app code; fail-soft: if it can't be
     /// opened the run/scan paths are unaffected. `None` in tests and on open failure.
     pub enforcement_ledger: crate::enforcement_ledger::EnforcementLedger,
+    /// App-wide credential store backed by the OS keychain in production and an
+    /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
+    /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
+    /// in-process, falling back to the environment variable for back-compat.
+    pub credential_store: Arc<dyn crate::credentials::CredentialStore>,
 }
 
 impl AppState {
@@ -184,6 +190,8 @@ impl AppState {
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
             // Tests and in-process runs start without a ledger (no-op; fail-soft).
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
+            // Tests use an in-memory credential store; production uses the OS keychain.
+            credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
         }
     }
 
@@ -193,6 +201,22 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Resolve the GitHub token: credential store first, then the
+    /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
+    /// Returns `None` when neither is set or non-empty.
+    pub fn github_token(&self) -> Option<String> {
+        // 1. Try the credential store (keychain in prod, in-memory in tests).
+        if let Ok(Some(token)) = self.credential_store.get(crate::credentials::GITHUB_TOKEN) {
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+        // 2. Fall back to the environment variable for back-compat.
+        std::env::var("CAMERATA_GITHUB_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty())
     }
 
     /// Build the shared PROJECT-GROUNDING block for the ACTIVE project: its rule context
@@ -450,6 +474,11 @@ impl AppState {
         // overrides applied on top. Loaded last so the flags are available to every
         // handler via AppState from first request. Infallible: missing config = defaults.
         state.feature_flags = crate::feature_flags::FeatureFlags::load();
+        // Production path: use the OS keychain (macOS Keychain, Windows Credential
+        // Manager, Secret Service on Linux) so credentials survive restarts without
+        // living in any file on disk.
+        state.credential_store =
+            Arc::new(crate::credentials::KeyringCredentialStore);
         state
     }
 }
@@ -701,6 +730,11 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── App-wide credential manager ───────────────────────────────────────
+        // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
+        // GET  /api/credentials        — list all known credentials with masked values
+        .route("/api/credentials", get(list_credentials))
+        .route("/api/credentials/:name", post(set_credential))
         .with_state(state)
 }
 
@@ -1132,7 +1166,7 @@ async fn start_governed_run(
                 .map(|(r, _)| r.to_string())
                 .unwrap_or_else(|| story_id.to_string());
             let branch = uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"));
-            let token = github_token();
+            let token = state.github_token();
             // For the tiered path we pick the strongest model for the implementer; for
             // the single-model path we use the caller's model (or the default).
             let impl_model = match &tier_map {
@@ -5996,6 +6030,100 @@ async fn set_workspace_root(
     Json(state.settings.set_workspace_root(req.path))
 }
 
+// ── Credential manager endpoints ──────────────────────────────────────────────
+
+/// Request body for `POST /api/credentials/:name`.
+#[derive(serde::Deserialize)]
+struct SetCredentialReq {
+    value: String,
+}
+
+/// One credential's status as returned by `GET /api/credentials`.
+///
+/// The `masked` field is the ONLY value ever placed in an HTTP response.
+/// The full secret is never serialised or logged.
+#[derive(serde::Serialize)]
+struct CredentialStatus {
+    name: String,
+    is_set: bool,
+    masked: Option<String>,
+}
+
+/// `POST /api/credentials/:name` — store a credential in the OS keychain.
+///
+/// Body: `{ "value": "…" }`
+/// Response: `{ "ok": true, "masked": "sk-o••••" }`
+///
+/// The full value is written to the keychain and immediately discarded from
+/// memory; the response contains only the masked form.
+async fn set_credential(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<SetCredentialReq>,
+) -> impl IntoResponse {
+    use crate::credentials::ALL_CREDENTIALS;
+    // Reject unknown credential names to prevent arbitrary keychain writes.
+    if !ALL_CREDENTIALS.contains(&name.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("unknown credential name: {name}")
+            })),
+        );
+    }
+    if req.value.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "value must not be empty"
+            })),
+        );
+    }
+    if let Err(e) = state.credential_store.set(&name, &req.value) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to store credential: {e}")
+            })),
+        );
+    }
+    // Return the masked form so the UI can confirm what was stored.
+    let masked = state
+        .credential_store
+        .masked(&name)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "••••".to_string());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "masked": masked })),
+    )
+}
+
+/// `GET /api/credentials` — list all known credentials with their set-status and
+/// masked values.  The full value is never included.
+///
+/// Response: `[{ "name": "openrouter_api_key", "is_set": true, "masked": "sk-o••••" }, …]`
+async fn list_credentials(State(state): State<AppState>) -> Json<Vec<CredentialStatus>> {
+    use crate::credentials::ALL_CREDENTIALS;
+    let statuses: Vec<CredentialStatus> = ALL_CREDENTIALS
+        .iter()
+        .map(|name| {
+            let is_set = state.credential_store.is_set(name).unwrap_or(false);
+            let masked = state.credential_store.masked(name).ok().flatten();
+            CredentialStatus {
+                name: name.to_string(),
+                is_set,
+                masked,
+            }
+        })
+        .collect();
+    Json(statuses)
+}
+
 /// Read-only checkout status for every repo in a project (no network).
 async fn checkout_status(
     State(state): State<AppState>,
@@ -6383,8 +6511,19 @@ async fn uow_get(
 
 // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
 
-/// Read `CAMERATA_GITHUB_TOKEN`, returning `None` when unset or empty.
+/// Read the GitHub token: credential store first, then `CAMERATA_GITHUB_TOKEN` env
+/// var as a back-compat fallback.  Returns `None` when neither is set or non-empty.
+///
+/// This is the canonical resolution path used by all handlers.  The plain
+/// `github_token_env()` helper below covers the few call sites that run before the
+/// AppState is available (e.g. the connections probe, which runs out of band).
 fn github_token() -> Option<String> {
+    github_token_env()
+}
+
+/// Read `CAMERATA_GITHUB_TOKEN` from the environment only (no credential store).
+/// Used by the connections probe and other paths that have no AppState at hand.
+fn github_token_env() -> Option<String> {
     std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
         .filter(|v| !v.is_empty())
@@ -6399,7 +6538,7 @@ fn github_token() -> Option<String> {
 /// repo" hint. A per-repo fetch failure is skipped (the union of the repos that DID
 /// resolve is returned) rather than failing the whole pull.
 async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return Json(serde_json::json!({
             "items": [],
             "message": "Connect GitHub to pull work items.",
@@ -6457,10 +6596,11 @@ struct WorkItemRefreshReq {
 }
 
 async fn workitems_refresh(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WorkItemRefreshReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = github_token()
+    let token = state
+        .github_token()
         .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let detail = crate::github_issues::get_issue_detail(&repo, number, &token)
@@ -6480,10 +6620,11 @@ struct WorkItemCommentReq {
 }
 
 async fn workitems_comment(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WorkItemCommentReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let token = github_token()
+    let token = state
+        .github_token()
         .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
     if req.body.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!("comment body must not be empty")));
@@ -6507,10 +6648,10 @@ struct WorkItemCommentsReq {
 }
 
 async fn workitems_comments(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WorkItemCommentsReq>,
 ) -> Json<serde_json::Value> {
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return Json(serde_json::json!({ "comments": [] }));
     };
     let Ok((repo, number)) = parse_github_work_item_id(&req.work_item_id) else {
@@ -6534,10 +6675,10 @@ struct WorkItemAssigneesReq {
 }
 
 async fn workitems_assignees(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WorkItemAssigneesReq>,
 ) -> Json<serde_json::Value> {
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return Json(serde_json::json!({ "users": [] }));
     };
     let Ok((repo, _number)) = parse_github_work_item_id(&req.work_item_id) else {
@@ -6568,7 +6709,7 @@ struct WorkItemSetParentReq {
 }
 
 async fn workitems_set_parent(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<WorkItemSetParentReq>,
 ) -> Json<serde_json::Value> {
     // Normalize parent_number from either a JSON number or a string.
@@ -6598,7 +6739,7 @@ async fn workitems_set_parent(
         }
     };
 
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return Json(serde_json::json!({
             "ok": false,
             "message": "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to set a parent.",
@@ -6772,7 +6913,7 @@ async fn uow_from_workitem(
     // id alone (so a token-free environment still creates a usable UoW).
     let story = match (
         state.stories.get(&story_id).await.map_err(AppError)?,
-        github_token(),
+        state.github_token(),
     ) {
         (Some(existing), _) => existing,
         (None, Some(token)) => {
@@ -7095,7 +7236,7 @@ async fn uow_publish(
             req.repo
         ))
     })?;
-    let token = github_token().ok_or_else(|| {
+    let token = state.github_token().ok_or_else(|| {
         AppError(anyhow::anyhow!(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the story to the board."
         ))
@@ -7340,7 +7481,7 @@ async fn uow_intake_ship(
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
     };
 
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
     };
 
@@ -8545,7 +8686,7 @@ async fn uow_update_branch(
         let uow_store = state.uow.clone();
         let rid = run_id.clone();
         let sid = story_id.clone();
-        let token = github_token();
+        let token = state.github_token();
         let src = req.source_branch.clone();
         // GROUNDING (the invariant): rule + repo digest for the conflict resolver.
         let grounding = state.project_grounding().await;
@@ -8600,7 +8741,7 @@ async fn uow_pr_open(
     let bad = |msg: String| {
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
     };
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
     };
     let uow = state.uow.get_or_create(&story_id);
@@ -8675,7 +8816,7 @@ async fn uow_pr_get(
     let empty = |msg: &str| {
         serde_json::json!({ "ok": false, "pr": null, "comments": [], "checks": null, "message": msg })
     };
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return Json(empty("Connect GitHub (set CAMERATA_GITHUB_TOKEN) to pull PR info."));
     };
     let Some(repo) = repo_from_story_id(&story_id) else {
@@ -8717,7 +8858,7 @@ async fn uow_pr_comment(
     let bad = |msg: String| {
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
     };
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to comment".to_string());
     };
     if req.body.trim().is_empty() {
@@ -8759,7 +8900,7 @@ async fn uow_pr_resolve(
     let bad = |msg: String| {
         (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
     };
-    let Some(token) = github_token() else {
+    let Some(token) = state.github_token() else {
         return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to resolve PR feedback".to_string());
     };
     let uow = state.uow.get_or_create(&story_id);
@@ -13531,6 +13672,171 @@ mod tests {
         assert!(
             multi.len() > 1,
             "two intake repos → multi-repo path (repo_worktrees populated)"
+        );
+    }
+
+    // ── Credential manager tests ───────────────────────────────────────────────
+
+    /// GET /api/credentials returns all known credentials with is_set=false when nothing
+    /// is stored, and is_set=true + a masked value after one is stored.
+    #[tokio::test]
+    async fn list_credentials_returns_all_known_names_with_is_set_flag() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+
+        // Initially: all credentials are unset.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/credentials")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().expect("must be an array");
+        // Both known credentials must be present.
+        let github = arr.iter().find(|c| c["name"] == "github_token").expect("must include github_token");
+        let or_key = arr.iter().find(|c| c["name"] == "openrouter_api_key").expect("must include openrouter_api_key");
+        assert!(!github["is_set"].as_bool().unwrap_or(true), "initially not set");
+        assert!(!or_key["is_set"].as_bool().unwrap_or(true), "initially not set");
+
+        // Store a GitHub token.
+        state
+            .credential_store
+            .set(crate::credentials::GITHUB_TOKEN, "ghp_test_value")
+            .expect("set must succeed in MemoryCredentialStore");
+
+        // Now list again — is_set must flip to true for the github_token entry.
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/credentials")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json2 = body_json(resp2).await;
+        let arr2 = json2.as_array().expect("must be an array");
+        let github2 = arr2.iter().find(|c| c["name"] == "github_token").expect("github_token present");
+        assert!(github2["is_set"].as_bool().unwrap_or(false), "now is_set=true");
+        let masked = github2["masked"].as_str().expect("masked must be present");
+        // Masked value must not contain the full token.
+        assert!(!masked.contains("ghp_test_value"), "masked must not reveal full token");
+        // Must start with the first 4 chars.
+        assert!(masked.starts_with("ghp_"), "masked must start with first 4 chars");
+    }
+
+    /// POST /api/credentials/:name rejects unknown credential names.
+    #[tokio::test]
+    async fn set_credential_rejects_unknown_name() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/totally_unknown_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"secret"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+    }
+
+    /// POST /api/credentials/:name rejects empty values.
+    #[tokio::test]
+    async fn set_credential_rejects_empty_value() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// POST /api/credentials/:name returns { ok: true, masked: "…" } on success,
+    /// and the masked value never contains the full token.
+    #[tokio::test]
+    async fn set_credential_returns_masked_value_not_full_token() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"ghp_supersecrettoken"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        let masked = json["masked"].as_str().expect("masked field must be present");
+        // Full token must NEVER appear in the response.
+        assert!(
+            !masked.contains("ghp_supersecrettoken"),
+            "response must never contain the full token: {masked}"
+        );
+        // The prefix appears.
+        assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+    }
+
+    /// `AppState::github_token()` prefers the credential store over the env var.
+    #[test]
+    fn github_token_method_prefers_store_over_env() {
+        // Set a value in the store.
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state
+            .credential_store
+            .set(crate::credentials::GITHUB_TOKEN, "store_token")
+            .expect("set must succeed");
+
+        // Ensure the env var is NOT set so we are testing the store path.
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+
+        let resolved = state.github_token();
+        assert_eq!(
+            resolved.as_deref(),
+            Some("store_token"),
+            "must return the store value when env var is absent"
+        );
+    }
+
+    /// `AppState::github_token()` falls back to env var when store is empty.
+    #[test]
+    fn github_token_method_falls_back_to_env_when_store_empty() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        // Store is empty (MemoryCredentialStore starts empty).
+
+        std::env::set_var("CAMERATA_GITHUB_TOKEN", "env_token");
+        let resolved = state.github_token();
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("env_token"),
+            "must fall back to env var when store is empty"
         );
     }
 }
