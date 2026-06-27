@@ -1355,14 +1355,27 @@ pub fn reassemble_batch_results(
 /// Constructed via [`build_completer`] when the model registry reports `provider =
 /// "openrouter"` for the requested model id. The API key is read from `api_key` (already
 /// resolved from the credential store by the factory — no IO at call time).
+///
+/// Each HTTP call is preceded by `limiter.acquire("openrouter")` so concurrent audit
+/// calls to OpenRouter free-tier models self-throttle to the configured RPM cap (default
+/// 20 RPM) rather than generating 429s. The limiter is a shared [`Arc`] clone; all
+/// `OpenRouterCompleter` instances across the process share one bucket.
 pub struct OpenRouterCompleter {
     /// The resolved `OPENROUTER_API_KEY` value. Never empty (factory guarantees it).
     api_key: String,
+    /// Shared per-provider rate limiter. Awaited before every HTTP call.
+    limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
 }
 
 impl OpenRouterCompleter {
     /// Call OpenRouter's `/api/v1/chat/completions` endpoint and return the completion.
+    ///
+    /// Awaits the per-provider rate limiter before issuing the HTTP request so concurrent
+    /// callers self-throttle to the configured RPM cap (default 20 RPM for "openrouter").
     async fn call_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        // Acquire a slot before hitting the wire. Unlimited providers (Anthropic, etc.)
+        // return immediately; rate-limited ones park until a refill token is available.
+        self.limiter.acquire("openrouter").await;
         // Build the messages array. System prompt goes as a separate "system" role message
         // when present (the OpenAI-compatible schema used by OpenRouter supports this).
         let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -1477,7 +1490,12 @@ impl Completer for OpenRouterCompleter {
 /// - `"claude"` provider (or any unknown/unrecognised provider) → returns `Arc::new(llm)`,
 ///   the existing Anthropic `Llm` that was already built by the caller.
 /// - `"openrouter"` provider → resolves `OPENROUTER_API_KEY` from `creds` and returns an
-///   `Arc<OpenRouterCompleter>`. Returns an error when the key is not set.
+///   `Arc<OpenRouterCompleter>` that self-throttles via `limiter` before each HTTP call.
+///   Returns an error when the key is not set.
+///
+/// `limiter` is a shared [`crate::rate_limit::ProviderRateLimiter`] (held in `AppState`).
+/// Passing `Arc::new(ProviderRateLimiter::new())` in tests is fine; the default cap for
+/// the `"openrouter"` bucket is 20 RPM.
 ///
 /// This is intentionally a free function (not a method on `AppState`) so it can be
 /// imported and tested without pulling in the full server state.
@@ -1486,6 +1504,7 @@ pub fn build_completer(
     registry: &crate::model_registry::ModelRegistry,
     creds: &dyn crate::credentials::CredentialStore,
     llm: std::sync::Arc<Llm>,
+    limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
 ) -> anyhow::Result<std::sync::Arc<dyn Completer>> {
     let provider = registry
         .all_entries()
@@ -1506,7 +1525,7 @@ pub fn build_completer(
                          set — add it via Settings → Credentials before using this model"
                     )
                 })?;
-            Ok(std::sync::Arc::new(OpenRouterCompleter { api_key: key }))
+            Ok(std::sync::Arc::new(OpenRouterCompleter { api_key: key, limiter }))
         }
         // "claude" or any unrecognised provider: use the existing Anthropic Llm.
         _ => Ok(llm),
@@ -1891,6 +1910,10 @@ malformed line, not json
         })
     }
 
+    fn make_limiter() -> std::sync::Arc<crate::rate_limit::ProviderRateLimiter> {
+        std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new())
+    }
+
     /// When the model id is not in the registry at all, the factory defaults to the
     /// Anthropic Llm (safe fallback: unknown models stay on the existing path).
     #[test]
@@ -1899,7 +1922,7 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         let llm = make_llm();
 
-        let completer = build_completer("unknown-model-xyz", &registry, &creds, llm);
+        let completer = build_completer("unknown-model-xyz", &registry, &creds, llm, make_limiter());
         // Should succeed (no error for an unknown model — safe fallback to Anthropic).
         assert!(
             completer.is_ok(),
@@ -1916,7 +1939,7 @@ malformed line, not json
         // Note: no OPENROUTER_API_KEY set, yet this must not error.
         let llm = make_llm();
 
-        let completer = build_completer("claude-sonnet-4-6", &registry, &creds, llm);
+        let completer = build_completer("claude-sonnet-4-6", &registry, &creds, llm, make_limiter());
         assert!(
             completer.is_ok(),
             "claude-provider model must succeed even without an OpenRouter key"
@@ -1943,7 +1966,7 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
         let llm = make_llm();
-        let result = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm);
+        let result = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter());
         assert!(result.is_err(), "factory must error when key is absent");
         // Extract the error without relying on `T: Debug` (Arc<dyn Completer> is not Debug).
         let msg = match result {
@@ -1978,7 +2001,7 @@ malformed line, not json
             .set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test-key")
             .unwrap();
         let llm = make_llm();
-        let completer = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm)
+        let completer = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter())
             .expect("factory must succeed when key is set");
         // Verify the concrete type is OpenRouterCompleter via downcast.
         assert!(

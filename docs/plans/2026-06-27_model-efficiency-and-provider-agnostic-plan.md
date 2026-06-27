@@ -142,16 +142,42 @@ OpenRouter (API driver) with paid fallback**; **Opus orchestrator (and optionall
 the subscription CLI**; L3 free/off. Heaviest buckets offloaded off the subscription → **quota
 relief**, with Opus reliability + fallback preserved.
 
+## 8. Per-provider rate limiting + OpenRouter caching controls
+
+**Per-provider RPM limiter (Zach — build now):** a shared limiter (token bucket / semaphore)
+keyed by provider that caps outbound requests to a provider's RPM (default OpenRouter ≈ 20 RPM,
+configurable). Applies to BOTH the `Completer` (bare-LLM) and the `ApiAgentDriver`. Effect: bursty
+free-routed work (onboarding's **concurrent audit passes**, fan-out) **self-throttles under the
+cap → stays fully free, just slower**, instead of throttling/falling back. The Claude subscription
+path is not limited here.
+
+**OpenRouter caching controls (paid-via-OpenRouter) — VERIFY exact API surface before wiring;
+implement what's real, flag what isn't:**
+- **Sticky routing:** stable **`session_id`** in the payload → subsequent requests hit the same
+  provider endpoint (activates caching from request one).
+- **Anthropic cache breakpoints (via OpenRouter):** **`cache_control: { type: "ephemeral" }`** on
+  the large *static* blocks (repo map / system instructions) — ties into §5 prefix-stability.
+- **Response caching (identical-request):** **`X-OpenRouter-Cache: true`** to enable;
+  **`X-OpenRouter-Cache-Clear: true`** to bust (stuck loop); read **`X-OpenRouter-Cache-Status`
+  (HIT/MISS)** for tracking. *(Confirm these header names against current docs first.)*
+
+## 9. Cost estimation reflects the active models
+
+The estimator prices each call by **the assigned model's registry price** (chunk 2): **free →
+$0**, paid → per-token price, subscription → quota-weight (not $). So the estimate tracks whatever
+profile is active (Max efficiency → near-$0 on offloaded work).
+
 ## Build sequencing (on go)
 
-1. **Credentials manager** (keychain; OpenRouter key + GitHub token) — needed by registry + driver. *(foundational)*
-2. **Model registry** (Claude static + OpenRouter API discovery) + badges in selectors. *(foundational)*
-3. **Native `ApiAgentDriver` + `Completer`-direct** (Anthropic + OpenRouter) — built **up front**,
-   same event stream + tool-call normalization; `ClaudeCliDriver` retained for the subscription
-   path. Dev engine is model-independent from day one. *(the big one)*
-4. **Tier chains** (fast/balanced → `Vec`) + the request-level **fallback policy** (§4) in the driver/`Completer`.
-5. **Model Efficiency Profile + cascade** (writes all entry points, auto-save) + the confirm-preview UI.
-6. **Prompt-caching prefix-stability** refactor.
+1. ✅ **Credentials manager** (keychain; OpenRouter + GitHub) — `acb7867`.
+2. ✅ **Model registry** (Claude static + OpenRouter discovery + badges) — `bd586b6`.
+3a. ✅ **`Completer`-direct** (OpenRouter Completer + provider factory) — `3216a1f`.
+3b. **Native `ApiAgentDriver`** (MCP loop via gateway lib, tool-call normalization, event parity,
+    driver-by-provider, invariant tests) — *the big one*.
+4. **Per-provider RPM limiter** (§8) — built now, for free-model onboarding testing.
+5. **Tier chains** (fast/balanced → `Vec`) + request-level **fallback policy** (§4).
+6. **Model Efficiency Profile + cascade** (§3) + auto-save + confirm-preview + **cost estimation** (§9).
+7. **Caching** (§5 + §8): subscription prefix-stability + OpenRouter cache controls (verified).
 
 ## Resolved decisions (2026-06-27, with Zach)
 

@@ -60,6 +60,7 @@ pub mod terminal;
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
 pub mod model_registry;
+pub mod rate_limit;
 pub mod workflow_gen;
 pub mod transcript;
 pub mod uow;
@@ -166,6 +167,12 @@ pub struct AppState {
     /// (or on demand via `POST /api/models/registry/refresh`). Thread-safe: the
     /// registry holds its own `Arc<Mutex<...>>` internally.
     pub model_registry: crate::model_registry::ModelRegistry,
+    /// Per-provider RPM rate limiter. Shared across all handlers so concurrent calls
+    /// through any [`crate::llm::OpenRouterCompleter`] instance all draw from the same
+    /// token bucket. Default: 20 RPM for "openrouter"; unlimited for all other providers.
+    /// Passed into [`crate::llm::build_completer`] whenever an OpenRouter model is
+    /// selected.
+    pub rate_limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
 }
 
 impl AppState {
@@ -201,6 +208,8 @@ impl AppState {
             // The registry always has the static Claude entries; OpenRouter is empty until
             // refreshed (key not set in tests anyway).
             model_registry: crate::model_registry::ModelRegistry::new(),
+            // Default limiter: 20 RPM for "openrouter", unlimited for all others.
+            rate_limiter: Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
         }
     }
 
@@ -5647,6 +5656,7 @@ async fn draft_routine_prompt(
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
+        state.rate_limiter.clone(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     match completer
@@ -5801,6 +5811,7 @@ async fn chat_escalation(
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
+        state.rate_limiter.clone(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     let reply = match completer
@@ -6055,6 +6066,7 @@ async fn chat(
         &state.model_registry,
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
+        state.rate_limiter.clone(),
     )
     .map_err(AppError)?;
     // Embed history into the prompt when prior turns exist; otherwise use the bare prompt.
