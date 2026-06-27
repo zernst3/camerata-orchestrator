@@ -3585,6 +3585,23 @@ html, body {
    overrides win; base values below match the effective rendered result).
    ===================================================================== */
 
+/* ── Obscuring overlay: sits between the bombe (z-index 0) and the app
+   shell (z-index 10+) at z-index 2.  pointer-events:none — never blocks
+   clicks.  Idle: strong dark fill so the bombe is visible but very subtle
+   and the app content is easy to read.  Running: overlay lightens so the
+   bombe glows through more clearly without making text unreadable.  ── */
+.bombe-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: rgba(16, 13, 11, 0.82);  /* strong dark → bombe barely visible idle */
+  transition: background 0.6s ease;
+}
+.bombe-overlay.bombe-overlay-running {
+  background: rgba(16, 13, 11, 0.48);  /* lightens → bombe glows through when active */
+}
+
 /* ── Outer wrapper: fixed full-viewport layer, below the app shell ── */
 .bombe-bg-machine {
   position: fixed;
@@ -3928,10 +3945,11 @@ html, body {
   animation: led-flicker 0.8s infinite alternate 0.4s;
 }
 
-/* ── App shell sits above the bombe layer ── */
+/* ── App shell sits above both the bombe layer (z-index 0) and the
+   obscuring overlay (z-index 2), so app content is always readable ── */
 .app-root {
   position: relative;
-  z-index: 1;
+  z-index: 10;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -4944,6 +4962,93 @@ select:focus {
 }
 .credentials-save-btn {
   flex-shrink: 0;
+}
+
+/* ── Bombe animation settings (inside the Settings panel) ── */
+.bombe-settings-section {
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+.bombe-settings-hint {
+  font-size: 13px;
+  color: var(--ink-faint);
+  margin: 4px 0 14px;
+  line-height: 1.5;
+}
+.bombe-settings-row {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.bombe-settings-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.bombe-settings-item-label {
+  font-size: 14px;
+  color: var(--ink-soft);
+  font-weight: 500;
+  min-width: 52px;
+}
+/* ON/OFF toggle button */
+.bombe-toggle-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  border-radius: 999px;
+  padding: 6px 18px;
+  border: 1.5px solid;
+  cursor: pointer;
+  transition: background 0.22s ease, color 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.bombe-toggle-btn-on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(202,138,4,0.30);
+}
+.bombe-toggle-btn-on:hover {
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
+}
+.bombe-toggle-btn-off {
+  background: var(--paper);
+  color: var(--ink-soft);
+  border-color: var(--line);
+}
+.bombe-toggle-btn-off:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+/* Play/Pause preview button */
+.bombe-preview-btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 6px 18px;
+  border: 1.5px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 0.22s ease, color 0.22s ease, border-color 0.22s ease;
+}
+.bombe-preview-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.bombe-preview-btn-active {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+.bombe-preview-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 "#;

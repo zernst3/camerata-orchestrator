@@ -10,7 +10,11 @@
 use dioxus::prelude::*;
 
 use crate::BFF_URL;
+use crate::loading::{BombeEnabled, BombePreview};
 use crate::toast::{push_toast, ToastKind};
+
+// ── localStorage key for the bombe animation toggle ──────────────────────────
+const BOMBE_ENABLED_KEY: &str = "camerata.bombe.enabled";
 
 // ── Known credential names (mirrors crate::credentials consts) ───────────────
 
@@ -72,6 +76,8 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
 /// The "Settings → Credentials" panel. Renders one row per known credential:
 /// a label, a password input, and a Save button. When already set, shows the
 /// masked value and grays out the input placeholder.
+///
+/// Also renders the Bombe animation settings section below the credentials.
 #[component]
 pub fn CredentialsSettings() -> Element {
     // Toast list from the app-wide context.
@@ -116,6 +122,120 @@ pub fn CredentialsSettings() -> Element {
                         }
                     }
                 },
+            }
+
+            // ── Bombe animation settings ──────────────────────────────────
+            BombeSettings {}
+        }
+    }
+}
+
+// ── BombeSettings ─────────────────────────────────────────────────────────────
+
+/// Settings section for the Bombe background animation.
+///
+/// Provides two controls:
+/// 1. **Animate ON/OFF** — a persisted toggle.  When OFF the bombe never
+///    animates even during loading (stays static-dark).  Persisted to
+///    `localStorage["camerata.bombe.enabled"]` so the choice survives
+///    relaunches.
+/// 2. **Play/Pause preview** — a transient button that toggles the animation
+///    purely for visual preview, without touching the loading count or the
+///    ON/OFF setting.  Useful to see the bombe in action before committing
+///    to a setting.
+///
+/// Both controls read/write the `BombeEnabled` and `BombePreview` signals in
+/// the Dioxus context (provided by `loading::provide_loading_context`).
+#[component]
+fn BombeSettings() -> Element {
+    // Consume bombe control signals from context.
+    let mut enabled = use_context::<BombeEnabled>();
+    let mut preview = use_context::<BombePreview>();
+
+    // On mount: read the persisted enabled value from localStorage and
+    // initialise the signal.  Runs once (empty deps).
+    use_effect(move || {
+        spawn(async move {
+            // Evaluate JS in the wry webview to read localStorage.
+            // Returns "false" if the key is explicitly set to false, else "true".
+            let mut ev = document::eval(
+                r#"
+                var v = localStorage.getItem('camerata.bombe.enabled');
+                dioxus.send(v === null ? 'true' : v);
+                "#,
+            );
+            if let Ok(val) = ev.recv::<String>().await {
+                enabled.set(val.trim() != "false");
+            }
+        });
+    });
+
+    // Persist enabled to localStorage whenever it changes.
+    let enabled_val = enabled();
+    use_effect(move || {
+        let js = format!(
+            "localStorage.setItem('{}', '{}');",
+            BOMBE_ENABLED_KEY,
+            if enabled_val { "true" } else { "false" }
+        );
+        let _ = document::eval(&js);
+    });
+
+    let preview_val = preview();
+    let preview_label = if preview_val { "Pause Preview" } else { "Play Preview" };
+    let enabled_label = if enabled_val { "ON" } else { "OFF" };
+
+    rsx! {
+        div { class: "credentials-field-section bombe-settings-section",
+            div { class: "credentials-field-header",
+                label { class: "credentials-label", "Background Animation" }
+            }
+            p { class: "bombe-settings-hint",
+                "Controls the Bombe machine animation behind the interface."
+            }
+            div { class: "bombe-settings-row",
+                // Animate ON/OFF toggle
+                div { class: "bombe-settings-item",
+                    span { class: "bombe-settings-item-label", "Animate" }
+                    button {
+                        class: if enabled_val {
+                            "bombe-toggle-btn bombe-toggle-btn-on"
+                        } else {
+                            "bombe-toggle-btn bombe-toggle-btn-off"
+                        },
+                        onclick: move |_| {
+                            enabled.set(!enabled_val);
+                            // When turning off, also stop any active preview.
+                            if enabled_val {
+                                preview.set(false);
+                            }
+                        },
+                        "{enabled_label}"
+                    }
+                }
+                // Play/Pause preview button — only active when enabled is ON.
+                div { class: "bombe-settings-item",
+                    span { class: "bombe-settings-item-label", "Preview" }
+                    button {
+                        class: if preview_val {
+                            "bombe-preview-btn bombe-preview-btn-active"
+                        } else {
+                            "bombe-preview-btn"
+                        },
+                        disabled: !enabled_val,
+                        title: if enabled_val {
+                            "Toggle a preview of the Bombe animation"
+                        } else {
+                            "Enable animation first"
+                        },
+                        onclick: move |_| {
+                            if enabled_val {
+                                preview.set(!preview_val);
+                            }
+                        },
+                        "{preview_label}"
+                    }
+                }
             }
         }
     }

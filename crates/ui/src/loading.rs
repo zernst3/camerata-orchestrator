@@ -3,8 +3,18 @@
 //! A single `Signal<usize>` in the Dioxus context tracks the number of
 //! in-flight operations.  The background Bombe machine watches this count:
 //!
-//! - count > 0  →  `.bombe-running` class active (animations on, opacity 0.72)
-//! - count == 0 →  class absent (idle, opacity 0.38, animations paused)
+//! - count > 0  →  `.bombe-running` class active (animations on, overlay lightens)
+//! - count == 0 →  class absent (idle, dark overlay, animations paused)
+//!
+//! Two additional signals live alongside the count:
+//!
+//! - `BombeEnabled` — persisted ON/OFF toggle (localStorage key
+//!   `camerata.bombe.enabled`).  When OFF, the bombe never animates.
+//! - `BombePreview` — transient Play/Pause flag that lets Settings trigger
+//!   the animation without touching real loading state.
+//!
+//! The bombe's effective running state is:
+//!   `running = enabled && (count > 0 || preview)`
 //!
 //! # How to use
 //!
@@ -31,10 +41,23 @@ use dioxus::prelude::*;
 /// The shared loading count type alias.
 pub type LoadingCount = Signal<usize>;
 
-/// Provide the global loading count into the Dioxus context.  Call once at
-/// the app root before any child that might consume it.
+/// Global animation enabled/disabled toggle.  Persisted to localStorage
+/// under key `camerata.bombe.enabled` by the Settings panel.
+/// Default: `true` (animations on).
+pub type BombeEnabled = Signal<bool>;
+
+/// Transient preview flag: lets Settings fire a Play/Pause preview WITHOUT
+/// touching the real loading count or the enabled toggle.
+/// Default: `false` (no preview active).
+pub type BombePreview = Signal<bool>;
+
+/// Provide the global loading count + bombe control signals into the Dioxus
+/// context.  Call once at the app root before any child that might consume
+/// them.
 pub fn provide_loading_context() {
     use_context_provider(|| Signal::new(0usize));
+    use_context_provider(|| Signal::new(true));   // BombeEnabled — on by default
+    use_context_provider(|| Signal::new(false));  // BombePreview — no preview
 }
 
 /// RAII guard that increments the loading count on creation and decrements

@@ -29,7 +29,7 @@
 //! idle cost is zero.
 
 use dioxus::prelude::*;
-use crate::loading::LoadingCount;
+use crate::loading::{BombeEnabled, BombePreview, LoadingCount};
 
 /// Total rotors = 3 blocks × 12 columns × 3 rows = 108.
 const BLOCKS: usize = 3;
@@ -44,22 +44,54 @@ const START_ANGLES: [u16; 12] = [0, 137, 274, 51, 188, 325, 102, 239, 16, 153, 2
 /// Background Bombe machine.
 ///
 /// Renders as a fixed, full-viewport layer behind the app (z-index 0,
-/// pointer-events none).  Adds `.bombe-running` when the global loading count
-/// is > 0, which activates all CSS animations.
+/// pointer-events none).  Adds `.bombe-running` when the effective running
+/// state is true:  `running = enabled && (count > 0 || preview)`.
+///
+/// Also renders `.bombe-overlay` — a sibling fixed layer at z-index 2 that
+/// sits between the bombe (z-index 0) and the app shell (z-index 10+).
+/// Idle: strong dark fill so the bombe is visible-but-subtle.
+/// Running: the overlay gets `.bombe-overlay-running`, which lowers its
+/// opacity so the bombe glows through more clearly.  `pointer-events: none`
+/// on both layers so the app is never blocked.
 #[component]
 pub fn BombeBg() -> Element {
-    // Read the loading count; re-render when it crosses 0 ↔ non-zero.
-    let running = match try_consume_context::<LoadingCount>() {
-        Some(c) => *c.read() > 0,
+    // Read the loading count + control signals.  All three use try_consume so
+    // BombeBg is safe even if mounted before the context is provided.
+    let count = match try_consume_context::<LoadingCount>() {
+        Some(c) => *c.read(),
+        None => 0,
+    };
+    let enabled = match try_consume_context::<BombeEnabled>() {
+        Some(s) => *s.read(),
+        None => true,
+    };
+    let preview = match try_consume_context::<BombePreview>() {
+        Some(s) => *s.read(),
         None => false,
     };
+
+    // The effective running state: animations only fire when the bombe is
+    // enabled AND either real work is in-flight OR the preview is active.
+    let running = enabled && (count > 0 || preview);
+
     let machine_class = if running {
         "bombe-bg-machine bombe-running"
     } else {
         "bombe-bg-machine"
     };
+    let overlay_class = if running {
+        "bombe-overlay bombe-overlay-running"
+    } else {
+        "bombe-overlay"
+    };
 
     rsx! {
+        // Dark obscuring overlay — sits BETWEEN the bombe (z-index 0) and the
+        // app shell (z-index 10+) at z-index 2.  pointer-events:none so it
+        // never intercepts clicks.  Lightens when the bombe is running so the
+        // machine glows through while text stays readable.
+        div { class: "{overlay_class}" }
+
         div { id: "bg-bombe-machine", class: "{machine_class}",
             div { class: "bombe-cabinet",
                 // ── Left panel: two gauges + vertical cable loom ──────────────
