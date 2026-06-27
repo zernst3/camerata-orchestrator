@@ -1124,6 +1124,13 @@ async fn start_governed_run(
             Ok(Some(s)) => (s.title, s.description),
             _ => (story_id.to_string(), String::new()),
         };
+
+        // Resolve the effective tier map for this run: caller-supplied map takes
+        // precedence (explicit per-run override); fall back to the project's
+        // persisted tier map so the project settings panel is authoritative.
+        let tier_map: Option<crate::model_tier::TierMap> = tier_map
+            .or_else(|| state.projects.active().map(|p| p.tier_map));
+
         // The active project's loop-guard ceiling (#29) governs how many times a dirty
         // stage may bounce-and-revise before its residual violations are surfaced.
         let max_iterations = state

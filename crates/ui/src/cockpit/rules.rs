@@ -1493,6 +1493,9 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
     let mut balanced = use_signal(|| project.tier_map.balanced.clone());
     let mut strongest = use_signal(|| project.tier_map.strongest.clone());
     let mut saving = use_signal(|| false);
+    // Model registry for dropdowns (same source as StepModelsEditor and L3ReviewEditor).
+    let models = use_resource(|| async move { fetch_audit_models().await });
+    let models = models.read().clone().flatten();
 
     rsx! {
         div { class: "tier-map-editor",
@@ -1504,118 +1507,218 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                  Changes take effect from the next run onward."
             }
             div { class: "tier-map-rows",
-                // Fast band — chain editor
+                // Fast band — chain editor with select dropdowns
                 div { class: "tier-map-row tier-map-chain-row",
                     label { class: "tier-map-band-label tier-map-fast", "Fast" }
                     span { class: "tier-map-band-desc", "(throughput — tests, simple edits)" }
                     div { class: "tier-chain-list",
                         for (i, _model) in fast().iter().enumerate() {
-                            div { key: "{i}", class: "tier-chain-entry",
-                                input {
-                                    class: "tier-map-input addressee-input tier-chain-input",
-                                    r#type: "text",
-                                    placeholder: "model id",
-                                    value: "{fast()[i]}",
-                                    oninput: {
-                                        let mut fast = fast;
-                                        move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
-                                            let mut v = fast();
-                                            if let Some(entry) = v.get_mut(i) {
-                                                *entry = e.value();
+                            {
+                                let models_i = models.clone();
+                                let cur = fast()[i].clone();
+                                rsx! {
+                                    div { key: "{i}", class: "tier-chain-entry",
+                                        if let Some(ref m) = models_i {
+                                            select {
+                                                class: "tier-map-input run-model-select tier-chain-select",
+                                                disabled: saving(),
+                                                onchange: {
+                                                    let mut fast = fast;
+                                                    move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                                        let mut v = fast();
+                                                        if let Some(entry) = v.get_mut(i) {
+                                                            *entry = e.value();
+                                                        }
+                                                        fast.set(v);
+                                                    }
+                                                },
+                                                for (group_label , opts) in m.grouped().into_iter() {
+                                                    optgroup { label: "{group_label}",
+                                                        for opt in opts.into_iter() {
+                                                            option {
+                                                                value: "{opt.id}",
+                                                                selected: cur == opt.id,
+                                                                "{opt.label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            fast.set(v);
+                                        } else {
+                                            input {
+                                                class: "tier-map-input addressee-input tier-chain-input",
+                                                r#type: "text",
+                                                placeholder: "model id",
+                                                value: "{cur}",
+                                                oninput: {
+                                                    let mut fast = fast;
+                                                    move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                                        let mut v = fast();
+                                                        if let Some(entry) = v.get_mut(i) {
+                                                            *entry = e.value();
+                                                        }
+                                                        fast.set(v);
+                                                    }
+                                                },
+                                            }
                                         }
-                                    },
-                                }
-                                if fast().len() > 1 {
-                                    button {
-                                        class: "btn-edit-sm tier-chain-remove",
-                                        title: "Remove this model from the chain",
-                                        onclick: {
-                                            let mut fast = fast;
-                                            move |_| {
-                                                let mut v = fast();
-                                                if i < v.len() { v.remove(i); }
-                                                fast.set(v);
+                                        if fast().len() > 1 {
+                                            button {
+                                                class: "btn-edit-sm tier-chain-remove",
+                                                title: "Remove this model from the chain",
+                                                onclick: {
+                                                    let mut fast = fast;
+                                                    move |_| {
+                                                        let mut v = fast();
+                                                        if i < v.len() { v.remove(i); }
+                                                        fast.set(v);
+                                                    }
+                                                },
+                                                "\u{2715}"
                                             }
-                                        },
-                                        "\u{2715}"
+                                        }
                                     }
                                 }
                             }
                         }
                         button {
                             class: "btn-edit-sm tier-chain-add",
-                            onclick: move |_| {
-                                let mut v = fast();
-                                v.push(String::new());
-                                fast.set(v);
+                            onclick: {
+                                // Default new chain entry: first model in registry, or empty string.
+                                let default_id = models.as_ref()
+                                    .and_then(|m| m.models.first())
+                                    .map(|m| m.id.clone())
+                                    .unwrap_or_default();
+                                move |_| {
+                                    let mut v = fast();
+                                    v.push(default_id.clone());
+                                    fast.set(v);
+                                }
                             },
                             "\u{002b} Add fallback"
                         }
                     }
                 }
-                // Balanced band — chain editor
+                // Balanced band — chain editor with select dropdowns
                 div { class: "tier-map-row tier-map-chain-row",
                     label { class: "tier-map-band-label tier-map-balanced", "Balanced" }
                     span { class: "tier-map-band-desc", "(mid-tier — most tasks)" }
                     div { class: "tier-chain-list",
                         for (i, _model) in balanced().iter().enumerate() {
-                            div { key: "{i}", class: "tier-chain-entry",
-                                input {
-                                    class: "tier-map-input addressee-input tier-chain-input",
-                                    r#type: "text",
-                                    placeholder: "model id",
-                                    value: "{balanced()[i]}",
-                                    oninput: {
-                                        let mut balanced = balanced;
-                                        move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
-                                            let mut v = balanced();
-                                            if let Some(entry) = v.get_mut(i) {
-                                                *entry = e.value();
+                            {
+                                let models_i = models.clone();
+                                let cur = balanced()[i].clone();
+                                rsx! {
+                                    div { key: "{i}", class: "tier-chain-entry",
+                                        if let Some(ref m) = models_i {
+                                            select {
+                                                class: "tier-map-input run-model-select tier-chain-select",
+                                                disabled: saving(),
+                                                onchange: {
+                                                    let mut balanced = balanced;
+                                                    move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                                        let mut v = balanced();
+                                                        if let Some(entry) = v.get_mut(i) {
+                                                            *entry = e.value();
+                                                        }
+                                                        balanced.set(v);
+                                                    }
+                                                },
+                                                for (group_label , opts) in m.grouped().into_iter() {
+                                                    optgroup { label: "{group_label}",
+                                                        for opt in opts.into_iter() {
+                                                            option {
+                                                                value: "{opt.id}",
+                                                                selected: cur == opt.id,
+                                                                "{opt.label}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            balanced.set(v);
+                                        } else {
+                                            input {
+                                                class: "tier-map-input addressee-input tier-chain-input",
+                                                r#type: "text",
+                                                placeholder: "model id",
+                                                value: "{cur}",
+                                                oninput: {
+                                                    let mut balanced = balanced;
+                                                    move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                                        let mut v = balanced();
+                                                        if let Some(entry) = v.get_mut(i) {
+                                                            *entry = e.value();
+                                                        }
+                                                        balanced.set(v);
+                                                    }
+                                                },
+                                            }
                                         }
-                                    },
-                                }
-                                if balanced().len() > 1 {
-                                    button {
-                                        class: "btn-edit-sm tier-chain-remove",
-                                        title: "Remove this model from the chain",
-                                        onclick: {
-                                            let mut balanced = balanced;
-                                            move |_| {
-                                                let mut v = balanced();
-                                                if i < v.len() { v.remove(i); }
-                                                balanced.set(v);
+                                        if balanced().len() > 1 {
+                                            button {
+                                                class: "btn-edit-sm tier-chain-remove",
+                                                title: "Remove this model from the chain",
+                                                onclick: {
+                                                    let mut balanced = balanced;
+                                                    move |_| {
+                                                        let mut v = balanced();
+                                                        if i < v.len() { v.remove(i); }
+                                                        balanced.set(v);
+                                                    }
+                                                },
+                                                "\u{2715}"
                                             }
-                                        },
-                                        "\u{2715}"
+                                        }
                                     }
                                 }
                             }
                         }
                         button {
                             class: "btn-edit-sm tier-chain-add",
-                            onclick: move |_| {
-                                let mut v = balanced();
-                                v.push(String::new());
-                                balanced.set(v);
+                            onclick: {
+                                let default_id = models.as_ref()
+                                    .and_then(|m| m.models.first())
+                                    .map(|m| m.id.clone())
+                                    .unwrap_or_default();
+                                move |_| {
+                                    let mut v = balanced();
+                                    v.push(default_id.clone());
+                                    balanced.set(v);
+                                }
                             },
                             "\u{002b} Add fallback"
                         }
                     }
                 }
-                // Strongest band — single model (stays String)
+                // Strongest band — single model select
                 div { class: "tier-map-row",
                     label { class: "tier-map-band-label tier-map-strongest", "Strongest" }
                     span { class: "tier-map-band-desc", "(frontier-class — architecture, security)" }
-                    input {
-                        class: "tier-map-input addressee-input",
-                        r#type: "text",
-                        placeholder: "e.g. claude-opus-4-8",
-                        value: "{strongest}",
-                        oninput: move |e| strongest.set(e.value()),
+                    if let Some(ref m) = models {
+                        select {
+                            class: "tier-map-input run-model-select",
+                            disabled: saving(),
+                            onchange: move |e| strongest.set(e.value()),
+                            for (group_label , opts) in m.grouped().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option {
+                                            value: "{opt.id}",
+                                            selected: strongest() == opt.id,
+                                            "{opt.label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        input {
+                            class: "tier-map-input addressee-input",
+                            r#type: "text",
+                            placeholder: "e.g. claude-opus-4-8",
+                            value: "{strongest}",
+                            oninput: move |e| strongest.set(e.value()),
+                        }
                     }
                 }
             }
@@ -2372,8 +2475,10 @@ pub(super) fn RulesView() -> Element {
                             }
                         }
 
-                        // ── SETTINGS: Model Efficiency Profile ────────────────────────
-                        // Cascades sensible model defaults to ALL entry points on apply.
+                        // ── SETTINGS: Model Efficiency Profile (PROJECT-WIDE, TOP) ───────
+                        // Governs all model entry points. Apply cascades to all model entry
+                        // points: tier map, step models, and L3 review. Placed first so the
+                        // governing setting is prominent above the per-entry overrides.
                         p { class: "section-label settings-label", "SETTINGS: Model Efficiency Profile" }
                         ModelProfileEditor { project: p_owned.clone(), refresh }
 
@@ -2390,6 +2495,11 @@ pub(super) fn RulesView() -> Element {
                         // runs); this covers audit / calibration / chat / authoring / etc.
                         p { class: "section-label settings-label", "SETTINGS: Step models" }
                         StepModelsEditor { project: p_owned.clone() }
+
+                        // ── SETTINGS: L3 agentic code review (R7) ────────────────────
+                        // Toggle the L3 reviewer on/off + pick the reviewer model.
+                        p { class: "section-label settings-label", "SETTINGS: L3 AI code review" }
+                        L3ReviewEditor { project: p_owned.clone() }
 
                         // ── SETTINGS: Stall thresholds ────────────────────────────
                         p { class: "section-label settings-label", "SETTINGS: Stall thresholds" }
