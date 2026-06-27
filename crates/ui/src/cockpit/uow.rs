@@ -2030,13 +2030,19 @@ pub(super) fn IssueManagementPanel(
 /// Chorale column set for the work-item table.
 ///
 /// Emits one hidden grouping column per hierarchy depth level (`lvl0`, `lvl1`, …,
-/// `lvl{max_depth}`) followed by the visible data columns (Repo, #, Title, State,
+/// `lvl{max_depth}`) followed by the visible data columns (Repo, ID, Title, State,
 /// Labels). The hierarchy columns drive `set_grouping` and have a minimal initial
 /// width since Chorale renders them as group headers, not data columns.
 ///
 /// `max_depth` must match the value used in `build_work_item_rows`; both are
 /// derived from the same item list inside `WorkItemTable`.
-pub(super) fn work_item_columns(max_depth: usize) -> Vec<ColumnDef<WorkItemRow>> {
+/// `repo_options` and `state_options` are the distinct values present in the
+/// current item list, used to populate the multi-select filters.
+pub(super) fn work_item_columns(
+    max_depth: usize,
+    repo_options: Vec<String>,
+    state_options: Vec<String>,
+) -> Vec<ColumnDef<WorkItemRow>> {
     let state_badges = BadgeVariantMap::new()
         .with("open", BadgeVariant::new("OPEN", "green"))
         .with("closed", BadgeVariant::new("CLOSED", "gray"))
@@ -2072,12 +2078,13 @@ pub(super) fn work_item_columns(max_depth: usize) -> Vec<ColumnDef<WorkItemRow>>
             CellValue::Text(r.work_item.repo.clone())
         })
         .sortable()
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelect { options: repo_options })
         .initial_width(180.0),
-        ColumnDef::new(ColumnId("num"), "#", |r: &WorkItemRow| {
+        ColumnDef::new(ColumnId("num"), "ID", |r: &WorkItemRow| {
             CellValue::Text(format!("#{}", r.work_item.number))
         })
         .sortable()
+        .filter(FilterKind::Text)
         .initial_width(80.0),
         ColumnDef::new(ColumnId("title"), "Title", |r: &WorkItemRow| {
             CellValue::Text(r.work_item.title.clone())
@@ -2089,6 +2096,7 @@ pub(super) fn work_item_columns(max_depth: usize) -> Vec<ColumnDef<WorkItemRow>>
             CellValue::Text(r.work_item.state.to_ascii_lowercase())
         })
         .sortable()
+        .filter(FilterKind::MultiSelect { options: state_options })
         .render_kind(RenderKind::Badge(state_badges))
         .initial_width(110.0),
         ColumnDef::new(ColumnId("labels"), "Labels", |r: &WorkItemRow| {
@@ -2109,7 +2117,12 @@ pub(super) fn work_item_columns(max_depth: usize) -> Vec<ColumnDef<WorkItemRow>>
 pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>) -> Element {
     // Build rows and derive max_depth from the same item list so the column set
     // and the grouping call are always in sync.
-    let (rows, max_depth): (Vec<(RowId, WorkItemRow)>, usize) = use_hook({
+    let (rows, max_depth, repo_options, state_options): (
+        Vec<(RowId, WorkItemRow)>,
+        usize,
+        Vec<String>,
+        Vec<String>,
+    ) = use_hook({
         let items = items.clone();
         move || {
             let built = build_work_item_rows(&items);
@@ -2117,16 +2130,31 @@ pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>)
                 .first()
                 .map(|r| r.hierarchy_cols.len().saturating_sub(1))
                 .unwrap_or(0);
+            // Derive distinct sorted repo and state values for the multi-select filters.
+            let mut repos: Vec<String> = {
+                let mut seen = std::collections::BTreeSet::new();
+                for r in &built { seen.insert(r.work_item.repo.clone()); }
+                seen.into_iter().collect()
+            };
+            repos.sort();
+            let mut states: Vec<String> = {
+                let mut seen = std::collections::BTreeSet::new();
+                for r in &built { seen.insert(r.work_item.state.to_ascii_lowercase()); }
+                seen.into_iter().collect()
+            };
+            states.sort();
             let rows = built
                 .into_iter()
                 .map(|r| (RowId::new(), r))
                 .collect();
-            (rows, max_depth)
+            (rows, max_depth, repos, states)
         }
     });
     let id_map: std::collections::HashMap<RowId, String> =
         rows.iter().map(|(r, row)| (*r, row.work_item.id.clone())).collect();
-    let handle = use_table(move || TableState::new(rows.clone(), work_item_columns(max_depth)));
+    let handle = use_table(move || {
+        TableState::new(rows.clone(), work_item_columns(max_depth, repo_options.clone(), state_options.clone()))
+    });
     // Group by all hierarchy levels (lvl0..lvl{max_depth}), producing genuinely
     // nested subgroups. Mirrors the 2-level findings-triage pattern.
     use_hook(move || {
@@ -3387,14 +3415,25 @@ pub(super) fn IntakePhaseView(
 
     rsx! {
         div { class: "uow-phase-body",
-            // AI-assisted "Update branch" control
-            UowUpdateBranchControl {
-                story_id: story_id.clone(),
-                uow_refresh,
-                models: models.clone(),
-            }
-            p { class: "section-hint",
-                "Update branch runs per selected repo. The control above applies to the primary repo for this UoW."
+            // "Update branch" controls — one per in-scope repo (populated from Intake
+            // scoping below). Falls back to a hint when no repos are in scope yet.
+            if selected_repos().is_empty() {
+                div { class: "uow-step-control uow-update-branch",
+                    p { class: "uow-step-h", "Update branch" }
+                    p { class: "section-hint",
+                        "Select the in-scope repos below to enable per-repo Update branch controls."
+                    }
+                }
+            } else {
+                for repo in selected_repos().iter().cloned().collect::<Vec<_>>() {
+                    UowUpdateBranchControl {
+                        key: "{repo}",
+                        story_id: story_id.clone(),
+                        uow_refresh,
+                        models: models.clone(),
+                        repo_label: repo,
+                    }
+                }
             }
 
             // ── Story + comments inline ───────────────────────────────────────────
@@ -5177,24 +5216,30 @@ pub(super) async fn poll_run_to_done(
     }
 }
 
-/// AI-assisted "Update branch" control (the GitHub PR "Update branch" pattern, gated).
+/// "Update branch" control (the GitHub PR "Update branch" pattern, gated).
 ///
 /// Merges a user-selected SOURCE branch (local or origin) INTO this UoW's working
-/// branch. A `<select>` is populated from `POST /api/uow/:story_id/branches`, grouped
-/// into "Local" and "Origin" `<optgroup>`s (origin values carry an `origin:` prefix so
-/// the handler knows the source kind). The "▶ Update branch (AI-assisted)" button POSTs
-/// to `POST /api/uow/:story_id/update-branch`, then drives `AgentActivity` on the
+/// branch. A searchable combobox (`<input>` + `<datalist>`) is populated from
+/// `POST /api/uow/:story_id/branches`; the user can type to filter the branch list.
+/// Branch values carry an `origin:` prefix for origin branches so the handler knows
+/// the source kind. The "▶ Update branch" button POSTs to
+/// `POST /api/uow/:story_id/update-branch`, then drives `AgentActivity` on the
 /// returned run and refreshes the UoW when the run completes.
 ///
 /// A clean merge commits server-side; a conflict is resolved by ONE gated agent (the
 /// gate is preserved end to end). A server 4xx (e.g. no branch yet, repo not resolved
 /// locally) raises a toast carrying the server's reason. Owns its OWN active-run signal
 /// so it doesn't collide with the lifecycle run control.
+///
+/// `repo_label` is displayed as the target-repo heading so it's clear which repo's
+/// branch is being updated when multiple in-scope repos are rendered.
 #[component]
 pub(super) fn UowUpdateBranchControl(
     story_id: String,
     uow_refresh: Signal<u32>,
     models: Option<AuditModelsResp>,
+    /// Owner/repo string shown in the heading so the user knows which repo this row targets.
+    repo_label: String,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
@@ -5209,55 +5254,78 @@ pub(super) fn UowUpdateBranchControl(
     };
     let branches = branches_res.read().clone().unwrap_or_default();
 
-    // The selected source. The select's value carries the source kind: a bare branch
-    // name is local; an `origin:`-prefixed value is an origin branch.
-    let mut selected = use_signal(String::new);
+    // Build a flat option list for the datalist: local branches bare, origin branches
+    // with an `origin:` prefix so the submit handler can decode the source kind.
+    let all_options: Vec<(String, String)> = {
+        let mut opts = Vec::new();
+        for b in &branches.local {
+            opts.push((b.clone(), b.clone()));
+        }
+        for b in &branches.origin {
+            opts.push((format!("origin:{b}"), format!("origin/{b}")));
+        }
+        opts
+    };
+
+    // The combobox input text (what the user typed / selected).
+    // We store the raw option VALUE (with the `origin:` prefix when applicable) so the
+    // submit handler can decode the source kind without an extra lookup.
+    let mut input_text = use_signal(String::new);
     // The conflict-resolution agent's model (default = project strongest, editable).
     let model = use_signal(String::new);
     // Its own active run + busy flag (independent of the lifecycle run control).
     let active_run = use_signal(|| Option::<RunView>::None);
     let mut updating = use_signal(|| false);
 
-    let has_branches = !branches.local.is_empty() || !branches.origin.is_empty();
+    let has_branches = !all_options.is_empty();
+    // A stable datalist id derived from the story_id + repo_label to avoid collisions
+    // when multiple per-repo rows are rendered on the same page.
+    let datalist_id = format!(
+        "ub-branches-{}-{}",
+        story_id.replace(['/', '#', ' '], "-"),
+        repo_label.replace(['/', '#', ' '], "-"),
+    );
 
     rsx! {
         div { class: "uow-step-control uow-update-branch",
-            p { class: "uow-step-h", "Update branch (AI-assisted)" }
+            div { class: "uow-update-branch-repo-header",
+                p { class: "uow-step-h", "Update branch" }
+                span { class: "uow-update-branch-repo-label", "Pulling into " strong { "{repo_label}" } }
+            }
             p { class: "section-hint",
-                "Merge a branch INTO this UoW's branch (GitHub's \"Update branch\"). A clean merge commits; conflicts are resolved by a gated agent."
+                "Merge a branch INTO this UoW's branch (GitHub's \"Update branch\"). "
+                "A clean merge commits directly; AI resolves conflicts if any."
             }
             if has_branches {
                 div { class: "run-control-row",
-                    select {
-                        class: "uow-branch-select",
-                        value: "{selected}",
-                        onchange: move |e| selected.set(e.value()),
-                        option { value: "", disabled: true, selected: selected().is_empty(), "Choose a branch…" }
-                        if !branches.local.is_empty() {
-                            optgroup { label: "Local",
-                                for b in branches.local.iter() {
-                                    option { key: "local:{b}", value: "{b}", "{b}" }
-                                }
-                            }
+                    // Searchable combobox: native <input list="..."> + <datalist>.
+                    // The user types to filter; selecting a suggestion sets the raw value
+                    // (with `origin:` prefix for remote branches).
+                    div { class: "uow-branch-combobox",
+                        input {
+                            class: "uow-branch-input",
+                            r#type: "text",
+                            list: "{datalist_id}",
+                            placeholder: "Search or choose a branch…",
+                            value: "{input_text}",
+                            oninput: move |e| input_text.set(e.value()),
                         }
-                        if !branches.origin.is_empty() {
-                            optgroup { label: "Origin",
-                                for b in branches.origin.iter() {
-                                    option { key: "origin:{b}", value: "origin:{b}", "{b}" }
-                                }
+                        datalist { id: "{datalist_id}",
+                            for (val, label) in all_options.iter() {
+                                option { key: "{val}", value: "{val}", "{label}" }
                             }
                         }
                     }
                     ModelSelect { models: models.clone(), selected: model }
                     button {
                         class: "btn-run",
-                        disabled: updating() || selected().is_empty(),
+                        disabled: updating() || input_text().trim().is_empty(),
                         onclick: move |_| {
-                            let raw = selected();
+                            let raw = input_text().trim().to_string();
                             if raw.is_empty() {
                                 return;
                             }
-                            // Decode the source kind from the option value's prefix.
+                            // Decode the source kind from the value's `origin:` prefix.
                             let (source, branch) = match raw.strip_prefix("origin:") {
                                 Some(b) => ("origin".to_string(), b.to_string()),
                                 None => ("local".to_string(), raw.clone()),
@@ -5284,7 +5352,7 @@ pub(super) fn UowUpdateBranchControl(
                                 updating.set(false);
                             });
                         },
-                        if updating() { "Updating…" } else { "▶ Update branch (AI-assisted)" }
+                        if updating() { "Updating…" } else { "▶ Update branch" }
                     }
                 }
                 // The gated run's live activity (conflict-resolution agent), when running.

@@ -2648,8 +2648,23 @@ html, body {
    with the model select beside it — same pattern the onboarding action rows use. The
    row's `gap` already provides the comfortable breathing room. */
 .run-control-row .btn-run { margin-bottom: 0; }
-/* The AI-assisted "Update branch" control's source-branch picker (grouped local/origin). */
+/* The "Update branch" control's source-branch picker (grouped local/origin). */
 .uow-branch-select {
+  min-width: 200px; max-width: 360px; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 12px;
+  background: var(--surface);
+}
+/* Per-repo "Update branch" header row: heading label + target-repo identifier. */
+.uow-update-branch-repo-header {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+.uow-update-branch-repo-label {
+  font-size: 12px; color: var(--ink-soft);
+}
+/* Searchable combobox wrapper for the branch picker. */
+.uow-branch-combobox { display: flex; flex-direction: column; min-width: 0; }
+/* The text input that drives the native datalist filter. */
+.uow-branch-input {
   min-width: 200px; max-width: 360px; padding: 7px 9px;
   border: 1px solid var(--line); border-radius: 8px; font: inherit; font-size: 12px;
   background: var(--surface);
