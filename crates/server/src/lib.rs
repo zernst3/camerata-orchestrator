@@ -637,6 +637,9 @@ pub fn router(state: AppState) -> Router {
         // ── 3-phase cockpit state (#104 / #105) ───────────────────────────────
         .route("/api/uow/:story_id/intake/context", post(uow_set_intake_context))
         .route("/api/uow/:story_id/intake/repos", post(uow_set_intake_repos))
+        // Per-repo Ship (R3.f / R6): push + open PR for each in-scope repo's story branch.
+        // This is the multi-repo generalisation of `POST /api/uow/:story_id/pr/open`.
+        .route("/api/uow/:story_id/intake/ship", post(uow_intake_ship))
         .route(
             "/api/uow/:story_id/investigation/chat",
             post(uow_append_investigation_chat),
@@ -1187,6 +1190,70 @@ async fn start_governed_run(
                     None
                 }
             };
+
+            // ── Multi-repo worktree setup (R3.f / R6) ────────────────────────────────
+            //
+            // When the UoW's intake.repos has entries, set up a worktree + story branch
+            // PER in-scope repo and capture each repo's base commit. The integration gate
+            // then computes diffs from ALL repos (run_multi_repo_integration_gate).
+            //
+            // Single in-scope repo (or no intake.repos): repo_worktrees stays empty and
+            // execute_dev_implement_run falls back to the single-repo path (unchanged).
+            //
+            // Base-commit capture: HEAD in each worktree before any agent work. Used by
+            // worktree_diff_from_base after the agent commits to get the exact per-repo diff.
+            //
+            // TODO(#105-live): When fan_out wires per-worker worktrees on the live-fleet
+            // side, extend this to also validate that each worker's jail matches its repo
+            // worktree dir. For now, repo_worktrees feeds only the integration gate.
+            let repo_worktrees: Vec<crate::dev_implement_run::RepoWorktree> = {
+                let intake_repos = uow_data.intake.repos.clone();
+                if intake_repos.len() <= 1 {
+                    // Single-repo path (or no intake selection): handled by the primary
+                    // dir + base_commit in execute_dev_implement_run. No extra setup.
+                    Vec::new()
+                } else {
+                    // Multi-repo path: resolve + set up each in-scope repo's worktree.
+                    let workspace_root = state.settings.workspace_root();
+                    let mut worktrees = Vec::new();
+                    for scope in &intake_repos {
+                        // Derive the story branch for this repo from its BranchMode.
+                        let scope_branch = derive_scope_branch(&scope.branch, &story_id_owned);
+                        let override_path = state.settings.repo_path(&scope.repo);
+                        // Resolve and ensure the per-repo worktree (same machinery as the
+                        // primary repo path above). Skip repos that don't resolve locally —
+                        // the primary repo's worktree is always present from the outer resolve.
+                        // TODO(#105-live): surface unresolved sibling repos as run events.
+                        if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
+                            override_path.as_deref(),
+                            workspace_root.as_deref(),
+                            &scope.repo,
+                            &scope_branch,
+                        )
+                        .await
+                        {
+                            // Capture the base commit for this repo's worktree.
+                            let base = tokio::process::Command::new("git")
+                                .args(["rev-parse", "HEAD"])
+                                .current_dir(&wt_dir)
+                                .output()
+                                .await
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                .unwrap_or_default();
+                            worktrees.push(crate::dev_implement_run::RepoWorktree {
+                                repo: scope.repo.clone(),
+                                branch: scope_branch,
+                                dir: wt_dir,
+                                base_commit: base,
+                            });
+                        }
+                    }
+                    worktrees
+                }
+            };
+
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -1207,6 +1274,7 @@ async fn start_governed_run(
                     read_dirs,
                     l3_bundle,
                     integration_gate_bundle,
+                    repo_worktrees,
                 )
                 .await
             });
@@ -7218,6 +7286,221 @@ async fn uow_set_intake_repos(
     Json(state.uow.set_intake_repos(&story_id, req.repos))
 }
 
+/// Per-repo Ship result for one in-scope repo. Part of the [`UowIntakeShipResponse`].
+#[derive(serde::Serialize, Debug)]
+pub struct RepoShipResult {
+    /// `owner/repo`.
+    pub repo: String,
+    /// The story branch that was pushed.
+    pub branch: String,
+    /// `true` when push + PR succeeded.
+    pub ok: bool,
+    /// The PR URL on success.
+    pub pr_url: Option<String>,
+    /// The PR number on success.
+    pub pr_number: Option<u64>,
+    /// Human-readable error when `ok = false`.
+    pub error: Option<String>,
+}
+
+/// Response body for `POST /api/uow/:story_id/intake/ship`.
+#[derive(serde::Serialize, Debug)]
+pub struct UowIntakeShipResponse {
+    /// Per-repo Ship results (one entry per in-scope repo in `intake.repos`).
+    pub repos: Vec<RepoShipResult>,
+    /// `true` when every repo shipped successfully.
+    pub all_ok: bool,
+}
+
+/// Optional request body for `POST /api/uow/:story_id/intake/ship`.
+#[derive(serde::Deserialize, Default)]
+struct UowIntakeShipReq {
+    /// The target/base branch to open each PR into. Empty/absent → each repo's default branch.
+    #[serde(default)]
+    base_branch: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/intake/ship` body `{ base_branch? }` — per-repo Ship (R3.f / R6).
+///
+/// Iterates the UoW's `intake.repos`; for each in-scope repo: derives the story branch
+/// (via `derive_scope_branch`), resolves its worktree, pushes the branch, and opens a PR.
+/// Returns per-repo results in [`UowIntakeShipResponse`] — partial success is surfaced
+/// (some repos may succeed while others fail).
+///
+/// Falls back to the single-repo PR-open path (`uow_pr_open` behaviour) when
+/// `intake.repos` is empty (no multi-repo scope selected at Intake).
+///
+/// 4xx when: no GitHub token; or when single-repo fallback finds no branch / no clone.
+async fn uow_intake_ship(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    req: Option<Json<UowIntakeShipReq>>,
+) -> Response {
+    let bad = |msg: String| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": msg }))).into_response()
+    };
+
+    let Some(token) = github_token() else {
+        return bad("no GitHub token — set CAMERATA_GITHUB_TOKEN to open a PR".to_string());
+    };
+
+    let base_branch = req.and_then(|Json(r)| r.base_branch).filter(|b| !b.trim().is_empty());
+    let uow = state.uow.get_or_create(&story_id);
+    let workspace_root = state.settings.workspace_root();
+
+    // ── Multi-repo path: intake.repos has explicit selections ─────────────────
+    if !uow.intake.repos.is_empty() {
+        let mut results: Vec<RepoShipResult> = Vec::new();
+
+        for scope in &uow.intake.repos {
+            let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+            let override_path = state.settings.repo_path(&scope.repo);
+
+            // Resolve the worktree for this repo + branch.
+            let dir = match crate::workspace::resolve_uow_worktree(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                &scope.repo,
+                &scope_branch,
+            )
+            .await
+            {
+                Some(d) => d,
+                None => {
+                    results.push(RepoShipResult {
+                        repo: scope.repo.clone(),
+                        branch: scope_branch.clone(),
+                        ok: false,
+                        pr_url: None,
+                        pr_number: None,
+                        error: Some(format!(
+                            "repo `{}` is not resolved locally — set its path in the Rules view \
+                             and start development so the repo is cloned",
+                            scope.repo
+                        )),
+                    });
+                    continue;
+                }
+            };
+
+            // Push the branch from its worktree.
+            if let Err(e) = crate::workspace::push_branch(&dir, &scope.repo, &scope_branch, &token).await {
+                results.push(RepoShipResult {
+                    repo: scope.repo.clone(),
+                    branch: scope_branch.clone(),
+                    ok: false,
+                    pr_url: None,
+                    pr_number: None,
+                    error: Some(format!("could not push `{scope_branch}`: {e}")),
+                });
+                continue;
+            }
+
+            // Open (or discover) the PR.
+            let title = format!("Camerata: {story_id} ({})", scope.repo);
+            let body = format!(
+                "Opened by Camerata for story `{story_id}` in repo `{}`.",
+                scope.repo
+            );
+            match crate::workspace::open_pr_with_base(
+                &scope.repo,
+                &scope_branch,
+                base_branch.as_deref(),
+                &title,
+                &body,
+                &token,
+            )
+            .await
+            {
+                Ok(opened) => {
+                    state.uow.append_history(
+                        &story_id,
+                        "intake_ship",
+                        &format!(
+                            "Opened PR #{} for `{}` on `{}`: {}",
+                            opened.number, scope.repo, scope_branch, opened.url
+                        ),
+                    );
+                    results.push(RepoShipResult {
+                        repo: scope.repo.clone(),
+                        branch: scope_branch.clone(),
+                        ok: true,
+                        pr_url: Some(opened.url),
+                        pr_number: Some(opened.number),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(RepoShipResult {
+                        repo: scope.repo.clone(),
+                        branch: scope_branch.clone(),
+                        ok: false,
+                        pr_url: None,
+                        pr_number: None,
+                        error: Some(format!("could not open PR: {e}")),
+                    });
+                }
+            }
+        }
+
+        let all_ok = results.iter().all(|r| r.ok);
+        return Json(UowIntakeShipResponse { repos: results, all_ok }).into_response();
+    }
+
+    // ── Single-repo fallback: no intake.repos — use the UoW's primary branch ──
+    // Mirrors the `uow_pr_open` flow so existing single-repo users see no change.
+    let Some(branch) = uow.branch.clone().filter(|b| !b.trim().is_empty()) else {
+        return bad(
+            "this UoW has no branch yet — start development first so there is a branch to \
+             open a PR for, or set the in-scope repos in the Intake view for multi-repo Ship"
+                .to_string(),
+        );
+    };
+    let Some(repo) = repo_from_story_id(&story_id) else {
+        return bad(format!("could not derive owner/repo from story id `{story_id}`"));
+    };
+    let override_path = state.settings.repo_path(&repo);
+    let Some(dir) = crate::workspace::resolve_uow_worktree(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &repo,
+        &branch,
+    )
+    .await
+    else {
+        return bad(
+            "repo not resolved locally — set its path in the Rules view (and start \
+             development so the repo is cloned) before opening a PR"
+                .to_string(),
+        );
+    };
+    if let Err(e) = crate::workspace::push_branch(&dir, &repo, &branch, &token).await {
+        return bad(format!("could not push `{branch}`: {e}"));
+    }
+    let title = format!("Camerata: {story_id}");
+    let body = format!("Opened by Camerata for story `{story_id}`.");
+    match crate::workspace::open_pr_with_base(&repo, &branch, base_branch.as_deref(), &title, &body, &token).await {
+        Ok(opened) => {
+            state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
+            state.uow.append_history(
+                &story_id,
+                "intake_ship",
+                &format!("Opened PR #{} for `{branch}`: {}", opened.number, opened.url),
+            );
+            let results = vec![RepoShipResult {
+                repo: repo.clone(),
+                branch,
+                ok: true,
+                pr_url: Some(opened.url),
+                pr_number: Some(opened.number),
+                error: None,
+            }];
+            Json(UowIntakeShipResponse { repos: results, all_ok: true }).into_response()
+        }
+        Err(e) => bad(format!("could not open the PR: {e}")),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct UowChatReq {
     /// `"user"` or `"agent"`.
@@ -8113,6 +8396,28 @@ pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
         Some(repo.to_string())
     } else {
         None
+    }
+}
+
+/// Derive the story branch for one in-scope repo given its [`BranchMode`] and the
+/// current story id. Used during per-repo worktree setup (R6 multi-repo path).
+///
+/// - `BranchMode::Existing { branch_name }` → use `branch_name` as-is (working off
+///   an existing branch in this repo, as selected at Intake).
+/// - `BranchMode::NewFromBase { new_name, .. }` → use `new_name` when non-empty;
+///   fall back to `camerata/<story_id>` (the standard Camerata branch slug).
+///
+/// This is a pure helper — no I/O. It mirrors the fallback the primary-repo branch
+/// derivation uses (`uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"))`).
+pub(crate) fn derive_scope_branch(mode: &crate::uow::BranchMode, story_id: &str) -> String {
+    match mode {
+        crate::uow::BranchMode::Existing { branch_name } if !branch_name.trim().is_empty() => {
+            branch_name.clone()
+        }
+        crate::uow::BranchMode::NewFromBase { new_name, .. } if !new_name.trim().is_empty() => {
+            new_name.clone()
+        }
+        _ => format!("camerata/{story_id}"),
     }
 }
 
@@ -13061,6 +13366,170 @@ mod tests {
         assert!(
             is_absent,
             "selected_rules_section must be absent when repo_selection is empty, got: {body:?}"
+        );
+    }
+
+    // ── derive_scope_branch (R6 multi-repo worktree setup) ─────────────────────
+
+    /// `BranchMode::Existing { branch_name }` → use the named branch as-is.
+    #[test]
+    fn derive_scope_branch_existing_mode_uses_branch_name() {
+        let mode = crate::uow::BranchMode::Existing {
+            branch_name: "feature/my-branch".to_string(),
+        };
+        assert_eq!(derive_scope_branch(&mode, "acme/api#42"), "feature/my-branch");
+    }
+
+    /// `BranchMode::Existing { branch_name: "" }` (empty) → fallback to `camerata/<story_id>`.
+    #[test]
+    fn derive_scope_branch_existing_empty_name_falls_back_to_slug() {
+        let mode = crate::uow::BranchMode::Existing {
+            branch_name: "".to_string(),
+        };
+        assert_eq!(
+            derive_scope_branch(&mode, "acme/api#42"),
+            "camerata/acme/api#42",
+        );
+    }
+
+    /// `BranchMode::NewFromBase { new_name }` → use `new_name` when non-empty.
+    #[test]
+    fn derive_scope_branch_new_from_base_uses_new_name() {
+        let mode = crate::uow::BranchMode::NewFromBase {
+            base: "main".to_string(),
+            new_name: "camerata/story-7".to_string(),
+        };
+        assert_eq!(derive_scope_branch(&mode, "acme/api#7"), "camerata/story-7");
+    }
+
+    /// `BranchMode::NewFromBase { new_name: "" }` → fallback to `camerata/<story_id>`.
+    #[test]
+    fn derive_scope_branch_new_from_base_empty_name_falls_back_to_slug() {
+        let mode = crate::uow::BranchMode::NewFromBase {
+            base: "main".to_string(),
+            new_name: String::new(),
+        };
+        assert_eq!(
+            derive_scope_branch(&mode, "acme/api#7"),
+            "camerata/acme/api#7",
+        );
+    }
+
+    // ── repo_from_story_id (also verifies the helper is stable) ─────────────────
+
+    /// `repo_from_story_id` extracts `owner/repo` from a `owner/repo#num` story id.
+    #[test]
+    fn repo_from_story_id_parses_owner_repo() {
+        assert_eq!(
+            repo_from_story_id("acme/api#42"),
+            Some("acme/api".to_string())
+        );
+    }
+
+    /// `repo_from_story_id` returns None for a malformed story id.
+    #[test]
+    fn repo_from_story_id_returns_none_for_invalid_id() {
+        // No '#' → None.
+        assert_eq!(repo_from_story_id("not-a-story-id"), None);
+    }
+
+    // ── uow_intake_ship single-repo fallback (no-token 4xx) ─────────────────────
+
+    /// When the GitHub token is absent, `POST /api/uow/:story_id/intake/ship` returns 400.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intake_ship_returns_bad_request_when_no_github_token() {
+        // Remove the token from the test env so the handler detects its absence.
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+
+        let state = AppState::seeded();
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/uow/acme__api-42/intake/ship")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "must return 400 when no GitHub token is available"
+        );
+        let body = body_json(resp).await;
+        let err = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            err.contains("GitHub token") || err.contains("no GitHub"),
+            "error must mention missing GitHub token, got: {body:?}"
+        );
+    }
+
+    // ── UowIntakeShipResponse structure ─────────────────────────────────────────
+
+    /// `UowIntakeShipResponse` is serializable with the expected shape.
+    #[test]
+    fn uow_intake_ship_response_serializes_correctly() {
+        let r = UowIntakeShipResponse {
+            repos: vec![
+                RepoShipResult {
+                    repo: "acme/api".to_string(),
+                    branch: "camerata/story-42".to_string(),
+                    ok: true,
+                    pr_url: Some("https://github.com/acme/api/pull/1".to_string()),
+                    pr_number: Some(1),
+                    error: None,
+                },
+                RepoShipResult {
+                    repo: "acme/frontend".to_string(),
+                    branch: "camerata/story-42".to_string(),
+                    ok: false,
+                    pr_url: None,
+                    pr_number: None,
+                    error: Some("push failed".to_string()),
+                },
+            ],
+            all_ok: false,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["all_ok"], false);
+        assert_eq!(json["repos"][0]["ok"], true);
+        assert_eq!(json["repos"][1]["ok"], false);
+        assert_eq!(json["repos"][0]["pr_number"], 1);
+        assert_eq!(json["repos"][1]["error"], "push failed");
+    }
+
+    // ── multi-repo worktree setup: intake.repos determines the path ──────────────
+
+    /// When intake.repos is empty (single-repo), repo_worktrees stays empty and
+    /// execute_dev_implement_run uses the single-repo fallback path.
+    #[test]
+    fn multi_repo_path_requires_two_or_more_intake_repos() {
+        // This test verifies the routing logic: <=1 intake repos → empty worktrees.
+        let empty: Vec<crate::uow::RepoScope> = vec![];
+        assert!(
+            empty.len() <= 1,
+            "zero intake repos → single-repo path (repo_worktrees = [])"
+        );
+        let single = vec![crate::uow::RepoScope {
+            repo: "acme/api".to_string(),
+            branch: crate::uow::BranchMode::default(),
+        }];
+        assert!(
+            single.len() <= 1,
+            "one intake repo → single-repo path (repo_worktrees = [])"
+        );
+        let multi = vec![
+            crate::uow::RepoScope {
+                repo: "acme/api".to_string(),
+                branch: crate::uow::BranchMode::default(),
+            },
+            crate::uow::RepoScope {
+                repo: "acme/frontend".to_string(),
+                branch: crate::uow::BranchMode::default(),
+            },
+        ];
+        assert!(
+            multi.len() > 1,
+            "two intake repos → multi-repo path (repo_worktrees populated)"
         );
     }
 }

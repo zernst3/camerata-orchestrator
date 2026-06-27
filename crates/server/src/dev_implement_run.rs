@@ -91,6 +91,23 @@ pub struct IntegrationGateBundle {
     pub llm: Arc<dyn Completer>,
 }
 
+/// One in-scope repo's worktree, branch, and base commit — the per-repo wiring
+/// for multi-repo fan-out (R3.f / R6). Owned by the server's run orchestration;
+/// NEVER passed to the agent (agents don't get git state).
+#[derive(Clone)]
+pub struct RepoWorktree {
+    /// `owner/repo` identifier.
+    pub repo: String,
+    /// The story branch for this repo (may be new-from-base or existing).
+    pub branch: String,
+    /// Resolved worktree dir on disk (from `resolve_uow_worktree`).
+    pub dir: std::path::PathBuf,
+    /// The commit SHA at the branch point (HEAD before any agent work). Used as
+    /// the base for `worktree_diff_from_base` to collect the per-repo diff after
+    /// the agent commits.
+    pub base_commit: String,
+}
+
 /// Run `git diff <base_commit>..HEAD` in `dir` and return the output (all changes
 /// introduced on this branch since `base_commit`, including committed changes).
 ///
@@ -218,20 +235,18 @@ async fn run_l3_if_enabled(
     }
 }
 
-/// Run the integration gate check if the bundle is present.
+/// Run the integration gate check for a SINGLE repo worktree (the original single-repo path).
 ///
-/// Called after the layer-2/L3 pass and before declaring victory. When the UoW
-/// crosses a contract boundary, the assembled diff from the current worktree is
-/// compared against the contract prose. Returns:
+/// Superseded by [`run_multi_repo_integration_gate`] which handles both single- and
+/// multi-repo cases. Kept here as an internal reference implementation and fallback
+/// for callers that don't yet have a `RepoWorktree` slice.
+///
+/// Returns:
 /// - `None` when the bundle is absent (no contract boundary in scope).
 /// - `Some(Ok(()))` when the gate passes.
 /// - `Some(Err(reason))` when the gate bounces — like L2/L3, the caller re-runs
 ///   the agent.
-///
-/// For the true multi-repo fan-out case the per-repo assembled outputs aren't yet
-/// surfaced here; we use the single available worktree diff as the "backend" repo
-/// output and leave a TODO for multi-repo wiring.
-// TODO(#105-followup): wire true multi-repo assembled outputs once fan_out surfaces them server-side.
+#[allow(dead_code)]
 async fn run_integration_gate_if_needed(
     runs: &RunStore,
     run_id: &str,
@@ -321,6 +336,144 @@ async fn run_integration_gate_if_needed(
         }
         Err(e) => {
             // Gate error is advisory: log but don't block the run (consistent with L3 policy).
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "error".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (R3.e) error (treating as pass — advisory): {e}"
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
+        }
+    }
+}
+
+/// Run the integration gate across ALL in-scope repo worktrees.
+///
+/// For multi-repo fan-out (R3.e / R3.f): after the agent commits in each repo's
+/// worktree, compute `worktree_diff_from_base` for EVERY in-scope repo and pass the
+/// full per-repo map to `check_integration_gate_live`. A single-repo UoW keeps
+/// working exactly as before (single-entry `repo_worktrees` slice).
+///
+/// Returns:
+/// - `None` when the bundle is absent (no contract boundary in scope).
+/// - `Some(Ok(()))` when the gate passes across all repos.
+/// - `Some(Err(reason))` when the gate bounces — caller re-runs the agent.
+pub async fn run_multi_repo_integration_gate(
+    runs: &RunStore,
+    run_id: &str,
+    next_seq: &impl Fn() -> usize,
+    gate: &Option<IntegrationGateBundle>,
+    repo_worktrees: &[RepoWorktree],
+    iteration: usize,
+) -> Option<Result<(), String>> {
+    let bundle = gate.as_ref()?;
+
+    runs.push_event(
+        run_id,
+        GateEvent {
+            seq: next_seq(),
+            layer: "integration-gate".to_string(),
+            verdict: "info".to_string(),
+            rule: None,
+            detail: format!(
+                "Integration gate (R3.e) starting — {} repo(s) (iteration {iteration}, model=`{}`).",
+                repo_worktrees.len(),
+                bundle.model
+            ),
+            content_hash: None,
+        },
+    );
+
+    // Collect per-repo diffs concurrently. Each entry is (repo_name, diff_text).
+    // Repos with an empty diff (no changes since base) are included with an explicit
+    // empty string so the integration gate can note "repo X had no changes."
+    let mut diff_futs = Vec::new();
+    for rw in repo_worktrees {
+        let dir = rw.dir.clone();
+        let base = rw.base_commit.clone();
+        diff_futs.push(async move {
+            worktree_diff_from_base(&dir, &base).await
+        });
+    }
+    // Run all diffs concurrently.
+    let diffs: Vec<String> = futures::future::join_all(diff_futs).await;
+
+    let repo_outputs: Vec<(String, String)> = repo_worktrees
+        .iter()
+        .zip(diffs.iter())
+        .map(|(rw, diff)| (rw.repo.clone(), diff.clone()))
+        .collect();
+
+    // Convert to &[(&str, &str)] for the gate call.
+    let repo_output_refs: Vec<(&str, &str)> = repo_outputs
+        .iter()
+        .map(|(r, d)| (r.as_str(), d.as_str()))
+        .collect();
+
+    match crate::review_agent::check_integration_gate_live(
+        bundle.llm.as_ref(),
+        Some(&bundle.contract),
+        &repo_output_refs,
+        &bundle.model,
+    )
+    .await
+    {
+        Ok(crate::review_agent::LiveGateResult::Passed) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "pass".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (R3.e): PASS — contract holds across {} repo(s).",
+                        repo_worktrees.len()
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
+        }
+        Ok(crate::review_agent::LiveGateResult::NoContractRequired) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "pass".to_string(),
+                    rule: None,
+                    detail: "Integration gate (R3.e): no contract required.".to_string(),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
+        }
+        Ok(crate::review_agent::LiveGateResult::BounceToOrchestrator { reason }) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "fail".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (R3.e): BOUNCE — contract mismatch across {n} repo(s): {reason}",
+                        n = repo_worktrees.len(),
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Err(reason))
+        }
+        Err(e) => {
             runs.push_event(
                 run_id,
                 GateEvent {
@@ -460,6 +613,16 @@ pub async fn execute_dev_implement_run(
     // contract boundary, the gate runs after L2/L3 and bounces like them.
     // When `None`, the gate is skipped entirely.
     integration_gate: Option<IntegrationGateBundle>,
+    // Multi-repo worktrees (R3.f / R6): for multi-repo fan-out, each in-scope repo's
+    // resolved worktree + branch + base commit. The integration gate computes diffs from
+    // ALL entries when this is non-empty (and has >1 entry), replacing the single-repo
+    // gate. The primary repo's worktree (`dir`) is always included in this slice when
+    // multi-repo is active. When empty, the gate falls back to the single-repo path
+    // using `dir` + `base_commit` — keeping single-repo runs exactly unchanged.
+    // TODO(#105-live): per-repo Layer-2 checks across all worktrees (currently only
+    // the primary repo's worktree runs Layer-2; full per-repo L2 needs live multi-repo
+    // fan-out + per-repo toolchain runners, deferred until live fleet wiring).
+    repo_worktrees: Vec<RepoWorktree>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -663,8 +826,22 @@ pub async fn execute_dev_implement_run(
                 }
             }
             // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
-            if let Some(gate_result) = run_integration_gate_if_needed(
-                &runs, &run_id, &next_seq, &integration_gate, &dir, &base_commit, iteration,
+            // Multi-repo path (R3.f): when repo_worktrees is populated, collect diffs
+            // from ALL in-scope repos and pass them together. Single-repo path: build
+            // a synthetic single-entry slice from the primary dir + base_commit so the
+            // same code path handles both cases.
+            let effective_worktrees: std::borrow::Cow<[RepoWorktree]> = if repo_worktrees.is_empty() {
+                std::borrow::Cow::Owned(vec![RepoWorktree {
+                    repo: repo.clone(),
+                    branch: target_branch.clone(),
+                    dir: dir.clone(),
+                    base_commit: base_commit.clone(),
+                }])
+            } else {
+                std::borrow::Cow::Borrowed(&repo_worktrees)
+            };
+            if let Some(gate_result) = run_multi_repo_integration_gate(
+                &runs, &run_id, &next_seq, &integration_gate, &effective_worktrees, iteration,
             ).await {
                 if let Err(reason) = gate_result {
                     iteration += 1;
@@ -717,8 +894,20 @@ pub async fn execute_dev_implement_run(
                     }
                 }
                 // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
-                if let Some(gate_result) = run_integration_gate_if_needed(
-                    &runs, &run_id, &next_seq, &integration_gate, &dir, &base_commit, iteration,
+                // Multi-repo path (R3.f): when repo_worktrees is populated, collect
+                // diffs from ALL in-scope repos. Single-repo: synthetic single-entry.
+                let effective_worktrees: std::borrow::Cow<[RepoWorktree]> = if repo_worktrees.is_empty() {
+                    std::borrow::Cow::Owned(vec![RepoWorktree {
+                        repo: repo.clone(),
+                        branch: target_branch.clone(),
+                        dir: dir.clone(),
+                        base_commit: base_commit.clone(),
+                    }])
+                } else {
+                    std::borrow::Cow::Borrowed(&repo_worktrees)
+                };
+                if let Some(gate_result) = run_multi_repo_integration_gate(
+                    &runs, &run_id, &next_seq, &integration_gate, &effective_worktrees, iteration,
                 ).await {
                     if let Err(reason) = gate_result {
                         iteration += 1;
@@ -1164,8 +1353,9 @@ mod tests {
             false,
             None,
             Vec::new(),
-            None, // L3 not enabled in this test
-            None, // integration gate not enabled in this test
+            None,       // L3 not enabled in this test
+            None,       // integration gate not enabled in this test
+            Vec::new(), // single-repo: no multi-repo worktrees
         )
         .await;
 
@@ -1371,5 +1561,239 @@ mod tests {
             "diff must contain the new function: {diff}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 7. RepoWorktree + multi-repo integration gate ─────────────────────────────
+
+    /// RepoWorktree is constructable and holds the expected fields.
+    #[test]
+    fn repo_worktree_struct_holds_expected_fields() {
+        let rw = RepoWorktree {
+            repo: "acme/api".to_string(),
+            branch: "camerata/story-42".to_string(),
+            dir: std::path::PathBuf::from("/tmp/acme-api-wt"),
+            base_commit: "abc123".to_string(),
+        };
+        assert_eq!(rw.repo, "acme/api");
+        assert_eq!(rw.branch, "camerata/story-42");
+        assert_eq!(rw.base_commit, "abc123");
+    }
+
+    /// When integration_gate is None, run_multi_repo_integration_gate returns None
+    /// regardless of how many repo_worktrees are provided.
+    #[tokio::test]
+    async fn multi_repo_integration_gate_absent_bundle_returns_none() {
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/api#42", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let worktrees = vec![
+            RepoWorktree {
+                repo: "acme/api".to_string(),
+                branch: "camerata/story-42".to_string(),
+                dir: std::path::PathBuf::from("/tmp/api"),
+                base_commit: String::new(),
+            },
+            RepoWorktree {
+                repo: "acme/frontend".to_string(),
+                branch: "camerata/story-42".to_string(),
+                dir: std::path::PathBuf::from("/tmp/frontend"),
+                base_commit: String::new(),
+            },
+        ];
+        let result = run_multi_repo_integration_gate(
+            &runs,
+            &run_id,
+            &next_seq,
+            &None, // no bundle — gate skipped
+            &worktrees,
+            0,
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "gate must return None when bundle is absent (no contract boundary)"
+        );
+    }
+
+    /// A stub LLM that returns "PASS" — used to test the gate pass path.
+    struct PassLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm::Completer for PassLlm {
+        async fn complete(
+            &self,
+            _req: crate::llm::LlmRequest,
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            Ok(crate::llm::LlmResponse {
+                text: "PASS".to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: crate::llm::LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            let r = self.complete(req).await?;
+            on_delta(&r.text);
+            Ok(r)
+        }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+    }
+
+    /// A stub LLM that returns "MISMATCH\n- contract violation" — tests the bounce path.
+    struct MismatchLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm::Completer for MismatchLlm {
+        async fn complete(
+            &self,
+            _req: crate::llm::LlmRequest,
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            Ok(crate::llm::LlmResponse {
+                text: "MISMATCH\n- backend omits email field required by contract".to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: crate::llm::LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<crate::llm::LlmResponse> {
+            let r = self.complete(req).await?;
+            on_delta(&r.text);
+            Ok(r)
+        }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+    }
+
+    /// Multi-repo integration gate with PASS verdict → Some(Ok(())).
+    /// Uses empty base_commits (worktree_diff_from_base returns "" for empty base)
+    /// so the gate receives empty diffs; the stub LLM returns PASS regardless.
+    #[tokio::test]
+    async fn multi_repo_integration_gate_pass_returns_ok() {
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/api#42", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let bundle = Some(IntegrationGateBundle {
+            contract: "GET /api/users returns [{id, name, email}]".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            llm,
+        });
+        // Two repos; empty base_commits mean diff returns "" (short-circuit in worktree_diff_from_base).
+        let worktrees = vec![
+            RepoWorktree {
+                repo: "acme/api".to_string(),
+                branch: "camerata/story-42".to_string(),
+                dir: std::path::PathBuf::from("/tmp/api"),
+                base_commit: String::new(), // empty → diff returns ""
+            },
+            RepoWorktree {
+                repo: "acme/frontend".to_string(),
+                branch: "camerata/story-42".to_string(),
+                dir: std::path::PathBuf::from("/tmp/frontend"),
+                base_commit: String::new(),
+            },
+        ];
+        let result = run_multi_repo_integration_gate(
+            &runs, &run_id, &next_seq, &bundle, &worktrees, 0,
+        )
+        .await;
+        assert!(result.is_some(), "gate must return Some when bundle is present");
+        assert!(
+            matches!(result.unwrap(), Ok(())),
+            "PASS verdict must map to Some(Ok(()))"
+        );
+        // Gate events were emitted: info + pass.
+        let run = runs.get(&run_id).unwrap();
+        assert!(
+            run.events.iter().any(|e| e.layer == "integration-gate" && e.verdict == "pass"),
+            "must emit a pass gate event"
+        );
+    }
+
+    /// Multi-repo integration gate with MISMATCH verdict → Some(Err(reason)).
+    #[tokio::test]
+    async fn multi_repo_integration_gate_bounce_returns_err() {
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/api#42", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let llm: Arc<dyn crate::llm::Completer> = Arc::new(MismatchLlm);
+        let bundle = Some(IntegrationGateBundle {
+            contract: "GET /api/users returns [{id, name, email}]".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            llm,
+        });
+        let worktrees = vec![
+            RepoWorktree {
+                repo: "acme/api".to_string(),
+                branch: "camerata/story-42".to_string(),
+                dir: std::path::PathBuf::from("/tmp/api"),
+                base_commit: String::new(),
+            },
+        ];
+        let result = run_multi_repo_integration_gate(
+            &runs, &run_id, &next_seq, &bundle, &worktrees, 0,
+        )
+        .await;
+        assert!(result.is_some());
+        let inner = result.unwrap();
+        assert!(inner.is_err(), "MISMATCH must map to Some(Err(_))");
+        assert!(
+            inner.unwrap_err().contains("email"),
+            "bounce reason must carry the mismatch detail"
+        );
+        let run = runs.get(&run_id).unwrap();
+        assert!(
+            run.events.iter().any(|e| e.layer == "integration-gate" && e.verdict == "fail"),
+            "must emit a fail gate event"
+        );
+    }
+
+    /// Single-repo synthetic worktree slice (the repo_worktrees.is_empty() fallback):
+    /// the integration gate treats a single entry exactly like the multi-repo path.
+    #[tokio::test]
+    async fn multi_repo_gate_single_entry_slice_works_like_single_repo() {
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/api#42", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let bundle = Some(IntegrationGateBundle {
+            contract: "single-repo contract".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            llm,
+        });
+        let single = vec![RepoWorktree {
+            repo: "acme/api".to_string(),
+            branch: "camerata/story-42".to_string(),
+            dir: std::path::PathBuf::from("/tmp/api"),
+            base_commit: String::new(),
+        }];
+        let result = run_multi_repo_integration_gate(
+            &runs, &run_id, &next_seq, &bundle, &single, 0,
+        )
+        .await;
+        assert!(matches!(result, Some(Ok(()))), "single-entry gate must pass with PASS LLM");
     }
 }
