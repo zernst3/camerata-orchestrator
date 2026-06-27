@@ -61,6 +61,7 @@ pub mod terminal;
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
 pub mod model_registry;
+pub mod model_profile_cascade;
 pub mod rate_limit;
 pub mod workflow_gen;
 pub mod transcript;
@@ -560,6 +561,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
         // L3 agentic code-review gate: per-project opt-in (R7).
         .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
+        // Model Efficiency Profile: preview (GET) and apply (POST).
+        .route("/api/projects/:id/model-profile/preview", get(preview_model_profile))
+        .route("/api/projects/:id/model-profile", post(apply_model_profile))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
@@ -2483,6 +2487,94 @@ async fn set_l3_review_handler(
         model: req.model.trim().to_string(),
     };
     match state.projects.set_l3_review(&id, config) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── Model Efficiency Profile ──────────────────────────────────────────────────
+
+/// Query parameters for `GET /api/projects/:id/model-profile/preview`.
+#[derive(serde::Deserialize)]
+struct PreviewProfileQuery {
+    profile: String,
+}
+
+/// `GET /api/projects/:id/model-profile/preview?profile=X` — compute the assignments a
+/// profile would produce WITHOUT applying them. Returns the proposed tier_map, step_models,
+/// and l3_review so the UI can show a "current → new" confirm popup before committing.
+async fn preview_model_profile(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PreviewProfileQuery>,
+) -> Json<serde_json::Value> {
+    let profile = match q.profile.to_ascii_lowercase().as_str() {
+        "max_efficiency" | "maxefficiency" => crate::project::ModelProfile::MaxEfficiency,
+        "balanced" => crate::project::ModelProfile::Balanced,
+        "max_quality" | "maxquality" => crate::project::ModelProfile::MaxQuality,
+        "custom" => crate::project::ModelProfile::Custom,
+        _ => return Json(serde_json::json!({ "ok": false, "message": "unknown profile" })),
+    };
+    // Verify the project exists.
+    if state.projects.get(&id).is_none() {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    }
+    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+    match assignments {
+        None => Json(serde_json::json!({
+            "ok": true,
+            "profile": q.profile,
+            "noop": true,
+            "message": "Custom profile: no cascade — user owns every entry.",
+        })),
+        Some(a) => Json(serde_json::json!({
+            "ok": true,
+            "profile": q.profile,
+            "noop": false,
+            "assignments": {
+                "tier_map": a.tier_map,
+                "step_models": a.step_models,
+                "l3_review": a.l3_review,
+            }
+        })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/model-profile`.
+#[derive(serde::Deserialize)]
+struct ApplyModelProfileReq {
+    /// The profile to apply: `"max_efficiency"` | `"balanced"` | `"max_quality"` | `"custom"`.
+    profile: String,
+}
+
+/// `POST /api/projects/:id/model-profile { profile }` — set the profile and apply the
+/// cascade to the project's tier-map, step-models, and L3 config. Auto-saves. Returns
+/// the updated project.
+async fn apply_model_profile(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ApplyModelProfileReq>,
+) -> Json<serde_json::Value> {
+    let profile = match req.profile.to_ascii_lowercase().as_str() {
+        "max_efficiency" | "maxefficiency" => crate::project::ModelProfile::MaxEfficiency,
+        "balanced" => crate::project::ModelProfile::Balanced,
+        "max_quality" | "maxquality" => crate::project::ModelProfile::MaxQuality,
+        "custom" => crate::project::ModelProfile::Custom,
+        _ => return Json(serde_json::json!({ "ok": false, "message": "unknown profile" })),
+    };
+
+    let assignments = crate::model_profile_cascade::compute_profile_cascade(profile, &state.model_registry);
+
+    let updated = state.projects.update(&id, |p| {
+        p.model_profile = profile;
+        if let Some(ref a) = assignments {
+            p.tier_map = a.tier_map.clone();
+            p.step_models = a.step_models.clone();
+            p.l3_review = a.l3_review.clone();
+        }
+    });
+
+    match updated {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }

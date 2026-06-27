@@ -1233,6 +1233,249 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
     }
 }
 
+/// Model Efficiency Profile selector + Apply button with confirm popup.
+///
+/// Shows a profile picker (MaxEfficiency / Balanced / MaxQuality / Custom).
+/// On Apply: fetches the preview, shows a confirm popup listing the per-entry
+/// `current -> new` changes + count of entries affected, then on confirm POSTs apply.
+/// After apply the per-entry editors still allow manual override.
+#[component]
+pub(super) fn ModelProfileEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+
+    let profile_options = [
+        ("balanced", "Balanced", "Opus/Sonnet/Haiku via Claude subscription. Reliable and caching-efficient."),
+        ("max_efficiency", "Max Efficiency", "Opus orchestrates; free OpenRouter models fill balanced/fast/steps. Quota relief with paid fallback."),
+        ("max_quality", "Max Quality", "Opus/Sonnet throughout; L3 review on. Highest quality, most subscription usage."),
+        ("custom", "Custom", "No cascade. You own every entry."),
+    ];
+
+    let current_profile = project.model_profile.clone();
+    let selected_profile = use_signal(|| current_profile.clone());
+    let applying = use_signal(|| false);
+
+    // Confirm popup state.
+    let confirm_open = use_signal(|| false);
+    let preview_data: Signal<Option<serde_json::Value>> = use_signal(|| None);
+
+    rsx! {
+        div { class: "tier-map-editor model-profile-editor",
+            p { class: "tier-map-heading", "Model Efficiency Profile" }
+            p { class: "section-hint tier-map-hint",
+                "Applying a profile cascades concrete model assignments to ALL entry points \
+                 (tier map, step models, L3). A confirm popup shows current \u{2192} new changes \
+                 before applying. After apply, per-entry editors still allow manual override."
+            }
+
+            div { class: "profile-selector-list",
+                for (value, label, desc) in profile_options.iter() {
+                    {
+                        let v = value.to_string();
+                        let is_current = current_profile == *value;
+                        let is_selected = selected_profile() == *value;
+                        rsx! {
+                            label {
+                                key: "{value}",
+                                class: if is_selected { "profile-option profile-option-selected" } else { "profile-option" },
+                                input {
+                                    r#type: "radio",
+                                    name: "model-profile",
+                                    value: "{value}",
+                                    checked: is_selected,
+                                    onchange: {
+                                        let v = v.clone();
+                                        let mut selected_profile = selected_profile;
+                                        move |_| selected_profile.set(v.clone())
+                                    },
+                                }
+                                span { class: "profile-option-label", "{label}" }
+                                if is_current {
+                                    span { class: "profile-option-active-badge", "active" }
+                                }
+                                span { class: "profile-option-desc", "{desc}" }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div { class: "profile-apply-row",
+                button {
+                    class: "btn-run",
+                    disabled: applying() || selected_profile() == "custom",
+                    title: if selected_profile() == "custom" { "Custom profile: no cascade to apply. Edit entries directly below." } else { "Preview and apply this profile" },
+                    onclick: move |_| {
+                        let sel = selected_profile();
+                        if sel == "custom" { return; }
+                        let pid = pid.clone();
+                        let mut applying = applying;
+                        let mut confirm_open = confirm_open;
+                        let mut preview_data = preview_data;
+                        applying.set(true);
+                        spawn(async move {
+                            let data = preview_model_profile(&pid, &sel).await;
+                            preview_data.set(data);
+                            confirm_open.set(true);
+                            applying.set(false);
+                        });
+                    },
+                    if applying() { "Loading preview\u{2026}" } else { "Apply profile\u{2026}" }
+                }
+            }
+
+            // Confirm popup
+            if confirm_open() {
+                {
+                    let sel = selected_profile();
+                    let pid2 = project.id.clone();
+                    let preview = preview_data().clone();
+                    let mut confirm_open = confirm_open;
+                    let refresh = refresh;
+
+                    // Build the change list from the preview.
+                    let (change_lines, affected_count) = build_change_summary(&project, &preview);
+
+                    rsx! {
+                        div { class: "profile-confirm-overlay",
+                            div { class: "profile-confirm-modal",
+                                p { class: "profile-confirm-title", "Apply \u{201c}{sel}\u{201d} profile?" }
+                                p { class: "profile-confirm-count", "{affected_count} entries will change" }
+                                div { class: "profile-confirm-changes",
+                                    for (i, line) in change_lines.iter().enumerate() {
+                                        p { key: "{i}", class: "profile-confirm-change-row", "{line}" }
+                                    }
+                                }
+                                div { class: "profile-confirm-actions",
+                                    button {
+                                        class: "btn-run",
+                                        onclick: move |_| {
+                                            let sel2 = sel.clone();
+                                            let pid3 = pid2.clone();
+                                            let toasts = toasts;
+                                            let mut confirm_open = confirm_open;
+                                            let mut refresh = refresh;
+                                            confirm_open.set(false);
+                                            spawn(async move {
+                                                let result = apply_model_profile(&pid3, &sel2).await;
+                                                if result.as_ref().and_then(|v| v.get("ok")).and_then(|b| b.as_bool()).unwrap_or(false) {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Profile applied.");
+                                                    refresh += 1;
+                                                } else {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not apply profile.");
+                                                }
+                                            });
+                                        },
+                                        "Confirm"
+                                    }
+                                    button {
+                                        class: "btn-restart",
+                                        onclick: move |_| confirm_open.set(false),
+                                        "Cancel"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Build the human-readable change summary for the confirm popup.
+/// Returns (lines, affected_count).
+fn build_change_summary(project: &ProjectView, preview: &Option<serde_json::Value>) -> (Vec<String>, usize) {
+    let Some(v) = preview else {
+        return (vec!["Preview unavailable.".to_string()], 0);
+    };
+    if v.get("noop").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return (vec!["Custom profile: no changes.".to_string()], 0);
+    }
+    let Some(a) = v.get("assignments") else {
+        return (vec!["No assignments in preview.".to_string()], 0);
+    };
+
+    let mut lines = Vec::new();
+    let mut count = 0usize;
+
+    // Tier map
+    if let Some(tm) = a.get("tier_map") {
+        let new_strongest = tm.get("strongest").and_then(|v| v.as_str()).unwrap_or("");
+        let cur_strongest = &project.tier_map.strongest;
+        if new_strongest != cur_strongest {
+            lines.push(format!("tier.strongest: {} \u{2192} {}", cur_strongest, new_strongest));
+            count += 1;
+        }
+        let new_balanced = tier_chain_str(tm.get("balanced"));
+        let cur_balanced = project.tier_map.balanced.join(", ");
+        if new_balanced != cur_balanced {
+            lines.push(format!("tier.balanced: {} \u{2192} {}", cur_balanced, new_balanced));
+            count += 1;
+        }
+        let new_fast = tier_chain_str(tm.get("fast"));
+        let cur_fast = project.tier_map.fast.join(", ");
+        if new_fast != cur_fast {
+            lines.push(format!("tier.fast: {} \u{2192} {}", cur_fast, new_fast));
+            count += 1;
+        }
+    }
+
+    // Step models
+    if let Some(sm) = a.get("step_models") {
+        let steps = [
+            ("audit", &project.step_models.audit),
+            ("calibration", &project.step_models.calibration),
+            ("research_chat", &project.step_models.research_chat),
+            ("story_authoring", &project.step_models.story_authoring),
+            ("decomposition", &project.step_models.decomposition),
+            ("escalation", &project.step_models.escalation),
+            ("clarification", &project.step_models.clarification),
+        ];
+        for (key, cur) in steps.iter() {
+            let new_val = sm.get(key).and_then(|v| v.as_str()).unwrap_or("");
+            if new_val != cur.as_str() {
+                lines.push(format!("step.{}: {} \u{2192} {}", key, cur, new_val));
+                count += 1;
+            }
+        }
+    }
+
+    // L3
+    if let Some(l3) = a.get("l3_review") {
+        let new_enabled = l3.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let cur_enabled = project.l3_review.enabled;
+        if new_enabled != cur_enabled {
+            lines.push(format!("l3.enabled: {} \u{2192} {}", cur_enabled, new_enabled));
+            count += 1;
+        }
+        let new_model = l3.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        let cur_model = project.l3_review.model.as_str();
+        if new_model != cur_model {
+            lines.push(format!("l3.model: {} \u{2192} {}", if cur_model.is_empty() { "(balanced fallback)" } else { cur_model }, if new_model.is_empty() { "(balanced fallback)" } else { new_model }));
+            count += 1;
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push("No changes (all entries already match).".to_string());
+    }
+
+    (lines, count)
+}
+
+fn tier_chain_str(v: Option<&serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(serde_json::Value::String(s)) => s.clone(),
+        _ => String::new(),
+    }
+}
+
 /// Model-tier editor (#63): a compact dev-console for the project's fast / balanced /
 /// strongest model bindings. Reads from `project.tier_map` and POSTs to
 /// `PATCH /api/projects/:id/tier-map` (patch semantics: all three bands sent each save).
@@ -2128,6 +2371,11 @@ pub(super) fn RulesView() -> Element {
                                 }
                             }
                         }
+
+                        // ── SETTINGS: Model Efficiency Profile ────────────────────────
+                        // Cascades sensible model defaults to ALL entry points on apply.
+                        p { class: "section-label settings-label", "SETTINGS: Model Efficiency Profile" }
+                        ModelProfileEditor { project: p_owned.clone(), refresh }
 
                         // ── SETTINGS: Model tier map (#63) ────────────────────────────
                         // NOT a ruleset concern — controls which model the fleet uses

@@ -69,6 +69,24 @@ pub fn default_routine_secs() -> u64 {
         .unwrap_or(600)
 }
 
+/// The project's model efficiency profile. Controls which models are assigned to each
+/// entry point when "Apply profile" is invoked. `Balanced` is the serde default so
+/// new and legacy projects both get sensible paid-subscription tiering out of the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProfile {
+    /// Opus orchestrates; free OpenRouter models fill balanced/fast/steps; L3 free.
+    /// Graceful fallback: if no free tool-use models exist in the registry, uses Balanced paid values.
+    MaxEfficiency,
+    /// Subscription-leaning: Opus/Sonnet/Haiku throughout; no free models; L3 off.
+    #[default]
+    Balanced,
+    /// Opus/Sonnet throughout; L3 on with Sonnet; no free models.
+    MaxQuality,
+    /// No-op: user owns every entry; profile apply is a no-op.
+    Custom,
+}
+
 /// Per-project Layer-3 (agentic code-review) configuration (R7).
 ///
 /// Default: off, using the project's `balanced` tier model when enabled.
@@ -267,6 +285,11 @@ pub struct Project {
     /// for projects persisted before this field existed — no migration required.
     #[serde(default)]
     pub l3_review: L3ReviewConfig,
+    /// The model efficiency profile for this project. When a profile other than `Custom`
+    /// is applied, it cascades concrete model assignments to the tier-map, step-models,
+    /// and L3 config. Serde default = `Balanced`.
+    #[serde(default)]
+    pub model_profile: ModelProfile,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -548,6 +571,7 @@ impl ProjectStore {
                 step_models: StepModels::default(),
                 stall_thresholds: StallThresholds::default(),
                 l3_review: L3ReviewConfig::default(),
+                model_profile: ModelProfile::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -614,6 +638,7 @@ impl ProjectStore {
                     step_models: StepModels::default(),
                     stall_thresholds: StallThresholds::default(),
                     l3_review: L3ReviewConfig::default(),
+                    model_profile: ModelProfile::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -746,6 +771,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -787,6 +813,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -822,6 +849,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -860,6 +888,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -910,6 +939,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1194,6 +1224,7 @@ mod tests {
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

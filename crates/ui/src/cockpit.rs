@@ -93,6 +93,10 @@ struct ProjectView {
     /// projects written before this field existed deserialise with the disabled default.
     #[serde(default)]
     l3_review: L3ReviewView,
+    /// The project's model efficiency profile.
+    /// Serde default = Balanced.
+    #[serde(default = "default_model_profile_str")]
+    model_profile: String, // "balanced" | "max_efficiency" | "max_quality" | "custom"
 }
 
 /// UI mirror of `camerata_server::project::L3ReviewConfig`.
@@ -209,6 +213,10 @@ impl Default for TierMapView {
 
 fn default_max_iterations() -> usize {
     1
+}
+
+fn default_model_profile_str() -> String {
+    "balanced".to_string()
 }
 
 /// GET a JSON resource from the BFF, retrying on a connection failure so a fetch that
@@ -389,6 +397,34 @@ async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Fetch the proposed model assignments for a profile WITHOUT applying them.
+pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+    reqwest::get(format!(
+        "{}/api/projects/{}/model-profile/preview?profile={}",
+        crate::BFF_URL,
+        project_id,
+        profile
+    ))
+    .await
+    .ok()?
+    .json::<serde_json::Value>()
+    .await
+    .ok()
+}
+
+/// Apply a profile to a project (set profile + cascade + auto-save).
+pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/model-profile", crate::BFF_URL, project_id))
+        .json(&serde_json::json!({ "profile": profile }))
+        .send()
+        .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()
 }
 
 /// Set the stall-detection thresholds for a project.

@@ -95,6 +95,7 @@ mod tests {
             step_models: crate::project::StepModels::default(),
             stall_thresholds: crate::project::StallThresholds::default(),
             l3_review: crate::project::L3ReviewConfig::default(),
+            model_profile: crate::project::ModelProfile::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
