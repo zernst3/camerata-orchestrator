@@ -291,6 +291,17 @@ impl ModelRegistry {
         entries
     }
 
+    /// Directly seed the OpenRouter cache with a set of entries. Only available in
+    /// `#[cfg(test)]` so it can never be called from production code paths.
+    /// Used by tests in other modules that need an openrouter-provider model in the
+    /// registry without making a live HTTP call.
+    #[cfg(test)]
+    pub fn seed_openrouter_entries(&self, entries: Vec<RegistryEntry>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.openrouter_cache = Some(entries);
+        }
+    }
+
     /// Attempt to refresh the OpenRouter cache using the credential store. No-op (returns
     /// `false`) when the key is not set; returns `true` when the fetch was attempted
     /// (even on error — the cache is updated to `Some([])` on failure so the UI doesn't

@@ -1338,6 +1338,181 @@ pub fn reassemble_batch_results(
         .collect()
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// OPENROUTER COMPLETER
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// Calls the OpenRouter chat-completions endpoint (`POST /api/v1/chat/completions`) with
+// an OpenAI-compatible request/response shape. The key is read from the credential store
+// at call time (not captured at construction). Prompt caching is NOT used on this path
+// (OpenRouter does not expose Anthropic's caching protocol on top of its pass-through).
+//
+// Object-safe: satisfies the same `Completer` trait as `Llm`, so callers never need to
+// know which backend they hold.
+
+/// A `Completer` that routes bare-LLM calls through OpenRouter's chat-completions API.
+///
+/// Constructed via [`build_completer`] when the model registry reports `provider =
+/// "openrouter"` for the requested model id. The API key is read from `api_key` (already
+/// resolved from the credential store by the factory — no IO at call time).
+pub struct OpenRouterCompleter {
+    /// The resolved `OPENROUTER_API_KEY` value. Never empty (factory guarantees it).
+    api_key: String,
+}
+
+impl OpenRouterCompleter {
+    /// Call OpenRouter's `/api/v1/chat/completions` endpoint and return the completion.
+    async fn call_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
+        // Build the messages array. System prompt goes as a separate "system" role message
+        // when present (the OpenAI-compatible schema used by OpenRouter supports this).
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        if let Some(system) = &req.system {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": system
+            }));
+        }
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": req.prompt
+        }));
+
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": req.max_tokens,
+            "messages": messages,
+        });
+
+        let resp = reqwest::Client::new()
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("HTTP-Referer", "https://camerata.ai")
+            .header("X-Title", "Camerata")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("OpenRouter API request failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("OpenRouter API HTTP {status}: {text}");
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("parse OpenRouter response JSON: {e}"))?;
+
+        // OpenAI-compatible shape: choices[0].message.content
+        let output = v["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice["message"]["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        // Usage (OpenAI-compatible: prompt_tokens / completion_tokens).
+        let input_tokens = v["usage"]["prompt_tokens"].as_u64();
+        let output_tokens = v["usage"]["completion_tokens"].as_u64();
+        // The response may echo back the model id (useful for wildcard/routing models).
+        let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+
+        Ok(LlmResponse {
+            text: output,
+            model: model_returned,
+            backend: "openrouter/api".to_string(),
+            cost_usd: None, // OpenRouter does not return a dollar figure in the response body.
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Completer for OpenRouterCompleter {
+    async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        let model = if req.model.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "OpenRouterCompleter requires an explicit model id in the request"
+            ));
+        } else {
+            req.model.clone()
+        };
+        self.call_api(&req, &model).await
+    }
+
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        // OpenRouter streaming is not implemented in this seam — fall back to a single
+        // non-streaming call and deliver the full text as one delta. Streaming can be
+        // added as a follow-up without changing the trait contract.
+        let resp = self.complete(req).await?;
+        on_delta(&resp.text);
+        Ok(resp)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════
+// PROVIDER-SELECTING FACTORY
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// Given a model id, the registry's provider tag for it, and the credential store,
+// return the right `Arc<dyn Completer>`. Callers that currently do `state.llm()` for a
+// user-chosen model should use `build_completer` instead so OpenRouter-provider models
+// are dispatched to `OpenRouterCompleter` rather than hitting the Anthropic "not wired
+// yet" arm.
+
+/// Build the right `Arc<dyn Completer>` for `model_id` based on what the registry says
+/// its provider is.
+///
+/// - `"claude"` provider (or any unknown/unrecognised provider) → returns `Arc::new(llm)`,
+///   the existing Anthropic `Llm` that was already built by the caller.
+/// - `"openrouter"` provider → resolves `OPENROUTER_API_KEY` from `creds` and returns an
+///   `Arc<OpenRouterCompleter>`. Returns an error when the key is not set.
+///
+/// This is intentionally a free function (not a method on `AppState`) so it can be
+/// imported and tested without pulling in the full server state.
+pub fn build_completer(
+    model_id: &str,
+    registry: &crate::model_registry::ModelRegistry,
+    creds: &dyn crate::credentials::CredentialStore,
+    llm: std::sync::Arc<Llm>,
+) -> anyhow::Result<std::sync::Arc<dyn Completer>> {
+    let provider = registry
+        .all_entries()
+        .into_iter()
+        .find(|e| e.id == model_id)
+        .map(|e| e.provider)
+        .unwrap_or_else(|| "claude".to_string());
+
+    match provider.as_str() {
+        "openrouter" => {
+            let key = creds
+                .get(crate::credentials::OPENROUTER_API_KEY)
+                .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
+                .filter(|k| !k.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "model `{model_id}` is an OpenRouter model but OPENROUTER_API_KEY is not \
+                         set — add it via Settings → Credentials before using this model"
+                    )
+                })?;
+            Ok(std::sync::Arc::new(OpenRouterCompleter { api_key: key }))
+        }
+        // "claude" or any unrecognised provider: use the existing Anthropic Llm.
+        _ => Ok(llm),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,5 +1816,174 @@ malformed line, not json
         assert!(v["params"]["model"].is_string());
         assert!(v["params"]["messages"].is_array());
         assert_eq!(v["params"]["max_tokens"], 512);
+    }
+
+    // ── OpenRouter Completer + factory ────────────────────────────────────────────
+
+    use crate::credentials::CredentialStore as _;
+
+    /// A canned OpenRouter JSON response (chat-completions shape) with both a text output
+    /// and a usage block. `parse_openrouter_response` (exercised indirectly via
+    /// `call_api`) must extract text and token counts correctly.
+    #[test]
+    fn openrouter_response_parse_extracts_text_and_tokens() {
+        // Build a synthetic chat-completions response body.
+        let body = serde_json::json!({
+            "id": "gen-abc123",
+            "model": "qwen/qwen3-235b-a22b-04-28:free",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Here is the audit finding."
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150
+            }
+        });
+
+        // Replicate the parse logic from `call_api` directly (no HTTP call needed).
+        let output = body["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice["message"]["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        let input_tokens = body["usage"]["prompt_tokens"].as_u64();
+        let output_tokens = body["usage"]["completion_tokens"].as_u64();
+        let model_returned = body["model"].as_str().unwrap_or("unknown").to_string();
+
+        assert_eq!(output, "Here is the audit finding.");
+        assert_eq!(input_tokens, Some(120));
+        assert_eq!(output_tokens, Some(30));
+        assert_eq!(model_returned, "qwen/qwen3-235b-a22b-04-28:free");
+    }
+
+    /// Missing `choices` in the response (malformed or empty completion) → empty string,
+    /// not a panic. Robustness guard.
+    #[test]
+    fn openrouter_response_parse_handles_missing_choices() {
+        let body = serde_json::json!({ "model": "some/model", "choices": [] });
+        let output = body["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice["message"]["content"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(output, "");
+    }
+
+    // ── build_completer factory ───────────────────────────────────────────────────
+
+    fn make_llm() -> std::sync::Arc<Llm> {
+        std::sync::Arc::new(Llm {
+            vendor: Vendor::Anthropic,
+            backend: Backend::Cli,
+            default_model: "claude-sonnet-4-6".to_string(),
+            api_key: None,
+            ledger: None,
+        })
+    }
+
+    /// When the model id is not in the registry at all, the factory defaults to the
+    /// Anthropic Llm (safe fallback: unknown models stay on the existing path).
+    #[test]
+    fn factory_returns_anthropic_for_unknown_model() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        let llm = make_llm();
+
+        let completer = build_completer("unknown-model-xyz", &registry, &creds, llm);
+        // Should succeed (no error for an unknown model — safe fallback to Anthropic).
+        assert!(
+            completer.is_ok(),
+            "factory must not error for unknown models"
+        );
+    }
+
+    /// For a claude-provider model (e.g. `claude-sonnet-4-6` in the static registry),
+    /// the factory returns the Anthropic Llm without touching the credential store.
+    #[test]
+    fn factory_returns_anthropic_for_claude_provider_model() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        // Note: no OPENROUTER_API_KEY set, yet this must not error.
+        let llm = make_llm();
+
+        let completer = build_completer("claude-sonnet-4-6", &registry, &creds, llm);
+        assert!(
+            completer.is_ok(),
+            "claude-provider model must succeed even without an OpenRouter key"
+        );
+    }
+
+    /// For an openrouter-provider model, the factory errors when no API key is set.
+    #[test]
+    fn factory_errors_for_openrouter_model_without_key() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        // Inject a fake OpenRouter entry so the factory knows the provider.
+        registry.seed_openrouter_entries(vec![crate::model_registry::RegistryEntry {
+            provider: "openrouter".to_string(),
+            display: "Qwen3 Coder (free)".to_string(),
+            id: "qwen/qwen3-235b:free".to_string(),
+            free: true,
+            tool_use: true,
+            context: 32_768,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+        }]);
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        // No key set → error.
+        let llm = make_llm();
+        let result = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm);
+        assert!(result.is_err(), "factory must error when key is absent");
+        // Extract the error without relying on `T: Debug` (Arc<dyn Completer> is not Debug).
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => unreachable!(),
+        };
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "error message must mention the missing key: {msg}"
+        );
+    }
+
+    /// For an openrouter-provider model WITH a key set, the factory succeeds and returns
+    /// an OpenRouterCompleter (we can verify this via the `as_any` downcast).
+    #[test]
+    fn factory_returns_openrouter_completer_when_key_is_set() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        registry.seed_openrouter_entries(vec![crate::model_registry::RegistryEntry {
+            provider: "openrouter".to_string(),
+            display: "Qwen3 Coder (free)".to_string(),
+            id: "qwen/qwen3-235b:free".to_string(),
+            free: true,
+            tool_use: true,
+            context: 32_768,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+        }]);
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        creds
+            .set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test-key")
+            .unwrap();
+        let llm = make_llm();
+        let completer = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm)
+            .expect("factory must succeed when key is set");
+        // Verify the concrete type is OpenRouterCompleter via downcast.
+        assert!(
+            completer.as_any().is::<OpenRouterCompleter>(),
+            "expected an OpenRouterCompleter for an openrouter-provider model"
+        );
     }
 }

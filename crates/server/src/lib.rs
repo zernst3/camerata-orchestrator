@@ -5642,8 +5642,14 @@ async fn draft_routine_prompt(
         "Permission scope: {}\n\nWhat the user wants:\n{}",
         req.scope, req.intent
     );
-    let llm = state.llm();
-    match llm
+    let completer = crate::llm::build_completer(
+        &req.model,
+        &state.model_registry,
+        state.credential_store.as_ref(),
+        std::sync::Arc::new(state.llm()),
+    )
+    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    match completer
         .complete(
             crate::llm::LlmRequest::new(user)
                 .with_model(req.model)
@@ -5790,8 +5796,14 @@ async fn chat_escalation(
         None => crate::escalation::chat_system_prompt(&esc),
     };
     let user = crate::escalation::chat_user_prompt(&esc, &req.message);
-    let llm = state.llm();
-    let reply = match llm
+    let completer = crate::llm::build_completer(
+        &req.model,
+        &state.model_registry,
+        state.credential_store.as_ref(),
+        std::sync::Arc::new(state.llm()),
+    )
+    .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
+    let reply = match completer
         .complete(
             crate::llm::LlmRequest::new(user)
                 .with_model(req.model)
@@ -6033,17 +6045,25 @@ async fn chat(
     State(state): State<AppState>,
     Json(req): Json<ChatReq>,
 ) -> Result<Json<crate::llm::LlmResponse>, AppError> {
-    let llm = state.llm();
     // Research chat is a UI-PICKED non-fleet step: an explicit request model wins; otherwise
     // the active project's per-step default applies (DEFAULT_MODEL floor only with no project).
     let model = step_model_or(&state, crate::project::StepKind::ResearchChat, Some(&req.model));
+    // Route to the right Completer: OpenRouter for openrouter-provider models, Anthropic for all
+    // others. Returns an error when the model is OpenRouter-provider but no key is set.
+    let completer = crate::llm::build_completer(
+        &model,
+        &state.model_registry,
+        state.credential_store.as_ref(),
+        std::sync::Arc::new(state.llm()),
+    )
+    .map_err(AppError)?;
     // Embed history into the prompt when prior turns exist; otherwise use the bare prompt.
     let full_prompt = render_chat_prompt(&req.history, &req.prompt);
     let mut r = crate::llm::LlmRequest::new(full_prompt).with_model(model);
     if let Some(system) = req.system {
         r = r.with_system(system);
     }
-    Ok(Json(llm.complete(r).await?))
+    Ok(Json(completer.complete(r).await?))
 }
 
 /// `GET /api/usage` — the cumulative, session-wide LLM usage snapshot for the cockpit's
