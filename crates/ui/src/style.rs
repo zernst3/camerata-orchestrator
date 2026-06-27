@@ -53,8 +53,10 @@ pub const GLOBAL_CSS: &str = r#"
      grouped tables read as part of the same dark-industrial surface.
      (chorale exposes these as overridable CSS variables.) */
   --chorale-accent:            var(--accent);
-  --chorale-accent-contrast:   #ffffff;
-  --chorale-surface:           var(--surface);
+  --chorale-accent-contrast:   #1a1816;
+  /* tables use SOLID dark (not the translucent --surface) so cells stay opaque + readable
+     regardless of any layer behind them; other glass panels stay translucent for the bombe. */
+  --chorale-surface:           #16130f;
   --chorale-text:              var(--ink);
   --chorale-text-muted:        var(--ink-soft);
   --chorale-text-subtle:       var(--ink-faint);
@@ -62,19 +64,32 @@ pub const GLOBAL_CSS: &str = r#"
   --chorale-border:            var(--line);
   --chorale-divider:           var(--line);
   --chorale-separator-color:   var(--line);
-  --chorale-header-bg:         var(--paper);
+  --chorale-header-bg:         #100d0b;
   --chorale-group-header-bg:   var(--accent-wash);
   --chorale-group-header-border: var(--line);
-  --chorale-toolbar-bg:        var(--surface);
-  --chorale-input-bg:          var(--surface);
+  --chorale-toolbar-bg:        #16130f;
+  --chorale-input-bg:          #0e0c0b;
   --chorale-input-border:      var(--line);
-  --chorale-button-bg:         var(--surface);
+  --chorale-button-bg:         #1f1b17;
   --chorale-button-disabled-bg: var(--line-soft);
-  --chorale-popover-bg:        var(--surface);
+  --chorale-popover-bg:        #16130f;
+  --chorale-popover-shadow:    0 15px 40px rgba(0,0,0,0.7);
+  --chorale-frozen-divider-shadow: 3px 0 4px -2px rgba(0,0,0,0.5);
   --chorale-range-bg:          var(--accent-wash);
   --chorale-active-cell-outline: var(--accent);
   --chorale-row-selected-divider: var(--accent);
-  --chorale-error:             #dc2626;
+  --chorale-error:             #f87171;
+  /* badges — chorale falls back to LIGHT pills if these are unset (the white state badges) */
+  --chorale-badge-default-bg:  rgba(255,255,255,0.06);
+  --chorale-badge-default-text: var(--ink-soft);
+  --chorale-badge-gray-bg:     rgba(140,128,117,0.15);
+  --chorale-badge-gray-text:   var(--ink-soft);
+  --chorale-badge-green-bg:    rgba(22,163,74,0.18);
+  --chorale-badge-green-text:  #4ade80;
+  --chorale-badge-red-bg:      rgba(220,38,38,0.18);
+  --chorale-badge-red-text:    #f87171;
+  --chorale-badge-yellow-bg:   rgba(202,138,4,0.20);
+  --chorale-badge-yellow-text: #fbbf24;
 }
 
 * { box-sizing: border-box; }
