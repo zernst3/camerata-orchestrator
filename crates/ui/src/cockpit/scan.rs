@@ -543,11 +543,28 @@ pub(super) async fn audit_against(
         .ok()
 }
 
-/// One model the audit selector offers (`GET /api/models`).
+/// One model entry in a selector, sourced from `GET /api/models/registry`.
+///
+/// `label` carries a badge-enriched display string (e.g. "Opus 4.8 [200K ctx]").
+/// `provider` groups the entry in `<optgroup>` elements ("claude" | "openrouter").
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelOption {
+    /// Badge-enriched display label. Built by [`model_badge_label`] at fetch time.
     pub label: String,
+    /// The model id passed to the API / CLI (stable key; stored in project settings).
     pub id: String,
+    /// Provider key: "claude" or "openrouter". Used for `<optgroup>` grouping.
+    #[serde(default)]
+    pub provider: String,
+    /// Whether the model is free to call (prompt + completion price = 0).
+    #[serde(default)]
+    pub free: bool,
+    /// Whether the model supports tool use.
+    #[serde(default)]
+    pub tool_use: bool,
+    /// Context window in tokens.
+    #[serde(default)]
+    pub context: u64,
     /// USD per million tokens (input / output). Drives the pre-audit cost estimate.
     #[serde(default)]
     pub price_in: f64,
@@ -555,20 +572,129 @@ pub(super) struct AuditModelOption {
     pub price_out: f64,
 }
 
+/// Build a badge-enriched display label from registry entry fields.
+///
+/// Format: "<display> [FREE] [200K ctx]"  (tool-use is implicit for Claude; shown
+/// for OpenRouter only when the model lacks it so the absence is visible).
+fn model_badge_label(display: &str, free: bool, tool_use: bool, context: u64, provider: &str) -> String {
+    let mut badges = Vec::<String>::new();
+    if free {
+        badges.push("FREE".to_string());
+    }
+    // Show tool-use badge only for OpenRouter models where absence matters.
+    if provider == "openrouter" && !tool_use {
+        badges.push("no-tools".to_string());
+    }
+    if context > 0 {
+        let ctx_k = context / 1000;
+        badges.push(format!("{ctx_k}K ctx"));
+    }
+    if badges.is_empty() {
+        display.to_string()
+    } else {
+        format!("{} [{}]", display, badges.join("] ["))
+    }
+}
+
+/// Shape of the raw registry wire response from `GET /api/models/registry`.
+#[derive(serde::Deserialize)]
+struct RegistryResp {
+    models: Vec<RegistryEntryWire>,
+    #[serde(default)]
+    openrouter_fetched: bool,
+}
+
+/// One entry from the registry wire response. Mirrors `camerata_server::model_registry::RegistryEntry`.
+#[derive(serde::Deserialize)]
+struct RegistryEntryWire {
+    id: String,
+    display: String,
+    provider: String,
+    #[serde(default)]
+    free: bool,
+    #[serde(default)]
+    tool_use: bool,
+    #[serde(default)]
+    context: u64,
+    #[serde(default)]
+    price_in: f64,
+    #[serde(default)]
+    price_out: f64,
+}
+
+impl RegistryEntryWire {
+    fn to_option(&self) -> AuditModelOption {
+        AuditModelOption {
+            label: model_badge_label(
+                &self.display,
+                self.free,
+                self.tool_use,
+                self.context,
+                &self.provider,
+            ),
+            id: self.id.clone(),
+            provider: self.provider.clone(),
+            free: self.free,
+            tool_use: self.tool_use,
+            context: self.context,
+            price_in: self.price_in,
+            price_out: self.price_out,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelsResp {
     pub models: Vec<AuditModelOption>,
+    /// The default model id to pre-select. For the registry this is the first Claude model.
     #[serde(default)]
     pub default: String,
+    /// Whether the OpenRouter portion of the registry has been fetched.
+    #[serde(default)]
+    pub openrouter_fetched: bool,
 }
 
+impl AuditModelsResp {
+    /// Return models grouped by provider for `<optgroup>` rendering.
+    /// Each group is `(group_label, entries)`. Claude always comes first.
+    pub fn grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
+        let claude: Vec<&AuditModelOption> =
+            self.models.iter().filter(|m| m.provider == "claude").collect();
+        let openrouter: Vec<&AuditModelOption> =
+            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let mut groups = Vec::new();
+        if !claude.is_empty() {
+            groups.push(("Claude (subscription)", claude));
+        }
+        if !openrouter.is_empty() {
+            groups.push(("OpenRouter", openrouter));
+        }
+        groups
+    }
+}
+
+/// Fetch the model registry (`GET /api/models/registry`) and map entries to selector options.
+///
+/// Falls back gracefully: if OpenRouter key is not set, only Claude entries are returned.
+/// Returns `None` only when the server is unreachable.
 pub(super) async fn fetch_audit_models() -> Option<AuditModelsResp> {
-    reqwest::get(format!("{}/api/models", crate::BFF_URL))
+    let resp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
         .await
         .ok()?
-        .json::<AuditModelsResp>()
+        .json::<RegistryResp>()
         .await
-        .ok()
+        .ok()?;
+
+    let models: Vec<AuditModelOption> = resp.models.iter().map(|e| e.to_option()).collect();
+    // Default = first Claude model (Opus), or first model overall if no Claude entries.
+    let default = models
+        .iter()
+        .find(|m| m.provider == "claude")
+        .or_else(|| models.first())
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+
+    Some(AuditModelsResp { models, default, openrouter_fetched: resp.openrouter_fetched })
 }
 
 /// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
@@ -2799,7 +2925,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 p { class: "scan-section-h", "Step 2 — audit the code against your selected rules (optional)" }
                 p { class: "scan-section-sub", "The audit is OPTIONAL — you can Apply the rules above and finish onboarding without it. Run it when you want to see existing violations to triage. Tick the rules, then press “Audit code against selected rules”. The deterministic security rules (secrets / raw-SQL / secret-URLs) always run as the enforced floor; the AI checks the code against ONLY your selected rules AND flags anything else worth a look (advisory)." }
                 // Model picker — the user owns the speed/thoroughness trade-off. List is
-                // company-agnostic, served by /api/models.
+                // company-agnostic, served by /api/models/registry. Options are grouped
+                // by provider (Claude first, then OpenRouter); each label has badges
+                // (FREE / no-tools / NNNk ctx). Degrades to Claude-only when no OpenRouter
+                // key is configured.
                 if let Some(m) = models.as_ref() {
                     div { class: "audit-model-row",
                         label { class: "audit-model-label", "Audit model" }
@@ -2808,8 +2937,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             disabled: auditing(),
                             value: "{audit_model}",
                             onchange: move |e| audit_model.set(e.value()),
-                            for opt in m.models.iter() {
-                                option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                            for (group_label , opts) in m.grouped().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                                    }
+                                }
                             }
                         }
                         span { class: "audit-model-hint", "Faster models finish sooner; stronger models catch more." }
@@ -2824,8 +2957,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             disabled: auditing(),
                             value: "{calibration_model}",
                             onchange: move |e| calibration_model.set(e.value()),
-                            for opt in m.models.iter() {
-                                option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                            for (group_label , opts) in m.grouped().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                                    }
+                                }
                             }
                         }
                         span { class: "audit-model-hint", "Recalibrates severity + flags low-confidence findings. Default = the scan model; pick a stronger one for cheap-scan-plus-smart-verify." }

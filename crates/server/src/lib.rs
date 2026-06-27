@@ -59,6 +59,7 @@ pub mod terminal;
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
+pub mod model_registry;
 pub mod workflow_gen;
 pub mod transcript;
 pub mod uow;
@@ -160,6 +161,11 @@ pub struct AppState {
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
     /// in-process, falling back to the environment variable for back-compat.
     pub credential_store: Arc<dyn crate::credentials::CredentialStore>,
+    /// App-wide model registry (Claude static + OpenRouter discovered). Shared so
+    /// the OpenRouter cache survives across requests and is refreshed exactly once
+    /// (or on demand via `POST /api/models/registry/refresh`). Thread-safe: the
+    /// registry holds its own `Arc<Mutex<...>>` internally.
+    pub model_registry: crate::model_registry::ModelRegistry,
 }
 
 impl AppState {
@@ -192,6 +198,9 @@ impl AppState {
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
+            // The registry always has the static Claude entries; OpenRouter is empty until
+            // refreshed (key not set in tests anyway).
+            model_registry: crate::model_registry::ModelRegistry::new(),
         }
     }
 
@@ -620,6 +629,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chat", post(chat))
         .route("/api/usage", get(usage))
         .route("/api/models", get(list_models))
+        .route("/api/models/registry", get(get_model_registry))
+        .route("/api/models/registry/refresh", post(refresh_model_registry))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route(
@@ -5897,6 +5908,40 @@ async fn list_models() -> Json<serde_json::Value> {
         "default": crate::llm::DEFAULT_MODEL,
         "backend": crate::llm::Llm::from_env().backend_label(),
     }))
+}
+
+/// `GET /api/models/registry` — return the full model registry (Claude static + cached
+/// OpenRouter entries). The response carries an `openrouter_fetched` flag; when `false`
+/// the client can prompt the user to add an OpenRouter key and call the refresh endpoint.
+async fn get_model_registry(
+    State(state): State<AppState>,
+) -> Json<crate::model_registry::RegistryResp> {
+    let models = state.model_registry.all_entries();
+    let openrouter_fetched = state.model_registry.openrouter_fetched();
+    Json(crate::model_registry::RegistryResp {
+        models,
+        openrouter_fetched,
+    })
+}
+
+/// `POST /api/models/registry/refresh` — (re-)fetch the OpenRouter model catalog using
+/// the credential stored in the OS keychain. Returns the count of fetched models plus the
+/// full updated registry. Returns `{ attempted: false, openrouter_count: 0 }` when the
+/// OpenRouter API key is not set (the Claude portion is unaffected).
+async fn refresh_model_registry(
+    State(state): State<AppState>,
+) -> Json<crate::model_registry::RefreshResp> {
+    let attempted = state
+        .model_registry
+        .try_refresh_from_store(state.credential_store.as_ref())
+        .await;
+    let models = state.model_registry.all_entries();
+    let openrouter_count = models.iter().filter(|e| e.provider == "openrouter").count();
+    Json(crate::model_registry::RefreshResp {
+        openrouter_count,
+        attempted,
+        models,
+    })
 }
 
 /// One prior turn in a research-chat conversation, sent by the UI with each POST so the

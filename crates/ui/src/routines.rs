@@ -153,11 +153,17 @@ fn status_badge(status: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// One model the routine form's picker offers (`GET /api/models`).
+/// One model the routine form's picker offers (sourced from `GET /api/models/registry`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ModelOption {
+    /// Badge-enriched label (built from the registry display + free/context badges).
     label: String,
     id: String,
+    /// Provider key: "claude" | "openrouter". Used for `<optgroup>` grouping.
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    free: bool,
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -167,14 +173,86 @@ struct ModelsResp {
     default: String,
 }
 
-/// Fetch the model catalog so the routine form can pick the model its agent runs on.
+impl ModelsResp {
+    /// Return models grouped by provider for `<optgroup>` rendering.
+    fn grouped(&self) -> Vec<(&'static str, Vec<&ModelOption>)> {
+        let claude: Vec<&ModelOption> =
+            self.models.iter().filter(|m| m.provider == "claude").collect();
+        let openrouter: Vec<&ModelOption> =
+            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let mut groups = Vec::new();
+        if !claude.is_empty() {
+            groups.push(("Claude (subscription)", claude));
+        }
+        if !openrouter.is_empty() {
+            groups.push(("OpenRouter", openrouter));
+        }
+        groups
+    }
+}
+
+/// One entry from the `/api/models/registry` wire response.
+#[derive(serde::Deserialize)]
+struct RegistryEntryWire {
+    id: String,
+    display: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    free: bool,
+    #[serde(default)]
+    tool_use: bool,
+    #[serde(default)]
+    context: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryResp {
+    models: Vec<RegistryEntryWire>,
+}
+
+/// Fetch the model catalog from the registry endpoint so the routine form can pick
+/// the model its agent runs on. Falls back gracefully to Claude-only when no
+/// OpenRouter key is set.
 async fn fetch_models() -> Option<ModelsResp> {
-    reqwest::get(format!("{}/api/models", crate::BFF_URL))
+    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
         .await
         .ok()?
-        .json::<ModelsResp>()
+        .json()
         .await
-        .ok()
+        .ok()?;
+
+    let models: Vec<ModelOption> = resp
+        .models
+        .into_iter()
+        .map(|e| {
+            let mut badges = Vec::<String>::new();
+            if e.free {
+                badges.push("FREE".to_string());
+            }
+            if e.provider == "openrouter" && !e.tool_use {
+                badges.push("no-tools".to_string());
+            }
+            if e.context > 0 {
+                badges.push(format!("{}K ctx", e.context / 1000));
+            }
+            let label = if badges.is_empty() {
+                e.display.clone()
+            } else {
+                format!("{} [{}]", e.display, badges.join("] ["))
+            };
+            ModelOption { label, id: e.id, provider: e.provider, free: e.free }
+        })
+        .collect();
+
+    let default = models
+        .iter()
+        .find(|m| m.provider == "claude")
+        .or_else(|| models.first())
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+
+    Some(ModelsResp { models, default })
 }
 
 /// The slice of a project the routine dashboard needs: id + name, for the form's project
@@ -533,10 +611,6 @@ pub fn RoutineDashboard() -> Element {
         escalations_res.read().clone().flatten().unwrap_or_default();
     let projects: Vec<ProjectView> = projects_res.read().clone().flatten().unwrap_or_default();
     let models_resp = models_res.read().clone().flatten();
-    let models: Vec<ModelOption> = models_resp
-        .as_ref()
-        .map(|m| m.models.clone())
-        .unwrap_or_default();
     let model_default = models_resp
         .as_ref()
         .map(|m| m.default.clone())
@@ -849,8 +923,12 @@ pub fn RoutineDashboard() -> Element {
                                                         class: "addressee-input escalation-model",
                                                         value: "{esc_model}",
                                                         onchange: move |e| esc_model.set(e.value()),
-                                                        for mo in models.iter() {
-                                                            option { key: "{mo.id}", value: "{mo.id}", "{mo.label}" }
+                                                        for (group_label , opts) in models_resp.as_ref().map(|m| m.grouped()).unwrap_or_default().into_iter() {
+                                                            optgroup { label: "{group_label}",
+                                                                for mo in opts.into_iter() {
+                                                                    option { key: "{mo.id}", value: "{mo.id}", "{mo.label}" }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1049,8 +1127,12 @@ pub fn RoutineDashboard() -> Element {
                             class: "addressee-input",
                             value: "{routine_model}",
                             onchange: move |e| routine_model.set(e.value()),
-                            for m in models.iter() {
-                                option { key: "{m.id}", value: "{m.id}", "{m.label}" }
+                            for (group_label , opts) in models_resp.as_ref().map(|m| m.grouped()).unwrap_or_default().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for m in opts.into_iter() {
+                                        option { key: "{m.id}", value: "{m.id}", "{m.label}" }
+                                    }
+                                }
                             }
                         }
                     }

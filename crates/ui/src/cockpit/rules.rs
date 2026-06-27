@@ -1413,11 +1413,15 @@ pub(super) fn StepModelRow(
                             saving.set(false);
                         });
                     },
-                    for opt in m.models.iter() {
-                        option {
-                            value: "{opt.id}",
-                            selected: selected() == opt.id,
-                            "{opt.label}"
+                    for (group_label , opts) in m.grouped().into_iter() {
+                        optgroup { label: "{group_label}",
+                            for opt in opts.into_iter() {
+                                option {
+                                    value: "{opt.id}",
+                                    selected: selected() == opt.id,
+                                    "{opt.label}"
+                                }
+                            }
                         }
                     }
                 }
@@ -1565,11 +1569,15 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                                 selected: model().is_empty(),
                                 "Use Balanced tier (default)"
                             }
-                            for opt in m.models.iter() {
-                                option {
-                                    value: "{opt.id}",
-                                    selected: model() == opt.id,
-                                    "{opt.label}"
+                            for (group_label , opts) in m.grouped().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option {
+                                            value: "{opt.id}",
+                                            selected: model() == opt.id,
+                                            "{opt.label}"
+                                        }
+                                    }
                                 }
                             }
                         }

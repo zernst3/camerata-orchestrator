@@ -563,6 +563,10 @@ pub(super) fn RunProvenancePanel(run_id: String, uow_refresh: Signal<u32>) -> El
 /// (Pillar 2). They are settable via the API endpoints; the UI shows them here.
 /// A `<select>` of model options, generic over the bound signal. Renders nothing
 /// until the model list has loaded. Used by every per-step run control.
+///
+/// Options are grouped by provider (`<optgroup>` — Claude first, then OpenRouter).
+/// Each label carries badges: [FREE], [no-tools], [NNNk ctx]. When only Claude is
+/// present (no OpenRouter key set) there is a single flat group.
 #[component]
 pub(super) fn ModelSelect(models: Option<AuditModelsResp>, selected: Signal<String>) -> Element {
     let mut selected = selected;
@@ -572,11 +576,15 @@ pub(super) fn ModelSelect(models: Option<AuditModelsResp>, selected: Signal<Stri
                 class: "run-model-select",
                 value: "{selected}",
                 onchange: move |e| selected.set(e.value()),
-                for opt in m.models.iter() {
-                    option {
-                        value: "{opt.id}",
-                        selected: selected() == opt.id,
-                        "{opt.label}"
+                for (group_label , opts) in m.grouped().into_iter() {
+                    optgroup { label: "{group_label}",
+                        for opt in opts.into_iter() {
+                            option {
+                                value: "{opt.id}",
+                                selected: selected() == opt.id,
+                                "{opt.label}"
+                            }
+                        }
                     }
                 }
             }

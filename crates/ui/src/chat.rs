@@ -56,11 +56,14 @@ const USER_GUIDE: &str = include_str!("../../../docs/USER_GUIDE.md");
 
 // ── wire types ────────────────────────────────────────────────────────────────
 
-/// One model the selector offers (`GET /api/models`).
+/// One model the selector offers (sourced from `GET /api/models/registry`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ModelOption {
     label: String,
     id: String,
+    /// Provider key: "claude" | "openrouter". Used for `<optgroup>` grouping.
+    #[serde(default)]
+    provider: String,
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -68,8 +71,32 @@ struct ModelsResp {
     models: Vec<ModelOption>,
     #[serde(default)]
     default: String,
+    /// Not returned by the registry endpoint; kept for graceful zero-value.
     #[serde(default)]
     backend: String,
+}
+
+impl ModelsResp {
+    /// Return models grouped by provider for `<optgroup>` rendering.
+    fn grouped(&self) -> Vec<(&'static str, Vec<&ModelOption>)> {
+        let claude: Vec<&ModelOption> =
+            self.models.iter().filter(|m| m.provider == "claude").collect();
+        let openrouter: Vec<&ModelOption> =
+            self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let mut groups = Vec::new();
+        if !claude.is_empty() {
+            groups.push(("Claude (subscription)", claude));
+        }
+        if !openrouter.is_empty() {
+            groups.push(("OpenRouter", openrouter));
+        }
+        // If provider isn't set on any entry (shouldn't happen but safe fallback),
+        // render them all without grouping under a generic header.
+        if groups.is_empty() && !self.models.is_empty() {
+            groups.push(("Models", self.models.iter().collect()));
+        }
+        groups
+    }
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -612,13 +639,66 @@ pub(crate) fn unified_system_prompt(
 
 // ── network helpers ───────────────────────────────────────────────────────────
 
+/// Wire shape from `GET /api/models/registry`.
+#[derive(serde::Deserialize)]
+struct RegistryEntryWire {
+    id: String,
+    display: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(default)]
+    free: bool,
+    #[serde(default)]
+    tool_use: bool,
+    #[serde(default)]
+    context: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct RegistryResp {
+    models: Vec<RegistryEntryWire>,
+}
+
 async fn fetch_models() -> Option<ModelsResp> {
-    reqwest::get(format!("{}/api/models", crate::BFF_URL))
+    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
         .await
         .ok()?
-        .json::<ModelsResp>()
+        .json()
         .await
-        .ok()
+        .ok()?;
+
+    let models: Vec<ModelOption> = resp
+        .models
+        .into_iter()
+        .map(|e| {
+            let mut badges = Vec::<String>::new();
+            if e.free {
+                badges.push("FREE".to_string());
+            }
+            if e.provider == "openrouter" && !e.tool_use {
+                badges.push("no-tools".to_string());
+            }
+            if e.context > 0 {
+                badges.push(format!("{}K ctx", e.context / 1000));
+            }
+            let label = if badges.is_empty() {
+                e.display.clone()
+            } else {
+                format!("{} [{}]", e.display, badges.join("] ["))
+            };
+            ModelOption { label, id: e.id, provider: e.provider }
+        })
+        .collect();
+
+    let default = models
+        .iter()
+        .find(|m| m.provider == "claude")
+        .or_else(|| models.first())
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+
+    // `backend` not returned by the registry endpoint; leave empty (shown only when non-empty).
+    Some(ModelsResp { models, default, backend: String::new() })
 }
 
 /// A prior chat turn sent to the server so the model has conversation context.
@@ -836,8 +916,12 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             value: "{model}",
                             onchange: move |e| model.set(e.value()),
                             if let Some(m) = &models {
-                                for opt in m.models.iter() {
-                                    option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                                for (group_label , opts) in m.grouped().into_iter() {
+                                    optgroup { label: "{group_label}",
+                                        for opt in opts.into_iter() {
+                                            option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
+                                        }
+                                    }
                                 }
                             }
                         }
