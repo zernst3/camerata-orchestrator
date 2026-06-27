@@ -173,27 +173,24 @@ impl Default for StallThresholdsView {
 }
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
-/// capability band. Serde defaults match the fleet defaults.
+/// capability band. `fast` and `balanced` are ordered chains (Vec<String>); `strongest`
+/// stays a single model. Serde defaults match the fleet defaults.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct TierMapView {
-    #[serde(default = "default_fast_model_str")]
-    fast: String,
-    #[serde(default = "default_balanced_model_str")]
-    balanced: String,
+    #[serde(default = "default_fast_chain_str")]
+    fast: Vec<String>,
+    #[serde(default = "default_balanced_chain_str")]
+    balanced: Vec<String>,
     #[serde(default = "default_strongest_model_str")]
     strongest: String,
 }
 
-fn default_fast_model_str() -> String {
-    // BUG-UI-1: align with the fleet canonical id in crates/fleet/src/tier.rs::default_fast_model().
-    // The previous value "claude-haiku-4-5" (without a date suffix) would cause the settings panel
-    // to show and save a different id than the fleet actually uses ("claude-haiku-4-5-20251001"),
-    // so a user hitting "Save" without changing anything would pin the wrong model.
-    "claude-haiku-4-5-20251001".to_string()
+fn default_fast_chain_str() -> Vec<String> {
+    vec!["claude-haiku-4-5-20251001".to_string()]
 }
 
-fn default_balanced_model_str() -> String {
-    "claude-sonnet-4-6".to_string()
+fn default_balanced_chain_str() -> Vec<String> {
+    vec!["claude-sonnet-4-6".to_string()]
 }
 
 fn default_strongest_model_str() -> String {
@@ -203,8 +200,8 @@ fn default_strongest_model_str() -> String {
 impl Default for TierMapView {
     fn default() -> Self {
         Self {
-            fast: default_fast_model_str(),
-            balanced: default_balanced_model_str(),
+            fast: default_fast_chain_str(),
+            balanced: default_balanced_chain_str(),
             strongest: default_strongest_model_str(),
         }
     }
@@ -2048,14 +2045,15 @@ mod tests {
     fn dev_run_body_matches_frozen_contract() {
         let tm = TierMapView {
             strongest: "opus-x".to_string(),
-            balanced: "sonnet-x".to_string(),
-            fast: "haiku-x".to_string(),
+            balanced: vec!["sonnet-x".to_string()],
+            fast: vec!["haiku-x".to_string()],
         };
         let body = dev_run_body(&tm, false);
         let tier = body.get("tier_map").expect("tier_map key present");
         assert_eq!(tier.get("strongest").unwrap(), "opus-x");
-        assert_eq!(tier.get("balanced").unwrap(), "sonnet-x");
-        assert_eq!(tier.get("fast").unwrap(), "haiku-x");
+        // fast/balanced are now arrays; check the first element.
+        assert_eq!(tier["balanced"][0], "sonnet-x");
+        assert_eq!(tier["fast"][0], "haiku-x");
         // Exactly the three tier keys, nothing else.
         assert_eq!(tier.as_object().unwrap().len(), 3);
         // Default (skip_layer2 = false): body is exactly today's — just tier_map, no flag.
@@ -2113,8 +2111,8 @@ mod tests {
     fn dev_run_body_includes_skip_layer2_only_when_on() {
         let tm = TierMapView {
             strongest: "opus-x".to_string(),
-            balanced: "sonnet-x".to_string(),
-            fast: "haiku-x".to_string(),
+            balanced: vec!["sonnet-x".to_string()],
+            fast: vec!["haiku-x".to_string()],
         };
         // OFF: no flag at all.
         let off = dev_run_body(&tm, false);
@@ -2135,11 +2133,15 @@ mod tests {
     fn default_tier_map_seeds_all_three_tiers() {
         let tm = TierMapView::default();
         assert!(!tm.strongest.is_empty());
+        // fast/balanced are now Vec<String>; non-empty means at least one model in the chain.
         assert!(!tm.balanced.is_empty());
         assert!(!tm.fast.is_empty());
         let body = dev_run_body(&tm, false);
         let tier = body.get("tier_map").unwrap();
         assert_eq!(tier.get("strongest").unwrap(), &tm.strongest);
+        // fast/balanced are arrays; verify the first element matches the primary.
+        assert_eq!(tier["balanced"][0].as_str().unwrap(), tm.balanced[0]);
+        assert_eq!(tier["fast"][0].as_str().unwrap(), tm.fast[0]);
     }
 
     /// Sequential mode (1 batch per chunk) has no caching reuse across batches — the

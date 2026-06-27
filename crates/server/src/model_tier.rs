@@ -11,7 +11,8 @@
 //! (serde-default back-compat).
 
 pub use camerata_fleet::tier::{
-    classify_task, default_balanced_model, default_fast_model, default_strongest_model,
+    classify_task, default_balanced_chain, default_balanced_model, default_fast_chain,
+    default_fast_model, default_strongest_model,
     CapabilityBand, TierMap,
 };
 
@@ -39,8 +40,8 @@ mod tests {
     fn project_tier_map_serde_roundtrip_through_store() {
         // Write a project with a custom tier map, serialise, deserialise, check.
         let custom_map = TierMap {
-            fast: "my-haiku".to_string(),
-            balanced: "my-sonnet".to_string(),
+            fast: vec!["my-haiku".to_string()],
+            balanced: vec!["my-sonnet".to_string()],
             strongest: "my-opus".to_string(),
         };
         let store = ProjectStore::new();
@@ -86,8 +87,8 @@ mod tests {
             onboarded: vec![],
             max_iterations: crate::project::default_max_iterations(),
             tier_map: TierMap {
-                fast: "haiku-custom".into(),
-                balanced: "sonnet-custom".into(),
+                fast: vec!["haiku-custom".into()],
+                balanced: vec!["sonnet-custom".into()],
                 strongest: "opus-custom".into(),
             },
             process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),

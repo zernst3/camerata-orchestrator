@@ -2887,10 +2887,10 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 dev_strongest.set(tm.strongest.clone());
             }
             if dev_balanced.peek().is_empty() {
-                dev_balanced.set(tm.balanced.clone());
+                dev_balanced.set(tm.balanced.first().cloned().unwrap_or_default());
             }
             if dev_fast.peek().is_empty() {
-                dev_fast.set(tm.fast.clone());
+                dev_fast.set(tm.fast.first().cloned().unwrap_or_default());
             }
         }));
     }
@@ -4520,8 +4520,8 @@ pub(super) fn DevelopmentPhaseView(
                                 let sid = story_id.clone();
                                 let tm = TierMapView {
                                     strongest: dev_strongest(),
-                                    balanced: dev_balanced(),
-                                    fast: dev_fast(),
+                                    balanced: vec![dev_balanced()],
+                                    fast: vec![dev_fast()],
                                 };
                                 move |_| {
                                     let sid = sid.clone();
@@ -6134,8 +6134,8 @@ pub(super) fn UowStepRunControls(
                                     let sid = sid_dev.clone();
                                     let tm = TierMapView {
                                         strongest: dev_strongest(),
-                                        balanced: dev_balanced(),
-                                        fast: dev_fast(),
+                                        balanced: vec![dev_balanced()],
+                                        fast: vec![dev_fast()],
                                     };
                                     let skip_l2 = bootstrap_skip_layer2();
                                     spawn(async move {

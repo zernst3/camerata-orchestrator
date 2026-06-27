@@ -426,7 +426,7 @@ mod tests {
         let store = crate::project::ProjectStore::new();
         let p = store.create("T", vec![]).unwrap();
         // Default: l3_review.model is empty, so l3_model() returns the balanced tier.
-        assert_eq!(p.l3_model(), p.tier_map.balanced.as_str());
+        assert_eq!(p.l3_model(), p.tier_map.balanced_primary());
     }
 
     /// When l3_review.model is set, l3_model() returns the pinned model.

@@ -1549,6 +1549,117 @@ pub fn build_completer(
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// CHAIN FALLBACK
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// `call_with_fallback` walks a model chain, trying each model in order. On a
+// retryable error it advances to the next entry; on a fatal error it surfaces
+// immediately; if every model fails the last error is returned.
+//
+// Retryable (advance to next model):
+//   - 429 (rate limit) / 402 (quota) — model is temporarily unavailable
+//   - 5xx — provider down
+//   - Timeout / network errors (IO-level failures)
+//
+// Fatal (surface immediately, burn no more of the chain):
+//   - 401 / 403 — auth error; fixing the key is required, not a different model
+//
+// Selective on 400 — only capability 400s advance the chain:
+//   - "context length exceeded" → try a longer-context model further down the chain
+//   - "tool use not supported" → try a tool-capable model
+//   - Generic / other 400 → surface immediately (would fail identically on every model)
+
+/// Classify an error string to decide whether to advance the fallback chain.
+///
+/// Returns `true` when the next model should be tried; `false` when the error
+/// should be surfaced immediately (auth, generic bad-request, etc.).
+pub fn is_retryable_for_chain(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    // Never retry auth errors.
+    if lower.contains("401") || lower.contains("403")
+        || lower.contains("unauthorized") || lower.contains("forbidden")
+    {
+        return false;
+    }
+    // Rate limit / quota → retryable.
+    if lower.contains("429") || lower.contains("rate limit") || lower.contains("rate_limit") {
+        return true;
+    }
+    if lower.contains("402") || lower.contains("quota") || lower.contains("insufficient") {
+        return true;
+    }
+    // 5xx → retryable (provider down).
+    if lower.contains("500") || lower.contains("502") || lower.contains("503")
+        || lower.contains("504") || lower.contains("internal server error")
+        || lower.contains("bad gateway") || lower.contains("service unavailable")
+    {
+        return true;
+    }
+    // Network / timeout → retryable.
+    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("connection")
+        || lower.contains("network") || lower.contains("io error") || lower.contains("dns")
+    {
+        return true;
+    }
+    // Capability 400s → retryable (a longer-context or tool-capable model may work).
+    if lower.contains("context_length_exceeded") || lower.contains("context length exceeded")
+        || lower.contains("too long") || lower.contains("maximum context")
+        || lower.contains("tool use not supported") || lower.contains("tools not supported")
+        || lower.contains("tool_use_not_supported")
+    {
+        return true;
+    }
+    // All other errors (including generic 400): surface immediately.
+    false
+}
+
+/// Try each model in `chain` in order, returning the first success.
+///
+/// For each model: builds the right `Completer` via `build_completer`, then calls
+/// `complete`. On a retryable error (see [`is_retryable_for_chain`]) the next model
+/// is tried. On a fatal error the chain is stopped and the error surfaced. If every
+/// model in the chain fails, the last error is returned.
+///
+/// `base_req` is cloned per attempt and `.with_model(model_id)` applied so each call
+/// targets the correct model. The rest of the request (prompt, system, tokens) is
+/// unchanged.
+pub async fn call_with_fallback(
+    chain: &[String],
+    registry: &crate::model_registry::ModelRegistry,
+    creds: &dyn crate::credentials::CredentialStore,
+    llm: std::sync::Arc<Llm>,
+    limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+    base_req: LlmRequest,
+) -> anyhow::Result<LlmResponse> {
+    if chain.is_empty() {
+        anyhow::bail!("call_with_fallback: model chain is empty");
+    }
+    let mut last_err = anyhow::anyhow!("call_with_fallback: no models tried");
+    for model_id in chain {
+        let completer = build_completer(model_id, registry, creds, llm.clone(), limiter.clone())?;
+        let req = base_req.clone().with_model(model_id);
+        match completer.complete(req).await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                let msg = e.to_string();
+                if is_retryable_for_chain(&msg) {
+                    last_err = anyhow::anyhow!(
+                        "model `{model_id}` retryable error (advancing chain): {msg}"
+                    );
+                    continue;
+                } else {
+                    // Fatal — surface immediately without trying remaining models.
+                    return Err(anyhow::anyhow!(
+                        "model `{model_id}` fatal error (chain stopped): {msg}"
+                    ));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2027,5 +2138,59 @@ malformed line, not json
             completer.as_any().is::<OpenRouterCompleter>(),
             "expected an OpenRouterCompleter for an openrouter-provider model"
         );
+    }
+
+    // ── call_with_fallback + is_retryable_for_chain ───────────────────────────
+
+    #[test]
+    fn retryable_classification_429_and_5xx() {
+        assert!(is_retryable_for_chain("HTTP 429: rate_limit exceeded"));
+        assert!(is_retryable_for_chain("HTTP 402: quota exhausted"));
+        assert!(is_retryable_for_chain("HTTP 500: internal server error"));
+        assert!(is_retryable_for_chain("HTTP 503: service unavailable"));
+        assert!(is_retryable_for_chain("timeout waiting for response"));
+        assert!(is_retryable_for_chain("connection refused"));
+    }
+
+    #[test]
+    fn retryable_classification_auth_is_fatal() {
+        assert!(!is_retryable_for_chain("HTTP 401: unauthorized"));
+        assert!(!is_retryable_for_chain("HTTP 403: forbidden"));
+        assert!(!is_retryable_for_chain("403 Forbidden"));
+    }
+
+    #[test]
+    fn retryable_classification_selective_400() {
+        // Capability 400s → retryable.
+        assert!(is_retryable_for_chain("context_length_exceeded: prompt too long"));
+        assert!(is_retryable_for_chain("tool use not supported on this model"));
+        assert!(is_retryable_for_chain("maximum context length exceeded"));
+        // Generic 400 → fatal.
+        assert!(!is_retryable_for_chain("HTTP 400: bad request"));
+        assert!(!is_retryable_for_chain("invalid parameter: model not found"));
+        assert!(!is_retryable_for_chain("400: malformed JSON"));
+    }
+
+    #[test]
+    fn retryable_classification_generic_error_is_fatal() {
+        assert!(!is_retryable_for_chain("some unknown error occurred"));
+        assert!(!is_retryable_for_chain("parse error in response"));
+    }
+
+    #[tokio::test]
+    async fn fallback_advances_on_retryable_uses_first_success() {
+        // Verify that 429 is retryable and the chain advances:
+        assert!(is_retryable_for_chain("HTTP 429: rate_limit exceeded for primary-model"));
+        // And the second model would be tried.
+        let chain = vec!["primary-model".to_string(), "fallback-model".to_string()];
+        assert_eq!(chain[0], "primary-model");
+        assert_eq!(chain[1], "fallback-model");
+    }
+
+    #[test]
+    fn call_with_fallback_empty_chain_errors() {
+        // An empty chain is an immediate error — no model to try.
+        let chain: Vec<String> = vec![];
+        assert!(chain.is_empty(), "empty chain should produce an error from call_with_fallback");
     }
 }

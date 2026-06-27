@@ -1230,7 +1230,7 @@ async fn start_governed_run(
                     && !uow_data.investigation.contract.trim().is_empty()
                 {
                     let gate_model = match &tier_map {
-                        Some(map) => map.balanced.clone(),
+                        Some(map) => map.balanced_primary().to_string(),
                         None => model
                             .clone()
                             .unwrap_or_else(crate::model_tier::default_strongest_model),
@@ -2272,16 +2272,36 @@ async fn delete_custom_rule(
 
 // ── Model-tiering tier-map endpoint (#63) ─────────────────────────────────────
 
+/// Deserialise a chain field that may be `null` (absent), a JSON string (legacy single-model),
+/// or a JSON array (new chain form). Mirrors `camerata_fleet::tier::deserialize_chain`.
+fn deserialize_optional_chain<'de, D>(de: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Single(String),
+        Many(Vec<String>),
+    }
+    let maybe: Option<StringOrVec> = Option::deserialize(de)?;
+    Ok(maybe.map(|v| match v {
+        StringOrVec::Single(s) => vec![s],
+        StringOrVec::Many(v) => v,
+    }))
+}
+
 /// Body for `POST /api/projects/:id/tier-map`. Mirrors [`crate::model_tier::TierMap`]
 /// with all three fields optional so callers can patch just the tiers they want.
 #[derive(serde::Deserialize)]
 struct SetTierMapReq {
-    /// Model id for fast (throughput) tasks.
-    #[serde(default)]
-    fast: Option<String>,
-    /// Model id for balanced (mid-tier) tasks.
-    #[serde(default)]
-    balanced: Option<String>,
+    /// Model chain for fast (throughput) tasks. Single string or array (back-compat).
+    #[serde(default, deserialize_with = "deserialize_optional_chain")]
+    fast: Option<Vec<String>>,
+    /// Model chain for balanced (mid-tier) tasks. Single string or array (back-compat).
+    #[serde(default, deserialize_with = "deserialize_optional_chain")]
+    balanced: Option<Vec<String>>,
     /// Model id for strongest (frontier-class) tasks.
     #[serde(default)]
     strongest: Option<String>,
@@ -2298,10 +2318,10 @@ async fn set_tier_map(
     Json(req): Json<SetTierMapReq>,
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
-        if let Some(fast) = req.fast.filter(|s| !s.trim().is_empty()) {
+        if let Some(fast) = req.fast.filter(|v| !v.is_empty()) {
             p.tier_map.fast = fast;
         }
-        if let Some(balanced) = req.balanced.filter(|s| !s.trim().is_empty()) {
+        if let Some(balanced) = req.balanced.filter(|v| !v.is_empty()) {
             p.tier_map.balanced = balanced;
         }
         if let Some(strongest) = req.strongest.filter(|s| !s.trim().is_empty()) {
@@ -10597,8 +10617,8 @@ mod tests {
         assert!(req.model.is_none());
         let map = req.tier_map.expect("tier_map parsed");
         assert_eq!(map.strongest, "opus-x");
-        assert_eq!(map.balanced, "sonnet-x");
-        assert_eq!(map.fast, "haiku-x");
+        assert_eq!(map.balanced_primary(), "sonnet-x");
+        assert_eq!(map.fast_primary(), "haiku-x");
     }
 
     #[test]

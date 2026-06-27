@@ -345,7 +345,7 @@ pub async fn execute_live_run_tiered(
             rule: None,
             detail: format!(
                 "Tiered run: lead/orchestrator = {} (strongest); balanced = {}; fast = {}.",
-                tier_map.strongest, tier_map.balanced, tier_map.fast
+                tier_map.strongest, tier_map.balanced_primary(), tier_map.fast_primary()
             ),
             content_hash: None,
         },

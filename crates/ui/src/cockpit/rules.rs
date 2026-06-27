@@ -1244,7 +1244,8 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
 pub(super) fn TierMapEditor(project: ProjectView) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
-    // Local editable copy of the three model strings. Seeded from the project's tier map.
+    // Local editable copies. fast/balanced are ordered chains (Vec<String>).
+    // strongest stays a single model id.
     let mut fast = use_signal(|| project.tier_map.fast.clone());
     let mut balanced = use_signal(|| project.tier_map.balanced.clone());
     let mut strongest = use_signal(|| project.tier_map.strongest.clone());
@@ -1254,36 +1255,115 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
         div { class: "tier-map-editor",
             p { class: "tier-map-heading", "Model tier map" }
             p { class: "section-hint tier-map-hint",
-                "Maps each capability band to a concrete model id. The fleet resolves every task's \
-                 band (Fast / Balanced / Strongest) to the model id here at runtime. Changing this \
-                 affects all governed runs for this project from the next run onward."
+                "Maps each capability band to a model chain. The fast and balanced bands support \
+                 multiple models: the primary is tried first; on a retryable error (429, 5xx, timeout) \
+                 the next model in the chain is tried automatically. Strongest stays a single model. \
+                 Changes take effect from the next run onward."
             }
             div { class: "tier-map-rows",
-                // Fast band
-                div { class: "tier-map-row",
+                // Fast band — chain editor
+                div { class: "tier-map-row tier-map-chain-row",
                     label { class: "tier-map-band-label tier-map-fast", "Fast" }
                     span { class: "tier-map-band-desc", "(throughput — tests, simple edits)" }
-                    input {
-                        class: "tier-map-input addressee-input",
-                        r#type: "text",
-                        placeholder: "e.g. claude-haiku-4-5-20251001",
-                        value: "{fast}",
-                        oninput: move |e| fast.set(e.value()),
+                    div { class: "tier-chain-list",
+                        for (i, _model) in fast().iter().enumerate() {
+                            div { key: "{i}", class: "tier-chain-entry",
+                                input {
+                                    class: "tier-map-input addressee-input tier-chain-input",
+                                    r#type: "text",
+                                    placeholder: "model id",
+                                    value: "{fast()[i]}",
+                                    oninput: {
+                                        let mut fast = fast;
+                                        move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                            let mut v = fast();
+                                            if let Some(entry) = v.get_mut(i) {
+                                                *entry = e.value();
+                                            }
+                                            fast.set(v);
+                                        }
+                                    },
+                                }
+                                if fast().len() > 1 {
+                                    button {
+                                        class: "btn-edit-sm tier-chain-remove",
+                                        title: "Remove this model from the chain",
+                                        onclick: {
+                                            let mut fast = fast;
+                                            move |_| {
+                                                let mut v = fast();
+                                                if i < v.len() { v.remove(i); }
+                                                fast.set(v);
+                                            }
+                                        },
+                                        "\u{2715}"
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn-edit-sm tier-chain-add",
+                            onclick: move |_| {
+                                let mut v = fast();
+                                v.push(String::new());
+                                fast.set(v);
+                            },
+                            "\u{002b} Add fallback"
+                        }
                     }
                 }
-                // Balanced band
-                div { class: "tier-map-row",
+                // Balanced band — chain editor
+                div { class: "tier-map-row tier-map-chain-row",
                     label { class: "tier-map-band-label tier-map-balanced", "Balanced" }
                     span { class: "tier-map-band-desc", "(mid-tier — most tasks)" }
-                    input {
-                        class: "tier-map-input addressee-input",
-                        r#type: "text",
-                        placeholder: "e.g. claude-sonnet-4-6",
-                        value: "{balanced}",
-                        oninput: move |e| balanced.set(e.value()),
+                    div { class: "tier-chain-list",
+                        for (i, _model) in balanced().iter().enumerate() {
+                            div { key: "{i}", class: "tier-chain-entry",
+                                input {
+                                    class: "tier-map-input addressee-input tier-chain-input",
+                                    r#type: "text",
+                                    placeholder: "model id",
+                                    value: "{balanced()[i]}",
+                                    oninput: {
+                                        let mut balanced = balanced;
+                                        move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                            let mut v = balanced();
+                                            if let Some(entry) = v.get_mut(i) {
+                                                *entry = e.value();
+                                            }
+                                            balanced.set(v);
+                                        }
+                                    },
+                                }
+                                if balanced().len() > 1 {
+                                    button {
+                                        class: "btn-edit-sm tier-chain-remove",
+                                        title: "Remove this model from the chain",
+                                        onclick: {
+                                            let mut balanced = balanced;
+                                            move |_| {
+                                                let mut v = balanced();
+                                                if i < v.len() { v.remove(i); }
+                                                balanced.set(v);
+                                            }
+                                        },
+                                        "\u{2715}"
+                                    }
+                                }
+                            }
+                        }
+                        button {
+                            class: "btn-edit-sm tier-chain-add",
+                            onclick: move |_| {
+                                let mut v = balanced();
+                                v.push(String::new());
+                                balanced.set(v);
+                            },
+                            "\u{002b} Add fallback"
+                        }
                     }
                 }
-                // Strongest band
+                // Strongest band — single model (stays String)
                 div { class: "tier-map-row",
                     label { class: "tier-map-band-label tier-map-strongest", "Strongest" }
                     span { class: "tier-map-band-desc", "(frontier-class — architecture, security)" }
@@ -1301,15 +1381,25 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                 disabled: saving(),
                 onclick: move |_| {
                     let pid = pid.clone();
-                    let map = TierMapView {
-                        fast: fast().trim().to_string(),
-                        balanced: balanced().trim().to_string(),
-                        strongest: strongest().trim().to_string(),
-                    };
-                    if map.fast.is_empty() || map.balanced.is_empty() || map.strongest.is_empty() {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "All three tier model ids are required.");
+                    // Filter out empty entries from the chains.
+                    let fast_chain: Vec<String> = fast().into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let balanced_chain: Vec<String> = balanced().into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let strongest_val = strongest().trim().to_string();
+                    if fast_chain.is_empty() || balanced_chain.is_empty() || strongest_val.is_empty() {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Each tier requires at least one model id.");
                         return;
                     }
+                    let map = TierMapView {
+                        fast: fast_chain,
+                        balanced: balanced_chain,
+                        strongest: strongest_val,
+                    };
                     saving.set(true);
                     spawn(async move {
                         if set_project_tier_map(&pid, &map).await {

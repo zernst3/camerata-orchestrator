@@ -78,33 +78,74 @@ impl CapabilityBand {
 
 // ─── TierMap ─────────────────────────────────────────────────────────────────
 
-/// The model-id for each [`CapabilityBand`], stored as project configuration.
+/// Deserialise a `Vec<String>` field that may be persisted as either a JSON string
+/// (legacy single-model form written by the previous `String` field) or a JSON array
+/// (the new chain form). A bare string becomes a 1-element Vec; an array is taken
+/// as-is; missing/null falls through to the field's `#[serde(default)]`.
+fn deserialize_chain<'de, D>(de: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Single(String),
+        Many(Vec<String>),
+    }
+
+    match StringOrVec::deserialize(de)? {
+        StringOrVec::Single(s) => Ok(vec![s]),
+        StringOrVec::Many(v) => Ok(v),
+    }
+}
+
+/// The model-id chains for each [`CapabilityBand`], stored as project configuration.
 ///
-/// Serde defaults on every field ensure a project persisted before this struct
-/// existed deserialises cleanly — the same back-compat pattern as `max_iterations`
-/// on the server-side `Project`.
+/// `fast` and `balanced` are **ordered chains** (`Vec<String>`): the first entry is the
+/// primary model; subsequent entries are fallbacks tried in order on retryable errors
+/// (429 / 5xx / timeout). `strongest` remains a single model (orchestrator reliability
+/// requires a single well-known model; fallbacks add complexity without benefit there).
 ///
-/// Default model ids match the current Anthropic tier names. A project that
-/// targets a different provider or cost/quality trade-off can override any field.
+/// **Back-compat**: a project JSON written with the old `String` form (e.g.
+/// `"fast": "claude-haiku-4-5-20251001"`) deserialises correctly — the custom
+/// `deserialize_chain` helper wraps the bare string into a 1-element Vec.
+///
+/// Serde defaults on every field ensure a project persisted before this struct existed
+/// deserialises cleanly — the same back-compat pattern as `max_iterations` on the
+/// server-side `Project`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TierMap {
-    /// Model id for [`CapabilityBand::Fast`] tasks.
-    #[serde(default = "default_fast_model")]
-    pub fast: String,
-    /// Model id for [`CapabilityBand::Balanced`] tasks.
-    #[serde(default = "default_balanced_model")]
-    pub balanced: String,
-    /// Model id for [`CapabilityBand::Strongest`] tasks.
+    /// Ordered model-id chain for [`CapabilityBand::Fast`] tasks (primary → fallbacks).
+    #[serde(default = "default_fast_chain", deserialize_with = "deserialize_chain")]
+    pub fast: Vec<String>,
+    /// Ordered model-id chain for [`CapabilityBand::Balanced`] tasks (primary → fallbacks).
+    #[serde(default = "default_balanced_chain", deserialize_with = "deserialize_chain")]
+    pub balanced: Vec<String>,
+    /// Model id for [`CapabilityBand::Strongest`] tasks. Single model — orchestrator
+    /// reliability requires a single well-known model.
     #[serde(default = "default_strongest_model")]
     pub strongest: String,
 }
 
-/// The shipped default for [`TierMap::fast`]: Claude Haiku 4.5 (throughput-optimised).
+/// The shipped default chain for [`TierMap::fast`]: Haiku only (1-element).
+pub fn default_fast_chain() -> Vec<String> {
+    vec!["claude-haiku-4-5-20251001".to_string()]
+}
+
+/// The shipped default chain for [`TierMap::balanced`]: Sonnet only (1-element).
+pub fn default_balanced_chain() -> Vec<String> {
+    vec!["claude-sonnet-4-6".to_string()]
+}
+
+/// The shipped default for [`TierMap::fast`] primary (back-compat for callers that
+/// needed the old `default_fast_model()` function).
 pub fn default_fast_model() -> String {
     "claude-haiku-4-5-20251001".to_string()
 }
 
-/// The shipped default for [`TierMap::balanced`]: Claude Sonnet 4.6 (solid mid-tier).
+/// The shipped default for [`TierMap::balanced`] primary (back-compat).
 pub fn default_balanced_model() -> String {
     "claude-sonnet-4-6".to_string()
 }
@@ -117,27 +158,53 @@ pub fn default_strongest_model() -> String {
 impl Default for TierMap {
     fn default() -> Self {
         Self {
-            fast: default_fast_model(),
-            balanced: default_balanced_model(),
+            fast: default_fast_chain(),
+            balanced: default_balanced_chain(),
             strongest: default_strongest_model(),
         }
     }
 }
 
 impl TierMap {
-    /// Resolve the concrete model id for `band`.
+    /// The primary (first) model in the `fast` chain. Never empty when default is used.
+    pub fn fast_primary(&self) -> &str {
+        self.fast.first().map(String::as_str).unwrap_or("claude-haiku-4-5-20251001")
+    }
+
+    /// The full `fast` fallback chain as a slice.
+    pub fn fast_chain(&self) -> &[String] {
+        &self.fast
+    }
+
+    /// The primary (first) model in the `balanced` chain. Never empty when default is used.
+    pub fn balanced_primary(&self) -> &str {
+        self.balanced.first().map(String::as_str).unwrap_or("claude-sonnet-4-6")
+    }
+
+    /// The full `balanced` fallback chain as a slice.
+    pub fn balanced_chain(&self) -> &[String] {
+        &self.balanced
+    }
+
+    /// Resolve the primary concrete model id for `band`.
     pub fn model_for(&self, band: CapabilityBand) -> &str {
         match band {
-            CapabilityBand::Fast => &self.fast,
-            CapabilityBand::Balanced => &self.balanced,
+            CapabilityBand::Fast => self.fast_primary(),
+            CapabilityBand::Balanced => self.balanced_primary(),
             CapabilityBand::Strongest => &self.strongest,
         }
     }
 
-    /// Classify `task` and resolve its model id in one call.
-    ///
-    /// Equivalent to `self.model_for(classify_task(task))`. The fleet's
-    /// build loop uses this as the single per-stage model-resolution call.
+    /// The full chain for a band. `Strongest` returns a single-element slice.
+    pub fn chain_for(&self, band: CapabilityBand) -> &[String] {
+        match band {
+            CapabilityBand::Fast => self.fast_chain(),
+            CapabilityBand::Balanced => self.balanced_chain(),
+            CapabilityBand::Strongest => std::slice::from_ref(&self.strongest),
+        }
+    }
+
+    /// Classify `task` and resolve its primary model id in one call.
     pub fn model_for_task(&self, task: &PlanTask) -> &str {
         self.model_for(classify_task(task))
     }
@@ -260,9 +327,9 @@ mod tests {
     #[test]
     fn default_tier_map_matches_catalog_ids() {
         let m = TierMap::default();
-        // These must stay in sync with the model ids in the server's llm::MODELS catalog.
-        assert_eq!(m.fast, "claude-haiku-4-5-20251001");
-        assert_eq!(m.balanced, "claude-sonnet-4-6");
+        // fast/balanced are now Vec<String>; check the primary (first) element.
+        assert_eq!(m.fast_primary(), "claude-haiku-4-5-20251001");
+        assert_eq!(m.balanced_primary(), "claude-sonnet-4-6");
         assert_eq!(m.strongest, "claude-opus-4-8");
     }
 
@@ -292,10 +359,10 @@ mod tests {
 
     #[test]
     fn tier_map_custom_values_round_trip() {
-        let json = r#"{"fast":"my-haiku","balanced":"my-sonnet","strongest":"my-opus"}"#;
+        let json = r#"{"fast":["my-haiku"],"balanced":["my-sonnet"],"strongest":"my-opus"}"#;
         let m: TierMap = serde_json::from_str(json).unwrap();
-        assert_eq!(m.fast, "my-haiku");
-        assert_eq!(m.balanced, "my-sonnet");
+        assert_eq!(m.fast, vec!["my-haiku"]);
+        assert_eq!(m.balanced, vec!["my-sonnet"]);
         assert_eq!(m.strongest, "my-opus");
     }
 
@@ -401,5 +468,61 @@ mod tests {
         let t = task(TaskKind::Backend, "[TIER:fast] quick scaffold");
         // Backend normally -> Strongest, but override forces Fast -> Haiku.
         assert_eq!(m.model_for_task(&t), "claude-haiku-4-5-20251001");
+    }
+
+    // ── TierMap chain shape + back-compat ─────────────────────────────────────
+
+    #[test]
+    fn single_string_back_compat_fast_deserializes_to_vec() {
+        // A project JSON written with the OLD `"fast": "<model>"` string form
+        // must deserialise into a 1-element Vec (back-compat via deserialize_chain).
+        let json = r#"{"fast":"claude-haiku-4-5-20251001","balanced":"claude-sonnet-4-6","strongest":"claude-opus-4-8"}"#;
+        let m: TierMap = serde_json::from_str(json).unwrap();
+        assert_eq!(m.fast, vec!["claude-haiku-4-5-20251001"],
+            "legacy fast string must deserialise to 1-element Vec");
+        assert_eq!(m.balanced, vec!["claude-sonnet-4-6"],
+            "legacy balanced string must deserialise to 1-element Vec");
+        assert_eq!(m.strongest, "claude-opus-4-8",
+            "strongest stays a String");
+    }
+
+    #[test]
+    fn chain_form_deserializes_multiple_models() {
+        let json = r#"{"fast":["free-coder:free","claude-haiku-4-5-20251001"],"balanced":["qwen:free","claude-sonnet-4-6"],"strongest":"claude-opus-4-8"}"#;
+        let m: TierMap = serde_json::from_str(json).unwrap();
+        assert_eq!(m.fast, vec!["free-coder:free", "claude-haiku-4-5-20251001"]);
+        assert_eq!(m.balanced, vec!["qwen:free", "claude-sonnet-4-6"]);
+        assert_eq!(m.fast_primary(), "free-coder:free",
+            "primary is the first element");
+        assert_eq!(m.balanced_primary(), "qwen:free");
+    }
+
+    #[test]
+    fn fast_primary_and_chain_accessors() {
+        let m = TierMap {
+            fast: vec!["a".into(), "b".into()],
+            balanced: vec!["c".into()],
+            strongest: "d".into(),
+        };
+        assert_eq!(m.fast_primary(), "a");
+        assert_eq!(m.fast_chain(), &["a", "b"]);
+        assert_eq!(m.balanced_primary(), "c");
+        assert_eq!(m.balanced_chain(), &["c"]);
+    }
+
+    #[test]
+    fn chain_for_strongest_returns_single_element_slice() {
+        let m = TierMap::default();
+        let chain = m.chain_for(CapabilityBand::Strongest);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0], "claude-opus-4-8");
+    }
+
+    #[test]
+    fn missing_fast_balanced_fields_fill_default_chains() {
+        // An empty JSON object (project pre-TierMap): defaults fill in 1-element chains.
+        let m: TierMap = serde_json::from_str("{}").unwrap();
+        assert_eq!(m.fast, vec!["claude-haiku-4-5-20251001"]);
+        assert_eq!(m.balanced, vec!["claude-sonnet-4-6"]);
     }
 }

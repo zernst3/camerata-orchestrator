@@ -403,7 +403,7 @@ impl Project {
         if !self.l3_review.model.trim().is_empty() {
             &self.l3_review.model
         } else {
-            &self.tier_map.balanced
+            self.tier_map.balanced_primary()
         }
     }
 
