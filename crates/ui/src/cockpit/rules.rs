@@ -1496,6 +1496,127 @@ pub(super) fn StallThresholdsEditor(project: ProjectView) -> Element {
     }
 }
 
+/// L3 agentic code-review gate editor (R7): a toggle (on/off) and a model selector.
+///
+/// When enabled, the L3 reviewer runs after each governed development stage, checking
+/// the generated diff against story intent and the project's rules. The model selector
+/// offers the same Anthropic tier options as the step-model and tier-map editors; an
+/// empty selection means "use the project's Balanced tier model" (the fallback defined
+/// in `Project::l3_model`).
+///
+/// Reads the current config from `project.l3_review` and persists on change via
+/// `POST /api/projects/:id/l3-review`. Uses the existing toast feedback pattern.
+#[component]
+pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    // Load the available Anthropic model options (same source as tier-map / step-model editors).
+    let models = use_resource(|| async move { fetch_audit_models().await });
+    let models = models.read().clone().flatten();
+
+    // Local edit state, seeded from the project's current L3 config.
+    let mut enabled = use_signal(|| project.l3_review.enabled);
+    // Empty string = "use balanced tier" (the serde/server default).
+    let mut model = use_signal(|| project.l3_review.model.clone());
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "tier-map-editor l3-review-editor",
+            p { class: "tier-map-heading", "L3 AI code review" }
+            p { class: "section-hint tier-map-hint",
+                "When enabled, an agentic reviewer checks each governed development stage's diff \
+                 against story intent and the project rules. Off by default. The model falls back \
+                 to the Balanced tier when left blank."
+            }
+
+            div { class: "tier-map-rows",
+                // ── Toggle ───────────────────────────────────────────────────
+                div { class: "tier-map-row l3-review-toggle-row",
+                    label { class: "tier-map-band-label", "Enabled" }
+                    // Checkbox styled inline.
+                    input {
+                        r#type: "checkbox",
+                        class: "l3-review-checkbox",
+                        checked: enabled(),
+                        disabled: saving(),
+                        onchange: move |e| {
+                            enabled.set(e.checked());
+                        },
+                    }
+                    span { class: "l3-review-toggle-hint",
+                        if enabled() { "On — L3 reviewer runs after each stage." }
+                        else { "Off — human is the reviewer." }
+                    }
+                }
+
+                // ── Model selector ───────────────────────────────────────────
+                div { class: "tier-map-row l3-review-model-row",
+                    label { class: "tier-map-band-label", "Model" }
+                    if let Some(ref m) = models {
+                        select {
+                            class: "tier-map-input run-model-select",
+                            disabled: saving(),
+                            onchange: move |e| {
+                                model.set(e.value());
+                            },
+                            // The first option is the "use Balanced tier" fallback (empty value).
+                            option {
+                                value: "",
+                                selected: model().is_empty(),
+                                "Use Balanced tier (default)"
+                            }
+                            for opt in m.models.iter() {
+                                option {
+                                    value: "{opt.id}",
+                                    selected: model() == opt.id,
+                                    "{opt.label}"
+                                }
+                            }
+                        }
+                    } else {
+                        // Models haven't loaded yet: show a text input as fallback.
+                        input {
+                            class: "tier-map-input addressee-input",
+                            r#type: "text",
+                            placeholder: "model id (empty = use Balanced tier)",
+                            value: "{model}",
+                            disabled: saving(),
+                            oninput: move |e| model.set(e.value()),
+                        }
+                    }
+                }
+            }
+
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let (pid, en, mo) = (pid.clone(), enabled(), model());
+                    saving.set(true);
+                    spawn(async move {
+                        if set_project_l3_review(&pid, en, &mo).await {
+                            let msg = if en {
+                                if mo.is_empty() {
+                                    "L3 review enabled (using Balanced tier model)."
+                                } else {
+                                    "L3 review enabled."
+                                }
+                            } else {
+                                "L3 review disabled."
+                            };
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, msg);
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save L3 review settings.");
+                        }
+                        saving.set(false);
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save L3 review settings" }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);

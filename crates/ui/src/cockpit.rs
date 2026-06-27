@@ -89,6 +89,27 @@ struct ProjectView {
     /// that omit the field get the server's built-in defaults.
     #[serde(default)]
     stall_thresholds: StallThresholdsView,
+    /// L3 agentic code-review gate (R7). Off by default. `#[serde(default)]` so
+    /// projects written before this field existed deserialise with the disabled default.
+    #[serde(default)]
+    l3_review: L3ReviewView,
+}
+
+/// UI mirror of `camerata_server::project::L3ReviewConfig`.
+/// Default: off, empty model (falls back to balanced tier).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct L3ReviewView {
+    #[serde(default)]
+    enabled: bool,
+    /// The model id for the L3 reviewer. Empty = use the project's balanced tier model.
+    #[serde(default)]
+    model: String,
+}
+
+impl Default for L3ReviewView {
+    fn default() -> Self {
+        Self { enabled: false, model: String::new() }
+    }
 }
 
 /// UI mirror of `camerata_server::project::StepModels`. One model-id slot per NON-FLEET AI
@@ -355,6 +376,18 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
             id
         ))
         .json(&serde_json::json!({ "max_iterations": max_iterations }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Set the L3 agentic code-review gate configuration for a project.
+/// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
+async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/l3-review", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "enabled": enabled, "model": model }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1667,7 +1700,12 @@ fn ProjectSettingsGear() -> Element {
 
                         // ── Stall thresholds ──────────────────────────────────────
                         div { class: "proj-settings-section",
-                            StallThresholdsEditor { project: p }
+                            StallThresholdsEditor { project: p.clone() }
+                        }
+
+                        // ── L3 AI code review ─────────────────────────────────────
+                        div { class: "proj-settings-section",
+                            L3ReviewEditor { project: p }
                         }
                     }
                 }

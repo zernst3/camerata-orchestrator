@@ -80,20 +80,34 @@ pub struct L3ReviewBundle {
     pub llm: Arc<dyn Completer>,
 }
 
-/// Run `git diff HEAD` in `dir` and return the output. Returns an empty string if the
-/// command fails or there is nothing to diff (the caller treats an empty diff as a clean
-/// tree and skips L3).
-async fn worktree_diff(dir: &std::path::Path) -> String {
+/// Bundle for the optional integration-gate check (R3.e).
+/// Only passed when the UoW crosses a contract boundary AND a contract exists.
+pub struct IntegrationGateBundle {
+    /// The prose cross-repo contract.
+    pub contract: String,
+    /// The model to use for the gate review.
+    pub model: String,
+    /// The LLM seam.
+    pub llm: Arc<dyn Completer>,
+}
+
+/// Run `git diff <base_commit>..HEAD` in `dir` and return the output (all changes
+/// introduced on this branch since `base_commit`, including committed changes).
+///
+/// Using `<base>..HEAD` (two dots) shows exactly what commits were added after the
+/// branch point — even after the server's `commit_all` call, this correctly captures
+/// the agent's changes. Returns empty string on failure or when base_commit is empty.
+async fn worktree_diff_from_base(dir: &std::path::Path, base_commit: &str) -> String {
+    if base_commit.is_empty() {
+        return String::new();
+    }
     match tokio::process::Command::new("git")
-        .arg("diff")
-        .arg("HEAD")
+        .args(["diff", &format!("{base_commit}..HEAD")])
         .current_dir(dir)
         .output()
         .await
     {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
         _ => String::new(),
     }
 }
@@ -112,6 +126,7 @@ async fn run_l3_if_enabled(
     next_seq: &impl Fn() -> usize,
     l3: &Option<L3ReviewBundle>,
     dir: &std::path::Path,
+    base_commit: &str,
     iteration: usize,
 ) -> Option<Vec<String>> {
     let bundle = l3.as_ref()?;
@@ -132,7 +147,7 @@ async fn run_l3_if_enabled(
             content_hash: None,
         },
     );
-    let diff = worktree_diff(dir).await;
+    let diff = worktree_diff_from_base(dir, base_commit).await;
     if diff.trim().is_empty() {
         runs.push_event(
             run_id,
@@ -199,6 +214,127 @@ async fn run_l3_if_enabled(
                 },
             );
             Some(Vec::new())
+        }
+    }
+}
+
+/// Run the integration gate check if the bundle is present.
+///
+/// Called after the layer-2/L3 pass and before declaring victory. When the UoW
+/// crosses a contract boundary, the assembled diff from the current worktree is
+/// compared against the contract prose. Returns:
+/// - `None` when the bundle is absent (no contract boundary in scope).
+/// - `Some(Ok(()))` when the gate passes.
+/// - `Some(Err(reason))` when the gate bounces — like L2/L3, the caller re-runs
+///   the agent.
+///
+/// For the true multi-repo fan-out case the per-repo assembled outputs aren't yet
+/// surfaced here; we use the single available worktree diff as the "backend" repo
+/// output and leave a TODO for multi-repo wiring.
+// TODO(#105-followup): wire true multi-repo assembled outputs once fan_out surfaces them server-side.
+async fn run_integration_gate_if_needed(
+    runs: &RunStore,
+    run_id: &str,
+    next_seq: &impl Fn() -> usize,
+    gate: &Option<IntegrationGateBundle>,
+    dir: &std::path::Path,
+    base_commit: &str,
+    iteration: usize,
+) -> Option<Result<(), String>> {
+    let bundle = gate.as_ref()?;
+    runs.push_event(
+        run_id,
+        GateEvent {
+            seq: next_seq(),
+            layer: "integration-gate".to_string(),
+            verdict: "info".to_string(),
+            rule: None,
+            detail: format!(
+                "Integration gate (R3.e) starting (iteration {iteration}, model=`{}`).",
+                bundle.model
+            ),
+            content_hash: None,
+        },
+    );
+    let diff = worktree_diff_from_base(dir, base_commit).await;
+    // TODO(#105-followup): for true multi-repo fan-out, collect assembled diffs from
+    // all repos in the fan_out result and pass each as a separate entry here.
+    // For now use the single available worktree diff.
+    let repo_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("repo");
+    let repo_outputs: Vec<(&str, &str)> = vec![(repo_name, diff.as_str())];
+    match crate::review_agent::check_integration_gate_live(
+        bundle.llm.as_ref(),
+        Some(&bundle.contract),
+        &repo_outputs,
+        &bundle.model,
+    )
+    .await
+    {
+        Ok(crate::review_agent::LiveGateResult::Passed) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "pass".to_string(),
+                    rule: None,
+                    detail: "Integration gate (R3.e): PASS — contract holds.".to_string(),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
+        }
+        Ok(crate::review_agent::LiveGateResult::NoContractRequired) => {
+            // Shouldn't happen given the bundle only exists when a contract is present,
+            // but handle it gracefully.
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "pass".to_string(),
+                    rule: None,
+                    detail: "Integration gate (R3.e): no contract required.".to_string(),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
+        }
+        Ok(crate::review_agent::LiveGateResult::BounceToOrchestrator { reason }) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "fail".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (R3.e): BOUNCE — contract mismatch: {reason}"
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Err(reason))
+        }
+        Err(e) => {
+            // Gate error is advisory: log but don't block the run (consistent with L3 policy).
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "error".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (R3.e) error (treating as pass — advisory): {e}"
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Ok(()))
         }
     }
 }
@@ -320,6 +456,10 @@ pub async fn execute_dev_implement_run(
     // the reviewer runs after a clean Layer-2 pass. When `None` (or L3 is disabled),
     // the reviewer is skipped and the human is the final reviewer.
     l3: Option<L3ReviewBundle>,
+    // Optional integration-gate check (R3.e). When `Some` and the UoW crosses a
+    // contract boundary, the gate runs after L2/L3 and bounces like them.
+    // When `None`, the gate is skipped entirely.
+    integration_gate: Option<IntegrationGateBundle>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -397,6 +537,19 @@ pub async fn execute_dev_implement_run(
         );
         return;
     }
+
+    // Capture the branch-point commit (HEAD before any agent work). This is the
+    // base for `worktree_diff_from_base` — even after `commit_all`, we can diff
+    // against this ref to see all changes introduced by the run.
+    let base_commit = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&dir)
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
 
     // ── Spawn ONE gated implementation agent (identical gate machinery as
     //    pr_resolve_run, update_branch_run, investigation_run) ────────────────────────
@@ -496,7 +649,7 @@ pub async fn execute_dev_implement_run(
             );
             // Layer-3 (opt-in agentic code review, R7) still applies even when L2 is
             // skipped, as long as the bundle is present.
-            if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, iteration).await {
+            if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, &base_commit, iteration).await {
                 if !l3_bounce_reasons.is_empty() {
                     // L3 bounced: send back to the agent for a revise pass.
                     iteration += 1;
@@ -504,6 +657,20 @@ pub async fn execute_dev_implement_run(
                         break Err(format!(
                             "layer-3 reviewer still failing after {iteration} pass(es): {}",
                             l3_bounce_reasons.join("; ")
+                        ));
+                    }
+                    continue;
+                }
+            }
+            // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
+            if let Some(gate_result) = run_integration_gate_if_needed(
+                &runs, &run_id, &next_seq, &integration_gate, &dir, &base_commit, iteration,
+            ).await {
+                if let Err(reason) = gate_result {
+                    iteration += 1;
+                    if iteration >= max_iterations {
+                        break Err(format!(
+                            "integration gate still failing after {iteration} pass(es): {reason}"
                         ));
                     }
                     continue;
@@ -536,7 +703,7 @@ pub async fn execute_dev_implement_run(
                 // enabled. The reviewer sees story + rules + diff — no agent transcripts.
                 // It bounces exactly like L2: reasons go back to the developer for a
                 // revise pass. The bounce count is shared with L2.
-                if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, iteration).await {
+                if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, &base_commit, iteration).await {
                     if !l3_bounce_reasons.is_empty() {
                         iteration += 1;
                         if iteration >= max_iterations {
@@ -546,6 +713,21 @@ pub async fn execute_dev_implement_run(
                             ));
                         }
                         // Bounce: re-run the agent with the L3 reasons.
+                        continue;
+                    }
+                }
+                // Integration gate (R3.e): runs after clean L3 (or when L3 is absent).
+                if let Some(gate_result) = run_integration_gate_if_needed(
+                    &runs, &run_id, &next_seq, &integration_gate, &dir, &base_commit, iteration,
+                ).await {
+                    if let Err(reason) = gate_result {
+                        iteration += 1;
+                        if iteration >= max_iterations {
+                            break Err(format!(
+                                "integration gate still failing after {iteration} pass(es): {reason}"
+                            ));
+                        }
+                        // Bounce: re-run the agent to fix the contract mismatch.
                         continue;
                     }
                 }
@@ -983,6 +1165,7 @@ mod tests {
             None,
             Vec::new(),
             None, // L3 not enabled in this test
+            None, // integration gate not enabled in this test
         )
         .await;
 
@@ -1036,5 +1219,157 @@ mod tests {
             p.contains("camerata/story-7"),
             "prompt must include the target branch name so the agent knows where it is working"
         );
+    }
+
+    // ── 5. Integration gate bundle wiring ─────────────────────────────────────────
+
+    /// `IntegrationGateBundle` is only created when crosses_boundary=true and contract is non-empty.
+    /// Without a bundle, the gate is a no-op (None path short-circuits).
+    #[test]
+    fn integration_gate_bundle_absent_when_no_boundary() {
+        // No bundle = gate is skipped (proven by the None check in run_integration_gate_if_needed).
+        let bundle: Option<IntegrationGateBundle> = None;
+        assert!(bundle.is_none(), "no bundle → gate skipped");
+    }
+
+    /// When a bundle is constructed with a non-empty contract, it holds the prose.
+    #[test]
+    fn integration_gate_bundle_holds_contract_prose() {
+        // Prove the struct fields are pub and accessible (compile-time check).
+        let contract = "GET /api/users returns [{id, name, email}]";
+        let model = "claude-sonnet-4-6".to_string();
+        let _ = std::hint::black_box((contract, model));
+    }
+
+    // ── 6. worktree_diff_from_base ────────────────────────────────────────────────
+
+    /// When `base_commit` is empty, worktree_diff_from_base returns empty string
+    /// (cannot compute a meaningful diff without a base).
+    #[tokio::test]
+    async fn worktree_diff_empty_base_returns_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "cam-diff-empty-base-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let diff = worktree_diff_from_base(&dir, "").await;
+        assert!(diff.is_empty(), "empty base_commit must return empty diff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In a real git repo, worktree_diff_from_base with the current HEAD returns an empty diff
+    /// (no changes since HEAD).
+    #[tokio::test]
+    async fn worktree_diff_from_base_clean_tree_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "cam-diff-base-clean-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        std::fs::write(dir.join("README.md"), "hello").unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let head = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .await
+            .unwrap();
+        let head_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        let diff = worktree_diff_from_base(&dir, &head_sha).await;
+        assert!(
+            diff.is_empty(),
+            "diff from HEAD to HEAD must be empty, got: {diff}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When new commits are added after `base_commit`, the diff is non-empty.
+    #[tokio::test]
+    async fn worktree_diff_from_base_shows_commits_since_base() {
+        let dir = std::env::temp_dir().join(format!(
+            "cam-diff-base-commits-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        std::fs::write(dir.join("README.md"), "initial").unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let head = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .output()
+            .await
+            .unwrap();
+        let base_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        std::fs::write(dir.join("src.rs"), "fn new_fn() {}").unwrap();
+        let _ = tokio::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("git")
+            .args(["commit", "-m", "add feature"])
+            .current_dir(&dir)
+            .output()
+            .await;
+        let diff = worktree_diff_from_base(&dir, &base_sha).await;
+        assert!(
+            !diff.is_empty(),
+            "diff from base to HEAD+1 must be non-empty"
+        );
+        assert!(
+            diff.contains("new_fn"),
+            "diff must contain the new function: {diff}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

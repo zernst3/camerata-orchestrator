@@ -148,7 +148,7 @@ async fn coordinator_bounces_real_fmt_violation_and_resolves() {
     let wt = TempWorktree::new("e2e").expect("create temp worktree");
 
     // REAL layer-2 gate: shells out to `cargo fmt --check`.
-    let checks = FmtCheckRunner;
+    let checks = FmtCheckRunner::new();
     // Fake agent that writes dirty first, clean on bounce.
     let driver = ReviseOnBounceDriver::new(wt.path().to_path_buf(), fmt_rule());
 

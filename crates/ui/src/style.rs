@@ -4449,4 +4449,336 @@ select:focus {
   box-shadow: none;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════
+   SURFACE 1 — 3-phase UoW nav-rail tabs
+   Mockup: .phase-navigator-rail / .phase-nav-tab / .active / .finished /
+           .phase-nav-name / .phase-status-indicator / .phase-nav-desc
+   App:    .uow-phase-topbar (the row that holds status + tabs + stop)
+           .uow-phase-tabs  (the flex container for the three tab buttons)
+           .uow-phase-tab   (each button; + .active + .finished modifiers)
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Topbar row that holds the status pill, phase tabs, and optional stop button */
+.uow-phase-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1.5px solid var(--line);
+  background: rgba(26,24,22, var(--opacity-mid));
+}
+
+/* The three-tab flex band */
+.uow-phase-tabs {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Individual phase tab */
+.uow-phase-tab {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  border: 1.5px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.22);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: "Courier Prime", ui-monospace, monospace;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+  text-align: left;
+  position: relative;
+  transition: all 0.25s var(--ease);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.04);
+  /* Sheen */
+  background-image: linear-gradient(to bottom, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 50%);
+}
+
+.uow-phase-tab:hover {
+  background: rgba(26,24,22,0.5);
+  border-color: rgba(202,138,4,0.4);
+  color: var(--ink);
+  transform: translateY(-1px);
+}
+
+/* Active (currently selected) tab */
+.uow-phase-tab.active {
+  background: rgba(40,32,0,0.65);
+  border-color: var(--accent);
+  color: var(--ink);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+/* Amber gradient underline on active tab — the key visual signal */
+.uow-phase-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 15%;
+  width: 70%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--warning-color), var(--accent));
+  border-radius: 99px;
+  box-shadow: 0 0 6px rgba(202,138,4,0.55);
+}
+
+/* Finished tab (phase done) */
+.uow-phase-tab.finished {
+  border-color: rgba(22,163,74,0.4);
+  background: rgba(22,163,74,0.08);
+  color: var(--ink-soft);
+}
+
+.uow-phase-tab.finished::before {
+  content: '✓ ';
+  color: var(--good);
+  font-weight: 700;
+}
+
+/* Status indicator dot (sits before the phase name via inline rendering) */
+.uow-phase-status-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(200,190,180,0.5);
+  margin-right: 7px;
+  vertical-align: middle;
+  box-shadow: inset 0 1px 1px rgba(0,0,0,0.2);
+}
+.uow-phase-tab.active .uow-phase-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 5px rgba(202,138,4,0.7);
+}
+.uow-phase-tab.finished .uow-phase-status-dot {
+  background: var(--good);
+  box-shadow: 0 0 5px rgba(22,163,74,0.6);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   SURFACE 2 — Chat + clarification cards (Bletchley amber, legible foreground)
+   Mockup: .dialog-card / .dialog-header / .dialog-opt-btn / .dialog-opt-btn.selected
+   App:    .clarify-q-card / .clarify-q-question / .clarify-q-option / .on
+           .uow-agent-chat-turn (+ .user / .ai role classes applied inline)
+           .uow-agent-chat-text
+           .chat-panel / .chat-head / .chat-log / .chat-turn / .chat-turn-text
+   Readability adjustment: amber border-left accent, NOT amber backgrounds on text
+   — foreground always uses --ink / --ink-soft so it stays legible on dark ground.
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Clarification question card: amber left accent + warm dark surface */
+.clarify-q-card {
+  border: 1.5px solid rgba(202,138,4,0.35);
+  border-left: 4px solid var(--accent);
+  background: rgba(26,24,22, var(--opacity-high));
+  border-radius: var(--r-sm);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* Question text inside the clarify card */
+.clarify-q-question {
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 13.5px;
+}
+
+/* Addressee label below the question */
+.clarify-q-addressee {
+  color: var(--accent-ink);
+}
+
+/* Option buttons within the clarify card */
+.clarify-q-option {
+  border: 1.5px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.22);
+  border-radius: var(--r-sm);
+  padding: 9px 11px;
+  transition: all 0.22s var(--ease);
+  position: relative;
+  overflow: hidden;
+}
+/* Subtle sheen */
+.clarify-q-option::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 35%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 100%);
+  pointer-events: none;
+}
+.clarify-q-option:hover {
+  border-color: rgba(202,138,4,0.5);
+  background: rgba(26,24,22,0.5);
+  transform: translateX(2px);
+  box-shadow: 0 3px 10px rgba(0,0,0,0.28);
+}
+/* Selected option: amber accent border + warm amber wash — text stays --ink for contrast */
+.clarify-q-option.on {
+  background: linear-gradient(135deg, rgba(60,40,0,0.65) 0%, rgba(30,20,0,0.55) 100%);
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+/* Option label text: keep full contrast */
+.clarify-q-option-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+.clarify-q-option-desc {
+  color: var(--ink-soft);
+}
+
+/* Agent chat turns inside the UoW phase body */
+.uow-agent-chat-turn {
+  padding: 8px 11px;
+  border-radius: 10px;
+  background: rgba(26,24,22, var(--opacity-high));
+  border: 1px solid var(--line);
+}
+/* "you" role: amber-washed bubble, text stays dark-on-amber-wash for contrast */
+.uow-agent-chat-turn.user {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  border-color: rgba(202,138,4,0.3);
+}
+/* "ai" / engine role: standard dark surface, amber-left accent */
+.uow-agent-chat-turn.ai {
+  align-self: flex-start;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+}
+/* Chat role label */
+.uow-agent-chat-role {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  display: block;
+  margin-bottom: 4px;
+}
+/* Chat body text: always high-contrast --ink */
+.uow-agent-chat-text {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The research chat panel FAB window: amber border top + darker surface */
+.chat-panel {
+  border-color: var(--line);
+  background: rgba(26,24,22, var(--opacity-high));
+}
+
+/* Chat header bar */
+.chat-head {
+  background: rgba(20,18,17,0.97);
+  border-bottom: 1.5px solid var(--line);
+}
+
+/* Chat title in header */
+.chat-title {
+  color: var(--ink);
+  font-family: "Courier Prime", ui-monospace, monospace;
+  font-weight: 700;
+}
+
+/* Chat log area: same dark surface */
+.chat-log {
+  background: rgba(22,20,18, var(--opacity-low));
+}
+
+/* AI (engine) chat turn text: amber left border, dark bg, high-contrast --ink text */
+.chat-turn.ai .chat-turn-text {
+  background: rgba(26,24,22,0.92);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  color: var(--ink);      /* legible warm-white on near-black */
+}
+/* User chat turn text: amber wash, muted amber border — keep text color at --ink */
+.chat-turn.you .chat-turn-text {
+  background: var(--accent-wash);
+  border-color: rgba(202,138,4,0.28);
+  color: var(--ink);      /* NOT amber text on amber wash — too low contrast */
+}
+
+/* Chat compose row */
+.chat-compose {
+  background: rgba(20,18,17,0.97);
+  border-top: 1.5px solid var(--line);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   SURFACE 3 — Table chrome (.chorale-root container + scan/rules page wrappers)
+   Mockup: .table-container — glass bg, 1.5px glass border, 6px radius, shadow
+   App:    .chorale-root (chorale's own root wrapper on every table)
+           .scan-results (the findings-table page section in the scan view)
+           .routine-table (the routines table)
+   We ONLY style the app-level container/chrome; chorale internals are left alone
+   (they inherit the --chorale-* palette vars already set in :root).
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* Chorale table outer chrome: glass card matching mockup .table-container */
+.chorale-root {
+  background: rgba(26,24,22, var(--opacity-high));
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  margin-top: 16px;
+  box-shadow:
+    0 15px 40px rgba(0,0,0,0.65),
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    inset 0 -1px 3px rgba(0,0,0,0.35);
+  position: relative;
+}
+
+/* Amber accent line at the top of each table chrome, matching the topbar cable motif */
+.chorale-root::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Scan results section wrapper: breathe around the table + own background */
+.scan-results {
+  background: transparent;
+  border-radius: var(--r-sm);
+}
+
+/* Routines table chrome: same glass treatment */
+.routine-table {
+  background: rgba(26,24,22, var(--opacity-high));
+  border: 1.5px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  box-shadow:
+    0 10px 28px rgba(0,0,0,0.55),
+    inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* Routine table header row: darker band matching mockup .chorale-thead */
+.routine-head {
+  background: rgba(20,18,17,0.92);
+  border-bottom: 1.5px solid var(--line);
+  color: var(--ink);
+}
+
+/* Routine table body rows: subtle warm ground, amber hover */
+.routine-row:not(.routine-head) {
+  background: transparent;
+  transition: background 0.18s var(--ease);
+}
+.routine-row:not(.routine-head):hover {
+  background: rgba(202,138,4,0.05);
+}
+
 "#;

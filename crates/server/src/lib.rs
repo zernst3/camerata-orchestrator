@@ -510,6 +510,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/step-models", post(set_step_model))
         // Stall-detection thresholds: per-project idle timeout config.
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
+        // L3 agentic code-review gate: per-project opt-in (R7).
+        .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
         // VCS-gate process-rule configuration + auditable bypass (issue #65).
         .route(
             "/api/projects/:id/process-rule-config",
@@ -1163,6 +1165,28 @@ async fn start_governed_run(
                     })
                 })
             };
+            // Integration gate bundle (R3.e): only when the UoW crosses a boundary and
+            // has a non-empty contract. The gate runs after L2/L3 in the bounce loop.
+            let integration_gate_bundle: Option<crate::dev_implement_run::IntegrationGateBundle> = {
+                if uow_data.investigation.crosses_boundary
+                    && !uow_data.investigation.contract.trim().is_empty()
+                {
+                    let gate_model = match &tier_map {
+                        Some(map) => map.balanced.clone(),
+                        None => model
+                            .clone()
+                            .unwrap_or_else(crate::model_tier::default_strongest_model),
+                    };
+                    let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+                    Some(crate::dev_implement_run::IntegrationGateBundle {
+                        contract: uow_data.investigation.contract.clone(),
+                        model: gate_model,
+                        llm,
+                    })
+                } else {
+                    None
+                }
+            };
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -1182,6 +1206,7 @@ async fn start_governed_run(
                     grounding,
                     read_dirs,
                     l3_bundle,
+                    integration_gate_bundle,
                 )
                 .await
             });
@@ -2269,6 +2294,45 @@ async fn set_stall_thresholds_handler(
         routine_secs: req.routine_secs,
     };
     match state.projects.set_stall_thresholds(&id, thresholds) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── L3 agentic code-review gate configuration (R7) ────────────────────────────
+
+/// Body for `POST /api/projects/:id/l3-review`.
+///
+/// `enabled` controls whether the L3 reviewer runs after each governed development
+/// stage. `model` pins the reviewer to a specific model id; an empty or absent
+/// `model` means "use the project's `balanced` tier model" (the fallback defined in
+/// [`crate::project::Project::l3_model`]).
+#[derive(serde::Deserialize)]
+struct SetL3ReviewReq {
+    /// Whether the L3 reviewer is enabled for this project.
+    enabled: bool,
+    /// The model id for the L3 reviewer. Empty string = use the balanced tier fallback.
+    #[serde(default)]
+    model: String,
+}
+
+/// `POST /api/projects/:id/l3-review` — update the per-project L3 agentic code-review
+/// gate configuration.
+///
+/// Accepts `{ "enabled": bool, "model": "<id or empty>" }` and writes it to the project
+/// store. Returns the updated project on success, or an error when the project id is not
+/// found. The `model` field is optional in the request body (defaults to empty string =
+/// use the balanced tier fallback).
+async fn set_l3_review_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetL3ReviewReq>,
+) -> Json<serde_json::Value> {
+    let config = crate::project::L3ReviewConfig {
+        enabled: req.enabled,
+        model: req.model.trim().to_string(),
+    };
+    match state.projects.set_l3_review(&id, config) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }

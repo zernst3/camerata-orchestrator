@@ -1,5 +1,5 @@
 //! Integration gate (R3.e): cross-repo contract verification.
-#![allow(dead_code)] // TODO(#105-followup): remove once the live agent check is wired
+#![allow(dead_code)] // The sync `check_integration_gate` is test/CI-only; the live path is server-side.
 //!
 //! After fan_out assembly, this gate reads the prose contract from the UoW
 //! investigation + the assembled per-repo diffs/outputs and verifies:
@@ -12,14 +12,19 @@
 //!
 //! # Seam
 //!
-//! `check_integration_gate` is the entry point. When `contract` is `None`
-//! (no contract in the UoW — single-repo or no cross-boundary work), it
-//! returns `IntegrationGateResult::NoContractRequired` and exits. When
-//! `contract` is `Some(prose)`, it:
-//! - Validates the prose is non-empty.
-//! - TODO(#105-followup): spawns an agent to read the contract + assembled
-//!   diffs and verify they agree; for now, returns `Pending` so the caller
-//!   can decide the policy (pass-through or block).
+//! `check_integration_gate` is the entry point for the SYNCHRONOUS (no-model) path.
+//! The live (model-backed) path is `check_integration_gate_live` in
+//! `camerata_server::review_agent` — called by the server after L2/L3 complete.
+//!
+//! When `contract` is `None` (no contract in the UoW — single-repo or no
+//! cross-boundary work), returns `IntegrationGateResult::NoContractRequired`.
+//! When `contract` is `Some(prose)`, validates the prose is non-empty, then
+//! returns `Pending` (no model available in this sync path).
+//!
+//! The `Pending` variant signals "no model available; the server should decide."
+//! In server contexts, `Pending` is never returned because `check_integration_gate_live`
+//! runs instead. In CI without API access, callers treat `Pending` as pass-through
+//! or block per policy.
 //!
 //! This is intentionally NOT a per-repo mechanical rule (those can't see both
 //! sides of a contract boundary). See spec R3.e.
@@ -38,9 +43,11 @@ pub enum IntegrationGateResult {
     /// reconcile (possibly re-delegating a fix to one repo's worker).
     BounceToOrchestrator { reason: String },
     /// The contract check agent was not invoked (no live model in this
-    /// environment). Callers that run in CI without a model key treat this as
-    /// pass-through or block per policy.
-    // TODO(#105-followup): remove once the live agent check is wired.
+    /// environment). The LIVE check is performed server-side by
+    /// `camerata_server::review_agent::check_integration_gate_live`
+    /// when a model is available. Callers without a model key (CI without
+    /// API access) treat this as pass-through or block per policy.
+    /// See `crates/server/src/review_agent.rs`.
     Pending { contract_prose: String },
 }
 
@@ -63,7 +70,8 @@ pub struct IntegrationGateInput<'a> {
 /// - If `input.contract` is `Some(prose)` and prose is empty (or whitespace-only):
 ///   returns `BounceToOrchestrator` — a contract that exists but is empty is a
 ///   signal to push back, not pass through.
-/// - Otherwise: TODO(#105-followup) live agent check; for now returns `Pending`.
+/// - Otherwise: returns `Pending` — the live model-backed check runs server-side
+///   via `camerata_server::review_agent::check_integration_gate_live`.
 pub fn check_integration_gate(input: &IntegrationGateInput<'_>) -> IntegrationGateResult {
     let Some(contract) = input.contract else {
         return IntegrationGateResult::NoContractRequired;
@@ -78,13 +86,10 @@ pub fn check_integration_gate(input: &IntegrationGateInput<'_>) -> IntegrationGa
         };
     }
 
-    // TODO(#105-followup): spawn an agent with:
-    //   - The contract prose
-    //   - The assembled worker outputs (diffs / file contents)
-    //   - Tool: read-only (no gated_write, no delegate, no fan_out)
-    //   - Task: "verify each repo's assembled output is consistent with the contract prose
-    //            below. Return PASS if they agree, or MISMATCH: <reason> if they don't."
-    // For now, return Pending so callers can decide policy (CI: pass-through; prod: block).
+    // The live agent check is wired server-side in
+    // `camerata_server::review_agent::check_integration_gate_live`.
+    // This sync path (no model available) returns Pending so callers can decide
+    // policy (CI: pass-through; prod: block).
     IntegrationGateResult::Pending {
         contract_prose: contract.to_string(),
     }

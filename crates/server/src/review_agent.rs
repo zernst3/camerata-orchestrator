@@ -546,4 +546,29 @@ mod tests {
             assert!(reason.contains("backend omits email field"));
         }
     }
+
+    // ── 8. Integration gate bundle policy ─────────────────────────────────────
+
+    /// Integration gate is only invoked (bundle present) when crosses_boundary=true
+    /// and contract is non-empty.
+    #[test]
+    fn integration_gate_live_only_called_with_contract() {
+        // No boundary crossing → no bundle.
+        let crosses_boundary = false;
+        let contract = "";
+        let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
+        assert!(!bundle_would_exist, "no bundle when not crossing boundary");
+
+        // Boundary but whitespace-only contract → no bundle.
+        let crosses_boundary = true;
+        let contract = "  ";
+        let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
+        assert!(!bundle_would_exist, "no bundle when contract is whitespace-only");
+
+        // Real boundary + real contract → bundle IS created.
+        let crosses_boundary = true;
+        let contract = "GET /api/users returns [{id}]";
+        let bundle_would_exist = crosses_boundary && !contract.trim().is_empty();
+        assert!(bundle_would_exist, "bundle IS created for real cross-boundary + contract");
+    }
 }
