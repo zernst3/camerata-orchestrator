@@ -822,6 +822,8 @@ pub async fn execute_dev_implement_run(
                             l3_bounce_reasons.join("; ")
                         ));
                     }
+                    // Snapshot the iteration before bouncing.
+                    let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                     continue;
                 }
             }
@@ -850,6 +852,7 @@ pub async fn execute_dev_implement_run(
                             "integration gate still failing after {iteration} pass(es): {reason}"
                         ));
                     }
+                    let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                     continue;
                 }
             }
@@ -889,6 +892,8 @@ pub async fn execute_dev_implement_run(
                                 l3_bounce_reasons.join("; ")
                             ));
                         }
+                        // Snapshot the iteration before bouncing.
+                        let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                         // Bounce: re-run the agent with the L3 reasons.
                         continue;
                     }
@@ -916,6 +921,7 @@ pub async fn execute_dev_implement_run(
                                 "integration gate still failing after {iteration} pass(es): {reason}"
                             ));
                         }
+                        let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                         // Bounce: re-run the agent to fix the contract mismatch.
                         continue;
                     }
@@ -974,6 +980,7 @@ pub async fn execute_dev_implement_run(
                         content_hash: None,
                     },
                 );
+                let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
             }
             Err(e) => {
                 // A hard check-runner error (e.g. toolchain not found) is surfaced as a

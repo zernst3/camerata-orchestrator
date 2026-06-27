@@ -9739,9 +9739,9 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         let arr = json.as_array().unwrap();
-        // The eleven substantive rules, GOV-1 (the synthetic test rule) filtered out.
-        // Count updated when SEC-NO-UNSAFE-DESERIALIZATION-1 was added (2026-06-24).
-        assert_eq!(arr.len(), 11);
+        // The twelve substantive rules, GOV-1 (the synthetic test rule) filtered out.
+        // Count updated when SEC-NO-GIT-STATE-MUTATION-1 was added (2026-06-27).
+        assert_eq!(arr.len(), 12);
         let ids: Vec<&str> = arr.iter().map(|r| r["id"].as_str().unwrap()).collect();
         assert!(ids.contains(&"SEC-NO-HARDCODED-SECRETS-1"));
         assert!(ids.contains(&"SEC-NO-PATH-ESCAPE-1"));
@@ -9752,6 +9752,7 @@ mod tests {
         assert!(ids.contains(&"SEC-NO-DISABLED-TLS-1"));
         assert!(ids.contains(&"SEC-NO-CAMERATA-CONFIG-1"));
         assert!(ids.contains(&"SEC-NO-UNSAFE-DESERIALIZATION-1"));
+        assert!(ids.contains(&"SEC-NO-GIT-STATE-MUTATION-1"));
         assert!(!ids.contains(&"GOV-1"));
     }
 

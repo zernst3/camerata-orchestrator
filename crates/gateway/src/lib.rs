@@ -115,6 +115,66 @@ pub fn sec_no_camerata_config_1_rule() -> RuleId {
     RuleId("SEC-NO-CAMERATA-CONFIG-1".to_string())
 }
 
+/// The id for the git-state-mutation guard rule.
+///
+/// This rule fires when a `gated_write` call would write a file whose content
+/// contains a git command that mutates working-tree state: `git stash`,
+/// `git reset --hard`, `git clean -f/-d`, `git checkout -- ` / `git checkout .`,
+/// `git rebase`, `git restore`, or `git worktree remove`. Agents have no shell
+/// access, but could try to encode these commands in shell scripts or Makefiles.
+///
+/// When a command-execution path is added to Camerata's toolset, `is_git_state_mutation`
+/// is the guard function to call before executing: it returns `true` when the command
+/// string would mutate git working-tree state.
+pub fn sec_no_git_state_mutation_1_rule() -> RuleId {
+    RuleId("SEC-NO-GIT-STATE-MUTATION-1".to_string())
+}
+
+/// Returns `true` when `cmd` is a git command that mutates working-tree state.
+///
+/// Covered commands:
+/// - `git stash`
+/// - `git reset --hard`
+/// - `git clean -f` / `git clean -d` (and combinations: `-fd`, `-df`, etc.)
+/// - `git checkout -- ` (restore specific paths)
+/// - `git checkout .` (restore entire tree)
+/// - `git rebase`
+/// - `git restore`
+/// - `git worktree remove`
+///
+/// Read-only git commands (`status`, `log`, `diff`, `rev-parse`, `show`, etc.) do NOT match.
+/// This function is the guard to call before executing any agent-requested shell command when
+/// a command-execution path is added to Camerata's toolset.
+pub fn is_git_state_mutation(cmd: &str) -> bool {
+    // Normalize: trim and collapse multiple spaces.
+    let cmd = cmd.trim();
+    // Must start with "git " (case-sensitive — git commands are lowercase by convention).
+    let rest = match cmd.strip_prefix("git ") {
+        Some(r) => r.trim_start(),
+        None => return false,
+    };
+    // Match state-mutating subcommands.
+    if rest.starts_with("stash") { return true; }
+    if rest.starts_with("rebase") { return true; }
+    if rest.starts_with("restore") { return true; }
+    if rest.starts_with("reset") && rest.contains("--hard") { return true; }
+    if rest.starts_with("clean") {
+        // Deny any `git clean` that has -f or -d flags (alone or combined: -fd, -df, -fdn, etc.)
+        let flags = rest;
+        if flags.contains("-f") || flags.contains("-d") { return true; }
+    }
+    if rest.starts_with("checkout") {
+        let after = rest["checkout".len()..].trim_start();
+        // `git checkout -- <paths>` or `git checkout .`
+        if after.starts_with("-- ") || after.starts_with(".") { return true; }
+    }
+    if rest.starts_with("worktree") {
+        let after = rest["worktree".len()..].trim_start();
+        if after.starts_with("remove") { return true; }
+    }
+    false
+}
+
 // ─── test-scope policy ────────────────────────────────────────────────────────
 
 /// Gate-layer policy when a matched line falls inside a test scope.
@@ -259,6 +319,14 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
                       this rule hard-guards against that. Only the repo operator may \
                       modify `.camerata/` files.",
         arm: arm_sec_no_camerata_config_1,
+    },
+    RuleEntry {
+        id: "SEC-NO-GIT-STATE-MUTATION-1",
+        description: "Deny file content containing a git command that mutates working-tree state: \
+                      `git stash`, `git reset --hard`, `git clean -f/-d`, `git checkout -- ` / \
+                      `git checkout .`, `git rebase`, `git restore`, `git worktree remove`. \
+                      Agents have no shell access but could encode these commands in scripts.",
+        arm: arm_sec_no_git_state_mutation_1,
     },
 ];
 
@@ -1382,6 +1450,36 @@ fn arm_sec_no_camerata_config_1(path: &str, _content: &str) -> Result<(), String
                  (features.toml, checks.toml). Agents must not modify governance \
                  config; only the repo operator may edit `.camerata/` files \
                  (path={path})"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ── SEC-NO-GIT-STATE-MUTATION-1 ───────────────────────────────────────────────
+
+/// SEC-NO-GIT-STATE-MUTATION-1: deny writing content that contains a git command
+/// that would mutate working-tree state: `git stash`, `git reset --hard`,
+/// `git clean -f/-d`, `git checkout -- ` / `git checkout .`, `git rebase`,
+/// `git restore`, or `git worktree remove`.
+///
+/// Agents cannot invoke git directly (no shell/Bash tool), but they COULD encode
+/// these commands into shell scripts, Makefiles, CI configs, or documentation.
+/// This rule catches that at write-time before the file lands in the worktree.
+///
+/// Read-only git commands (`status`, `log`, `diff`, `rev-parse`) are allowed.
+fn arm_sec_no_git_state_mutation_1(_path: &str, content: &str) -> Result<(), String> {
+    for line in content.lines() {
+        // Trim leading whitespace / shell prompt chars but look for `git ` anywhere on the line.
+        let trimmed = line.trim_start_matches(|c: char| c == '$' || c == '#' || c.is_whitespace());
+        if is_git_state_mutation(trimmed) {
+            // Redact the line to the first 80 chars for the denial message.
+            let preview: String = trimmed.chars().take(80).collect();
+            return Err(format!(
+                "SEC-NO-GIT-STATE-MUTATION-1: content contains a git command that \
+                 mutates working-tree state (`{preview}`); agents must not embed \
+                 state-mutating git commands in written files — Camerata manages all \
+                 git state on behalf of agents"
             ));
         }
     }
@@ -3016,5 +3114,111 @@ mod adversarial {
             ".camerata\\checks.toml",
             "Windows-style backslash separator must also be caught",
         );
+    }
+
+    // ── SEC-NO-GIT-STATE-MUTATION-1 tests ────────────────────────────────────────
+
+    #[test]
+    fn git_state_mutation_guard_denies_stash() {
+        assert!(is_git_state_mutation("git stash"));
+        assert!(is_git_state_mutation("git stash push"));
+        assert!(is_git_state_mutation("git stash pop"));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_denies_reset_hard() {
+        assert!(is_git_state_mutation("git reset --hard"));
+        assert!(is_git_state_mutation("git reset --hard HEAD"));
+        assert!(is_git_state_mutation("git reset --hard origin/main"));
+        // soft reset is NOT a state mutation (does not touch working tree)
+        assert!(!is_git_state_mutation("git reset --soft HEAD~1"));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_denies_clean() {
+        assert!(is_git_state_mutation("git clean -f"));
+        assert!(is_git_state_mutation("git clean -d"));
+        assert!(is_git_state_mutation("git clean -fd"));
+        assert!(is_git_state_mutation("git clean -df"));
+        assert!(is_git_state_mutation("git clean -fdn")); // dry-run with -f still flagged
+    }
+
+    #[test]
+    fn git_state_mutation_guard_denies_checkout_restore_paths() {
+        assert!(is_git_state_mutation("git checkout -- src/main.rs"));
+        assert!(is_git_state_mutation("git checkout ."));
+        assert!(is_git_state_mutation("git restore src/lib.rs"));
+        assert!(is_git_state_mutation("git restore ."));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_denies_rebase() {
+        assert!(is_git_state_mutation("git rebase main"));
+        assert!(is_git_state_mutation("git rebase -i HEAD~3"));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_denies_worktree_remove() {
+        assert!(is_git_state_mutation("git worktree remove /path/to/wt"));
+        assert!(is_git_state_mutation("git worktree remove --force /path/to/wt"));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_allows_read_only_git_commands() {
+        // Benign read-only commands must NOT trigger the guard.
+        assert!(!is_git_state_mutation("git status"));
+        assert!(!is_git_state_mutation("git log --oneline"));
+        assert!(!is_git_state_mutation("git diff HEAD"));
+        assert!(!is_git_state_mutation("git rev-parse HEAD"));
+        assert!(!is_git_state_mutation("git show HEAD:src/main.rs"));
+        assert!(!is_git_state_mutation("git fetch origin"));
+        assert!(!is_git_state_mutation("git branch -r"));
+    }
+
+    #[test]
+    fn git_state_mutation_guard_allows_non_git_commands() {
+        assert!(!is_git_state_mutation("cargo test"));
+        assert!(!is_git_state_mutation("echo git stash")); // doesn't start with "git "
+        assert!(!is_git_state_mutation(""));
+    }
+
+    #[test]
+    fn sec_no_git_state_mutation_rule_denies_shell_script_with_mutation() {
+        // A shell script embedding a state-mutating git command is denied.
+        let script = "#!/bin/bash\ncd /repo\ngit reset --hard HEAD\n";
+        assert!(
+            arm_sec_no_git_state_mutation_1("deploy.sh", script).is_err(),
+            "shell script with git reset --hard must be denied"
+        );
+        let script2 = "#!/bin/bash\ngit clean -fd\n";
+        assert!(
+            arm_sec_no_git_state_mutation_1("scripts/clean.sh", script2).is_err(),
+            "shell script with git clean -fd must be denied"
+        );
+    }
+
+    #[test]
+    fn sec_no_git_state_mutation_rule_allows_read_only_scripts() {
+        // A script with only read-only git commands is allowed.
+        let script = "#!/bin/bash\ngit status\ngit log --oneline -10\ngit diff HEAD\n";
+        assert!(
+            arm_sec_no_git_state_mutation_1("check.sh", script).is_ok(),
+            "read-only git commands must be allowed"
+        );
+    }
+
+    #[test]
+    fn sec_no_git_state_mutation_rule_denies_makefile_with_mutation() {
+        let makefile = "clean:\n\tgit clean -fd\n\tgit checkout -- .\n";
+        assert!(
+            arm_sec_no_git_state_mutation_1("Makefile", makefile).is_err(),
+            "Makefile with git clean -fd must be denied"
+        );
+    }
+
+    #[test]
+    fn sec_no_git_state_mutation_rule_is_registered_in_registry() {
+        let found = RULE_REGISTRY.iter().any(|e| e.id == "SEC-NO-GIT-STATE-MUTATION-1");
+        assert!(found, "SEC-NO-GIT-STATE-MUTATION-1 must be in RULE_REGISTRY");
     }
 }
