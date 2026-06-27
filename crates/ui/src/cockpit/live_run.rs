@@ -198,6 +198,7 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                             let on_answered = on_answered;
                             submitting.set(true);
                             spawn(async move {
+                                let _guard = crate::loading::LoadingGuard::new();
                                 let ok = answer_clarification(&cid, sel, ft).await;
                                 submitting.set(false);
                                 if ok {
@@ -208,10 +209,8 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                     },
                     if submitting() { "Submitting…" } else { "Submit answer" }
                 }
-                // Submitting indicator: the Bombe turns while the answer is in flight.
-                if submitting() {
-                    crate::bombe::BombeSpinner { title: "Submitting your answer\u{2026}".to_string() }
-                }
+                // Submitting: the background Bombe machine activates via the
+                // global loading guard held by the spawn task above.
             }
         }
     }
@@ -278,9 +277,8 @@ pub(super) fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 span { class: "live-run-title", "Governed run" }
                 span { class: "live-run-mode", "{mode_label}" }
                 span { class: "live-run-status {status_cls}", "{status_label}" }
-                if !run.done {
-                    crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
-                }
+                // While running, the background Bombe machine is already active
+                // via the poll_run_to_done loading guard — no inline spinner needed.
                 // Stop button: always available while the run is in a running/non-terminal state.
                 if cancellable {
                     button {
@@ -368,7 +366,6 @@ pub(super) fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                         p { class: "live-events-empty", "No activity recorded for this run." }
                     } else {
                         div { class: "live-events-empty",
-                            crate::bombe::BombeSpinner { title: "Spinning up the fleet\u{2026}".to_string() }
                             p { "Spinning up the fleet\u{2026}" }
                         }
                     }

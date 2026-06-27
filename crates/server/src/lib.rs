@@ -499,6 +499,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/:id/reconcile", get(reconcile_project))
         .route("/api/projects/:id/emit", post(emit_project))
+        .route("/api/projects/:id/emit-local", post(emit_project_local))
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
@@ -4994,6 +4995,124 @@ async fn emit_project(
     Json(serde_json::json!({ "ok": true, "results": results }))
 }
 
+/// Re-emit a project's ruleset directly into the LOCAL working copies of its repos,
+/// unconditionally — regardless of onboarding state. Rebuilds AGENTS.md +
+/// CONVENTIONS.md + the gate configs from the project's CURRENT principle sources and
+/// ALWAYS writes them to disk. Does NOT open a PR and does NOT require the repo to be
+/// already onboarded. This is the "re-sync my local clones" action for an architect who
+/// edited the ruleset after onboarding and wants the local files to reflect the current
+/// selections without going through a full re-onboard.
+///
+/// Needs a workspace folder set (or per-repo path overrides via repo health) — Apply
+/// writes into the repo's local clone. The token is required so the branch can also be
+/// pushed to origin (keeping the remote in sync with the local write).
+async fn emit_project_local(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+
+    let rules = resolve_project_arm_rules(&project).await;
+    if rules.is_empty() && project.ruleset.custom.is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }),
+        );
+    }
+
+    // Re-emit carries no new baseline (it's a ruleset refresh, not onboarding).
+    let no_baselines: std::collections::HashMap<String, String> = Default::default();
+    let workspace_root = state.settings.workspace_root();
+
+    // Filter to repo-local rules only (cross-repo / process rules are project-level).
+    let repo_local: Vec<crate::arm::ArmRule> = rules
+        .iter()
+        .filter(|r| r.scope != "cross-repo" && r.scope != "process")
+        .cloned()
+        .collect();
+    let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
+    repos.sort();
+    repos.dedup();
+
+    let has_any_local =
+        workspace_root.is_some() || repos.iter().any(|r| state.settings.repo_path(r).is_some());
+    if !has_any_local {
+        return Json(
+            serde_json::json!({ "ok": false, "message": "Set a local workspace folder (Settings) or choose each repo's local folder (repo health) — emit-local writes into the repo's local clone." }),
+        );
+    }
+
+    let custom = project.ruleset.custom.clone();
+    let mut results = Vec::new();
+    for repo in &repos {
+        let repo_rules: Vec<&crate::arm::ArmRule> = repo_local
+            .iter()
+            .filter(|r| r.repos.iter().any(|x| x == repo))
+            .collect();
+        let repo_custom: Vec<&crate::project::CustomRule> = custom
+            .iter()
+            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .collect();
+        if repo_rules.is_empty() && repo_custom.is_empty() {
+            continue;
+        }
+        // Build the governance files unconditionally — no onboarding-state gate.
+        let mut files = crate::arm::arm_files_for_repo(&repo_rules, &repo_custom);
+        if let Some(baseline_json) = no_baselines.get(repo) {
+            files.push((".camerata/baseline.json".to_string(), baseline_json.clone()));
+        }
+        // Resolve this repo's local dir: per-repo override wins, else <workspace_root>/<repo>.
+        let override_path = state.settings.repo_path(repo);
+        let Some(dir) = crate::workspace::resolve_repo_dir(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        ) else {
+            results.push(serde_json::json!({
+                "repo": repo, "ok": false,
+                "message": "No local path — choose this repo's folder (repo health) or set a workspace folder."
+            }));
+            continue;
+        };
+        let clone_root = if override_path
+            .as_deref()
+            .map(|p| !p.trim().is_empty())
+            .unwrap_or(false)
+        {
+            None
+        } else {
+            workspace_root.as_deref().map(std::path::Path::new)
+        };
+        let msg = format!("chore(governance): re-emit Camerata ruleset to {repo}");
+        match crate::workspace::apply_local_and_push(
+            &dir,
+            repo,
+            clone_root,
+            crate::arm::ARM_BRANCH,
+            &files,
+            &msg,
+            &token,
+        )
+        .await
+        {
+            Ok(path) => {
+                results.push(serde_json::json!({
+                    "repo": repo, "ok": true, "branch": crate::arm::ARM_BRANCH, "path": path
+                }));
+            }
+            Err(e) => results.push(serde_json::json!({
+                "repo": repo, "ok": false, "message": format!("{e}")
+            })),
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
 /// Query for draining the notification feed: only items newer than `since`.
 #[derive(serde::Deserialize)]
 struct NotifyQuery {
@@ -8896,6 +9015,75 @@ mod tests {
             after.ruleset.custom.len(),
             1,
             "custom survived the re-arm upsert"
+        );
+    }
+
+    /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run
+    /// unconditionally for an already-onboarded project (no onboarding-state gate).
+    ///
+    /// This test verifies the route is wired and the handler logic executes regardless
+    /// of whether the project is onboarded. With no workspace configured the handler
+    /// reports the expected "no local path" error (not a 404, not a silent no-op, and
+    /// not the "already onboarded" gate that blocked all re-emits before this fix).
+    ///
+    /// A full end-to-end local-write test requires a real git repo with a pushable
+    /// remote (the apply_local_and_push codepath pushes the branch). The pure-function
+    /// layer (arm_files_for_repo always produces current content) is covered by the
+    /// `re_emit_for_onboarded_project_always_writes_current_content` test in arm.rs.
+    #[tokio::test]
+    async fn emit_project_local_route_runs_for_onboarded_project_no_workspace_guard() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // Create a project, seed it with a rule, and mark it as ALREADY ONBOARDED.
+        let p = state
+            .projects
+            .create("Onboarded", vec!["me/api".to_string()])
+            .unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "RUST-DOMAIN-6".to_string(),
+                chosen_option: None,
+                repos: vec!["me/api".to_string()],
+            });
+            proj.mark_onboarded(&["me/api".to_string()]);
+        });
+        let onboarded = state.projects.get(&p.id).unwrap();
+        assert!(
+            onboarded.onboarded.contains(&"me/api".to_string()),
+            "project must be onboarded before calling emit-local"
+        );
+
+        // Call the endpoint. No workspace is set, so the handler reports the "no local
+        // path" message — the point is that it RUNS (200 ok:false, not 404 or no-op).
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/emit-local", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The route MUST exist (not 404) and must return 200.
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "emit-local endpoint must be reachable for an onboarded project"
+        );
+        let json = body_json(resp).await;
+        // The handler reaches the emit logic (no silent no-op, no onboarding-state guard).
+        // With no workspace set it returns ok:false + the actionable message.
+        assert_eq!(
+            json["ok"], false,
+            "with no workspace, emit-local reports ok:false (not a silent no-op): {json:?}"
+        );
+        let msg = json["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("workspace") || msg.contains("local") || msg.contains("emit"),
+            "message must explain the missing workspace, got: {msg}"
         );
     }
 

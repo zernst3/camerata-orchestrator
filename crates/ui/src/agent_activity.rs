@@ -131,10 +131,10 @@ pub fn AgentActivity(run_id: String) -> Element {
                                         }
                                     }
                                     // While the agent is thinking with nothing emitted yet,
-                                    // run the Bombe — the "it's actually working" affordance.
+                                    // the background Bombe machine is already running via the
+                                    // global loading count — just show the text label.
                                     if a.output.is_empty() {
                                         div { class: "agent-thinking",
-                                            crate::bombe::BombeSpinner { title: "Camerata is thinking\u{2026}".to_string() }
                                             span { class: "agent-thinking-label",
                                                 if a.status == "running" { "thinking\u{2026}" } else { "waiting\u{2026}" }
                                             }

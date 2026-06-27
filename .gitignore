@@ -39,3 +39,6 @@ npm-debug.log*
 
 # Rust
 /target
+
+# audio experiment assets
+docs/plans/*.mp3

@@ -873,4 +873,86 @@ mod tests {
         assert_eq!(by.get("me/api").unwrap().len(), 1);
         assert_eq!(by.get("me/web").unwrap().len(), 2);
     }
+
+    /// Regression test for issue #106: re-emit for an already-onboarded project must
+    /// produce the CURRENT content, not no-op.
+    ///
+    /// The bug was that no code path ever called `arm_files_for_repo` for a repo that
+    /// was already in the project's `onboarded` list — the only emit path was the
+    /// initial onboarding flow, and once a repo was marked onboarded the files were
+    /// stuck at whatever was written then. This test proves that calling
+    /// `arm_files_for_repo` a second time (the re-emit) with CHANGED content yields
+    /// the updated directive, not the old one. The function must be unconditional: it
+    /// has no "already emitted" guard and always returns the current rule content.
+    ///
+    /// This is the pure-function layer of the fix (no git I/O). The server-layer fix
+    /// is `emit_project_local` (POST /api/projects/:id/emit-local), which calls
+    /// `apply_local_and_push` → `arm_files_for_repo` unconditionally, bypassing all
+    /// onboarding-state checks.
+    #[test]
+    fn re_emit_for_onboarded_project_always_writes_current_content() {
+        // First emit: an initial prose rule.
+        let first_rule = ArmRule {
+            id: "RUST-DOMAIN-6".to_string(),
+            title: "Domain models are pure".to_string(),
+            directive: "Initial directive: no I/O in domain models.".to_string(),
+            option: None,
+            enforcement: "prose".to_string(),
+            scope: "repo-local".to_string(),
+            conformance: None,
+            repos: vec!["me/api".to_string()],
+        };
+        let first_files = arm_files_for_repo(&[&first_rule], &[]);
+        let first_agents = first_files
+            .iter()
+            .find(|(n, _)| n == "AGENTS.md")
+            .map(|(_, c)| c.as_str())
+            .expect("AGENTS.md must be emitted on first emit");
+        assert!(
+            first_agents.contains("Initial directive"),
+            "first emit carries the initial directive: {first_agents}"
+        );
+
+        // Simulate project being onboarded (state change would set onboarded=["me/api"]).
+        // The re-emit must NOT consult onboarding state — it always calls arm_files_for_repo.
+
+        // Second emit (re-emit): the directive changed (rule was edited in the corpus).
+        let updated_rule = ArmRule {
+            id: "RUST-DOMAIN-6".to_string(),
+            title: "Domain models are pure".to_string(),
+            directive: "UPDATED directive: no I/O or async in domain models.".to_string(),
+            option: None,
+            enforcement: "prose".to_string(),
+            scope: "repo-local".to_string(),
+            conformance: None,
+            repos: vec!["me/api".to_string()],
+        };
+        let second_files = arm_files_for_repo(&[&updated_rule], &[]);
+        let second_agents = second_files
+            .iter()
+            .find(|(n, _)| n == "AGENTS.md")
+            .map(|(_, c)| c.as_str())
+            .expect("AGENTS.md must be emitted on re-emit");
+
+        // The re-emitted file carries the UPDATED directive, not the original.
+        assert!(
+            second_agents.contains("UPDATED directive"),
+            "re-emit must reflect current directive, got: {second_agents}"
+        );
+        assert!(
+            !second_agents.contains("Initial directive"),
+            "re-emit must NOT contain stale initial directive, got: {second_agents}"
+        );
+
+        // The gate config (rules.json) is also re-emitted (not stuck at the old emit).
+        let second_gate = second_files
+            .iter()
+            .find(|(n, _)| n == ".camerata/rules.json")
+            .map(|(_, c)| c.as_str())
+            .expect(".camerata/rules.json must be emitted on re-emit");
+        assert!(
+            second_gate.contains("RUST-DOMAIN-6"),
+            "gate config must carry the rule id on re-emit: {second_gate}"
+        );
+    }
 }

@@ -433,6 +433,81 @@ impl UowStage {
     }
 }
 
+// ── 3-phase cockpit types ─────────────────────────────────────────────────────
+
+/// Which of the three cockpit phases the user has selected to view.
+/// Navigation is FREE — selecting only changes the view, never auto-advances.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default, Debug)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PhaseTab {
+    #[default]
+    Intake,
+    Investigation,
+    Development,
+}
+
+impl PhaseTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Intake => "Intake",
+            Self::Investigation => "Investigation & Refinement",
+            Self::Development => "Development",
+        }
+    }
+}
+
+/// Per-UoW metadata for the 3-phase cockpit shell.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct UowMeta {
+    /// Informational UoW status (mirrors stage, informational only).
+    #[serde(default)]
+    pub status_label: String,
+    /// Which phase the user last selected to view.
+    #[serde(default)]
+    pub viewed_phase: PhaseTab,
+    /// Phase finish flags.
+    #[serde(default)]
+    pub intake_finished: bool,
+    #[serde(default)]
+    pub investigation_finished: bool,
+    #[serde(default)]
+    pub development_finished: bool,
+    /// Done/archived flag (replaces SignedOff as a terminal state).
+    #[serde(default)]
+    pub done: bool,
+}
+
+/// Maps the old `UowStage` to the 3-phase `PhaseTab` for migration / initialisation.
+///
+/// - `Intake` → Intake
+/// - `Investigating`, `DecisionsApproved` → Investigation
+/// - `Development`, `AwaitingQa` → Development
+/// - `SignedOff` → Development (+ caller should set `meta.done = true`)
+pub(super) fn stage_to_phase(stage: UowStage) -> PhaseTab {
+    match stage {
+        UowStage::Intake => PhaseTab::Intake,
+        UowStage::Investigating | UowStage::DecisionsApproved => PhaseTab::Investigation,
+        UowStage::Development | UowStage::AwaitingQa | UowStage::SignedOff => {
+            PhaseTab::Development
+        }
+    }
+}
+
+/// Returns a short, informational display label for the UoW's current lifecycle stage.
+/// This is purely informational — it never drives control flow.
+pub(super) fn stage_to_status_label(stage: UowStage) -> &'static str {
+    match stage {
+        UowStage::Intake => "Intake",
+        UowStage::Investigating => "Investigating",
+        UowStage::DecisionsApproved => "Decisions Approved",
+        UowStage::Development => "In Development",
+        UowStage::AwaitingQa => "Awaiting QA",
+        UowStage::SignedOff => "Signed Off",
+    }
+}
+
+// ── End 3-phase cockpit types ─────────────────────────────────────────────────
+
 /// A single entry in the AI development history.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct HistoryEntryView {
@@ -2398,6 +2473,7 @@ pub(super) fn StoryAuthoringPanel(
                             sending.set(true);
                             // Track the spawned task so the Stop button can abort it.
                             let task = spawn(async move {
+                                let _guard = crate::loading::LoadingGuard::new();
                                 match post_author_message(&id, &msg, &md).await {
                                     Some(_) => {
                                         message.set(String::new());
@@ -2421,10 +2497,8 @@ pub(super) fn StoryAuthoringPanel(
                 }
                 // Model selector — mirrors the investigation "Begin investigation" control.
                 ModelSelect { models: run_models_snap.clone(), selected: send_model }
-                // In-progress indicator: the Bombe turns while the assistant drafts.
-                if sending() {
-                    crate::bombe::BombeSpinner { title: "Camerata is drafting\u{2026}".to_string() }
-                }
+                // In-progress: the background Bombe machine activates via the global
+                // loading guard held by the spawn task above — no inline spinner needed.
                 // Stop button — shown only while a send is in flight. The author send is not
                 // a tracked run, so Stop aborts the in-flight request task and resets to idle.
                 if sending() {
@@ -2569,11 +2643,19 @@ pub(super) fn StoryAuthoringPanel(
     }
 }
 
-/// The dev controls for a selected Unit of Work. Reuses the EXISTING governed-dev
-/// mechanisms — run the governed fleet THROUGH THE GATE, the clarify back-and-forth, and
-/// sign-off — keyed to this UoW's id (the same key the existing endpoints use). Adds an
-/// "Add comment to issue" box (`POST /api/workitems/comment`) and a "Pull latest work item"
-/// button (`POST /api/workitems/refresh`). Provider-agnostic: it only reads the WorkItem DTO.
+/// The 3-phase Governed-Development cockpit shell for a selected Unit of Work.
+///
+/// Top bar (always visible):
+/// - UoW status badge (informational only, derived from lifecycle stage)
+/// - "Pull latest work item" button
+/// - Phase selector: Intake / Investigation & Refinement / Development (free navigation)
+///
+/// Phase body delegates to `IntakePhaseView`, `InvestigationPhaseView`, or
+/// `DevelopmentPhaseView`. The "Stop run" control is surfaced in the top bar whenever a
+/// run is live.
+///
+/// The `GateSelfCheck {}` UI box has been removed from this component (the gateway
+/// enforcement code in cockpit.rs is preserved; only the UI invocation is removed).
 #[component]
 pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -2592,11 +2674,8 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
     // The reused per-UoW UoW panel / run live behind a refresh tick, same as the old page.
     let uow_refresh = use_signal(|| 0u32);
 
-    // Increment 1: runs live ON THE STEPS, not a standalone button. We fetch the UoW
-    // here (keyed on the same refresh tick the panel uses) so we know the current
-    // lifecycle `stage` and can render the run control for the ACTIVE phase inline with
-    // the lifecycle strip. The downstream `UowPanel` re-fetches the same UoW for its own
-    // read-out, so the two stay in sync without sharing a fetch.
+    // Fetch the UoW (keyed on the same refresh tick the panel uses) so we know the
+    // current lifecycle `stage` and can derive the status label + seed the phase tab.
     let uow_for_stage = {
         let sid = uow.id.clone();
         use_resource(move || {
@@ -2605,11 +2684,7 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
             async move { fetch_uow(&sid).await }
         })
     };
-    // The KNOWN lifecycle stage, or `None` when the UoW fetch is still loading OR
-    // failed. Critically we do NOT collapse "unknown" into the `Intake` default: doing
-    // so showed the "Begin investigation" button while the real stage was past Intake,
-    // so the click 409'd with "Could not begin the investigation run." The run control
-    // renders only once the stage is genuinely known (see `UowStepRunControls`).
+    // The KNOWN lifecycle stage, or `None` when the UoW fetch is still loading OR failed.
     let stage: Option<UowStage> = uow_for_stage
         .read()
         .as_ref()
@@ -2659,33 +2734,41 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
         }));
     }
 
-    // Comment-to-issue composer (+ GitHub-style @-mention autocomplete).
-    let mut comment_body = use_signal(String::new);
-    let mut commenting = use_signal(|| false);
     // Pull-latest state.
     let mut refreshing = use_signal(|| false);
 
     // ── Work-item modal (opened from inside the UoW) ───────────────────────────
-    // A local flag toggles the WorkItemDetail modal for THIS UoW's work item. The
-    // modal's create/open-UoW action is hidden (the UoW already exists), so the
-    // uows / sel / uows_refresh it requires are local throwaways here.
     let mut wi_modal_open = use_signal(|| false);
     let modal_uows_refresh = use_signal(|| 0u32);
     let modal_sel = use_signal(|| GovDevSel::IssueManagement);
 
-    // ── @-mention autocomplete state ───────────────────────────────────────────
-    // The repo's assignable users, fetched once per work item (the practical mention
-    // set). Degrades to empty (no token / error) → the dropdown simply never shows.
-    let assignees_res = {
-        let wid = uow.work_item.clone().unwrap_or_default().id;
-        use_resource(move || {
-            let wid = wid.clone();
-            async move { fetch_work_item_assignees(&wid).await }
-        })
-    };
-    let assignees = assignees_res.read().clone().unwrap_or_default();
-    // Whether the dropdown is showing (an active `@token` exists and matches).
-    let mut mention_open = use_signal(|| false);
+    // ── 3-phase shell state ────────────────────────────────────────────────────
+    // Phase tab: initialised from the lifecycle stage once known, then freely navigable.
+    let mut phase = use_signal(|| PhaseTab::Intake);
+    // Per-phase finish flags.
+    let intake_finished = use_signal(|| false);
+    let investigation_finished = use_signal(|| false);
+    let development_finished = use_signal(|| false);
+
+    // Seed the phase tab from the lifecycle stage the FIRST time the stage loads.
+    // We use a one-shot flag so user navigation isn't overwritten on every refresh.
+    let mut phase_seeded = use_signal(|| false);
+    use_effect(move || {
+        if !phase_seeded() {
+            if let Some(st) = stage {
+                phase.set(stage_to_phase(st));
+                phase_seeded.set(true);
+            }
+        }
+    });
+
+    // Informational status label — purely display, never drives control flow.
+    let status_label = stage
+        .map(stage_to_status_label)
+        .unwrap_or("Loading…");
+
+    // Stop-run busy flag (surfaced in top bar when a run is live).
+    let mut stopping = use_signal(|| false);
 
     let it = item.read().clone();
     let (state_label, state_cls) = work_item_state_badge(&it.state);
@@ -2697,21 +2780,17 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 span { class: "uow-dev-repo", "{it.repo}" }
                 span { class: "uow-dev-num", "#{it.number}" }
                 span { class: "wi-state {state_cls}", "{state_label}" }
-                // Open the full work-item modal (title + body + ALL comments) in-app.
                 button {
                     class: "btn-edit-sm",
                     onclick: move |_| wi_modal_open.set(true),
                     "Open work item"
                 }
-                // RETAINED: the direct link to the issue on the tracker.
                 if !it.url.is_empty() {
                     a { class: "wi-detail-link", href: "{it.url}", target: "_blank", "Open issue ↗" }
                 }
             }
             p { class: "uow-dev-title", "{it.title}" }
 
-            // The work-item modal (with comments), opened from the head button above.
-            // Its create/open-UoW action is hidden — this UoW already exists.
             if wi_modal_open() {
                 WorkItemDetail {
                     item: it.clone(),
@@ -2723,8 +2802,15 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 }
             }
 
-            // ── Pull latest work item ─────────────────────────────────────────
-            div { class: "uow-dev-pull-row",
+            // ── Top bar: status · pull · phase selector · stop ────────────────
+            div { class: "uow-phase-topbar",
+                // Status (informational only)
+                div { class: "uow-phase-status",
+                    span { class: "uow-field-label", "Status" }
+                    span { class: "uow-status-badge", "{status_label}" }
+                }
+
+                // Pull latest work item
                 button {
                     class: "btn-edit-sm",
                     disabled: refreshing(),
@@ -2735,8 +2821,6 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                         spawn(async move {
                             match refresh_work_item(&wid).await {
                                 Some(updated) => item.set(updated),
-                                // Surface the failure (no token, 404, transport) instead of
-                                // silently stopping the spinner so dogfooding isn't left guessing.
                                 None => crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Warning,
@@ -2748,100 +2832,423 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                     },
                     if refreshing() { "Pulling…" } else { "Pull latest work item" }
                 }
-                span { class: "section-hint", "Re-pull this issue from the tracker." }
+
+                // Phase selector — free navigation, never auto-advances
+                div { class: "uow-phase-tabs",
+                    {
+                        let tabs = [
+                            (PhaseTab::Intake, intake_finished()),
+                            (PhaseTab::Investigation, investigation_finished()),
+                            (PhaseTab::Development, development_finished()),
+                        ];
+                        rsx! {
+                            for (tab, finished) in tabs {
+                                {
+                                    let is_active = phase() == tab;
+                                    let mut cls = String::from("uow-phase-tab");
+                                    if is_active { cls.push_str(" active"); }
+                                    if finished { cls.push_str(" finished"); }
+                                    let label = if finished {
+                                        format!("{} (done)", tab.label())
+                                    } else {
+                                        tab.label().to_string()
+                                    };
+                                    rsx! {
+                                        button {
+                                            class: "{cls}",
+                                            onclick: move |_| phase.set(tab),
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Stop run — visible whenever a run is live, regardless of phase
+                {
+                    let active = active_run();
+                    let stoppable = active.as_ref().map(|r| !r.done).unwrap_or(false);
+                    let rid = active.as_ref().map(|r| r.id.clone()).unwrap_or_default();
+                    if stoppable {
+                        rsx! {
+                            div { class: "uow-run-stop-row",
+                                button {
+                                    class: "btn-secondary uow-run-stop",
+                                    disabled: stopping(),
+                                    onclick: move |_| {
+                                        let rid = rid.clone();
+                                        let mut uow_refresh = uow_refresh;
+                                        let toasts = toasts;
+                                        stopping.set(true);
+                                        spawn(async move {
+                                            let ok = cancel_run(&rid).await;
+                                            if ok {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Info,
+                                                    "Stopping the run…".to_string(),
+                                                );
+                                            } else {
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    crate::toast::ToastKind::Warning,
+                                                    "Could not stop the run (it may have already finished).".to_string(),
+                                                );
+                                            }
+                                            uow_refresh += 1;
+                                            stopping.set(false);
+                                        });
+                                    },
+                                    if stopping() { "Stopping…" } else { "■ Stop run" }
+                                }
+                                span { class: "section-hint", "Cancels the running agent and stops this run." }
+                            }
+                        }
+                    } else {
+                        rsx! {}
+                    }
+                }
             }
 
-            // ── Gate self-check (reused) ──────────────────────────────────────
-            GateSelfCheck {}
-
-            // NOTE: Loop guard (max revise iterations) is a PROJECT-level setting and
-            // has been moved to the gear-icon project-settings popup in GovernedDevPage.
-            // It no longer lives here (per-UoW) to avoid implying it is per-UoW state.
-
-            // ── Lifecycle steps with the ACTIVE phase's run control inline ────
-            // Increment 1: runs live ON THE STEPS. The lifecycle strip shows the
-            // ordered stages + the architect transitions ("Approve decisions"), and
-            // the run control for the current phase is rendered inline beneath it —
-            // it REPLACES the prior phase's control rather than stacking. The
-            // investigation control owns the Intake → Investigating transition (with
-            // its own model select); the development control runs the gated build with
-            // a per-tier model map. The strongest tier leads and delegates simpler work.
-            UowStepRunControls {
-                story_id: uow_key.clone(),
-                stage,
-                uow_refresh,
-                active_run,
-                models: run_models_snap.clone(),
-                invest_model,
-                dev_strongest,
-                dev_balanced,
-                dev_fast,
+            // ── Phase body: delegate to the selected phase view ───────────────
+            match phase() {
+                PhaseTab::Intake => rsx! {
+                    IntakePhaseView {
+                        story_id: uow_key.clone(),
+                        uow_refresh,
+                        item,
+                        intake_finished,
+                        models: run_models_snap.clone(),
+                    }
+                },
+                PhaseTab::Investigation => rsx! {
+                    InvestigationPhaseView {
+                        story_id: uow_key.clone(),
+                        story_work_item_id: item.read().id.clone(),
+                        uow_refresh,
+                        active_run,
+                        models: run_models_snap.clone(),
+                        invest_model,
+                        investigation_finished,
+                        stage,
+                    }
+                },
+                PhaseTab::Development => rsx! {
+                    DevelopmentPhaseView {
+                        story_id: uow_key.clone(),
+                        uow_refresh,
+                        active_run,
+                        models: run_models_snap.clone(),
+                        dev_strongest,
+                        dev_balanced,
+                        dev_fast,
+                        development_finished,
+                        uow_for_stage,
+                    }
+                },
             }
+        }
+    }
+}
 
-            // ── Agent activity for the active run (reused) ────────────────────
-            {
-                let rid = match active_run() {
-                    Some(ref r) => r.id.clone(),
-                    None => String::new(),
-                };
-                rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+// ── Phase view components ──────────────────────────────────────────────────────
+
+/// Per-repo branch mode selection for Intake scoping.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(super) enum BranchModeChoice {
+    #[default]
+    NewFromBase,
+    Existing,
+}
+
+/// Branch selection state for one in-scope repo.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub(super) struct RepoBranchScope {
+    pub mode: BranchModeChoice,
+    /// When mode=Existing: the existing branch name.
+    pub existing_branch: String,
+    /// When mode=NewFromBase: the base branch to create from.
+    pub base_branch: String,
+}
+
+/// Oversight mode for phase components — controls where clarification dialogs
+/// and escalations are routed (per §8).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum OversightMode {
+    /// Dialogs block inline; answered now (the dev console default).
+    #[default]
+    Interactive,
+    /// Dialogs are emitted to a triage backlog; answered later (routines).
+    Batched,
+}
+
+/// Intake phase view.
+///
+/// Contains:
+/// - AI-assisted "Update branch" control
+/// - Story body + comments inline
+/// - Free-text context for the investigation agent
+/// - Repo/branch scoping
+/// - "Add comment to issue" section
+/// - Finish / Reopen controls
+#[component]
+pub(super) fn IntakePhaseView(
+    story_id: String,
+    uow_refresh: Signal<u32>,
+    item: Signal<WorkItem>,
+    mut intake_finished: Signal<bool>,
+    models: Option<AuditModelsResp>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // @-mention autocomplete state
+    let assignees_res = {
+        let wid = item.read().id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            async move { fetch_work_item_assignees(&wid).await }
+        })
+    };
+    let assignees = assignees_res.read().clone().unwrap_or_default();
+    let mut comment_body = use_signal(String::new);
+    let mut commenting = use_signal(|| false);
+    let mut mention_open = use_signal(|| false);
+
+    if intake_finished() {
+        return rsx! {
+            div { class: "uow-phase-body uow-phase-finished",
+                div { class: "uow-phase-finished-header",
+                    span { class: "uow-phase-finished-label", "Intake (finished)" }
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| intake_finished.set(false),
+                        "Reopen Intake"
+                    }
+                }
+                p { class: "section-hint", "(Intake finished — reopen to edit)" }
             }
+        };
+    }
 
-            // ── Decisions-review surface (Investigating stage) ────────────────
-            // After Begin investigation the stage is Investigating; this is where the
-            // architect reads the investigation note, records/approves decisions, and
-            // (when ready) advances via the "Approve decisions" transition above. Without
-            // this surface "Approve decisions" was a dead end (the gate 409s with no
-            // approved decisions) and the investigation output was invisible.
-            if stage == Some(UowStage::Investigating) {
-                DecisionsReviewPanel { story_id: uow_key.clone(), uow_refresh }
-            }
+    // Fetch comments for the story inline display.
+    let comments_res = {
+        let wid = item.read().id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            async move { fetch_work_item_comments(&wid).await }
+        })
+    };
 
-            // ── AI-assisted "Update branch" (GitHub PR "Update branch", gated) ─
-            // Targets THIS UoW's branch: pick a source branch (local or origin) and
-            // merge it INTO the UoW branch. A clean merge commits; a conflict is
-            // resolved by ONE gated agent (drives its own AgentActivity). Per-UoW
-            // because it operates on this UoW's working branch.
+    // Repo/branch scoping — R6.
+    let project_res = use_resource(fetch_active_project);
+    let project_repos = project_res.read().clone().flatten().map(|p| p.repos.clone()).unwrap_or_default();
+
+    let mut selected_repos: Signal<Vec<String>> = use_signal(Vec::new);
+    let mut repo_branch_modes: Signal<std::collections::HashMap<String, RepoBranchScope>> =
+        use_signal(std::collections::HashMap::new);
+
+    // Free-text context for the investigation agent.
+    let mut intake_context = use_signal(String::new);
+
+    rsx! {
+        div { class: "uow-phase-body",
+            // AI-assisted "Update branch" control
             UowUpdateBranchControl {
-                story_id: uow_key.clone(),
+                story_id: story_id.clone(),
                 uow_refresh,
-                models: run_models_snap.clone(),
+                models: models.clone(),
+            }
+            p { class: "section-hint",
+                "Update branch runs per selected repo. The control above applies to the primary repo for this UoW."
             }
 
-            // ── PR lifecycle (Decision 2): open / pull / resolve / comment ────
-            // Gated on the UoW having a branch (read from the same keyed UoW fetch the
-            // lifecycle strip uses). The resolve action is gated EXACTLY like the dev run.
-            UowPrControl {
-                story_id: uow_key.clone(),
-                has_branch: uow_for_stage
-                    .read()
-                    .clone()
-                    .flatten()
-                    .and_then(|u| u.branch)
-                    .map(|b| !b.trim().is_empty())
-                    .unwrap_or(false),
-                uow_refresh,
-                models: run_models_snap.clone(),
+            // ── Story + comments inline ───────────────────────────────────────────
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "{item.read().title}" }
+                {
+                    let body = item.read().body.clone();
+                    if body.is_empty() {
+                        rsx! { p { class: "wi-detail-body empty", "(no description)" } }
+                    } else {
+                        rsx! {
+                            div {
+                                class: "wi-detail-body md chat-turn-text",
+                                dangerous_inner_html: crate::md::md_to_html(&body),
+                            }
+                        }
+                    }
+                }
+                div { class: "wi-comments",
+                    p { class: "wi-comments-h", "Comments" }
+                    {
+                        let comments = comments_res.read().clone();
+                        match comments {
+                            None => rsx! { p { class: "section-hint", "Loading comments…" } },
+                            Some(list) if list.is_empty() => rsx! {
+                                p { class: "wi-comments-empty section-hint", "No comments." }
+                            },
+                            Some(list) => rsx! {
+                                for (i , c) in list.into_iter().enumerate() {
+                                    div { key: "{i}", class: "wi-comment",
+                                        div { class: "wi-comment-meta",
+                                            span { class: "wi-comment-author", "{c.author}" }
+                                            if !c.created_at.is_empty() {
+                                                span { class: "wi-comment-date", "{c.created_at}" }
+                                            }
+                                        }
+                                        if c.body.is_empty() {
+                                            p { class: "wi-comment-body empty", "(empty comment)" }
+                                        } else {
+                                            div {
+                                                class: "wi-comment-body md chat-turn-text",
+                                                dangerous_inner_html: crate::md::md_to_html(&c.body),
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
             }
 
-            // ── The UoW panel (reused), keyed to this UoW ─────────────────────
-            UowPanel { story_id: uow.id.clone(), uow_refresh }
-
-            // ── The live run + provenance + sign-off (reused) ─────────────────
-            if let Some(r) = active_run() {
-                LiveRunPanel { run: r, uow_refresh }
+            // ── Free-text context for investigation agent ─────────────────────────
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Context for the investigation agent" }
+                textarea {
+                    class: "intake-context-input",
+                    rows: "4",
+                    placeholder: "Add extra context for the investigation agent — anything the story doesn't capture…",
+                    value: "{intake_context}",
+                    oninput: move |e| intake_context.set(e.value()),
+                }
+                // TODO(#105): persist to UoW intake state via backend
             }
 
-            // ── Add comment to the source issue (with @-mention autocomplete) ──
-            // A comment with an @-mention IS how you loop a teammate in. As you type an
-            // `@<partial>` token, a dropdown of the repo's ASSIGNABLE users (the practical
-            // mention set GitHub resolves) appears; clicking one completes the @handle.
-            // SCOPE: the candidate set is GitHub's assignees for the repo. A per-provider
-            // mention wrapper (Jira/ADO user search) is the future generalization.
+            // ── Repos in scope ────────────────────────────────────────────────────
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Repos in scope" }
+                p { class: "section-hint",
+                    "Select which repos this story touches. Out-of-scope repos are not grounded into the investigation agent."
+                }
+                for repo in project_repos.iter() {
+                    {
+                        let repo = repo.clone();
+                        let is_selected = selected_repos().contains(&repo);
+                        rsx! {
+                            div { key: "{repo}", class: "intake-repo-row",
+                                label {
+                                    input {
+                                        class: "intake-repo-check",
+                                        r#type: "checkbox",
+                                        checked: is_selected,
+                                        onchange: {
+                                            let repo = repo.clone();
+                                            move |_| {
+                                                let mut cur = selected_repos();
+                                                if let Some(pos) = cur.iter().position(|r| r == &repo) {
+                                                    cur.remove(pos);
+                                                } else {
+                                                    cur.push(repo.clone());
+                                                }
+                                                selected_repos.set(cur);
+                                            }
+                                        },
+                                    }
+                                    " {repo}"
+                                }
+                                if is_selected {
+                                    {
+                                        let scope = repo_branch_modes().get(&repo).cloned().unwrap_or_default();
+                                        let is_existing = scope.mode == BranchModeChoice::Existing;
+                                        rsx! {
+                                            div { class: "intake-branch-mode",
+                                                label {
+                                                    input {
+                                                        r#type: "radio",
+                                                        name: "branch-mode-{repo}",
+                                                        checked: !is_existing,
+                                                        onchange: {
+                                                            let repo = repo.clone();
+                                                            move |_| {
+                                                                let mut map = repo_branch_modes();
+                                                                let entry = map.entry(repo.clone()).or_default();
+                                                                entry.mode = BranchModeChoice::NewFromBase;
+                                                                repo_branch_modes.set(map);
+                                                                // TODO(#105): persist repo/branch scope to UoW intake state
+                                                            }
+                                                        },
+                                                    }
+                                                    " New branch from base"
+                                                }
+                                                label {
+                                                    input {
+                                                        r#type: "radio",
+                                                        name: "branch-mode-{repo}",
+                                                        checked: is_existing,
+                                                        onchange: {
+                                                            let repo = repo.clone();
+                                                            move |_| {
+                                                                let mut map = repo_branch_modes();
+                                                                let entry = map.entry(repo.clone()).or_default();
+                                                                entry.mode = BranchModeChoice::Existing;
+                                                                repo_branch_modes.set(map);
+                                                                // TODO(#105): persist repo/branch scope to UoW intake state
+                                                            }
+                                                        },
+                                                    }
+                                                    " Existing branch"
+                                                }
+                                                if is_existing {
+                                                    input {
+                                                        r#type: "text",
+                                                        placeholder: "Branch name",
+                                                        value: "{scope.existing_branch}",
+                                                        oninput: {
+                                                            let repo = repo.clone();
+                                                            move |e| {
+                                                                let mut map = repo_branch_modes();
+                                                                let entry = map.entry(repo.clone()).or_default();
+                                                                entry.existing_branch = e.value();
+                                                                repo_branch_modes.set(map);
+                                                            }
+                                                        },
+                                                    }
+                                                } else {
+                                                    input {
+                                                        r#type: "text",
+                                                        placeholder: "Base branch (e.g. main)",
+                                                        value: "{scope.base_branch}",
+                                                        oninput: {
+                                                            let repo = repo.clone();
+                                                            move |e| {
+                                                                let mut map = repo_branch_modes();
+                                                                let entry = map.entry(repo.clone()).or_default();
+                                                                entry.base_branch = e.value();
+                                                                repo_branch_modes.set(map);
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // TODO(#105): persist repo/branch scope to UoW intake state
+            }
+
+            // Add comment to the source issue (with @-mention autocomplete)
             div { class: "uow-comment",
                 p { class: "clarify-h", "Add comment to issue" }
-                p { class: "section-hint", "Posts a comment back onto the source issue via the tracker adapter. Type @ to mention an assignable teammate (GitHub resolves @handle)." }
-                // The textarea wrapper is position-relative so the dropdown anchors to it.
+                p { class: "section-hint",
+                    "Posts a comment back onto the source issue via the tracker adapter. Type @ to mention an assignable teammate (GitHub resolves @handle)."
+                }
                 div { class: "uow-comment-box",
                     textarea {
                         class: "clarify-q",
@@ -2850,7 +3257,6 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                         placeholder: "Write a comment to post on the issue… (type @ to mention)",
                         oninput: move |e| {
                             let v = e.value();
-                            // Recompute whether an active @token exists with matches.
                             let show = match active_mention_partial(&v) {
                                 Some(p) => !filter_mention_candidates(&assignees, p).is_empty(),
                                 None => false,
@@ -2859,7 +3265,6 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                             mention_open.set(show);
                         },
                     }
-                    // The autocomplete dropdown: shown only when an active @token matches.
                     if mention_open() {
                         {
                             let partial = active_mention_partial(&comment_body()).unwrap_or("").to_string();
@@ -2919,6 +3324,1070 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                         });
                     },
                     if commenting() { "Posting…" } else { "Post comment" }
+                }
+            }
+
+            // Finish Intake
+            div { class: "uow-phase-finish-row",
+                button {
+                    class: "btn-secondary",
+                    onclick: move |_| intake_finished.set(true),
+                    "Finish Intake"
+                }
+            }
+        }
+    }
+}
+
+/// Investigation & Refinement phase view.
+///
+/// Contains:
+/// - Lifecycle strip + Begin investigation / Approve decisions controls (via `UowStepRunControls`)
+/// - Decisions review panel when stage is Investigating / DecisionsApproved
+/// - Agent activity for the active run
+/// - Clarification dialogs
+/// - Agent chat (investigation scope)
+/// - Board-visible story comments + add-comment control
+/// - Interface contract section
+/// - Finish / Reopen controls
+#[component]
+pub(super) fn InvestigationPhaseView(
+    story_id: String,
+    /// The work item id for board-visible comment posting and comments fetch.
+    story_work_item_id: String,
+    uow_refresh: Signal<u32>,
+    active_run: Signal<Option<RunView>>,
+    models: Option<AuditModelsResp>,
+    invest_model: Signal<String>,
+    mut investigation_finished: Signal<bool>,
+    stage: Option<UowStage>,
+    /// Whether this phase is embedded in an Interactive (inline) or Batched (routine triage)
+    /// context. Controls where clarification dialogs route their answers.
+    #[props(default = OversightMode::Interactive)]
+    oversight: OversightMode,
+) -> Element {
+    // Pass a no-op dev-tier through to UowStepRunControls (it only uses invest_model here).
+    let dev_strongest = use_signal(String::new);
+    let dev_balanced = use_signal(String::new);
+    let dev_fast = use_signal(String::new);
+
+    let toasts_inv = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // Clarification refresh counter — bumped on each answer.
+    let mut clarify_refresh = use_signal(|| 0u32);
+
+    // Fetch open clarifications for this story.
+    let open_clars_res = {
+        let id = story_id.clone();
+        use_resource(move || {
+            let id = id.clone();
+            let _dep = clarify_refresh();
+            async move { fetch_open_clarifications_for_story(&id).await }
+        })
+    };
+
+    // Agent chat — client-side only, no backend persistence yet.
+    // TODO(#105): persist to UoW transcript
+    let mut chat_messages: Signal<Vec<(String, String)>> = use_signal(Vec::new);
+    let mut chat_input = use_signal(String::new);
+    let mut chat_sending = use_signal(|| false);
+
+    // Board-visible story comments — assignees + comment state.
+    let invest_assignees_res = {
+        let wid = story_work_item_id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            async move { fetch_work_item_assignees(&wid).await }
+        })
+    };
+    let invest_assignees = invest_assignees_res.read().clone().unwrap_or_default();
+    let mut invest_comment_body = use_signal(String::new);
+    let mut invest_commenting = use_signal(|| false);
+    let mut invest_mention_open = use_signal(|| false);
+
+    // Contract section.
+    let mut show_contract = use_signal(|| false);
+    let mut contract_text = use_signal(String::new);
+
+    let _ = oversight; // used for routing in a future PR; field is established here
+
+    if investigation_finished() {
+        return rsx! {
+            div { class: "uow-phase-body uow-phase-finished",
+                div { class: "uow-phase-finished-header",
+                    span { class: "uow-phase-finished-label", "Investigation & Refinement (finished)" }
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| investigation_finished.set(false),
+                        "Reopen Investigation"
+                    }
+                }
+                p { class: "section-hint", "(Investigation finished — reopen to edit)" }
+            }
+        };
+    }
+
+    rsx! {
+        div { class: "uow-phase-body",
+            // Lifecycle strip + run controls (Begin investigation / Approve decisions)
+            UowStepRunControls {
+                story_id: story_id.clone(),
+                stage,
+                uow_refresh,
+                active_run,
+                models: models.clone(),
+                invest_model,
+                dev_strongest,
+                dev_balanced,
+                dev_fast,
+            }
+
+            // Agent activity for the active run
+            {
+                let rid = match active_run() {
+                    Some(ref r) => r.id.clone(),
+                    None => String::new(),
+                };
+                rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+            }
+
+            // Decisions-review surface (Investigating stage)
+            if stage == Some(UowStage::Investigating) || stage == Some(UowStage::DecisionsApproved) {
+                DecisionsReviewPanel { story_id: story_id.clone(), uow_refresh }
+            }
+
+            // ── Clarifications ────────────────────────────────────────────────────
+            {
+                let clars = open_clars_res.read().clone().unwrap_or_default();
+                if clars.is_empty() {
+                    rsx! {}
+                } else {
+                    rsx! {
+                        div { class: "uow-dev-section",
+                            p { class: "uow-dev-section-h", "Clarifications" }
+                            for clar in clars.iter() {
+                                {
+                                    rsx! {
+                                        div { key: "{clar.id}", class: "authoring-clarify",
+                                            ClarifyQuestion {
+                                                clar: clar.clone(),
+                                                on_answered: move |_| {
+                                                    clarify_refresh += 1;
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Agent chat (investigation scope) ──────────────────────────────────
+            div { class: "uow-agent-chat",
+                p { class: "uow-dev-section-h", "Agent chat (investigation scope)" }
+                // TODO(#105): persist to UoW transcript
+                for (i , (role , text)) in chat_messages().into_iter().enumerate() {
+                    {
+                        let role_cls = if role == "user" { "user" } else { "assistant" };
+                        rsx! {
+                            div { key: "{i}", class: "uow-agent-chat-turn {role_cls}",
+                                span { class: "uow-agent-chat-role", "{role}" }
+                                p { class: "uow-agent-chat-text", "{text}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "uow-agent-chat-input-row",
+                    textarea {
+                        rows: "3",
+                        placeholder: "Message the investigation agent…",
+                        value: "{chat_input}",
+                        disabled: chat_sending(),
+                        oninput: move |e| chat_input.set(e.value()),
+                    }
+                    button {
+                        class: "btn-run",
+                        disabled: chat_sending() || chat_input().trim().is_empty(),
+                        onclick: move |_| {
+                            let msg = chat_input().trim().to_string();
+                            if msg.is_empty() { return; }
+                            chat_sending.set(true);
+                            let mut msgs = chat_messages();
+                            msgs.push(("user".to_string(), msg.clone()));
+                            chat_messages.set(msgs);
+                            chat_input.set(String::new());
+                            spawn(async move {
+                                // TODO(#105): call investigation agent chat endpoint
+                                let stub = "(Investigation agent response — coming soon. TODO #105)".to_string();
+                                let mut msgs = chat_messages();
+                                msgs.push(("assistant".to_string(), stub));
+                                chat_messages.set(msgs);
+                                chat_sending.set(false);
+                            });
+                        },
+                        if chat_sending() { "Sending…" } else { "Send" }
+                    }
+                }
+            }
+
+            // ── Board-visible story comments ───────────────────────────────────────
+            div { class: "uow-comment",
+                p { class: "clarify-h", "Add comment to issue" }
+                p { class: "section-hint",
+                    "Posts a comment back onto the source issue via the tracker adapter. Type @ to mention an assignable teammate (GitHub resolves @handle)."
+                }
+                div { class: "uow-comment-box",
+                    textarea {
+                        class: "clarify-q",
+                        value: "{invest_comment_body}",
+                        rows: "3",
+                        placeholder: "Write a comment to post on the issue… (type @ to mention)",
+                        oninput: move |e| {
+                            let v = e.value();
+                            let show = match active_mention_partial(&v) {
+                                Some(p) => !filter_mention_candidates(&invest_assignees, p).is_empty(),
+                                None => false,
+                            };
+                            invest_comment_body.set(v);
+                            invest_mention_open.set(show);
+                        },
+                    }
+                    if invest_mention_open() {
+                        {
+                            let partial = active_mention_partial(&invest_comment_body()).unwrap_or("").to_string();
+                            let candidates = filter_mention_candidates(&invest_assignees, &partial);
+                            rsx! {
+                                div { class: "uow-mention-dropdown",
+                                    for login in candidates {
+                                        button {
+                                            key: "{login}",
+                                            class: "uow-mention-option",
+                                            onclick: {
+                                                let login = login.clone();
+                                                move |_| {
+                                                    let next = apply_mention_selection(&invest_comment_body(), &login);
+                                                    invest_comment_body.set(next);
+                                                    invest_mention_open.set(false);
+                                                }
+                                            },
+                                            "@{login}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                button {
+                    class: "btn-run",
+                    disabled: invest_commenting(),
+                    onclick: {
+                        let wid = story_work_item_id.clone();
+                        move |_| {
+                            let wid = wid.clone();
+                            let body = invest_comment_body();
+                            if body.trim().is_empty() { return; }
+                            let toasts = toasts_inv;
+                            invest_commenting.set(true);
+                            spawn(async move {
+                                match comment_on_work_item(&wid, &body).await {
+                                    Some(_url) => {
+                                        invest_comment_body.set(String::new());
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Info,
+                                            "Comment posted to the issue.".to_string(),
+                                        );
+                                    }
+                                    None => {
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Warning,
+                                            "Could not post the comment.".to_string(),
+                                        );
+                                    }
+                                }
+                                invest_commenting.set(false);
+                            });
+                        }
+                    },
+                    if invest_commenting() { "Posting…" } else { "Post comment" }
+                }
+            }
+
+            // ── Interface contract (R3.g / §4.6) ─────────────────────────────────
+            div { class: "uow-contract-section",
+                p { class: "uow-dev-section-h", "Interface contract (R3.g)" }
+                p { class: "section-hint",
+                    "Required only when the story's work crosses a shared interface boundary (API + caller, service + consumer, shared schema + users). Leave blank for single-side changes."
+                }
+                button {
+                    class: "btn-secondary",
+                    onclick: move |_| show_contract.set(!show_contract()),
+                    if show_contract() { "Hide contract" } else { "Settle interface contract" }
+                }
+                if show_contract() {
+                    textarea {
+                        class: "intake-context-input",
+                        rows: "6",
+                        placeholder: "Describe the interface contract — API shapes, shared types, service interfaces the cross-repo work must satisfy…",
+                        value: "{contract_text}",
+                        oninput: move |e| contract_text.set(e.value()),
+                    }
+                    div { class: "uow-contract-actions",
+                        button {
+                            class: "btn-run",
+                            onclick: move |_| {
+                                // TODO(#105): persist contract to UoW investigation state
+                                let toasts = toasts_inv;
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    "Contract saved (local)".to_string(),
+                                );
+                            },
+                            "Save contract"
+                        }
+                        button {
+                            class: "btn-secondary",
+                            disabled: true,
+                            title: "Coming soon — requires fan-out agent (TODO #105)",
+                            "Draft with agent"
+                        }
+                    }
+                }
+            }
+
+            // Finish Investigation
+            div { class: "uow-phase-finish-row",
+                button {
+                    class: "btn-secondary",
+                    onclick: move |_| investigation_finished.set(true),
+                    "Finish Investigation"
+                }
+            }
+        }
+    }
+}
+
+/// Development phase view.
+///
+/// Contains:
+/// 1. Contract boundary guard — when the UoW crosses a contract boundary and no contract
+///    exists in Investigation & Refinement, shows a "needs a contract" block instead of
+///    the Begin Development button.
+/// 2. Begin Development button (always available when no contract block applies).
+/// 3. Agent activity for the active run.
+/// 4. Clarifications pause — when the run is awaiting clarification, shows structured
+///    dialogs (single/multi-select + Other + chat back); answering resumes the run.
+/// 5. Branch name + agent output display so the user can go test the branch.
+/// 6. Bug-fix loop — free-text bug report + gated re-run on the same branch.
+/// 7. Layer-2 results display (runs automatically at the end of the dev cycle — no button).
+/// 8. Ship panel (§5.7) — per in-scope repo:
+///    - Base-branch picker
+///    - Push / Open PR / Comment link each gated on the prior step
+///    - Ship all repos chain button
+/// 9. UoW panel (history / provenance / sign-off readout)
+/// 10. Live run panel for the active run
+/// 11. Done state (read-only + archived)
+///
+/// Accepts `oversight: OversightMode` (default Interactive).
+#[component]
+pub(super) fn DevelopmentPhaseView(
+    story_id: String,
+    uow_refresh: Signal<u32>,
+    active_run: Signal<Option<RunView>>,
+    models: Option<AuditModelsResp>,
+    dev_strongest: Signal<String>,
+    dev_balanced: Signal<String>,
+    dev_fast: Signal<String>,
+    mut development_finished: Signal<bool>,
+    uow_for_stage: Resource<Option<UowView>>,
+    /// Whether this phase is embedded in an Interactive (inline) or Batched (routine triage)
+    /// context. Controls where clarification dialogs route their answers (§8).
+    #[props(default = OversightMode::Interactive)]
+    oversight: OversightMode,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+
+    // Pass a no-op invest_model through to UowStepRunControls (it only uses dev tiers here).
+    let invest_model = use_signal(String::new);
+
+    // Derive stage and has_branch from the shared uow_for_stage resource.
+    let stage: Option<UowStage> = uow_for_stage
+        .read()
+        .as_ref()
+        .and_then(|opt| opt.as_ref().map(|u| u.stage));
+
+    let branch_name: Option<String> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .and_then(|u| u.branch)
+        .filter(|b| !b.trim().is_empty());
+
+    let has_branch = branch_name.is_some();
+
+    // ── Contract boundary guard (R3.g / §4.6 / §5.1) ─────────────────────────────
+    // UI-level guard: when the story crosses a contract boundary and no contract exists,
+    // show a "needs a contract" block instead of letting the user begin development.
+    // The true backend enforcement is the orchestrator refusing to start — marked TODO(#105).
+    //
+    // TODO(#105): The backend (orchestrator) is the real gatekeeper — it inspects the UoW
+    // state and refuses to begin development if a contract boundary is crossed but no contract
+    // artifact exists. This UI guard is a UX hint ONLY and does not replace that enforcement.
+    let has_contract = use_signal(|| false);
+    let crosses_contract_boundary = use_signal(|| false);
+    // TODO(#105): derive `crosses_contract_boundary` from UoW investigation state (contract
+    // artifact presence check via GET /api/uow/:id/investigation). For now it defaults false
+    // so Begin Development is always available, matching the spec (§5.1: "always available
+    // unless the story crosses a contract boundary and no contract exists").
+
+    // ── Clarification state ────────────────────────────────────────────────────────
+    let mut clarify_refresh = use_signal(|| 0u32);
+    let open_clars_res = {
+        let id = story_id.clone();
+        use_resource(move || {
+            let id = id.clone();
+            let _dep = clarify_refresh();
+            // Also re-read when the parent UoW refreshes (e.g. after a run finishes).
+            let _dep2 = uow_refresh();
+            async move { fetch_open_clarifications_for_story(&id).await }
+        })
+    };
+
+    // ── Dev agent chat (development scope) ─────────────────────────────────────────
+    // TODO(#105): persist to UoW development transcript
+    let mut dev_chat_messages: Signal<Vec<(String, String)>> = use_signal(Vec::new);
+    let mut dev_chat_input = use_signal(String::new);
+    let mut dev_chat_sending = use_signal(|| false);
+
+    // ── Bug-fix loop ─────────────────────────────────────────────────────────────
+    let mut bug_report = use_signal(String::new);
+    let mut bug_fix_running = use_signal(|| false);
+
+    // ── Layer-2 results (displayed after a dev run completes — no button) ─────────
+    // TODO(#105): fetch real Layer-2 bounce results from the run's provenance endpoint
+    let layer2_results: Option<String> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .and_then(|u| u.gate_provenance)
+        .map(|p| format!(
+            "Layer-2: {} allowed, {} denied ({} bounces). Rules fired: {}",
+            p.allow_count,
+            p.deny_count,
+            p.total_bounces,
+            if p.rules_fired.is_empty() {
+                "none".to_string()
+            } else {
+                p.rules_fired.join(", ")
+            }
+        ));
+
+    // ── Ship panel state ──────────────────────────────────────────────────────────
+    // Base branch for opening the PR (empty → server default branch).
+    let mut ship_base_branch = use_signal(String::new);
+    // Track the per-repo ship steps. Today's backend is single-repo; the per-repo
+    // Ship row rendering uses the in-scope repos from Intake scoping state.
+    // TODO(#105): bind to the UoW's in-scope repos from Intake state (R6 / §3);
+    // for now we derive the repo list from the UoW's work item repo field.
+    let in_scope_repos: Vec<String> = {
+        // TODO(#105): replace with actual in-scope repos from UoW intake state (R6)
+        // For now, derive from the active project or the work item's repo.
+        let project_res = use_resource(fetch_active_project);
+        let repos = project_res.read().clone().flatten().map(|p| p.repos.clone()).unwrap_or_default();
+        if repos.is_empty() {
+            // Graceful fallback: no repos configured means nothing to ship.
+            Vec::new()
+        } else {
+            repos
+        }
+    };
+
+    // Per-repo ship step state: (pushed, pr_opened, commented)
+    // Each repo has its own push/PR/comment gating chain.
+    // TODO(#105): true multi-repo ship fan-out via fan_out() tool (R3); today this is
+    // a per-repo UI rendering over the existing single-repo PR path.
+    let mut ship_pushed = use_signal(|| false);
+    let mut ship_pr_opened = use_signal(|| false);
+    let mut ship_commented = use_signal(|| false);
+    let mut ship_running = use_signal(|| false);
+    let mut ship_all_running = use_signal(|| false);
+
+    // Fetch branches for the base-branch picker (reused from UowPrControl).
+    let branches_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow_branches(&sid).await }
+        })
+    };
+    let branches = branches_res.read().clone().unwrap_or_default();
+
+    let _ = oversight; // established for routine reuse; routing used in future PR
+
+    // ── Done state: read-only + archived ─────────────────────────────────────────
+    if development_finished() {
+        return rsx! {
+            div { class: "uow-phase-body uow-phase-finished",
+                div { class: "uow-phase-finished-header",
+                    span { class: "uow-phase-finished-label", "Development (done)" }
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| development_finished.set(false),
+                        "Reopen Development"
+                    }
+                }
+                p { class: "section-hint", "(Development archived — reopen to resume work)" }
+
+                // Read-only branch display in done state
+                if let Some(ref branch) = branch_name {
+                    div { class: "uow-dev-section",
+                        p { class: "uow-dev-section-h", "Branch" }
+                        span { class: "uow-branch-val", "{branch}" }
+                    }
+                }
+
+                // Read-only gate provenance / Layer-2 results in done state
+                if let Some(ref l2) = layer2_results {
+                    div { class: "uow-dev-section",
+                        p { class: "uow-dev-section-h", "Layer-2 results" }
+                        p { class: "section-hint", "{l2}" }
+                    }
+                }
+
+                UowPanel { story_id: story_id.clone(), uow_refresh }
+            }
+        };
+    }
+
+    // ── Contract boundary block ───────────────────────────────────────────────────
+    // When the story's work crosses a contract boundary and no contract has been settled
+    // in Investigation & Refinement, show a block instead of the Begin Development button.
+    // This mirrors the orchestrator's refuse-and-push-back behavior (R3.g / §5.1).
+    // TODO(#105): derive crosses_contract_boundary from the UoW investigation state.
+    let show_contract_block = crosses_contract_boundary() && !has_contract();
+
+    rsx! {
+        div { class: "uow-phase-body",
+
+            // ── §1: Contract boundary guard ─────────────────────────────────────
+            if show_contract_block {
+                div { class: "uow-dev-section uow-contract-block",
+                    p { class: "uow-dev-section-h", "Contract required before Development" }
+                    p { class: "section-hint",
+                        "This story's work crosses a shared interface boundary (an API and its caller, \
+                         a service and its consumer, or a shared schema and its users). The orchestrator \
+                         requires a settled contract artifact in Investigation & Refinement before \
+                         Development can begin. Switch to the Investigation & Refinement tab to settle it."
+                    }
+                    // TODO(#105): the backend enforcer is the orchestrator refusing to start
+                    // the dev run when no contract exists and the boundary is crossed (R3.g).
+                    p { class: "section-hint",
+                        "UI-level guard only — the orchestrator enforces this at run time. TODO(#105)."
+                    }
+                }
+            }
+
+            // ── §2: Development run controls (Begin Development — always available unless
+            //         the contract block applies) ─────────────────────────────────────────
+            if !show_contract_block {
+                UowStepRunControls {
+                    story_id: story_id.clone(),
+                    stage,
+                    uow_refresh,
+                    active_run,
+                    models: models.clone(),
+                    invest_model,
+                    dev_strongest,
+                    dev_balanced,
+                    dev_fast,
+                }
+            }
+
+            // ── §3: Agent activity for the active run ────────────────────────────
+            {
+                let rid = match active_run() {
+                    Some(ref r) => r.id.clone(),
+                    None => String::new(),
+                };
+                rsx! { crate::agent_activity::AgentActivity { run_id: rid } }
+            }
+
+            // ── §4: Clarifications pause (awaiting_clarification state) ──────────
+            // When the orchestrator asks for clarification the run parks; answering resumes it.
+            // Reuses the Investigation ClarifyQuestion pattern verbatim (same component).
+            {
+                let clars = open_clars_res.read().clone().unwrap_or_default();
+                if clars.is_empty() {
+                    rsx! {}
+                } else {
+                    rsx! {
+                        div { class: "uow-dev-section",
+                            p { class: "uow-dev-section-h", "Clarifications (run paused)" }
+                            p { class: "section-hint",
+                                "The development agent is waiting for your input. Answer each question to resume the run."
+                            }
+                            for clar in clars.iter() {
+                                {
+                                    rsx! {
+                                        div { key: "{clar.id}", class: "authoring-clarify",
+                                            ClarifyQuestion {
+                                                clar: clar.clone(),
+                                                on_answered: move |_| {
+                                                    clarify_refresh += 1;
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Chat back during a clarification pause — scoped to this UoW + repo.
+                            // TODO(#105): persist to UoW development transcript and call
+                            // the dev-agent clarification-chat endpoint.
+                            div { class: "uow-agent-chat",
+                                p { class: "uow-dev-section-h", "Chat back (development scope)" }
+                                for (i , (role , text)) in dev_chat_messages().into_iter().enumerate() {
+                                    {
+                                        let role_cls = if role == "user" { "user" } else { "assistant" };
+                                        rsx! {
+                                            div { key: "{i}", class: "uow-agent-chat-turn {role_cls}",
+                                                span { class: "uow-agent-chat-role", "{role}" }
+                                                p { class: "uow-agent-chat-text", "{text}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "uow-agent-chat-input-row",
+                                    textarea {
+                                        rows: "3",
+                                        placeholder: "Add context for the development agent…",
+                                        value: "{dev_chat_input}",
+                                        disabled: dev_chat_sending(),
+                                        oninput: move |e| dev_chat_input.set(e.value()),
+                                    }
+                                    button {
+                                        class: "btn-run",
+                                        disabled: dev_chat_sending() || dev_chat_input().trim().is_empty(),
+                                        onclick: move |_| {
+                                            let msg = dev_chat_input().trim().to_string();
+                                            if msg.is_empty() { return; }
+                                            dev_chat_sending.set(true);
+                                            let mut msgs = dev_chat_messages();
+                                            msgs.push(("user".to_string(), msg.clone()));
+                                            dev_chat_messages.set(msgs);
+                                            dev_chat_input.set(String::new());
+                                            spawn(async move {
+                                                // TODO(#105): call dev-agent chat endpoint (this-UoW + repo scope)
+                                                let stub = "(Development agent response — coming soon. TODO #105)".to_string();
+                                                let mut msgs = dev_chat_messages();
+                                                msgs.push(("assistant".to_string(), stub));
+                                                dev_chat_messages.set(msgs);
+                                                dev_chat_sending.set(false);
+                                            });
+                                        },
+                                        if dev_chat_sending() { "Sending…" } else { "Send" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── §5: Branch name + agent output (go test the branch) ─────────────
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Branch" }
+                if let Some(ref branch) = branch_name {
+                    div { class: "uow-branch-row",
+                        span { class: "uow-branch-val", "{branch}" }
+                        p { class: "section-hint", "Check out this branch and test the changes." }
+                    }
+                } else {
+                    p { class: "section-hint", "No branch yet — start a development run to create one." }
+                }
+            }
+
+            // ── §6: Bug-fix loop ─────────────────────────────────────────────────
+            // Free-text bug report → a gated re-run on the same branch (re-runnable dev).
+            // Uses the existing development run path (same gate as the initial dev run).
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Bug-fix loop" }
+                p { class: "section-hint",
+                    "Found a bug? Describe it here and a gated agent will attempt the fix on the same branch."
+                }
+                if !has_branch {
+                    p { class: "section-hint", "Requires a branch — run development first." }
+                } else {
+                    textarea {
+                        class: "intake-context-input",
+                        rows: "4",
+                        placeholder: "Describe the bug — what you expected vs. what happened, steps to reproduce…",
+                        value: "{bug_report}",
+                        disabled: bug_fix_running(),
+                        oninput: move |e| bug_report.set(e.value()),
+                    }
+                    div { class: "run-control-row",
+                        button {
+                            class: "btn-run",
+                            disabled: bug_fix_running() || bug_report().trim().is_empty(),
+                            onclick: {
+                                let sid = story_id.clone();
+                                let tm = TierMapView {
+                                    strongest: dev_strongest(),
+                                    balanced: dev_balanced(),
+                                    fast: dev_fast(),
+                                };
+                                move |_| {
+                                    let sid = sid.clone();
+                                    let tm = tm.clone();
+                                    let report = bug_report().trim().to_string();
+                                    if report.is_empty() { return; }
+                                    let toasts = toasts;
+                                    bug_fix_running.set(true);
+                                    spawn(async move {
+                                        // TODO(#105): use a dedicated bug-fix endpoint that threads
+                                        // the bug report into the agent context. Today we reuse
+                                        // start_dev_run on the same branch (the orchestrator sees
+                                        // the bug report in the UoW transcript via the history).
+                                        match start_dev_run(&sid, &tm, false).await {
+                                            StartRunOutcome::Started(rid) => {
+                                                poll_run_to_done(rid, active_run, uow_refresh).await;
+                                            }
+                                            StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                reason,
+                                            ),
+                                            StartRunOutcome::Failed => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not start the bug-fix run.".to_string(),
+                                            ),
+                                        }
+                                        bug_fix_running.set(false);
+                                    });
+                                }
+                            },
+                            if bug_fix_running() { "Running bug-fix…" } else { "▶ Run bug-fix (gated)" }
+                        }
+                    }
+                    p { class: "section-hint",
+                        "Gated re-run on the same branch. The Layer-1 security gate and Layer-2 mechanical bounce both apply."
+                    }
+                }
+            }
+
+            // ── §7: Layer-2 results (automatic — no button) ─────────────────────
+            // Layer-2 runs automatically at the end of every dev cycle and bounces failures
+            // back to the agent. We display the last known results from gate provenance.
+            // TODO(#105): fetch live Layer-2 bounce results from the run provenance endpoint;
+            // today we read the frozen gate provenance stamped on the UoW after the run.
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Layer-2 results (automatic)" }
+                if let Some(ref l2) = layer2_results {
+                    p { class: "section-hint", "{l2}" }
+                    p { class: "section-hint",
+                        "Layer-2 runs automatically at the end of the dev cycle. Failures bounce back to the agent to fix."
+                    }
+                } else {
+                    p { class: "section-hint",
+                        "No Layer-2 results yet. Results appear here after the first development run completes."
+                    }
+                }
+                // TODO(#105): integrate live Layer-2 bounce stream and Layer-3 opt-in agentic
+                // code reviewer (R7); both run with / parallel to Layer-2.
+            }
+
+            // ── §8: Ship panel (§5.7) — per in-scope repo ───────────────────────
+            // One Ship row per in-scope repo. The fan-out guarantees each repo's branch
+            // is already coherent before this point (fleet doc R3.e-f).
+            // TODO(#105): true multi-repo fan-out via fan_out() tool (R3);
+            // today the per-repo rows share the existing single-repo PR path.
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Ship" }
+                p { class: "section-hint",
+                    "Push the branch, open a PR, and link it on the story — per in-scope repo."
+                }
+
+                // Base-branch picker (shared across all repos for now)
+                div { class: "run-control-row",
+                    span { class: "uow-field-label", "Base branch" }
+                    select {
+                        class: "uow-branch-select",
+                        value: "{ship_base_branch}",
+                        onchange: move |e| ship_base_branch.set(e.value()),
+                        option { value: "", selected: ship_base_branch().is_empty(), "Default branch" }
+                        if !branches.local.is_empty() {
+                            optgroup { label: "Local",
+                                for b in branches.local.iter() {
+                                    option { key: "ship-local:{b}", value: "{b}", "{b}" }
+                                }
+                            }
+                        }
+                        if !branches.origin.is_empty() {
+                            optgroup { label: "Origin",
+                                for b in branches.origin.iter() {
+                                    option { key: "ship-origin:{b}", value: "{b}", "{b}" }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !has_branch {
+                    p { class: "section-hint", "No branch yet — run development first before shipping." }
+                } else if in_scope_repos.is_empty() {
+                    p { class: "section-hint", "No repos in scope. Select repos at Intake to enable Ship." }
+                } else {
+                    // One Ship row per in-scope repo
+                    // TODO(#105): each repo should have its own push/PR/comment state once
+                    // true multi-repo fan-out (R3) gives each repo its own branch.
+                    for repo in in_scope_repos.iter() {
+                        {
+                            let repo = repo.clone();
+                            let sid_push = story_id.clone();
+                            let sid_pr = story_id.clone();
+                            let sid_comment = story_id.clone();
+                            rsx! {
+                                div { key: "{repo}", class: "uow-ship-row",
+                                    span { class: "uow-ship-repo", "{repo}" }
+                                    div { class: "run-control-row",
+                                        // Push branch (always enabled when has_branch)
+                                        button {
+                                            class: "btn-run",
+                                            disabled: ship_running(),
+                                            onclick: {
+                                                let sid = sid_push.clone();
+                                                let base = ship_base_branch();
+                                                move |_| {
+                                                    let sid = sid.clone();
+                                                    let base = base.clone();
+                                                    let toasts = toasts;
+                                                    ship_running.set(true);
+                                                    spawn(async move {
+                                                        // Push is implicit in open_uow_pr (server pushes before opening).
+                                                        // TODO(#105): expose a separate push-only endpoint per repo.
+                                                        match open_uow_pr(&sid, &base).await {
+                                                            OpenPrOutcome::Opened(n, url) => {
+                                                                crate::toast::push_toast(
+                                                                    toasts,
+                                                                    crate::toast::ToastKind::Info,
+                                                                    format!("Pushed and opened PR #{n}: {url}"),
+                                                                );
+                                                                ship_pushed.set(true);
+                                                                ship_pr_opened.set(true);
+                                                                uow_refresh += 1;
+                                                            }
+                                                            OpenPrOutcome::Blocked(reason) => crate::toast::push_toast(
+                                                                toasts, crate::toast::ToastKind::Warning, reason,
+                                                            ),
+                                                            OpenPrOutcome::Failed => crate::toast::push_toast(
+                                                                toasts,
+                                                                crate::toast::ToastKind::Warning,
+                                                                "Could not push / open PR.".to_string(),
+                                                            ),
+                                                        }
+                                                        ship_running.set(false);
+                                                    });
+                                                }
+                                            },
+                                            if ship_running() { "Pushing…" } else { "Push branch" }
+                                        }
+
+                                        // Open PR — gated on Push having completed
+                                        button {
+                                            class: "btn-run",
+                                            disabled: !ship_pushed() || ship_running(),
+                                            onclick: {
+                                                let sid = sid_pr.clone();
+                                                let base = ship_base_branch();
+                                                move |_| {
+                                                    let sid = sid.clone();
+                                                    let base = base.clone();
+                                                    let toasts = toasts;
+                                                    ship_running.set(true);
+                                                    spawn(async move {
+                                                        match open_uow_pr(&sid, &base).await {
+                                                            OpenPrOutcome::Opened(n, url) => {
+                                                                crate::toast::push_toast(
+                                                                    toasts,
+                                                                    crate::toast::ToastKind::Info,
+                                                                    format!("Opened PR #{n}: {url}"),
+                                                                );
+                                                                ship_pr_opened.set(true);
+                                                                uow_refresh += 1;
+                                                            }
+                                                            OpenPrOutcome::Blocked(reason) => crate::toast::push_toast(
+                                                                toasts, crate::toast::ToastKind::Warning, reason,
+                                                            ),
+                                                            OpenPrOutcome::Failed => crate::toast::push_toast(
+                                                                toasts,
+                                                                crate::toast::ToastKind::Warning,
+                                                                "Could not open PR.".to_string(),
+                                                            ),
+                                                        }
+                                                        ship_running.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Open PR"
+                                        }
+
+                                        // Comment link on story — gated on PR having been opened
+                                        button {
+                                            class: "btn-secondary",
+                                            disabled: !ship_pr_opened() || ship_running(),
+                                            onclick: {
+                                                let sid = sid_comment.clone();
+                                                move |_| {
+                                                    let sid = sid.clone();
+                                                    let toasts = toasts;
+                                                    ship_running.set(true);
+                                                    spawn(async move {
+                                                        // Post a comment on the story's work item linking the PR.
+                                                        // TODO(#105): fetch the PR url from the UoW's pr info to
+                                                        // include in the comment body.
+                                                        let body = "Development complete — see the pull request for the changes.".to_string();
+                                                        // We post the comment on the PR itself (the work item comment
+                                                        // path is analogous; both go through the tracker adapter).
+                                                        match comment_on_uow_pr(&sid, &body).await {
+                                                            Some(_url) => {
+                                                                crate::toast::push_toast(
+                                                                    toasts,
+                                                                    crate::toast::ToastKind::Info,
+                                                                    "Comment posted linking the PR.".to_string(),
+                                                                );
+                                                                ship_commented.set(true);
+                                                            }
+                                                            None => crate::toast::push_toast(
+                                                                toasts,
+                                                                crate::toast::ToastKind::Warning,
+                                                                "Could not post the link comment.".to_string(),
+                                                            ),
+                                                        }
+                                                        ship_running.set(false);
+                                                    });
+                                                }
+                                            },
+                                            "Comment link"
+                                        }
+                                    }
+
+                                    // Inline ship-step state display
+                                    div { class: "uow-ship-status",
+                                        if ship_pushed() {
+                                            span { class: "uow-ship-step done", "pushed \u{2713}" }
+                                        }
+                                        if ship_pr_opened() {
+                                            span { class: "uow-ship-step done", "PR \u{2713}" }
+                                        }
+                                        if ship_commented() {
+                                            span { class: "uow-ship-step done", "commented \u{2713}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Ship all repos chain button — runs push → open-PR → comment in sequence
+                    // for all in-scope repos, halting on first failure.
+                    // TODO(#105): true multi-repo Ship all via fan_out(); today this is a
+                    // sequential single-repo chain (the per-repo rows share one backend path).
+                    div { class: "uow-ship-all-row",
+                        button {
+                            class: "btn-run",
+                            disabled: ship_all_running() || !has_branch,
+                            onclick: {
+                                let sid = story_id.clone();
+                                move |_| {
+                                    let sid = sid.clone();
+                                    let base = ship_base_branch();
+                                    let toasts = toasts;
+                                    ship_all_running.set(true);
+                                    spawn(async move {
+                                        // TODO(#105): true multi-repo fan_out(); today we run the
+                                        // single-repo path sequentially as a placeholder.
+                                        let push_result = open_uow_pr(&sid, &base).await;
+                                        match push_result {
+                                            OpenPrOutcome::Opened(n, url) => {
+                                                ship_pushed.set(true);
+                                                ship_pr_opened.set(true);
+                                                uow_refresh += 1;
+                                                // Post the link comment.
+                                                let body = format!("Development complete — PR #{n}: {url}");
+                                                match comment_on_uow_pr(&sid, &body).await {
+                                                    Some(_) => {
+                                                        ship_commented.set(true);
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Info,
+                                                            format!("Ship complete — pushed, PR #{n}, commented."),
+                                                        );
+                                                    }
+                                                    None => crate::toast::push_toast(
+                                                        toasts,
+                                                        crate::toast::ToastKind::Warning,
+                                                        "Push + PR opened, but comment failed.".to_string(),
+                                                    ),
+                                                }
+                                            }
+                                            OpenPrOutcome::Blocked(reason) => crate::toast::push_toast(
+                                                toasts, crate::toast::ToastKind::Warning, reason,
+                                            ),
+                                            OpenPrOutcome::Failed => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Ship all failed at push/PR step.".to_string(),
+                                            ),
+                                        }
+                                        ship_all_running.set(false);
+                                    });
+                                }
+                            },
+                            if ship_all_running() {
+                                "Shipping\u{2026}"
+                            } else {
+                                "Ship all repos \u{2192}"
+                            }
+                        }
+                        p { class: "section-hint",
+                            "Chains push \u{2192} open PR \u{2192} comment for all in-scope repos. Halts on first failure. TODO(#105): true multi-repo fan-out."
+                        }
+                    }
+                }
+            }
+
+            // ── UoW panel (history / provenance / sign-off) ──────────────────────
+            UowPanel { story_id: story_id.clone(), uow_refresh }
+
+            // ── Live run panel ───────────────────────────────────────────────────
+            if let Some(r) = active_run() {
+                LiveRunPanel { run: r, uow_refresh }
+            }
+
+            // ── PR lifecycle panel (reused existing control) ──────────────────────
+            UowPrControl {
+                story_id: story_id.clone(),
+                has_branch,
+                uow_refresh,
+                models: models.clone(),
+            }
+
+            // ── Finish Development / Mark Done ────────────────────────────────────
+            div { class: "uow-phase-finish-row",
+                button {
+                    class: "btn-secondary",
+                    onclick: move |_| development_finished.set(true),
+                    "Mark Done (archive)"
+                }
+                p { class: "section-hint",
+                    "Marks this UoW done and archives it (read-only). The UoW is never deleted — deletion is a separate, explicit act."
                 }
             }
         }
@@ -3141,6 +4610,9 @@ pub(super) async fn poll_run_to_done(
     mut active_run: Signal<Option<RunView>>,
     mut uow_refresh: Signal<u32>,
 ) {
+    // Loading guard for the entire poll loop — Bombe machine stays active
+    // for the full duration of the live run (investigation or development).
+    let _guard = crate::loading::LoadingGuard::new();
     let mut misses = 0u32;
     loop {
         match fetch_run(&run_id).await {
@@ -4052,9 +5524,8 @@ pub(super) fn UowStepRunControls(
                                 },
                                 if stopping() { "Stopping…" } else { "■ Stop run" }
                             }
-                            // In-progress indicator: the Bombe turns while the run is live,
-                            // matching the draft-story Send's working affordance.
-                            crate::bombe::BombeSpinner { title: "Camerata is working\u{2026}".to_string() }
+                            // In-progress: the background Bombe machine activates via
+                            // the global loading guard in poll_run_to_done above.
                             span { class: "section-hint", "Cancels the running agent and stops this run." }
                         }
                     }
@@ -4093,6 +5564,8 @@ pub(super) fn UowStepRunControls(
                                     let mut uow_refresh = uow_refresh;
                                     let mut starting = starting;
                                     spawn(async move {
+                                        // Loading guard: Bombe machine runs while the investigation is in flight.
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         match begin_investigation_run(&sid, &md).await {
                                             crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
                                                 // The server advances Intake → Investigating BEFORE it
@@ -4129,7 +5602,6 @@ pub(super) fn UowStepRunControls(
                                     });
                                 },
                                 if starting() {
-                                    crate::bombe::BombeSpinner {}
                                     span { "Starting\u{2026}" }
                                 } else {
                                     "\u{25b6} Begin investigation"

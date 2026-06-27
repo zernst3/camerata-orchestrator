@@ -393,6 +393,9 @@ pub(super) struct ScanReportView {
 }
 
 pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
+    // Hold a loading guard for the full duration of the scan request so the
+    // background Bombe machine runs while the server is scanning.
+    let _guard = crate::loading::LoadingGuard::new();
     reqwest::Client::new()
         .post(format!("{}/api/onboard/scan", crate::BFF_URL))
         .json(&serde_json::json!({ "repos": repos }))
@@ -515,6 +518,8 @@ pub(super) async fn audit_against(
     run_ai_review: bool,
     run_deterministic: bool,
 ) -> Option<ScanReportView> {
+    // Loading guard: the Bombe machine runs for the full audit round-trip.
+    let _guard = crate::loading::LoadingGuard::new();
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
         .post(format!("{}/api/onboard/audit", crate::BFF_URL))
@@ -878,6 +883,9 @@ pub(super) async fn poll_job(
     mut active_audit_job: Signal<Option<String>>,
     mut scan_idle_ms: Signal<Option<u128>>,
 ) {
+    // Loading guard held for the ENTIRE poll loop so the Bombe machine stays
+    // active until the background job reports done/failed/cancelled.
+    let _guard = crate::loading::LoadingGuard::new();
     let mut misses = 0u32;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -3062,11 +3070,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         }
                     }
                 }
-                // While the audit runs, the Bombe turns — a visible "the AI is thinking"
-                // cue so a multi-second audit doesn't look hung.
+                // While the audit runs the background Bombe machine activates via
+                // the global loading guard — just show the text label inline.
                 if auditing() {
                     div { class: "audit-thinking",
-                        crate::bombe::BombeSpinner { title: "Camerata is auditing\u{2026}".to_string() }
                         span { class: "audit-thinking-label", "Camerata is auditing your code\u{2026}" }
                         button {
                             class: "btn-stop",

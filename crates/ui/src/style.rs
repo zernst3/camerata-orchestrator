@@ -1,38 +1,57 @@
 //! The global stylesheet. Kept as one string so the whole look — palette, type
-//! scale, spacing, motion — lives in a single, reviewable place. The look is
-//! restrained consumer-grade: near-black on near-white, one warm accent
-//! (terracotta, nodding to the pottery example), a system-font stack, large calm
-//! type, slow subtle motion.
+//! scale, spacing, motion — lives in a single, reviewable place.
+//!
+//! Theme: "Bletchley industrial amber" — dark near-black ground, warm amber
+//! accent, Courier Prime monospace titling, Inter sans body.
 
 pub const GLOBAL_CSS: &str = r#"
 :root {
-  /* Restrained palette: near-black text, near-white ground, one accent. */
-  --ink:        #1b1a18;   /* near-black, warm */
-  --ink-soft:   #6c6862;   /* secondary text */
-  --ink-faint:  #a8a39b;   /* tertiary / hints */
-  --paper:      #faf9f6;   /* near-white, warm */
-  --surface:    #ffffff;   /* raised cards */
-  --line:       #ece9e3;   /* hairline borders */
-  --line-soft:  #f3f1ec;
-  --accent:     #b35636;   /* terracotta — deepened ~12% so it reads "considered" */
-  --accent-ink: #97442a;   /* accent text/hover (deeper still) */
-  --accent-wash:#f5e9e3;   /* accent at ~8% for fills */
-  --good:       #5c8a5c;   /* the quiet check */
+  /* ── Bletchley industrial amber palette ─────────────────────────────── */
+  /* Text hierarchy */
+  --ink:        #f1ede9;   /* --text-main  : warm near-white on dark ground */
+  --ink-soft:   #c2b7ad;   /* --text-muted : secondary / labels */
+  --ink-faint:  #8c8075;   /* --text-faint : tertiary / hints */
+
+  /* Ground surfaces — dark, slightly warm */
+  --paper:      #1a1816;   /* deepest background layer */
+  --surface:    rgba(26,24,22, var(--opacity-high)); /* raised cards (glassmorphic) */
+  --line:       #2e2a25;   /* --glass-border : hairline borders */
+  --line-soft:  #252220;   /* softer inner dividers */
+
+  /* Accent: industrial amber */
+  --accent:     #ca8a04;   /* --primary : amber gold */
+  --accent-ink: #b07803;   /* darker amber for text / hover */
+  --accent-wash:rgba(202,138,4, 0.12); /* faint amber fill */
+
+  /* Semantic signals */
+  --good:       #16a34a;   /* --success */
+  --warning-color: #ea580c; /* --warning / --cyan (both map to burnt orange) */
+  --danger-color:  #dc2626; /* --danger */
+
+  /* Opacity tiers for glassmorphic layering */
+  --opacity-high: 0.78;    /* main cards, warning banners */
+  --opacity-mid:  0.72;    /* sidebars, dropdown/modal overlays */
+  --opacity-low:  0.65;    /* inner nested panels, detail boxes */
+
+  /* Glass system */
+  --glass-bg:     rgba(26,24,22, var(--opacity-high));
+  --glass-border: #2e2a25;
+  --glass-shadow: 0 15px 40px rgba(0,0,0,0.75), inset 0 2px 0 rgba(255,255,255,0.05);
 
   /* Enterprise-sharp corners (Linear/Vercel/Stripe register), not consumer-round. */
   --r-lg: 12px;
   --r-md: 8px;
   --r-sm: 5px;
 
-  --shadow-card: 0 1px 2px rgba(27,26,24,.04), 0 10px 30px rgba(27,26,24,.05);
-  --shadow-pop:  0 1px 2px rgba(27,26,24,.05), 0 18px 50px rgba(27,26,24,.09);
+  --shadow-card: 0 1px 2px rgba(0,0,0,.18), 0 10px 30px rgba(0,0,0,.28);
+  --shadow-pop:  var(--glass-shadow);
 
   /* Slow, reassuring easing. Nothing snaps. */
   --ease: cubic-bezier(.22,.61,.36,1);
 
-  /* chorale table palette → mapped onto the app's warm cream/terracotta scheme so the
-     grouped tables stop reading as the library's default blue. (chorale exposes these as
-     overridable CSS variables.) */
+  /* chorale table palette → mapped onto the Bletchley amber scheme so the
+     grouped tables read as part of the same dark-industrial surface.
+     (chorale exposes these as overridable CSS variables.) */
   --chorale-accent:            var(--accent);
   --chorale-accent-contrast:   #ffffff;
   --chorale-surface:           var(--surface);
@@ -55,7 +74,7 @@ pub const GLOBAL_CSS: &str = r#"
   --chorale-range-bg:          var(--accent-wash);
   --chorale-active-cell-outline: var(--accent);
   --chorale-row-selected-divider: var(--accent);
-  --chorale-error:             #b3261e;
+  --chorale-error:             #dc2626;
 }
 
 * { box-sizing: border-box; }
@@ -68,9 +87,12 @@ html, body {
      scrolling happens inside the content panes (e.g. .cockpit-scroll). This kills
      the persistent ~95%-height page scrollbar. */
   overflow: hidden;
-  background: var(--paper);
+  /* Bletchley: deep near-black radial gradient — darkest at the edges,
+     slightly lighter anthracite at the center. */
+  background: radial-gradient(circle at center, #242220 0%, #121110 100%);
   color: var(--ink);
-  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+  /* Sans body: Inter; title + mono: Courier Prime (industrial monospace). */
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
                "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -987,7 +1009,7 @@ html, body {
 .onboard-gate-dot { width: 8px; height: 8px; border-radius: 50%; background: #b06a2e; margin-top: 5px; flex: none; }
 .onboard-gate-h { font-weight: 700; font-size: 13px; color: #8a4f1d; }
 .onboard-gate-b { font-size: 12px; color: #8a4f1d; margin-top: 3px; line-height: 1.5; }
-.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+.mono { font-family: "Courier Prime", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
 .onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
 .onboard-repos-input { width: 100%; box-sizing: border-box; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; resize: vertical; }
@@ -3513,4 +3535,918 @@ html, body {
 .wi-comment-date { font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .wi-comment-body { font-size: 13px; color: var(--ink-soft); line-height: 1.5; }
 .wi-comment-body.empty { font-style: italic; color: var(--ink-faint); }
+
+/* =====================================================================
+   BombeBg — full Bletchley Bombe machine background layer.
+   Ported from docs/plans/camerata_ui_mockup.html (Bletchley !important
+   overrides win; base values below match the effective rendered result).
+   ===================================================================== */
+
+/* ── Outer wrapper: fixed full-viewport layer, below the app shell ── */
+.bombe-bg-machine {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  pointer-events: none;
+  opacity: 0.38;       /* Bletchley raised value */
+  transition: opacity 0.5s ease;
+}
+.bombe-bg-machine.bombe-running {
+  opacity: 0.72;       /* Bletchley raised value */
+}
+
+/* ── Cabinet body ── */
+.bombe-cabinet {
+  width: 1400px;
+  height: 750px;
+  background-color: #121110;
+  /* Vertical steel-beam column dividers */
+  background-image:
+    linear-gradient(90deg,
+      transparent 0px, transparent 180px,
+      #2e2a25 180px, #443f38 183px, #2e2a25 186px, #1a1918 190px,
+      transparent 190px, transparent 1160px,
+      #2e2a25 1160px, #443f38 1163px, #2e2a25 1166px, #1a1918 1170px,
+      transparent 1170px
+    );
+  border: 8px solid #292522;
+  border-radius: 8px;
+  box-shadow:
+    0 35px 90px rgba(0,0,0,0.95),
+    inset 0 0 120px rgba(0,0,0,0.95);
+  display: grid;
+  grid-template-columns: 180px 1fr 180px;
+  padding: 24px;
+  position: relative;
+  contain: layout paint;
+}
+
+/* Woven copper wire loom running along the cabinet top */
+.bombe-cabinet::after {
+  content: '';
+  position: absolute;
+  top: -16px; left: 30px; right: 30px; height: 16px;
+  background:
+    repeating-linear-gradient(90deg,
+      transparent 0px, transparent 60px,
+      #eae3db 60px, #eae3db 63px,
+      transparent 63px, transparent 120px),   /* white string ties */
+    linear-gradient(to bottom,
+      #ea580c 0px,  #ea580c 2px,
+      #c2410c 2px,  #c2410c 4px,
+      #dc2626 4px,  #dc2626 6px,
+      #991b1b 6px,  #991b1b 8px,
+      #ea580c 8px,  #ea580c 10px,
+      #7f1d1d 10px
+    );
+  border-radius: 6px;
+  opacity: 0.95;
+  box-shadow:
+    0 4px 8px rgba(0,0,0,0.6),
+    inset 0 1px 0 rgba(255,255,255,0.2),
+    inset 0 -1px 2px rgba(0,0,0,0.4);
+}
+/* Glowing loom when running */
+.bombe-running .bombe-cabinet::after {
+  box-shadow:
+    0 0 20px rgba(239,68,68,0.85),
+    0 4px 10px rgba(0,0,0,0.6);
+}
+
+/* ── Control panels (left / right) ── */
+.bombe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+  padding-top: 20px;
+  background-color: #1a1917;
+  /* Rivet dots at the four corners */
+  background-image:
+    radial-gradient(circle at 10px 10px,         #78716c 1.5px, #3c3b37 3px, transparent 4px),
+    radial-gradient(circle at calc(100% - 10px) 10px, #78716c 1.5px, #3c3b37 3px, transparent 4px),
+    radial-gradient(circle at 10px calc(100% - 10px), #78716c 1.5px, #3c3b37 3px, transparent 4px),
+    radial-gradient(circle at calc(100% - 10px) calc(100% - 10px), #78716c 1.5px, #3c3b37 3px, transparent 4px);
+  border: 3px solid #2d2925;
+  border-radius: 6px;
+  box-shadow: inset 0 2px 10px rgba(0,0,0,0.9);
+}
+.bombe-panel-label {
+  font-weight: 800;
+  font-size: 10px;
+  color: #8c8075;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .06em;
+}
+
+/* ── Dial gauges ── */
+.bombe-gauge {
+  width: 54px; height: 54px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fbf7ee 0%, #e5d9bd 75%, #c5b694 100%);
+  border: 3.5px solid #2e2b27;
+  position: relative;
+  box-shadow: inset 0 3px 6px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.6);
+}
+/* Tick-mark ring (semi-transparent conic overlay, masked to edge only) */
+.bombe-gauge::before {
+  content: '';
+  position: absolute;
+  top: 2px; left: 2px; right: 2px; bottom: 2px;
+  border-radius: 50%;
+  background: repeating-conic-gradient(from 220deg, #2e2b27 0deg 2deg, transparent 2deg 20deg);
+  -webkit-mask-image: radial-gradient(circle, transparent 70%, black 75%);
+  mask-image: radial-gradient(circle, transparent 70%, black 75%);
+  opacity: 0.55;
+}
+.bombe-needle {
+  position: absolute;
+  bottom: 50%; left: 50%;
+  width: 2px; height: 20px;
+  background: #b91c1c;
+  transform-origin: bottom center;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease-out;
+}
+.bombe-running .bombe-needle {
+  animation: gauge-vibe 0.3s infinite alternate;
+}
+@keyframes gauge-vibe {
+  0%   { transform: rotate(10deg); }
+  50%  { transform: rotate(20deg); }
+  100% { transform: rotate(15deg); }
+}
+
+/* ── Cable bundles (vertical looms) ── */
+.bombe-cable-bundle {
+  width: 14px;
+  flex: 1;
+  background:
+    repeating-linear-gradient(180deg,
+      transparent 0px, transparent 40px,
+      #eae3db 40px, #eae3db 42px,
+      transparent 42px, transparent 80px),   /* white string ties */
+    linear-gradient(to right, #ea580c 0px, #dc2626 4px, #7f1d1d 12px);
+  border-radius: 4px;
+  box-shadow: 3px 0 8px rgba(0,0,0,0.6), inset -1px 0 2px rgba(0,0,0,0.4);
+}
+.bombe-cable-bundle.right-cables {
+  background:
+    repeating-linear-gradient(180deg,
+      transparent 0px, transparent 40px,
+      #eae3db 40px, #eae3db 42px,
+      transparent 42px, transparent 80px),
+    linear-gradient(to right, #eab308 0px, #ca8a04 4px, #854d0e 12px);
+}
+
+/* ── Rotor matrix container ── */
+.bombe-rotors-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 16px;
+  justify-content: center;
+}
+
+/* ── Block backboard (plated dark bakelite) ── */
+.bombe-block {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 8px;
+  padding: 10px;
+  background: #151413;
+  border: 2px solid #272421;
+  border-radius: 6px;
+  box-shadow: inset 0 4px 15px rgba(0,0,0,0.9);
+}
+
+/* ── Rotor socket ── */
+.bg-bombe-rotor {
+  width: 58px; height: 58px;
+  border-radius: 50%;
+  background: #090807;
+  border: 3px solid #25221e;
+  position: relative;
+  box-shadow: inset 0 3px 8px rgba(0,0,0,0.9), 0 2px 4px rgba(0,0,0,0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  contain: layout paint;
+  /* Outer contact pins (26 metallic slits around the rim) */
+}
+/* Gilded/amber glow when running */
+.bombe-running .bg-bombe-rotor {
+  border-color: rgba(245,158,11,0.8);
+  box-shadow:
+    0 0 25px rgba(245,158,11,0.65),
+    0 0 10px rgba(245,158,11,0.3),
+    inset 0 0 12px rgba(245,158,11,0.25);
+}
+
+/* ── Rotor drum (the spinning element — ONE child per socket) ─────────────
+   The drum carries all the visual layers as layered backgrounds so no extra
+   child elements are needed.  It spins via rotor-clicking-spin when running.
+   ── */
+.rotor-drum {
+  width: 100%; height: 100%;
+  border-radius: 50%;
+  position: relative;
+  will-change: transform;
+  /* Layer 1 (topmost): pointer — a thin amber bar at 12 o'clock */
+  /* Layer 2: centre hub — a small metallic disc */
+  /* Layer 3: outer contacts ring — 26 evenly-spaced white slits */
+  /* Layer 4: bakelite base disc (colour comes from row-class below) */
+  /* The static initial rotation from --start-angle is applied inline. */
+  transform: rotate(var(--start-angle, 0deg));
+}
+
+/* ── Drum layer: outer contact-pin ring (26 metallic slits) ── */
+.rotor-drum::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(255,255,255,0.65) 0deg 2.2deg,
+    transparent 2.2deg 13.85deg
+  );
+  -webkit-mask-image: radial-gradient(circle, transparent 86%, black 88%);
+  mask-image: radial-gradient(circle, transparent 86%, black 88%);
+  pointer-events: none;
+}
+
+/* ── Drum layer: 12 o'clock pointer (amber) — drawn as an after pseudo ── */
+.rotor-drum::after {
+  content: '';
+  position: absolute;
+  top: 5px; left: 50%;
+  width: 2px; height: 18px;
+  margin-left: -1px;
+  border-radius: 1px;
+  pointer-events: none;
+}
+.bombe-running .rotor-drum::after {
+  box-shadow: 0 0 12px #f97316;
+}
+
+/* ── Row-specific bakelite disc colour (backgrounds on the drum itself) ── */
+/* Top row: reddish-brown bakelite, brass pointer */
+.bombe-row-top .rotor-drum {
+  background:
+    /* pointer bar */
+    linear-gradient(to bottom, #ca8a04 0%, #a16207 100%)
+      no-repeat center top / 2px 18px,
+    /* centre hub metallic disc */
+    radial-gradient(circle at 35% 35%, #fff 0%, #cbd5e1 55%, #64748b 100%)
+      no-repeat center / 18px 18px,
+    /* bakelite disc */
+    radial-gradient(circle, #732218 0%, #400f08 100%)
+      no-repeat center / calc(100% - 6px) calc(100% - 6px),
+    /* outer socket (background of the drum itself is the socket colour) */
+    transparent;
+}
+/* Middle row: cream/yellowish bakelite, dark-brown pointer */
+.bombe-row-mid .rotor-drum {
+  background:
+    linear-gradient(to bottom, #451a03 0%, #1c0a00 100%)
+      no-repeat center top / 2px 18px,
+    radial-gradient(circle at 35% 35%, #fff 0%, #cbd5e1 55%, #64748b 100%)
+      no-repeat center / 18px 18px,
+    radial-gradient(circle, #ecdcb7 0%, #b59f6b 100%)
+      no-repeat center / calc(100% - 6px) calc(100% - 6px),
+    transparent;
+}
+/* Bottom row: crimson bakelite, brass pointer */
+.bombe-row-bot .rotor-drum {
+  background:
+    linear-gradient(to bottom, #ca8a04 0%, #a16207 100%)
+      no-repeat center top / 2px 18px,
+    radial-gradient(circle at 35% 35%, #fff 0%, #cbd5e1 55%, #64748b 100%)
+      no-repeat center / 18px 18px,
+    radial-gradient(circle, #7e1e12 0%, #450c05 100%)
+      no-repeat center / calc(100% - 6px) calc(100% - 6px),
+    transparent;
+}
+
+/* ── Rotor spin animation — ONLY active under .bombe-running ── */
+@keyframes rotor-clicking-spin {
+  from { transform: rotate(var(--start-angle, 0deg)); }
+  to   { transform: rotate(calc(var(--start-angle, 0deg) + 360deg)); }
+}
+.bombe-running .rotor-drum {
+  animation-name: rotor-clicking-spin;
+  animation-timing-function: steps(26, end);
+  animation-iteration-count: infinite;
+  /* animation-duration is set inline (0.9s / 26s / 78s per row) */
+}
+
+/* ── Status LEDs ── */
+.bombe-status-leds {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.bombe-led-bulb {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: #3f1712;
+  border: 2.5px solid #6b5a3e;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.8);
+  transition: all 0.3s;
+}
+.bombe-led-bulb.active {
+  background: #f97316;
+  border-color: #8f7956;
+  box-shadow:
+    0 0 15px #f97316,
+    0 0 5px #f97316,
+    inset 0 1px 0 rgba(255,255,255,0.4);
+}
+/* LED flicker keyframe (missing from the mockup — defined here as an opacity pulse) */
+@keyframes led-flicker {
+  0%   { opacity: 0.65; }
+  40%  { opacity: 1.0; }
+  70%  { opacity: 0.80; }
+  100% { opacity: 0.95; }
+}
+.bombe-running .bombe-led-bulb:nth-child(1) {
+  animation: led-flicker 0.6s infinite alternate;
+}
+.bombe-running .bombe-led-bulb:nth-child(2) {
+  animation: led-flicker 0.4s infinite alternate-reverse 0.2s;
+}
+.bombe-running .bombe-led-bulb:nth-child(3) {
+  animation: led-flicker 0.8s infinite alternate 0.4s;
+}
+
+/* ── App shell sits above the bombe layer ── */
+.app-root {
+  position: relative;
+  z-index: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   BLETCHLEY COMPONENT THEME — ports the effective mockup CSS onto the app's
+   actual class names.  Palette vars are already in :root above; this section
+   adds per-component styling that was missing.  The trailing .app-root block
+   below is intentionally omitted here (it lives above this comment block).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Buttons ──────────────────────────────────────────────────────────────
+   The mockup's Bletchley override turns all .btn variants into bakelite /
+   cast-iron panels with a bevel border and glossy ::after highlight.
+   The app uses: .btn-run (primary amber), .btn-secondary, .btn-stop,
+   .btn-restart, .btn-run-sm, .btn-edit-sm, .btn-delete-sm.
+   We also introduce .btn-solid-primary / .btn-solid-success / .btn-solid-danger
+   / .btn-outline / .btn-danger-outline that map to the mockup's named variants.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* Shared aero geometry: all action buttons get overflow:hidden so ::after
+   can clip cleanly, and position:relative for the pseudo-element stacking. */
+.btn-run, .btn-secondary, .btn-stop, .btn-restart,
+.btn-run-sm, .btn-edit-sm, .btn-delete-sm,
+.btn-solid-primary, .btn-solid-success, .btn-solid-danger,
+.btn-outline, .btn-danger-outline, .onboard-cta {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Top-highlight pseudo-element (glossy aero sheen) */
+.btn-run::after, .btn-secondary::after, .btn-stop::after, .btn-restart::after,
+.btn-run-sm::after, .btn-edit-sm::after, .btn-delete-sm::after,
+.btn-solid-primary::after, .btn-solid-success::after, .btn-solid-danger::after,
+.btn-outline::after, .btn-danger-outline::after, .onboard-cta::after {
+  content: '';
+  position: absolute;
+  top: 1px; left: 1px; right: 1px;
+  height: 35%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0) 100%);
+  border-radius: 3px 3px 0 0;
+  pointer-events: none;
+}
+
+/* Primary amber run button — the Bletchley industrial look */
+.btn-run {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-ink) 100%);
+  border: 2px solid var(--accent-ink);
+  border-top-color: var(--accent);
+  border-bottom-color: #7a5200;
+  box-shadow: 0 3px 8px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+}
+.btn-run:hover:not(:disabled) {
+  background: linear-gradient(180deg, #dba012 0%, var(--accent-ink) 100%);
+  box-shadow: 0 5px 14px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.14);
+}
+.btn-run:active:not(:disabled) {
+  background: linear-gradient(180deg, #a16207 0%, #7a5200 100%);
+  border-top-color: #7a5200;
+  border-bottom-color: var(--accent-ink);
+  transform: translateY(1px);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 2px 5px rgba(0,0,0,0.5);
+}
+
+/* Secondary bordered button */
+.btn-secondary {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid #3a3530;
+  border-top-color: #4a4540;
+  border-bottom-color: #0c0b0a;
+  color: var(--ink);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #333028 0%, #242220 100%);
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+  box-shadow: 0 4px 10px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08);
+}
+.btn-secondary.danger:hover:not(:disabled) {
+  border-color: var(--danger-color);
+  color: var(--danger-color);
+}
+
+/* Stop / cancel button */
+.btn-stop {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid rgba(185,28,28,0.5);
+  border-top-color: rgba(220,38,38,0.5);
+  border-bottom-color: rgba(100,10,10,0.7);
+  color: #f87171;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.45);
+}
+.btn-stop:hover:not(:disabled) {
+  border-color: var(--danger-color);
+  color: #ef4444;
+  background: linear-gradient(180deg, #2f1a1a 0%, #1f1010 100%);
+}
+
+/* Small restart / "quiet action" button */
+.btn-restart {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid #3a3530;
+  border-top-color: #4a4540;
+  border-bottom-color: #0c0b0a;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 7px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+.btn-restart:hover {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, #333028 0%, #242220 100%);
+}
+
+/* Small run button variant */
+.btn-run-sm {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-ink) 100%);
+  border: 2px solid var(--accent-ink);
+  border-top-color: var(--accent);
+  border-bottom-color: #7a5200;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+}
+.btn-run-sm:hover { background: linear-gradient(180deg, #dba012 0%, var(--accent-ink) 100%); }
+
+/* Small edit / inline action button */
+.btn-edit-sm {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid #3a3530;
+  border-top-color: #4a4540;
+  border-bottom-color: #0c0b0a;
+  color: var(--ink);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+}
+.btn-edit-sm:hover {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, #333028 0%, #242220 100%);
+}
+
+/* Small delete button */
+.btn-delete-sm {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid #3a3530;
+  border-top-color: #4a4540;
+  border-bottom-color: #0c0b0a;
+  color: var(--ink-soft);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.4);
+}
+.btn-delete-sm:hover { border-color: var(--danger-color); color: var(--danger-color); }
+.btn-delete-sm.confirm { background: linear-gradient(180deg, #b91c1c 0%, #7f1d1d 100%); border-color: #b91c1c; color: #fff; }
+
+/* Named button variants (for new components and the Re-emit button) */
+.btn-solid-primary {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-ink) 100%);
+  border: 2px solid var(--accent-ink);
+  border-top-color: var(--accent);
+  border-bottom-color: #7a5200;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  box-shadow: 0 3px 8px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+}
+.btn-solid-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #dba012 0%, var(--accent-ink) 100%);
+  box-shadow: 0 5px 14px rgba(0,0,0,0.5);
+}
+.btn-solid-primary:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+.btn-solid-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-solid-success {
+  background: linear-gradient(180deg, #16a34a 0%, #15803d 100%);
+  border: 2px solid #166534;
+  border-top-color: #22c55e;
+  border-bottom-color: #14532d;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  box-shadow: 0 3px 8px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.12);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+}
+.btn-solid-success:hover:not(:disabled) {
+  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+  box-shadow: 0 5px 12px rgba(22,163,74,0.35);
+}
+
+.btn-solid-danger {
+  background: linear-gradient(180deg, #b91c1c 0%, #7f1d1d 100%);
+  border: 2px solid #b91c1c;
+  border-top-color: #dc2626;
+  border-bottom-color: #450a0a;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  box-shadow: 0 3px 8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+}
+.btn-solid-danger:hover:not(:disabled) {
+  background: linear-gradient(180deg, #dc2626 0%, #991b1b 100%);
+  box-shadow: 0 5px 14px rgba(185,28,28,0.45);
+}
+
+.btn-outline {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid #3a3530;
+  border-top-color: #4a4540;
+  border-bottom-color: #0c0b0a;
+  color: var(--ink-soft);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+}
+.btn-outline:hover:not(:disabled) {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+  background: linear-gradient(180deg, #333028 0%, #242220 100%);
+}
+
+.btn-danger-outline {
+  background: linear-gradient(180deg, #2a2825 0%, #1c1a18 100%);
+  border: 2px solid rgba(185,28,28,0.4);
+  border-top-color: rgba(220,38,38,0.5);
+  border-bottom-color: rgba(80,10,10,0.6);
+  color: #f87171;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+  font-size: 13px; font-weight: 700; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+}
+.btn-danger-outline:hover:not(:disabled) {
+  border-color: var(--danger-color);
+  color: #ef4444;
+  background: linear-gradient(180deg, #2f1a1a 0%, #1f1010 100%);
+}
+
+/* ── Glass / card surfaces ───────────────────────────────────────────────
+   The mockup adds "silver rivet" corner dots and a heavier cast-iron border
+   to every card surface.  App classes: .pg-card, .card, .live-run, .sups-panel,
+   .custom-rules, .audit-cost, .fix-panel, .uow-panel, .uow-step-control.
+   ─────────────────────────────────────────────────────────────────────── */
+
+/* Rivet pattern shared by all card surfaces */
+.pg-card,
+.live-run,
+.sups-panel,
+.audit-cost,
+.fix-panel,
+.uow-step-control {
+  border-width: 2px;
+  border-color: var(--line);
+  box-shadow:
+    0 12px 30px rgba(0,0,0,0.65),
+    inset 0 1px 0 rgba(255,255,255,0.04),
+    inset 0 -1px 3px rgba(0,0,0,0.45);
+  background-image:
+    radial-gradient(circle at 10px 10px, #57534e 2px, #2e2a25 3.5px, transparent 4.5px),
+    radial-gradient(circle at calc(100% - 10px) 10px, #57534e 2px, #2e2a25 3.5px, transparent 4.5px),
+    radial-gradient(circle at 10px calc(100% - 10px), #57534e 2px, #2e2a25 3.5px, transparent 4.5px),
+    radial-gradient(circle at calc(100% - 10px) calc(100% - 10px), #57534e 2px, #2e2a25 3.5px, transparent 4.5px);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
+/* Project-gate card gets a hover lift */
+.pg-card:hover {
+  border-color: var(--accent-ink);
+  box-shadow:
+    0 16px 40px rgba(0,0,0,0.75),
+    inset 0 1px 0 rgba(255,255,255,0.06),
+    0 0 0 1px var(--accent-ink);
+  transform: translateY(-2px);
+  transition: all 0.25s var(--ease);
+}
+.pg-card { transition: all 0.25s var(--ease); }
+
+/* ── Forms (inputs, selects, textareas) ──────────────────────────────────
+   The mockup themes all form controls as "terminal slot lines": inset shadow,
+   near-black bg, copper-orange focus glow, monospace font.
+   App uses: .addressee-input, .alt-select, .onboard-repos-input, the generic
+   input / select / textarea elements in cockpit forms.
+   ─────────────────────────────────────────────────────────────────────── */
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+textarea,
+select {
+  background-color: #11100f;
+  border: 2px solid var(--line);
+  border-top-color: #0b0a0a;
+  border-left-color: #0b0a0a;
+  color: var(--ink);
+  font-family: "Courier Prime", ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-radius: 4px;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.7);
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+textarea:focus,
+select:focus {
+  border-color: var(--warning-color);
+  outline: none;
+  box-shadow: 0 0 5px rgba(234,88,12,0.35), inset 0 2px 4px rgba(0,0,0,0.7);
+}
+
+/* ── Global header ────────────────────────────────────────────────────────
+   The cockpit's top bar / topbar maps to the app's .cockpit-topbar.
+   The brand panel is .topbar-brand and nav tabs are .cockpit-nav-tab.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.cockpit-topbar {
+  background: #1b1a18;
+  border-bottom: 3px solid var(--line);
+  box-shadow: 0 4px 15px rgba(0,0,0,0.55);
+  position: relative;
+}
+/* Red-orange cable harness running along header top */
+.cockpit-topbar::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 4px;
+  background: repeating-linear-gradient(
+    90deg,
+    #dc2626 0px, #dc2626 8px,
+    #ea580c 8px, #ea580c 16px,
+    #991b1b 16px, #991b1b 24px
+  );
+  box-shadow: 0 1px 3px rgba(0,0,0,0.45);
+  pointer-events: none;
+}
+
+.topbar-brand {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: 0.03em;
+}
+
+/* ── Cockpit nav tabs ─────────────────────────────────────────────────────
+   .cockpit-nav acts as the toolbar under the topbar.
+   .cockpit-nav-tab are the individual clickable tabs.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.cockpit-nav {
+  background: #1a1917;
+  border-bottom: 2px solid var(--line);
+}
+
+.cockpit-nav-tab {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  font-weight: 700;
+  color: var(--ink-soft);
+  border-radius: 3px;
+  transition: color .15s var(--ease), background .15s var(--ease), border-color .15s var(--ease);
+  border-bottom: 3px solid transparent;
+}
+.cockpit-nav-tab:hover { color: var(--ink); background: rgba(255,255,255,0.04); }
+.cockpit-nav-tab.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: rgba(0,0,0,0.2);
+  box-shadow: none;
+}
+
+/* ── UoW sidebar (cockpit left pane) ──────────────────────────────────────
+   The app's cockpit body is .cockpit-body with .cockpit-rail as the left
+   sidebar.  .spine-item are the UoW story items.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.cockpit-rail {
+  background: rgba(20,18,17,0.97);
+  border-right: 2px solid var(--line);
+}
+
+.spine-item {
+  background: rgba(0,0,0,0.18);
+  border: 2px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.22);
+  position: relative;
+  transition: border-color .2s var(--ease), box-shadow .2s var(--ease), transform .2s var(--ease);
+}
+.spine-item::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 35%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0) 100%);
+  pointer-events: none;
+  border-radius: 3px 3px 0 0;
+}
+.spine-item:hover {
+  border-color: var(--accent-ink);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+}
+.spine-item.sel {
+  background: linear-gradient(135deg, rgba(80,50,0,0.45) 0%, rgba(40,25,0,0.35) 100%);
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* UoW phase tags */
+.spine-badge {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 3px;
+  box-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+  letter-spacing: 0.04em;
+}
+.spine-badge.neutral, .topbar-status.neutral { background: #2e2a25; color: var(--ink-soft); border: 1px solid var(--line); }
+.spine-badge.active, .topbar-status.active   { background: rgba(202,138,4,0.18); color: var(--accent); border: 1px solid var(--accent-ink); }
+.spine-badge.warn, .topbar-status.warn       { background: rgba(234,88,12,0.15); color: #fbbf24; border: 1px solid rgba(234,88,12,0.4); }
+.spine-badge.done, .topbar-status.done       { background: rgba(22,163,74,0.15); color: #86efac; border: 1px solid rgba(22,163,74,0.35); }
+.spine-badge.block, .topbar-status.block     { background: #3f0f0a; color: #fca5a5; border: 1px solid #b91c1c; }
+
+/* ── Onboarding option cards ──────────────────────────────────────────────
+   App uses .onboard-path cards for the "browse / quick" options.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.onboard-path {
+  background: var(--glass-bg);
+  border: 2px solid var(--glass-border);
+  border-radius: 5px;
+  box-shadow: var(--glass-shadow);
+  position: relative;
+  transition: border-color .25s var(--ease), box-shadow .25s var(--ease), transform .25s var(--ease);
+}
+.onboard-path::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 35%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0) 100%);
+  pointer-events: none;
+  border-radius: 4px 4px 0 0;
+}
+.onboard-path:hover {
+  border-color: var(--accent-ink);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  transform: translateY(-2px);
+}
+.onboard-path.on {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(80,50,0,0.6) 0%, rgba(40,25,0,0.5) 100%);
+  box-shadow: 0 10px 28px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* ── Scanner progress bar ─────────────────────────────────────────────────
+   App renders the scan progress inline; .scanner-progress-bar /
+   .scanner-progress-fill re-use the mockup names exactly.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.scanner-progress-bar {
+  height: 8px;
+  background: rgba(0,0,0,0.4);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 12px 0;
+  box-shadow: inset 0 1.5px 3px rgba(0,0,0,0.3);
+  border: 1px solid var(--line);
+}
+.scanner-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--warning-color) 0%, var(--accent) 60%, var(--good) 100%);
+  border-radius: 6px;
+  box-shadow: 0 0 8px rgba(202,138,4,0.3);
+  transition: width 0.3s ease-out;
+  position: relative;
+}
+.scanner-progress-fill::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 40%;
+  background: rgba(255,255,255,0.35);
+}
+
+/* ── Scan log panel ───────────────────────────────────────────────────────
+   App renders scan logs as a scrolling text area; we give it the terminal
+   slot look.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.scan-logs {
+  font-family: "Courier Prime", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink);
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 14px;
+  background: rgba(0,0,0,0.35);
+  border: 2px solid var(--line);
+  border-top-color: #0b0a0a;
+  border-left-color: #0b0a0a;
+  border-radius: 4px;
+  box-shadow: inset 0 2px 6px rgba(0,0,0,0.7);
+}
+
+/* ── Status / severity badges ─────────────────────────────────────────────
+   The onboard-status badges (clean / pending) in project cards.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.pg-onboard-badge {
+  font-family: "Courier Prime", ui-monospace, monospace;
+  font-weight: 700;
+  box-shadow: 1px 1px 3px rgba(0,0,0,0.5);
+}
+
+/* ── Re-emit local button (issue #106) ────────────────────────────────────
+   A dedicated button class for the "Re-emit rules locally" action: amber
+   primary that reads as a sibling to .btn-run but at a slightly smaller
+   size so it fits beside the PR-emit button without competing.
+   ─────────────────────────────────────────────────────────────────────── */
+
+.btn-emit-local {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-ink) 100%);
+  border: 2px solid var(--accent-ink);
+  border-top-color: var(--accent);
+  border-bottom-color: #7a5200;
+  border-radius: 7px;
+  padding: 9px 16px;
+  cursor: pointer;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  box-shadow: 0 3px 8px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12);
+  transition: background .2s var(--ease), box-shadow .2s var(--ease), transform .15s var(--ease);
+  position: relative;
+  overflow: hidden;
+}
+.btn-emit-local::after {
+  content: '';
+  position: absolute;
+  top: 1px; left: 1px; right: 1px;
+  height: 35%;
+  background: linear-gradient(to bottom, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0) 100%);
+  border-radius: 5px 5px 0 0;
+  pointer-events: none;
+}
+.btn-emit-local:hover:not(:disabled) {
+  background: linear-gradient(180deg, #dba012 0%, var(--accent-ink) 100%);
+  box-shadow: 0 5px 14px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.14);
+  transform: translateY(-1px);
+}
+.btn-emit-local:active:not(:disabled) {
+  background: linear-gradient(180deg, #a16207 0%, #7a5200 100%);
+  transform: translateY(1px);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 2px 5px rgba(0,0,0,0.5);
+}
+.btn-emit-local:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 "#;

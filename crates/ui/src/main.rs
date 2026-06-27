@@ -11,9 +11,10 @@
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
 
 mod agent_activity;
-mod bombe;
+mod bombe_bg;
 mod chat;
 mod cockpit;
+pub mod loading;
 pub mod md;
 mod routines;
 mod style;
@@ -54,9 +55,10 @@ fn main() {
                 // is released immediately.  Without this, a stale server shadows the
                 // freshly-built one on the next `cargo run`.
                 .with_exits_when_last_window_closes(true)
-                // JS shim for Cmd-C / Cmd-X / Cmd-A (belt-and-suspenders alongside the
-                // native menu).  See docs/decisions/2026-06-24_desktop_clipboard.md.
-                .with_custom_head(CLIPBOARD_SHIM_SCRIPT.to_string()),
+                // Google Fonts for "Courier Prime" (title/mono) and "Inter" (sans body),
+                // followed by the JS shim for Cmd-C / Cmd-X / Cmd-A.
+                // See docs/decisions/2026-06-24_desktop_clipboard.md for the shim rationale.
+                .with_custom_head(format!("{GOOGLE_FONTS_LINK}\n{CLIPBOARD_SHIM_SCRIPT}")),
         )
         .launch(App);
 }
@@ -96,6 +98,18 @@ fn reclaim_port(port: &str) {
 /// can't reclaim it.  The caller just retries and ultimately gives up loudly.
 #[cfg(not(unix))]
 fn reclaim_port(_port: &str) {}
+
+/// Google Fonts <link> tags injected into <head> so that "Courier Prime"
+/// (title + monospace) and "Inter" (sans body) are available via the CDN.
+/// These are loaded before the clipboard shim and before the global stylesheet
+/// so the fonts are already resolving when layout paint fires.
+///
+/// Both families are variable-weight subsets served from fonts.googleapis.com.
+/// Courier Prime (400/700 roman only — it has no variable axis) is loaded
+/// alongside Inter's variable range (100..900 wght).
+const GOOGLE_FONTS_LINK: &str = r#"<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Inter:wght@100..900&display=swap">"#;
 
 /// JavaScript injected into <head> on every page load.
 ///
@@ -341,6 +355,13 @@ fn App() -> Element {
         });
     });
 
+    // Global ref-counted in-flight loading count.  Any component or async
+    // helper that holds a `loading::LoadingGuard` for its duration
+    // increments this; the background Bombe machine watches it and activates
+    // animations while count > 0.  Provided BEFORE the BombeBg mount so the
+    // context is available when BombeBg first renders.
+    loading::provide_loading_context();
+
     // App-wide toast stack, shared via context so any component can push
     // notifications/errors. The ConnectionWatcher below seeds it from the
     // integration health probe.
@@ -358,6 +379,12 @@ fn App() -> Element {
         // Global stylesheet, injected as a raw <style> so it works identically on
         // desktop without the asset pipeline. Keeps the whole look in one place.
         style { dangerous_inner_html: style::GLOBAL_CSS }
+
+        // The Bombe machine background — fixed full-viewport layer at z-index 0,
+        // pointer-events:none.  Activates .bombe-running (animations, higher opacity)
+        // while the global loading count > 0.  Mounted BEFORE app-root so it paints
+        // below the app shell (z-index 1).
+        bombe_bg::BombeBg {}
 
         div { class: "app-root",
             // Watches connection health and pushes warning/error toasts; renders nothing.

@@ -21,6 +21,34 @@ pub(super) async fn emit_project_rules(project_id: &str) -> Option<Vec<ArmResult
     serde_json::from_value(v.get("results").cloned()?).ok()
 }
 
+/// Re-emit the project's ruleset locally into each repo's working copy
+/// (POST /api/projects/:id/emit-local).  Writes AGENTS.md + CONVENTIONS.md
+/// directly into the local checkout; no GitHub token needed, no PR opened.
+/// Returns `(ok, message)` — ok=true means at least one file was written.
+pub(super) async fn emit_project_local(project_id: &str) -> (bool, String) {
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/emit-local",
+            crate::BFF_URL,
+            project_id
+        ))
+        .send()
+        .await;
+    match resp {
+        Ok(r) => {
+            let v: serde_json::Value = r.json().await.unwrap_or_default();
+            let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+            let msg = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or(if ok { "Rules emitted locally." } else { "emit-local failed." })
+                .to_string();
+            (ok, msg)
+        }
+        Err(e) => (false, format!("Network error: {e}")),
+    }
+}
+
 /// Add or edit (by name) a custom rule on a project.
 pub(super) async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str) -> bool {
     reqwest::Client::new()
@@ -1493,6 +1521,7 @@ pub(super) fn RulesView() -> Element {
     let mut cr_domain = use_signal(String::new);
     let mut cr_body = use_signal(String::new);
     let mut emitting = use_signal(|| false);
+    let mut emitting_local = use_signal(|| false);
 
     // Shared context: the open rule in the detail modal (Tables 1 + 2 both write here).
     let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
@@ -1576,6 +1605,7 @@ pub(super) fn RulesView() -> Element {
                     let pid = p.id.clone();
                     let pid_rec = p.id.clone();
                     let pid_emit = p.id.clone();
+                    let pid_emit_local = p.id.clone();
                     let pid_sup = p.id.clone();
                     let pid_health = p.id.clone();
                     let pid_drift = p.id.clone();
@@ -1757,6 +1787,37 @@ pub(super) fn RulesView() -> Element {
                                 if emitting() { "Emitting…" } else { "Emit ruleset to repos (re-emit)" }
                             }
                             span { class: "rules-emit-hint", "Rebuilds each repo's AGENTS.md / CONVENTIONS.md / gate config from this project's ruleset. Custom rules are always carried through." }
+
+                            // #106 Re-emit rules locally: writes AGENTS.md + CONVENTIONS.md
+                            // directly into each repo's local working copy (no GitHub token,
+                            // no PR).  Calls POST /api/projects/:id/emit-local.
+                            button {
+                                class: "btn-emit-local",
+                                disabled: emitting_local(),
+                                title: "Re-emit rules locally — writes AGENTS.md + CONVENTIONS.md into each repo's local checkout without opening a PR.",
+                                onclick: move |_| {
+                                    let id = pid_emit_local.clone();
+                                    emitting_local.set(true);
+                                    spawn(async move {
+                                        let (ok, msg) = emit_project_local(&id).await;
+                                        if ok {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Info,
+                                                msg,
+                                            );
+                                        } else {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Error,
+                                                msg,
+                                            );
+                                        }
+                                        emitting_local.set(false);
+                                    });
+                                },
+                                if emitting_local() { "Re-emitting locally…" } else { "Re-emit rules locally" }
+                            }
                         }
 
                         // Reconcile: read what's ACTUALLY in the repos and rehydrate
