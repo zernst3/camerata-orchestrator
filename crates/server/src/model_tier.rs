@@ -93,6 +93,7 @@ mod tests {
             process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),
             step_models: crate::project::StepModels::default(),
             stall_thresholds: crate::project::StallThresholds::default(),
+            l3_review: crate::project::L3ReviewConfig::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

@@ -69,6 +69,30 @@ pub fn default_routine_secs() -> u64 {
         .unwrap_or(600)
 }
 
+/// Per-project Layer-3 (agentic code-review) configuration (R7).
+///
+/// Default: off, using the project's `balanced` tier model when enabled.
+/// Serialises with `serde(default)` so projects written before this field existed
+/// deserialise to the disabled default without migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct L3ReviewConfig {
+    /// Whether L3 is enabled for this project.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The model id that runs the L3 reviewer. Empty = use the project's `balanced` tier model.
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for L3ReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: String::new(),
+        }
+    }
+}
+
 /// Per-project stall detection thresholds, split by context (watched = interactive,
 /// routine = autonomous/walk-away). Mirrors the `StepModels` pattern.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -238,6 +262,11 @@ pub struct Project {
     /// routine = autonomous/walk-away). Defaults to 120s watched / 600s routine.
     #[serde(default)]
     pub stall_thresholds: StallThresholds,
+    /// Layer-3 agentic code-review gate (R7). Opt-in per project. When off, the human
+    /// is the reviewer. Serde default fills in [`L3ReviewConfig::default()`] (disabled)
+    /// for projects persisted before this field existed — no migration required.
+    #[serde(default)]
+    pub l3_review: L3ReviewConfig,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -363,6 +392,24 @@ impl Project {
     /// Replace this project's stall thresholds in place.
     pub fn set_stall_thresholds(&mut self, thresholds: StallThresholds) {
         self.stall_thresholds = thresholds;
+    }
+
+    /// The effective model id for the L3 reviewer on this project.
+    ///
+    /// Returns `self.l3_review.model` when it is non-empty; falls back to
+    /// `self.tier_map.balanced` so a project that opts in but doesn't pin a specific
+    /// model uses its configured balanced tier.
+    pub fn l3_model(&self) -> &str {
+        if !self.l3_review.model.trim().is_empty() {
+            &self.l3_review.model
+        } else {
+            &self.tier_map.balanced
+        }
+    }
+
+    /// Replace the L3 review configuration for this project in place.
+    pub fn set_l3_review(&mut self, config: L3ReviewConfig) {
+        self.l3_review = config;
     }
 }
 
@@ -500,6 +547,7 @@ impl ProjectStore {
                 process_rule_config: ProcessRuleConfig::default(),
                 step_models: StepModels::default(),
                 stall_thresholds: StallThresholds::default(),
+                l3_review: L3ReviewConfig::default(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -565,6 +613,7 @@ impl ProjectStore {
                     process_rule_config: ProcessRuleConfig::default(),
                     step_models: StepModels::default(),
                     stall_thresholds: StallThresholds::default(),
+                    l3_review: L3ReviewConfig::default(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -641,6 +690,12 @@ impl ProjectStore {
         self.update(id, |p| p.set_stall_thresholds(thresholds))
     }
 
+    /// Set the L3 review configuration for a single project by id. Returns the updated
+    /// project, or `None` when no project has that id.
+    pub fn set_l3_review(&self, id: &str, config: L3ReviewConfig) -> Option<Project> {
+        self.update(id, |p| p.set_l3_review(config))
+    }
+
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
         let updated = {
@@ -690,6 +745,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -730,6 +786,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -764,6 +821,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -801,6 +859,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -850,6 +909,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1133,6 +1193,7 @@ mod tests {
             process_rule_config: ProcessRuleConfig::default(),
             step_models: StepModels::default(),
             stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

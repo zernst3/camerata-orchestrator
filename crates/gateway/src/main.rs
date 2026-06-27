@@ -47,6 +47,11 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod delegate;
 use delegate::OrchestratorConfig;
 
+mod fan_out;
+use fan_out::FanOutEntry;
+
+mod integration_gate;
+
 /// Env var the orchestrator points at the per-session rules JSON file.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 
@@ -364,6 +369,14 @@ pub struct DelegateArgs {
     pub tier: String,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FanOutArgs {
+    /// The list of per-repo/per-partition work items to run concurrently. Each
+    /// entry targets one repo partition; no two entries may share the same repo
+    /// (write-isolation invariant).
+    pub entries: Vec<FanOutEntry>,
+}
+
 /// Load the session's rule-subset from `CAMERATA_RULES_FILE` if set, else fall
 /// back to the verified default subset `["GOV-1"]`.
 ///
@@ -654,6 +667,110 @@ impl Gateway {
 
         result
     }
+
+    /// Fan-out: concurrent multi-repo / multi-partition dispatch. ENABLED only in
+    /// orchestrator mode (the lead agent's gateway). Spawns ALL workers concurrently
+    /// (one per entry), each jailed to its own repo partition, each with `gated_write`
+    /// ONLY — `fan_out` and `delegate` are DISABLED for every worker. Returns a
+    /// formatted summary of all worker results. Use when a unit-of-work spans
+    /// MULTIPLE repos and the partitions are independent (no cross-partition write
+    /// ordering required). After all workers return, Camerata (not the agents) is the
+    /// sole committer: read the results and drive commits yourself.
+    #[tool(
+        name = "fan_out",
+        description = "Concurrently dispatch independent subtasks to per-repo worker agents. \
+                       Each entry targets ONE repo partition; workers run in parallel with \
+                       write-isolated jails (no worker can touch another's repo). \
+                       NO two entries may share the same repo (partition collision). \
+                       Workers have gated_write ONLY — they cannot fan_out or delegate further. \
+                       Returns a summary of all worker outputs. You (the orchestrator) drive \
+                       commits after all workers complete."
+    )]
+    pub async fn fan_out(&self, args: Parameters<FanOutArgs>) -> String {
+        let FanOutArgs { entries } = args.0;
+
+        // Per-process gate: if this gateway was not launched in orchestrator mode, refuse.
+        let Some(config) = self.orchestrator.as_ref() else {
+            eprintln!("[gateway] fan_out REFUSED: gateway is not in orchestrator mode");
+            return "FAN_OUT REFUSED: this agent is not the orchestrator; \
+                    fan_out is not available. Do the work yourself or use delegate."
+                .to_string();
+        };
+
+        let entry_count = entries.len();
+        eprintln!(
+            "[gateway] fan_out dispatching {} entries depth={} max_depth={}",
+            entry_count, config.depth, config.max_depth,
+        );
+
+        // Observability: record the fan-out dispatch in the structured sink.
+        append_gate_record(&GateDecisionRecord {
+            kind: "fan-out-dispatch".to_string(),
+            verdict: "dispatch".to_string(),
+            target: format!("{} repos", entry_count),
+            rule: None,
+            reason: format!("Fan-out dispatching {entry_count} concurrent workers."),
+            ts_ms: now_ms(),
+            content_hash: None,
+        });
+
+        // Dispatch all workers concurrently.
+        let result = fan_out::run_fan_out(
+            config,
+            (*self.rule_subset).clone(),
+            entries,
+        )
+        .await;
+
+        // Observability: record the fan-out return.
+        let (summary, incomplete_count) = match &result {
+            Ok(results) => {
+                let incomplete = results.iter().filter(|r| r.incomplete).count();
+                let summary = format!(
+                    "Fan-out complete: {total} workers returned, {incomplete} INCOMPLETE.",
+                    total = results.len(),
+                    incomplete = incomplete,
+                );
+                (summary, incomplete)
+            }
+            Err(e) => (e.to_string(), 0),
+        };
+
+        append_gate_record(&GateDecisionRecord {
+            kind: "fan-out-return".to_string(),
+            verdict: if incomplete_count > 0 {
+                "incomplete".to_string()
+            } else {
+                "returned".to_string()
+            },
+            target: format!("{} repos", entry_count),
+            rule: None,
+            reason: summary.clone(),
+            ts_ms: now_ms(),
+            content_hash: None,
+        });
+
+        // Build the formatted output: one section per worker result.
+        match result {
+            Err(e) => format!("FAN_OUT REFUSED: {e}"),
+            Ok(results) => {
+                let mut out = format!(
+                    "[fan-out complete: {} worker(s), {} INCOMPLETE]\n\n",
+                    results.len(),
+                    incomplete_count,
+                );
+                for r in &results {
+                    out.push_str(&format!(
+                        "--- repo={} domain={} incomplete={} ---\n{}\n\n",
+                        r.repo, r.domain, r.incomplete, r.output
+                    ));
+                }
+                // Assembly is available via assemble_by_repo for the commit phase.
+                // The orchestrator reads this output and drives commits.
+                out
+            }
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -920,5 +1037,106 @@ mod jail_tests {
     fn absolute_paths_inside_the_worktree_are_allowed() {
         let root = Path::new("/work/crate");
         assert!(within_jail(root, "/work/crate/src/lib.rs"));
+    }
+}
+
+#[cfg(test)]
+mod fan_out_gate_invariant_tests {
+    use camerata_agent::{
+        allowed_tools_for_role, allowed_tools_for_role_with_mode, FAN_OUT_TOOL, DELEGATE_TOOL,
+        GATED_WRITE_TOOL,
+    };
+    use camerata_core::{Role, RuleId};
+
+    fn role() -> Role {
+        Role {
+            name: "orchestrator-test".to_string(),
+            rule_subset: vec![RuleId("GOV-1".to_string())],
+            allowed_paths: vec!["/work/project".to_string()],
+        }
+    }
+
+    #[test]
+    fn fan_out_tool_is_orchestrator_only_not_in_non_orchestrator_tools() {
+        // The non-orchestrator allowed list must NOT include fan_out.
+        // This is the depth-1 / no-recursive-fan-out gate-invariant test.
+        let tools = allowed_tools_for_role(&role());
+        assert!(
+            !tools.iter().any(|t| t == FAN_OUT_TOOL),
+            "fan_out must be absent from non-orchestrator tool list"
+        );
+        // Explicit mode=false agrees.
+        let tools_false = allowed_tools_for_role_with_mode(&role(), false);
+        assert!(!tools_false.iter().any(|t| t == FAN_OUT_TOOL));
+    }
+
+    #[test]
+    fn fan_out_tool_present_in_orchestrator_mode() {
+        // The orchestrator tool list MUST include fan_out alongside delegate.
+        let tools = allowed_tools_for_role_with_mode(&role(), true);
+        assert!(
+            tools.iter().any(|t| t == FAN_OUT_TOOL),
+            "orchestrator must have fan_out in its tool list"
+        );
+        assert!(
+            tools.iter().any(|t| t == DELEGATE_TOOL),
+            "orchestrator must still have delegate"
+        );
+        assert!(
+            tools.iter().any(|t| t == GATED_WRITE_TOOL),
+            "orchestrator must still have gated_write"
+        );
+    }
+
+    #[test]
+    fn fan_out_tool_constant_has_correct_mcp_prefix() {
+        // Sanity-check the constant matches the server key / tool name pattern.
+        assert_eq!(FAN_OUT_TOOL, "mcp__camerata__fan_out");
+    }
+}
+
+#[cfg(test)]
+mod integration_gate_module_tests {
+    use super::integration_gate::{check_integration_gate, IntegrationGateInput, IntegrationGateResult};
+    use super::fan_out::WorkerResult;
+
+    fn no_workers() -> Vec<WorkerResult> {
+        vec![]
+    }
+
+    #[test]
+    fn integration_gate_no_contract_is_no_contract_required() {
+        let input = IntegrationGateInput {
+            contract: None,
+            assembled: &no_workers(),
+        };
+        assert_eq!(
+            check_integration_gate(&input),
+            IntegrationGateResult::NoContractRequired
+        );
+    }
+
+    #[test]
+    fn integration_gate_empty_contract_bounces() {
+        let input = IntegrationGateInput {
+            contract: Some(""),
+            assembled: &no_workers(),
+        };
+        assert!(matches!(
+            check_integration_gate(&input),
+            IntegrationGateResult::BounceToOrchestrator { .. }
+        ));
+    }
+
+    #[test]
+    fn integration_gate_nonempty_contract_is_pending() {
+        let input = IntegrationGateInput {
+            contract: Some("GET /api/orgs → [{id, name}]"),
+            assembled: &no_workers(),
+        };
+        assert!(matches!(
+            check_integration_gate(&input),
+            IntegrationGateResult::Pending { .. }
+        ));
     }
 }

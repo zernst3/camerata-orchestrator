@@ -4,7 +4,7 @@ This is the "I have a repo new to Camerata — where do I start, and how do I ta
 the way through?" walkthrough, and the canonical source the **in-app assistant** (the chat bubble) answers from. Keep it accurate to what's actually shipped — an
 assistant that describes a feature that doesn't exist undercuts the whole point.
 
-> Status (updated 2026-06-23): the brownfield **onboarding flow is built and live** — per-repo
+> Status (updated 2026-06-27): the brownfield **onboarding flow is built and live** — per-repo
 > stack detection + rule selection, **custom rules** (per-repo + project-global), an optional code
 > audit you can scope with a **scan-type selector** (AI review and/or deterministic scans), four scan
 > modes, an opt-in **thorough-calibration** consensus pass, a **scan-time deterministic preview** that
@@ -13,22 +13,31 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > **CI/CD security rules** (Semgrep, CodeQL) are available but **never auto-recommended or pre-checked**.
 > Re-onboarding an already-onboarded repo is **blocked**. Projects are **exportable/importable**, repos
 > resolve to **local folders** with a health check, and onboarding state **auto-saves**. Governed
-> Development adds a project-settings **gear popup** (loop guard + tier-map + per-project step-model
-> config + **stall thresholds**), **blank UoWs you author with AI**, an **AI-assisted Update-branch**
-> control, a work-item modal with comments + @-mention autocomplete, a one-time **layer-2 bootstrap
-> bypass** for installing tooling, a one-click **Gate self-check** (go/no-go), **multiple concurrent
-> UoWs** (each runs in its own isolated git worktree), **PR lifecycle buttons** per UoW (push, open PR,
-> pull PR info, resolve with agent), and **structured clarifications** that auto-save at pause points.
-> Dev runs and onboarding scans show **run liveness**: an amber **stall warning** appears when a run
-> makes no progress for the watched threshold, and a **Stop button** is always available to cancel any
-> running dev run or scan at any time (the run ends in a **Cancelled** state). Scan findings now
-> include a **Test badge** for test-scope violations, a separate **Scan coverage** section (tools that
-> didn't run), and scan tools (Semgrep/ESLint) **auto-install on first use**. The in-app assistant
-> retains **conversation context** across messages and is grounded on your active project and pulled
-> issues. A persistent **token usage meter** tracks 5-hour and session-wide spend. The **check
-> manifest** (`.camerata/checks.toml`) is the single source of truth for custom deterministic gates:
-> one entry wires a check into BOTH the in-loop dev gate and the generated CI workflow. The two things
-> you connect are a **GitHub token** and **Claude** (the `claude` CLI).
+> Development is now a **3-phase cockpit** (Intake · Investigation & Refinement · Development) with
+> free navigation between phases, **Finish/Reopen** controls per phase, **per-story repo/branch
+> scoping** (Intake), **prose contract settling** and a **contract precondition** (no development for
+> cross-boundary work without a contract), and a **per-repo Ship panel** with a "Ship all repos"
+> chain button. UoWs reach a **Done/archive** terminal state. The gear popup adds an opt-in
+> **L3 AI code review** (per-project, model-selectable, runs parallel to Layer-2). The **Rules view**
+> has a **"Re-emit rules"** button that regenerates governance files directly into local repo clones
+> with no commit. The UI theme is **Bletchley industrial amber** with a background **Bombe machine**
+> animation driven by the global loading state. A project-settings **gear popup** (loop guard +
+> tier-map + per-project step-model config + **stall thresholds** + **L3 AI review**), **blank UoWs
+> you author with AI**, an **AI-assisted Update-branch** control, a work-item modal with comments +
+> @-mention autocomplete, a one-time **layer-2 bootstrap bypass** for installing tooling, a one-click
+> **Gate self-check** (go/no-go), **multiple concurrent UoWs** (each runs in its own isolated git
+> worktree), **PR lifecycle buttons** per UoW (push, open PR, pull PR info, resolve with agent), and
+> **structured clarifications** that auto-save at pause points. Dev runs and onboarding scans show
+> **run liveness**: an amber **stall warning** appears when a run makes no progress for the watched
+> threshold, and a **Stop button** is always available to cancel any running dev run or scan at any
+> time (the run ends in a **Cancelled** state). Scan findings now include a **Test badge** for
+> test-scope violations, a separate **Scan coverage** section (tools that didn't run), and scan tools
+> (Semgrep/ESLint) **auto-install on first use**. The in-app assistant retains **conversation context**
+> across messages and is grounded on your active project and pulled issues. A persistent **token usage
+> meter** tracks 5-hour and session-wide spend. The **check manifest** (`.camerata/checks.toml`) is
+> the single source of truth for custom deterministic gates: one entry wires a check into BOTH the
+> in-loop dev gate and the generated CI workflow. The two things you connect are a **GitHub token**
+> and **Claude** (the `claude` CLI).
 
 ---
 
@@ -347,6 +356,19 @@ Two tables:
 
 The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
 
+### Re-emit rules button (issue #106)
+
+The **"Emit ruleset to repos (re-emit)"** button in the Rules view regenerates `AGENTS.md`,
+`CONVENTIONS.md`, `.camerata/checks.toml`, and `.github/workflows/camerata-gates.yml` **directly
+into each repo's local clone** — with no commit and no PR. This is the fix for a gap where
+editing rules after onboarding had no local-first path: only a GitHub push was available.
+
+Click it after editing rules (adding/removing rules, switching options, adding custom rules) to
+bring the governance files on your local branches up to date before committing. The button is
+always safe to re-run (it regenerates from the current ruleset each time). It requires at least
+one repo to have a resolved local path; if no local workspace is configured it reports an error
+rather than silently doing nothing.
+
 **Opt-in rules are not pre-checked.** Rules with the `opt_in_only` flag (currently the two security-
 scan rules) appear in rule tables as **"Available"** only — no pre-checked checkbox, no recommended
 badge. You opt in deliberately by checking them.
@@ -410,6 +432,8 @@ settings:
     thresholds exist because a human-watched run warrants a shorter patience window, while a walk-away
     routine warrants more room and should fail explicitly rather than hang indefinitely. Both values
     must be positive integers greater than zero; saving zero is blocked.
+- **L3 AI code review** — an opt-in, per-project agentic code reviewer that runs in parallel with
+  Layer-2 after each dev-run iteration. See §6a for full details.
 
 These are project defaults, not per-UoW knobs. (The tier-map is also still editable in the Rules view
 for discoverability; both surfaces save to the same project row.) Per-run model overrides stay on the
@@ -481,105 +505,119 @@ The investigation phase can **pause mid-run** when the agent raises a question, 
 "Awaiting clarification," and **resume** (re-spawn the gated agent with the Q+A in context) once you
 answer. Dev-phase mid-write pause/resume is planned but not yet shipped.
 
-### The UoW dev controls
+### The 3-phase Development cockpit
 
-Below the table is a list of **UoW cards**. Open one to get the governed dev controls.
+The Governed Development surface for a selected UoW is a **three-phase cockpit** with free
+navigation between phases. The three phases are:
 
-**All AI runs are step-bound on the UoW lifecycle** — there is no standalone "run" button separate
-from the lifecycle strip. Each phase of the lifecycle has its own control, shown inline with that
-step. The lifecycle stages are:
+> **Intake → Investigation & Refinement → Development**
 
-> **Intake → Investigating → Decisions Approved → Development → Awaiting QA → Signed Off**
+Unlike the old strict-sequence lifecycle strip, you can navigate between phases freely. Status
+within each phase is **informational** — the cockpit does not lock you into the current phase.
+The underlying `UowStage` server state (Intake / Investigating / DecisionsApproved / Development /
+AwaitingQa / SignedOff) still gates the actual AI runs, but the UI surfacing is free-nav.
 
-The lifecycle strip shows the stages as a progress bar with the current stage highlighted. The
-control for the active phase renders directly beneath it.
+Each phase has a **Finish / Reopen** control that marks it done (a visible tick) and persists that
+flag so it survives a restart. Finishing a phase is informational — it does not advance the stage
+automatically, and you can always reopen.
 
-#### Intake: Begin investigation
+#### Phase 1: Intake
 
-At the **Intake** stage, a single **model select** and a **▶ Begin investigation** button appear.
+The Intake phase is where you set the scope of the story:
 
-- The model defaults to the active project's strongest tier; you can change it for this run.
-- Clicking the button runs a **single gated investigation agent** that reads the issue/story,
-  surfaces decisions and tradeoffs, and records an investigation note onto the UoW. The stage
-  advances to **Investigating** as the run begins.
-- Without `CAMERATA_LIVE_BUILD=1`, the investigation run completes with a placeholder note; with
-  it set and `claude` connected, a real `claude -p` investigation agent runs.
+- **Scope notes** — a free-text context note for the investigation agent ("extra context the story
+  doesn't capture"). Persisted to the UoW; the agent receives it at investigation time.
+- **Repos in scope** — which repos the story touches and which branch each targets. Setting the scope
+  here affects the **per-repo Ship panel** in Development (only in-scope repos appear). Out-of-scope
+  repos are simply not listed.
 
-#### Investigating: Approve decisions
+A **▶ Begin investigation** button (with a model select) starts the investigation run from Intake.
+The model defaults to the project's strongest tier. Clicking it transitions the UoW to
+**Investigating** and starts a single gated investigation agent.
 
-At the **Investigating** stage, the architect reviews the investigation note and the decisions the
-agent surfaced. When all decision records are approved, click **Approve decisions** to advance the
-stage to **Decisions Approved**. The server enforces this gate: the development run is blocked until
-every decision record is marked approved (a `409` is returned if you try to skip ahead).
+Without `CAMERATA_LIVE_BUILD=1` the run completes with a placeholder note; with it set and `claude`
+connected, a real `claude -p` investigation agent runs.
 
-#### Decisions Approved: Run development (governed)
+#### Phase 2: Investigation & Refinement
 
-At the **Decisions Approved** stage, three per-tier model selects appear — **Strongest**, **Balanced**,
-and **Fast** — each defaulting from the active project's tier map and editable for this run without
-changing the saved project defaults. Click **▶ Run development (governed)** to start the build.
+The Investigation phase hosts the investigation agent's output and the prose interface contract.
 
-**Brownfield vs. greenfield.** When the UoW's repo has a local clone (the normal case for a real
-story), the agent edits the **existing codebase in-place on the UoW's branch** in its isolated
-worktree. When there is no local clone yet, the runner scaffolds a new app from the plan in a
-temporary directory (greenfield). Camerata picks the path automatically — you see the same controls
-either way.
+**Investigation chat and decisions.** The investigation/refinement agent chat transcript is shown
+here. Decisions the agent surfaced are listed and can be approved or rejected. When all decision
+records are approved, **Approve decisions** advances the UoW to **Decisions Approved** — the gate
+state the server requires before development can start.
+
+**Settling the prose contract (cross-repo work).** If the story's work **crosses a contract
+boundary** (e.g. two repos need to agree on an API shape), mark **"this work crosses a contract
+boundary"** and write the agreed interface contract in the contract text field. This prose contract
+is the R3.g artifact — the single authoritative reference that:
+
+- The development agent uses as its primary spec.
+- The **integration gate** checks after multi-repo fan-out assembly.
+
+**Contract precondition.** For a story marked as crossing a boundary, the server **blocks
+development** until the contract field is non-empty. Attempting to start a dev run without a
+contract returns a 400 with an explanatory message. The precondition only applies when
+`crosses_boundary = true`; single-repo stories are unaffected.
+
+A **Finish Investigation** button marks the phase done. **Reopen Investigation** is always available.
+
+#### Phase 3: Development
+
+The Development phase is the main run-and-ship surface.
+
+**Run development (governed).** Three per-tier model selects appear — **Strongest**, **Balanced**,
+and **Fast** — each defaulting from the project tier map and overridable for this run only. Click
+**▶ Run development (governed)** to start the build.
+
+**Brownfield vs. greenfield.** When the UoW's repo has a local clone (the normal case), the agent
+edits the existing codebase in-place on the UoW's branch in its isolated worktree. When there is no
+local clone, the runner scaffolds a new app from the plan in a throwaway temp directory (greenfield).
+Camerata picks the path automatically.
 
 **How the tiered run works:** the **Strongest-tier agent is the orchestrator and lead.** It does the
-complex, one-way-door work itself. For well-scoped simpler subtasks it can use the governed
-`mcp__camerata__delegate` tool to hand the task to the Balanced or Fast tier. The gate stays
-universal across all tiers: every delegate child is spawned gated (`gated_write` only, `Task`
-disallowed), delegation is only one level deep (children cannot re-delegate), and escalation is
-parent-driven (a child returns an `INCOMPLETE:` signal and the orchestrator re-handles it). The raw
-`Task` tool stays disallowed for every agent — delegation goes through `delegate`, not `Task`.
+complex, one-way-door work itself. For well-scoped subtasks it can use the governed `delegate` tool
+to hand the task to the Balanced or Fast tier. The gate is universal: every child is spawned gated
+(`gated_write` only, `Task` disallowed), delegation is only one level deep, and escalation is
+parent-driven (a child returns `INCOMPLETE:` and the orchestrator re-handles it).
 
-Without `CAMERATA_LIVE_BUILD=1` the run is token-free/scripted and the gate enforcement is still
-real. With it set and `claude` connected, a real multi-tier `claude -p` fleet runs.
+**For multi-repo stories**, the lead can use the `fan_out` tool to dispatch **concurrent per-repo
+workers**, each write-isolated to its own repo directory. Workers assemble their outputs and the
+**integration gate** checks that the assembled outputs are consistent with the settled contract.
+Fan-out is depth-limited (workers cannot fan out or delegate further). The integration gate's live
+LLM check path is implemented but the wiring into the dev run orchestration path is **in progress
+(#105-followup)** — the contract precondition and the synchronous gate seam are live.
 
-**Bootstrap run — skip layer-2 checks (the chicken-and-egg escape hatch).** The development-run control
-carries a **default-OFF** "bootstrap run — skip layer-2 checks" toggle. Layer 2 is fail-closed: a repo
-with a manifest but no lint/test wired fails as "could-not-run," which is correct governance but creates
-a deadlock — the very run that would *install* the linters fails layer 2 because the tools aren't there
-yet. Enabling this toggle skips **only** the post-task layer-2 lint/test bounce for that one
-tool-installing run, so you can land the tooling, then turn it back off. **Layer 1 (deny-before-write)
-and the decisions gate still apply** — you never bypass the security gate. It's deliberate and visible,
-never silent or sticky.
+Without `CAMERATA_LIVE_BUILD=1` the run is token-free/scripted and gate enforcement is still real.
 
-#### Run liveness: stall warnings and the Stop button
+**Bootstrap run — skip layer-2 checks (the chicken-and-egg escape hatch).** The development-run
+control carries a **default-OFF** "bootstrap run — skip layer-2 checks" toggle. Layer 2 is
+fail-closed: a repo with a manifest but no lint/test wired fails as "could-not-run," which is
+correct governance but creates a deadlock — the very run that would install the linters fails layer
+2 because the tools aren't there yet. Enabling this toggle skips only the post-task layer-2
+lint/test bounce for that one tool-installing run. **Layer 1 (deny-before-write) and the decisions
+gate still apply.** It is deliberate and visible, never silent or sticky.
 
-Camerata watches for **lack of progress**, not elapsed time. A legitimately long build or agent step
-that keeps emitting output is never flagged. A process that goes silent is.
+**Per-repo Ship panel.** Below the run controls, a Ship panel shows one row per in-scope repo (set
+in Intake). Each row has its own push, PR, and comment controls. A **"Ship all repos →"** chain
+button runs push → open PR → comment across all in-scope repos in sequence. The per-repo breakdown
+reflects the repos that will be touched by the story's fan-out work.
 
-**Stop button — always available.** A **■ Stop** button appears in the run panel bar as long as the
-run is in a non-terminal state. You do not need to wait for a stall warning to stop a run; clicking
-Stop at any point ends the run and transitions it to **Cancelled**.
+**Done / archive.** A **"Mark Done (archive)"** button transitions the UoW to an archived state
+(read-only in the cockpit). The UoW is never deleted — reopening Development from the archived
+state is always available. Done UoWs remain visible in the left nav (with a done indicator) and in
+the history.
 
-**Stall warning.** If a dev run produces no progress for the project's configured **Watched** threshold
-(default 120 s), an amber banner appears above the live-events stream:
+**Run liveness: stall warnings and the Stop button.** Camerata watches for lack of progress, not
+elapsed time. A legitimately long build that keeps emitting output is never flagged; a process that
+goes silent is. A **■ Stop** button is always visible while a run is in progress (you do not have
+to wait for a stall). If a dev run produces no progress for the project's configured Watched
+threshold (default 120 s), an amber banner appears. For autonomous routines, a stall auto-cancels
+the run to **Failed** (with the stall reason as the diagnostic); for watched runs, you remain in
+control. See "Stall thresholds" in Project settings for the configurable values.
 
-> ⚠ No progress for Xm — possible stall
-
-The banner shows the idle duration and the last progress label. It is a warning, not an automatic
-kill — for an interactive dev run you remain in control. Dismiss the concern by clicking Stop, or
-wait to see if the agent resumes.
-
-**Failed vs. Cancelled.** These two terminal states mean different things:
-- **Cancelled** — you (or another operator action) explicitly stopped the run. Normal for "I changed
-  my mind" or "something looked wrong."
-- **Failed (with reason)** — the run stopped due to an error, including an automatic stall-cancel
-  for a routine/autonomous run where `StallPolicy` is `Cancel`. The failure reason (e.g. "Stall
-  timeout exceeded") is displayed in the run panel and recorded on the UoW history. For autonomous
-  routines, the recorded reason is the actionable diagnostic — it surfaces in the Routines view and
-  any configured escalation path.
-
-The stall threshold and policy are per project (see "Project settings" above); the Stop button
-behavior is identical regardless of threshold.
-
-#### Later stages (Development → Awaiting QA → Signed Off)
-
-Once a development run starts, the remaining stage transitions are engine-driven:
-
-- **Development → Awaiting QA** is set by the fleet when the run finishes.
-- **Signed Off** is the architect's explicit act after reviewing the run's diff + gate results.
+**Failed vs. Cancelled.** Failed (with reason) = the run stopped due to an error or stall. Cancelled =
+you explicitly stopped it. Both are terminal; only Failed carries a diagnostic reason.
 
 **Other controls on every UoW card:**
 
@@ -633,16 +671,79 @@ and as `camerata gate-probe` on the CLI.
 
 ---
 
+## 6a. L3 AI code review (opt-in per project)
+
+The **L3 agentic code reviewer** is an optional AI reviewer that runs **in parallel with Layer-2**
+after each dev-run iteration. It is the third enforcement stage in the canonical model:
+**L1** Security · **L2** Mechanical · **L3 AI code review** · **L4** Origin/CI.
+
+### Enabling it
+
+In the project-settings gear popup (§6), the **L3 AI code review** section has:
+- An **enable/disable toggle** — off by default (opt-in per project; a project without L3 configured
+  never runs the reviewer).
+- A **model selector** — empty = fall back to the project's Balanced tier model.
+
+The setting is per-project, not per-UoW. Enabling it applies to every subsequent dev run in that
+project.
+
+> **Note:** the project settings route for saving L3 config exists in the server (`set_l3_review`)
+> and is correctly consumed in the dev run path, but the gear popup UI control to expose the toggle
+> is **in progress** — it is not yet rendered in the gear popup in the current build.
+
+### What it does
+
+After the dev agent finishes each iteration and Layer-2 checks run, the L3 reviewer:
+
+1. Runs `git diff HEAD` in the agent's worktree.
+2. Sends the **story + selected rules + diff** to the configured model.
+3. Returns a PASS or BOUNCE verdict.
+
+A BOUNCE feeds the bounce reasons back to the dev agent on the next iteration — same
+bounce-and-revise mechanism as Layer-2. A PASS is recorded as a `layer-3` gate event in the run log.
+
+If the diff is empty (nothing changed), the L3 review is skipped (logged: "Layer-3 skipped: no diff
+to review").
+
+### Isolation: blind to other agents
+
+The reviewer sees **only** the story, the rules, and the diff — it is deliberately blind to the
+investigation notes, orchestrator transcripts, and developer reasoning. This isolation prevents
+rubber-stamping: the reviewer is spec-grounded and implementer-blind.
+
+### When to use it
+
+- **Cross-cutting rules that are hard to lint** — prose and structured rules that the agent should
+  follow but that Layer-2 cannot mechanically verify. The L3 reviewer can catch a rule violation
+  that regex/lint cannot.
+- **Spec conformance checking** — verifying that the diff actually implements what the story says,
+  not just that it compiles.
+- **High-stakes stories** — when the cost of a missed rule violation is high enough to justify
+  additional AI inference per iteration.
+
+The tradeoff: L3 adds one model call per dev iteration. At the Balanced tier this is modest; at the
+Strongest tier it is more expensive. Match the model to the risk.
+
+---
+
 ## 7. The rules that govern it
 
-Four enforcement points, all deterministic (binary pass/fail, no LLM judgement):
+Five enforcement points, of which four are fully deterministic (binary pass/fail, no LLM judgement)
+and one (L3) is AI-driven:
 
 | Point | Enforces on | Example |
 |---|---|---|
-| **Layer 1** (MCP tool gate) | one write's file content, before it executes | no hardcoded secret reaches disk |
-| **Layer 2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`, `bundle exec rubocop`/`rspec`, `./mvnw verify`/`./gradlew check`, `dotnet format`/`build`/`test`) |
-| **Integration gate** | the assembled tree (cross-agent) | API contract between two agents agrees |
+| **L1** (MCP tool gate) | one write's file content, before it executes | no hardcoded secret reaches disk |
+| **L2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`, `bundle exec rubocop`/`rspec`, `./mvnw verify`/`./gradlew check`, `dotnet format`/`build`/`test`) |
+| **L3** (AI code reviewer, opt-in) | diff + story + rules, per iteration | rule violation or spec non-conformance the agent missed (see §6a) |
+| **Integration gate** | the assembled per-repo outputs vs. the prose contract | API contract between repo A and repo B agrees; live check in progress (#105-followup) |
 | **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
+
+> **Layer numbering note:** the canonical stages are **L1** Security · **L2** Mechanical ·
+> **L3** AI code review · **L4** Origin/CI. Some older parts of the docs and the `layer3_only`
+> rule-corpus flag use "Layer 3" to mean CI (now **L4**) — the flag predates the L3 reviewer.
+> The flag is NOT being renamed in code; the canonical model in `ENFORCEMENT_MODEL.md` is the
+> reference.
 
 **Layer 2 is cross-language and polyglot — across all seven supported languages.** It is no longer
 Rust-only: for each worktree it runs the checks for every **supported** language present — **Rust,
@@ -848,7 +949,11 @@ Every rule in Camerata's corpus carries an `enforcement` field that answers one 
 
 The diagram above is the canonical **stage** model — L1 Security · L2 Mechanical · L3 AI code review · L4 Origin/CI — and how rules feed each layer (full write-up: [`ENFORCEMENT_MODEL.md`](ENFORCEMENT_MODEL.md)). The table just below is a **different, related axis**: the rule *enforcement modalities* (how objectively a rule can be checked), which determine *what kind of wiring* a rule needs.
 
-> **Numbering note:** this section (and §14, and the `layer3_only` flag) use "Layer 3" for **CI**, which is **L4** in the canonical stage model above; the AI code reviewer is the new **L3**. The two numberings are being reconciled.
+> **Numbering note:** this section (and §14, and the `layer3_only` rule flag) still use "Layer 3"
+> in some places to mean **CI**, which is **L4** in the canonical stage model above. The AI code
+> reviewer (§6a) is the actual **L3**. The `layer3_only` flag is a legacy name that predates the
+> L3 reviewer — it means "CI-only (L4)"; the flag is not renamed in code. See §7 for the canonical
+> enforcement table.
 
 ### The four-layer model
 
@@ -878,7 +983,9 @@ A few `mechanical` rules carry an **`opt_in_only`** flag: they are grounded agai
 they exist to generate a security-scan **CI story** for a DevOps engineer, not to constrain the agent's
 code, and they have **no default option** so selecting one forces a conscious tier choice. CodeQL also
 carries **`layer3_only`** — its whole-program database build is too heavy to run at the scan preview or
-in the dev loop, so it is enforced at CI / layer-3 only and never appears in the scan-time preview.
+in the dev loop, so it is CI-only (L4 in the canonical model) and never appears in the scan-time
+preview. Note: the `layer3_only` flag name is a legacy artefact that predates the L3 AI reviewer;
+it means "CI / L4 only", not "only at L3". See §7 for the canonical stage numbering.
 
 ### The objectivity spectrum
 
@@ -1145,17 +1252,19 @@ are orchestrated differently and belong to a different configuration axis.
 choosing AI review and/or deterministic scans → pick per-repo rules (opt-in rules are never
 pre-checked) → Add rules to repo(s): local branch+push → optionally audit + triage (check Test
 badge + Scan coverage section) + wire CI via two separate stories (mechanical and architectural)) →
-manage the ruleset in the Rules view → in Governed Development, pull work items (or author a new
-story from a blank UoW with AI), create a Unit of Work from one → Begin investigation (Intake,
-single-model run; may pause for structured clarifications) → Approve decisions (Investigating) →
-Run development governed (Decisions Approved, three-tier orchestrator-led run, brownfield in-place
-or greenfield scaffold) → use PR lifecycle buttons to push, open PR, pull CI status, and resolve
-feedback with a gated agent → review → sign off.**
+manage the ruleset in the Rules view (Re-emit rules to bring local clones up to date) → in
+Governed Development, pull work items (or author a new story from a blank UoW with AI), create a
+Unit of Work from one → 3-phase cockpit (Intake: scope repos + set context → Investigation: run
+investigation agent, approve decisions, settle prose contract for cross-boundary work → Development:
+run three-tier orchestrator-led build, use per-repo Ship panel, mark Done/archive) → use PR
+lifecycle buttons to push, open PR, pull CI status, and resolve feedback with a gated agent →
+sign off.**
 
 Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the push/PR and the AI
 audit + governed dev. Export/import a project (config only; UoWs stay local) to move it between
 machines; resolve local repo paths on the receiving side. Multiple UoWs can run concurrently, each
 in its own isolated git worktree. Wire custom checks via `.camerata/checks.toml` (the SSOT for
-both the dev loop and CI); pin exact tool versions to prevent drift. Watch the token usage meter in
-the nav for cumulative spend. Use the chat bubble to ask data-driven questions about your active
-project — it retains context across messages.
+both the dev loop and CI); pin exact tool versions to prevent drift. Opt in to the L3 AI code
+reviewer in the project settings gear popup for spec-grounded post-iteration diff review. Watch the
+token usage meter in the nav for cumulative spend. Use the chat bubble to ask data-driven questions
+about your active project — it retains context across messages.

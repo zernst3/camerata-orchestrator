@@ -168,8 +168,15 @@ the wiring cost, and why the layers drift) is [`ENFORCEMENT_MODEL.md`](ENFORCEME
 
 ![Camerata enforcement model](enforcement-model.svg)
 
-> **Numbering note:** sections below predate the L3 AI reviewer and use "Layer 3" for **CI**
-> (now **L4**). Reconciliation to the canonical numbering is pending.
+> **Numbering note — layer naming collision.** Camerata's canonical four-stage model is
+> **L1** Security (MCP gate) · **L2** Mechanical (post-task check runner) · **L3** AI code
+> review (the agentic reviewer) · **L4** Origin/CI (the repo's own pipeline). Some sections
+> below and the `layer3_only` rule-metadata flag use "Layer 3" to mean **CI**, because they
+> were written before the L3 AI reviewer existed. **The `layer3_only` flag means L4 (CI) —
+> the flag name is a legacy artefact; it predates the L3 reviewer and has not been renamed
+> in code.** Never rename it without a corpus-wide migration. The canonical ENFORCEMENT_MODEL.md
+> is the authoritative stage reference; this file and USER_GUIDE.md follow that numbering and
+> note divergence inline where it occurs.
 
 ## 2. Layer-1 MCP gate
 
@@ -2199,7 +2206,314 @@ See `docs/decisions/2026-06-22_per_project_step_models.md`.
 
 ---
 
-## 11. Cockpit UI
+## 10a. 3-phase governed-dev cockpit and UoW state endpoints
+
+### The 3-phase cockpit shell
+
+The governed-development cockpit is structured as **three free-navigable phases** — Intake,
+Investigation & Refinement, and Development — replacing the old 6-stage strict-sequence lifecycle
+strip. Navigation between phases is free (no forced advance); status is **informational**, not
+blocking (the stages still exist in `UowStage` for the server's gate logic, but the UI no longer
+locks the user to the current stage).
+
+The phases are backed by `PhaseTab` (`crates/ui/src/cockpit/uow.rs`):
+
+```rust
+enum PhaseTab { Intake, Investigation, Development }
+```
+
+`stage_to_phase(stage: UowStage) -> PhaseTab` maps the server's `UowStage` to the three UI tabs
+for migration and initialisation. Each tab has a **Finish / Reopen** control that persists the
+finished flag to the server (`POST /api/uow/:id/meta`) and is visible as an informational tick.
+
+### Per-story repo/branch scoping (Intake)
+
+Intake is where the architect sets the **scope** of the story: which repos are in play and which
+branch each targets. This is the `R6` per-repo scoping mechanism:
+
+- `POST /api/uow/:story_id/intake/context { "context": "..." }` — set a free-text context
+  note for the investigation agent. Returns the updated `UnitOfWork`.
+- `POST /api/uow/:story_id/intake/repos { "repos": [...] }` — replace the per-story repo/branch
+  scope with a `Vec<RepoScope>`. Out-of-scope repos are simply absent from the list.
+
+The scope is surfaced in the Intake phase panel so the architect can confirm (or add/remove) repos
+before advancing to Investigation.
+
+### Prose contract settling (Investigation & Refinement)
+
+The Investigation phase hosts the investigation agent chat transcript and the **prose interface
+contract** (R3.g). Cross-repo or cross-boundary work requires a contract to be written and settled
+here before development starts.
+
+- `POST /api/uow/:story_id/investigation/chat { "role": "user"|"agent", "text": "..." }` —
+  append one turn to the investigation/refinement agent chat transcript.
+- `POST /api/uow/:story_id/contract { "contract": "...", "crosses_boundary": bool }` — set the
+  prose interface contract and mark whether the work crosses a contract boundary. When
+  `crosses_boundary = true` the server enforces the **contract precondition** (see below).
+
+### Contract precondition (no development for cross-boundary work without a contract)
+
+`start_governed_run` in `crates/server/src/lib.rs` enforces R3.g before spawning any dev agent:
+
+```rust
+if uow.investigation.crosses_boundary && uow.investigation.contract.trim().is_empty() {
+    // 400: block development until the contract is filled in
+}
+```
+
+A story marked `crosses_boundary = true` with an empty contract returns a 400 before any agent
+spawns. The architect must write the interface contract in the Investigation phase first. An
+empty-whitespace-only contract is also rejected (the trimmed check catches this). This guard is
+independent of the `UowStage` gate — it applies even if the stage machine is at `DecisionsApproved`.
+
+### Per-repo Ship panel (Development)
+
+The Development phase exposes a **per-repo Ship panel** derived from the in-scope repos set during
+Intake. Each repo in scope gets its own ship row (push → open PR). A **"Ship all repos →"** chain
+button runs the sequence across every in-scope repo. The per-repo rows and the chain button both
+live in the Development phase component in `crates/ui/src/cockpit/uow.rs`.
+
+### Done / archive
+
+The Development phase has a **"Mark Done (archive)"** button that transitions the UoW to an
+archived/done state via `POST /api/uow/:story_id/meta { "done": true }`. Done UoWs are read-only
+in the cockpit; the UoW is never deleted (deletion is a separate explicit act). Reopening
+Development from the archived state is always available.
+
+### `/api/uow/:id/{intake,investigation,development,contract,meta}` — phase state endpoints
+
+Summary of all UoW phase-state endpoints (all return the updated `UnitOfWork`):
+
+| Endpoint | Body | Purpose |
+|---|---|---|
+| `POST /api/uow/:id/intake/context` | `{ context }` | Set the Intake free-text context for the investigation agent |
+| `POST /api/uow/:id/intake/repos` | `{ repos: Vec<RepoScope> }` | Replace the in-scope repo/branch set (R6) |
+| `POST /api/uow/:id/investigation/chat` | `{ role, text }` | Append a turn to the investigation/refinement chat transcript |
+| `POST /api/uow/:id/contract` | `{ contract, crosses_boundary }` | Set the prose interface contract + boundary flag (R3.g) |
+| `POST /api/uow/:id/development/chat` | `{ role, text }` | Append a turn to the development agent chat transcript |
+| `POST /api/uow/:id/meta` | `{ viewed_phase?, intake_finished?, investigation_finished?, development_finished?, done? }` | Patch the 3-phase cockpit meta (Finish/Reopen flags + done/archive). Each field is optional; absent fields are left unchanged |
+
+All are Axum handlers in `crates/server/src/lib.rs`; the state mutations are on `UowStore`
+(`crates/server/src/uow.rs`). The `PhaseTab::from_wire` converter accepts `"intake"`,
+`"investigation"`, `"development"` as wire strings; an unknown value is a no-op, never a 400.
+
+---
+
+## 10b. `fan_out` MCP tool — concurrent per-repo workers
+
+### What it is
+
+`fan_out` (`crates/gateway/src/fan_out.rs`) is a second orchestrator-only MCP tool, alongside
+`delegate`. Where `delegate` spawns one child at a time, `fan_out` spawns **all workers
+concurrently** via `tokio::task::JoinSet` and returns when ALL workers complete, then assembles
+their outputs keyed by repo. It is the entry point for **multi-repo Units of Work**.
+
+`fan_out` is exposed on the gateway only when `CAMERATA_DELEGATE_ENABLED=1` is set (the same
+condition that enables `delegate`). Non-orchestrator gateways refuse both tools at the handler level.
+
+### Input: `FanOutEntry` list
+
+```rust
+pub struct FanOutEntry {
+    pub repo: String,    // the repo this worker writes to (the write jail)
+    pub domain: String,  // label for observability ("backend", "frontend", "migration")
+    pub subtask: String, // the specific work instruction for this worker
+}
+```
+
+### Write isolation
+
+Each worker's worktree jail is narrowed to its own repo subdirectory (`worker_jail`):
+`config.worktree_root.join(&entry.repo)` for relative repo values, or the absolute path
+directly. Worker A in `backend/` cannot touch `frontend/` — different jail. Camerata is the
+**sole committer**: workers produce output but do not commit; the orchestrator reads
+`assemble_by_repo` and drives commits.
+
+### Validation (fail-fast, before any spawn)
+
+Three pre-spawn checks prevent partial execution:
+
+1. **Depth guard** — `config.may_delegate()` (depth < max_depth). Fan-out children sit at depth 1
+   and cannot fan out or delegate further (structural: each child's gateway lacks
+   `CAMERATA_DELEGATE_ENABLED`; explicit: the depth counter is incremented per child).
+2. **Non-empty entries** — an empty `entries` list is a caller bug, not a valid fan-out.
+3. **No duplicate repos** — two entries sharing the same `repo` violates write isolation.
+   `DuplicateRepo(repo)` is returned on the first collision, before any spawn.
+
+### Assembly (`assemble_by_repo`)
+
+`assemble_by_repo(results: &[WorkerResult]) -> BTreeMap<String, &WorkerResult>` collects all
+worker results keyed by repo. Because `DuplicateRepo` is rejected at validation time, the map is
+always conflict-free. This is the input to the **integration gate** (§10c).
+
+### Workers use the "balanced" tier
+
+Fan-out workers default to the `"balanced"` tier. The rationale: the orchestrator on `"strongest"`
+dispatched them; each worker is scoped to one repo partition and does not need the full strongest model.
+
+### `fan_out` vs `delegate`
+
+| | `delegate` | `fan_out` |
+|---|---|---|
+| Workers | One at a time | All concurrently |
+| Scope | One subtask | One subtask per repo partition |
+| Jail | Orchestrator's full worktree | Per-entry subdirectory |
+| Use case | Simple sub-task hand-off | Cross-repo multi-partition work |
+
+---
+
+## 10c. Integration gate (`integration_gate.rs`)
+
+### What it is
+
+After fan_out assembly, the **integration gate** (`crates/gateway/src/integration_gate.rs`) verifies
+that the assembled per-repo outputs are consistent with the prose cross-repo contract from the UoW
+investigation (R3.e). It is the cross-boundary enforcement point that neither per-repo Layer-2
+checks nor per-repo Layer-1 gate can cover — they see only one side of a contract boundary.
+
+### Check flow
+
+`check_integration_gate(input: &IntegrationGateInput)` is the entry point:
+
+1. `contract = None` → `NoContractRequired` (single-repo or no cross-boundary work).
+2. `contract = Some("")` (empty/whitespace-only) → `BounceToOrchestrator` — a contract that exists
+   but is empty must be filled in before development (R3.g).
+3. `contract = Some(prose)` → **TODO(#105-followup)**: a live agent check is planned. For now the
+   function returns `Pending { contract_prose }` so callers can decide policy (CI: pass-through;
+   production: block). The live path is implemented in
+   `review_agent::check_integration_gate_live` (see §10d) and is wired to this seam by the caller.
+
+**Status note:** the synchronous `check_integration_gate` is the CI/no-model path. The live agent
+check (`check_integration_gate_live`) is implemented and tested in `crates/server/src/review_agent.rs`
+but the wiring from the fan_out orchestration path into the dev run is marked `TODO(#105-followup)`.
+The gate types, the reviewer logic, and the tests are fully built; the caller integration is in progress.
+
+### `IntegrationGateResult`
+
+```rust
+pub enum IntegrationGateResult {
+    NoContractRequired,
+    Passed,
+    BounceToOrchestrator { reason: String },
+    Pending { contract_prose: String },  // TODO(#105-followup): remove once live check is wired
+}
+```
+
+---
+
+## 10d. L3 agentic code reviewer
+
+### What it is
+
+The **L3 reviewer** (`crates/server/src/review_agent.rs`, `run_l3_review`) is an **opt-in,
+per-project, model-selectable** AI code reviewer that runs **parallel to Layer-2** after a dev
+run iteration. It is the third enforcement stage in the canonical model (L1 Security · L2
+Mechanical · **L3 AI code review** · L4 Origin/CI).
+
+### Isolation: blind to other agents
+
+The reviewer sees ONLY:
+
+1. The story (requirements, contract, integrations, acceptance criteria).
+2. The project's selected rules as prose (the SSOT — from `rules_prose` in `L3ReviewBundle`).
+3. The diff (`git diff HEAD` from the worktree after the dev agent finishes).
+
+It is **explicitly blind** to the investigation notes, orchestrator transcripts, and developer
+reasoning. This isolation is enforced at the prompt level (`build_l3_prompt`) and is the core
+property that prevents rubber-stamping — the reviewer is spec-grounded and implementer-blind.
+
+### Inputs and config
+
+`L3ReviewBundle` is assembled in `start_governed_run` (`crates/server/src/lib.rs`) when the
+active project has `l3_review.enabled = true`:
+
+```rust
+pub struct L3ReviewBundle {
+    pub story_text: String,    // title + description + contract
+    pub rules_prose: String,   // the project's rules for this repo as prose
+    pub model: String,         // from project.l3_model() — the configured or fallback model
+    pub llm: Arc<dyn Completer>,
+}
+```
+
+`L3ReviewConfig` (`crates/server/src/project.rs`) is stored on the `Project` struct:
+
+```rust
+pub struct L3ReviewConfig {
+    pub enabled: bool,   // default: false (opt-in per project)
+    pub model: String,   // empty = fall back to project.tier_map.balanced
+}
+```
+
+`project.l3_model()` returns `l3_review.model` when non-empty; falls back to `tier_map.balanced`.
+
+**API for setting L3 config:** `ProjectStore::set_l3_review` exists in `project.rs`. A dedicated
+HTTP route for the settings UI is **not yet wired** — the config is stored and read correctly, but
+the project-settings gear popup in the UI does not yet expose an L3 review toggle (in progress).
+The server already checks `proj.l3_review.enabled` and resolves `proj.l3_model()` in the dev run
+path; adding a route and UI control is a follow-up.
+
+### How it hooks relative to Layer-2
+
+In `execute_dev_implement_run` (`crates/server/src/dev_implement_run.rs`):
+
+1. The dev agent runs (Layer-1 gated — same as always).
+2. Layer-2 post-task checks run (`CheckRunner`).
+3. **If L3 bundle is present**, `run_l3_if_enabled` runs: calls `worktree_diff`, feeds
+   story + rules + diff to `run_l3_review`, and emits a `layer-3` gate event (info/pass/bounce).
+4. If L3 bounces, the bounce reasons are fed back to the agent on the next iteration (same
+   bounce-and-revise mechanism as Layer-2). A `layer-3 bounce` event is recorded in the run log.
+
+L3 runs **per dev iteration**, not just once at the end. An empty diff skips the L3 call (logged
+as "Layer-3 skipped: no diff to review").
+
+### `ReviewVerdict`
+
+```rust
+pub enum ReviewVerdict {
+    Pass,
+    Bounce { reasons: Vec<String> },
+}
+```
+
+`parse_l3_verdict` parses the LLM's text response: a `PASS` prefix → `Pass`; any `BOUNCE` prefix
+followed by bullet-list lines → `Bounce { reasons }`. Malformed / unrecognised output → `Bounce`
+with empty reasons (safe default — never silently approves).
+
+---
+
+## 10e. `emit-local` — regenerate governance files on local disk
+
+### The problem this solves (issue #106)
+
+Before `emit-local` was added, `arm_files_for_repo` (the apply step) only pushed governance files
+to GitHub (`camerata/onboard-governance` branch). After onboarding, if a user edited rules in the
+Rules view, there was no way to re-emit `AGENTS.md` + `CONVENTIONS.md` locally — the next push
+would write the old files. The **Regenerate CI workflow** button also only wrote to GitHub.
+
+`POST /api/projects/:id/emit-local` (`emit_project_local` in `crates/server/src/lib.rs`)
+regenerates `AGENTS.md` and `CONVENTIONS.md` (and the check manifest `.camerata/checks.toml` and
+CI workflow `.github/workflows/camerata-gates.yml`) **directly into the repo's local clone**,
+with no commit and no PR.
+
+### What it does
+
+1. Loads the active project's ruleset and resolves the arm rules.
+2. Filters to `scope = "repo-local"` rules only (cross-repo and process rules are project-level).
+3. Calls `arm_files_for_repo` for each in-scope repo — the same function the Apply step calls.
+4. Writes the generated files into each repo's local clone directory (`resolve_repo_dir`).
+5. Returns `{ "ok": true/false, "message": "..." }`.
+
+No baseline is written on re-emit (it is a ruleset refresh, not an initial onboarding). Re-emit
+requires at least one repo to have a resolved local path — it returns `ok: false` with a
+descriptive message when no local workspace is configured.
+
+### UI surface
+
+The **"Emit ruleset to repos (re-emit)"** button in the **Rules view** (`crates/ui/src/cockpit/rules.rs`)
+calls `POST /api/projects/:id/emit-local`. The label switches to "Emitting…" while in flight.
+
+---
 
 ### Process model
 
@@ -2363,6 +2677,37 @@ All CSS is one `pub const GLOBAL_CSS: &str` in `crates/ui/src/style.rs`, injecte
 as `style { dangerous_inner_html: GLOBAL_CSS }` in `App`. The markdown CSS class
 is `.chat-turn-text.md` and styles rendered HTML from `pulldown-cmark` (tables,
 code, headings, lists).
+
+### Theme: "Bletchley industrial amber"
+
+`crates/ui/src/style.rs` line 4 declares the theme name and palette. The palette is dark
+near-black ground with warm amber accents:
+
+- `--accent: #ca8a04` (amber gold) — the primary interactive colour.
+- `--accent-ink: #b07803` — darker amber for text and hover states.
+- `--accent-wash: rgba(202,138,4, 0.12)` — faint amber fill for badges and hover backgrounds.
+
+The chorale table CSS variables are mapped onto the Bletchley amber scheme so the audit findings
+table, proposed-rules table, and the work-item table share the same warm palette.
+
+### `BombeBg` — background Bombe machine animation
+
+`crates/ui/src/bombe_bg.rs` contains the `BombeBg` component — a full-viewport CSS-animated
+homage to the Bletchley Park Bombe codebreaking machine. It renders as a fixed-position
+background layer (`pointer-events: none`) so it never interferes with interactions.
+
+The animation is driven by a **global ref-counted loading state** (`crates/ui/src/loading.rs`):
+
+- `provide_loading_context()` — call once at the root to install the `Signal<u32>` into the
+  Dioxus context. Called in `App` (`crates/ui/src/main.rs`) before `BombeBg` mounts.
+- `LoadingGuard::new()` — a RAII guard that increments the count on creation and decrements on
+  drop. Any async operation that should drive the Bombe holds one while in-flight.
+- `is_loading() -> bool` — true when count > 0.
+
+`BombeBg` reads `is_loading()` and toggles the `.bombe-running` CSS class on the machine
+element. When running, CSS animations bring the Bombe "to life" at higher opacity; when idle,
+the machine is dim (opacity 0.38 vs 0.72 running). The net effect: the background subtly
+animates whenever ANY async operation is in flight across the entire cockpit.
 
 ---
 

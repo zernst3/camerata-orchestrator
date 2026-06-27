@@ -200,6 +200,13 @@ pub const GATED_WRITE_TOOL: &str = "mcp__camerata__gated_write";
 /// the orchestrator role. Delegate children NEVER get it (depth-1 guarantee).
 pub const DELEGATE_TOOL: &str = "mcp__camerata__delegate";
 
+/// The fully-qualified MCP tool name for fan-out (concurrent multi-repo dispatch).
+/// Same `camerata` server key, the `fan_out` tool. It is registered on the gateway
+/// ONLY when the gateway boots in orchestrator mode; it is added to `--allowedTools`
+/// ONLY for the orchestrator role. Fan-out workers are depth-1 children with
+/// `gated_write` ONLY — they NEVER get `fan_out` or `delegate`.
+pub const FAN_OUT_TOOL: &str = "mcp__camerata__fan_out";
+
 /// The fully-qualified MCP tool name for raising a structured clarifying question
 /// (Phase 3b). Same `camerata` server key, the `ask_clarification` tool. It is a
 /// READ-CLASS tool: it records a question to the per-session clarify-request sink and
@@ -228,12 +235,13 @@ pub fn allowed_tools_for_role(role: &Role) -> Vec<String> {
 /// mode**.
 ///
 /// When `orchestrator` is `true`, the governed `delegate` tool
-/// ([`DELEGATE_TOOL`]) is added on top of the read-only built-ins and the
-/// governed write tool. This is the ONLY place `delegate` is granted, and it is
-/// granted ONLY to the lead/orchestrator agent. Combined with the gateway only
-/// *registering* the tool in orchestrator mode, this gives the depth-1 guarantee:
-/// a spawned delegate child uses `orchestrator = false`, so it can never
-/// re-delegate.
+/// ([`DELEGATE_TOOL`]) and the `fan_out` tool ([`FAN_OUT_TOOL`]) are added on
+/// top of the read-only built-ins and the governed write tool. This is the ONLY
+/// place `delegate` and `fan_out` are granted, and they are granted ONLY to the
+/// lead/orchestrator agent. Combined with the gateway only *registering* those
+/// tools in orchestrator mode, this gives the depth-1 guarantee: a spawned
+/// worker child uses `orchestrator = false`, so it can never re-delegate or
+/// fan-out further.
 pub fn allowed_tools_for_role_with_mode(role: &Role, orchestrator: bool) -> Vec<String> {
     // The role's identity is load-bearing for provenance even though the tool
     // surface is currently uniform; reference it so the mapping is obviously
@@ -243,6 +251,7 @@ pub fn allowed_tools_for_role_with_mode(role: &Role, orchestrator: bool) -> Vec<
     tools.push(GATED_WRITE_TOOL.to_string());
     if orchestrator {
         tools.push(DELEGATE_TOOL.to_string());
+        tools.push(FAN_OUT_TOOL.to_string());
     }
     tools
 }
@@ -529,6 +538,32 @@ mod tests {
         // Belt: the explicit-mode false path agrees.
         let tools_false = allowed_tools_for_role_with_mode(&role(), false);
         assert!(!tools_false.iter().any(|t| t == DELEGATE_TOOL));
+    }
+
+    #[test]
+    fn fan_out_tool_not_in_non_orchestrator_tools() {
+        // fan_out must NEVER appear in the non-orchestrator tool surface.
+        // This is the depth-1 / no-recursive-fan-out guarantee.
+        let tools = allowed_tools_for_role(&role());
+        assert!(
+            !tools.iter().any(|t| t == FAN_OUT_TOOL),
+            "fan_out must never be in a non-orchestrator agent's allowlist"
+        );
+        let tools_false = allowed_tools_for_role_with_mode(&role(), false);
+        assert!(!tools_false.iter().any(|t| t == FAN_OUT_TOOL));
+    }
+
+    #[test]
+    fn fan_out_tool_in_orchestrator_tools() {
+        // fan_out MUST be present in orchestrator mode alongside delegate.
+        let tools = allowed_tools_for_role_with_mode(&role(), true);
+        assert!(
+            tools.iter().any(|t| t == FAN_OUT_TOOL),
+            "orchestrator must get the fan_out tool"
+        );
+        // Orchestrator still gets delegate and gated_write too.
+        assert!(tools.iter().any(|t| t == DELEGATE_TOOL));
+        assert!(tools.iter().any(|t| t == GATED_WRITE_TOOL));
     }
 
     #[test]

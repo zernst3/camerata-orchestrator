@@ -197,6 +197,155 @@ pub struct AuthoringState {
     pub draft_body: String,
 }
 
+/// One turn in a per-phase agent chat transcript (investigation or development).
+/// `role` is `"user"` or `"agent"`; `text` is the message body. Persisted on the UoW
+/// so the back-and-forth refinement session survives sessions (3-phase doc §7).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct ChatTurn {
+    /// `"user"` (the architect) or `"agent"` (the gated working agent).
+    pub role: String,
+    /// The message body.
+    pub text: String,
+}
+
+/// The branch mode for one in-scope repo (R6): either work off an EXISTING branch in
+/// that repo, or create a NEW UoW-specific branch from a chosen base. Both are
+/// first-class options (3-phase doc §3, fleet doc R6).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum BranchMode {
+    /// Work off an existing branch in this repo.
+    Existing {
+        /// The existing branch name to work off.
+        #[serde(default)]
+        branch_name: String,
+    },
+    /// Create a new UoW-specific branch from a chosen base.
+    NewFromBase {
+        /// The base branch to create the new branch from (e.g. `"main"`).
+        #[serde(default)]
+        base: String,
+        /// The new branch name to create. May be empty when the fleet derives it.
+        #[serde(default)]
+        new_name: String,
+    },
+}
+
+impl Default for BranchMode {
+    fn default() -> Self {
+        Self::NewFromBase {
+            base: String::new(),
+            new_name: String::new(),
+        }
+    }
+}
+
+/// One in-scope repo for a story, with its branch mode (R6). Out-of-scope repos are not
+/// mounted into the agents' read grounding — this set is the token-cost / correctness
+/// control the orchestrator's fan-out is bounded to (fleet doc R6).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct RepoScope {
+    /// `OWNER/REPO` for this in-scope repo.
+    pub repo: String,
+    /// The branch mode for this repo: existing branch vs. new-from-base.
+    #[serde(default)]
+    pub branch: BranchMode,
+}
+
+/// The Intake-phase state for a UoW (3-phase doc §3 / §7). Free-text context for the
+/// next agent and the per-story repo/branch scope (R6). All fields default so a legacy
+/// `uow.json` written before this field existed deserializes with an empty intake state.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct IntakeState {
+    /// Free-text context for the investigation agent — extra context the story doesn't capture.
+    #[serde(default)]
+    pub context: String,
+    /// The in-scope repos for this story, each with its branch mode (R6). Empty until the
+    /// architect selects repos in the Intake scoping UI.
+    #[serde(default)]
+    pub repos: Vec<RepoScope>,
+}
+
+/// The Investigation & Refinement-phase state for a UoW (3-phase doc §4 / §7). Holds the
+/// free-text refinement chat transcript and the prose interface contract (R3.g). All
+/// fields default for back-compat.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct InvestigationState {
+    /// The investigation/refinement agent chat transcript (user + agent turns), in order.
+    #[serde(default)]
+    pub chat: Vec<ChatTurn>,
+    /// The prose interface contract (R3.g). Free-form prose written into the story; the
+    /// cross-repo integration gate reads and checks the assembled code against it. Empty
+    /// when no contract has been settled.
+    #[serde(default)]
+    pub contract: String,
+    /// `true` when the architect (or orchestrator) has determined the work crosses a
+    /// contract boundary, so a contract is REQUIRED before development (R3.g / §4.6).
+    #[serde(default)]
+    pub crosses_boundary: bool,
+}
+
+/// The Development-phase state for a UoW (3-phase doc §5 / §7). Holds the dev-agent chat
+/// transcript (clarification back-and-forth, bug-fix chat). Dev-run output + layer-2
+/// results already live in `history` / `gate_provenance`. All fields default for back-compat.
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct DevelopmentState {
+    /// The development agent chat transcript (user + agent turns), in order.
+    #[serde(default)]
+    pub chat: Vec<ChatTurn>,
+}
+
+/// Which of the three cockpit phases the user last selected to view. Navigation is FREE —
+/// this is informational view state, never drives control flow (3-phase doc §2 / §7).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseTab {
+    /// Intake phase.
+    #[default]
+    Intake,
+    /// Investigation & Refinement phase.
+    Investigation,
+    /// Development phase.
+    Development,
+}
+
+impl PhaseTab {
+    /// Parse from the wire string (`"intake"`, `"investigation"`, `"development"`).
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "intake" => Some(Self::Intake),
+            "investigation" => Some(Self::Investigation),
+            "development" => Some(Self::Development),
+            _ => None,
+        }
+    }
+}
+
+/// Per-UoW metadata for the 3-phase cockpit shell (3-phase doc §7 `meta`). The viewed
+/// phase, the per-phase finished flags, and the done/archived flag. All fields default
+/// so a legacy `uow.json` loads with an empty meta (back-compat). This is the durable
+/// home for the soft Finish/Reopen structure the architect uses to separate "what I'm
+/// doing now" from "what I've settled" (§2).
+#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct UowMeta {
+    /// Which phase the architect last selected to view.
+    #[serde(default)]
+    pub viewed_phase: PhaseTab,
+    /// `true` when Intake has been Finished (greyed read-only until Reopened).
+    #[serde(default)]
+    pub intake_finished: bool,
+    /// `true` when Investigation & Refinement has been Finished.
+    #[serde(default)]
+    pub investigation_finished: bool,
+    /// `true` when Development has been Finished.
+    #[serde(default)]
+    pub development_finished: bool,
+    /// `true` when the whole UoW is Done (read-only + archived). Never deletes the UoW —
+    /// deletion is a separate explicit act (§5.8).
+    #[serde(default)]
+    pub done: bool,
+}
+
 /// The Unit of Work for one story. Keyed by `story_id`.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct UnitOfWork {
@@ -303,6 +452,23 @@ pub struct UnitOfWork {
     /// for legacy `uow.json` records written before this field existed (back-compat).
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The Intake-phase state: free-text context for the investigation agent + the
+    /// per-story repo/branch scope (R6). Defaults to an empty intake state so a legacy
+    /// `uow.json` loads unchanged (3-phase doc §3 / §7).
+    #[serde(default)]
+    pub intake: IntakeState,
+    /// The Investigation & Refinement-phase state: the refinement chat transcript + the
+    /// prose interface contract (R3.g). Defaults to empty for back-compat (§4 / §7).
+    #[serde(default)]
+    pub investigation: InvestigationState,
+    /// The Development-phase state: the dev-agent chat transcript (clarification + bug-fix
+    /// back-and-forth). Defaults to empty for back-compat (§5 / §7).
+    #[serde(default)]
+    pub development: DevelopmentState,
+    /// The 3-phase cockpit shell metadata: viewed phase, per-phase finished flags,
+    /// done/archived flag. Defaults to empty for back-compat (§2 / §7).
+    #[serde(default)]
+    pub meta: UowMeta,
     /// RFC 3339 timestamp of the last mutation. Stamped by every mutator.
     #[serde(default)]
     pub updated: String,
@@ -968,6 +1134,177 @@ impl UowStore {
         uow.updated = Self::now_rfc3339();
         drop(map);
         self.flush();
+    }
+
+    // ── 3-phase cockpit state (intake / investigation / development / meta) ──────
+
+    /// Set the Intake free-text context for the investigation agent (3-phase doc §3).
+    /// Creates the UoW if needed. Returns the updated UoW. Persists.
+    pub fn set_intake_context(&self, story_id: &str, context: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.intake.context = context.to_string();
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Replace the per-story repo/branch scope (R6). Out-of-scope repos are dropped from
+    /// the in-scope set entirely (the absence of a repo IS its out-of-scope state). Creates
+    /// the UoW if needed. Returns the updated UoW. Persists.
+    pub fn set_intake_repos(&self, story_id: &str, repos: Vec<RepoScope>) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.intake.repos = repos;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Append one turn to the investigation/refinement agent chat transcript (3-phase
+    /// doc §4). `role` is `"user"` or `"agent"`. Creates the UoW if needed. Returns the
+    /// updated UoW. Persists.
+    pub fn append_investigation_chat(
+        &self,
+        story_id: &str,
+        role: &str,
+        text: &str,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.investigation.chat.push(ChatTurn {
+                role: role.to_string(),
+                text: text.to_string(),
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Set the prose interface contract + the `crosses_boundary` flag (R3.g / §4.6).
+    /// Creates the UoW if needed. Returns the updated UoW. Persists.
+    pub fn set_contract(
+        &self,
+        story_id: &str,
+        contract: &str,
+        crosses_boundary: bool,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.investigation.contract = contract.to_string();
+            uow.investigation.crosses_boundary = crosses_boundary;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Append one turn to the development agent chat transcript (3-phase doc §5). `role`
+    /// is `"user"` or `"agent"`. Creates the UoW if needed. Returns the updated UoW. Persists.
+    pub fn append_development_chat(
+        &self,
+        story_id: &str,
+        role: &str,
+        text: &str,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.development.chat.push(ChatTurn {
+                role: role.to_string(),
+                text: text.to_string(),
+            });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Update the 3-phase cockpit meta (viewed phase + per-phase finished flags +
+    /// done/archived). Each argument is `Option`: `None` leaves that field unchanged so a
+    /// single endpoint can patch any subset (3-phase doc §2 / §7). Creates the UoW if
+    /// needed. Returns the updated UoW. Persists.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_meta(
+        &self,
+        story_id: &str,
+        viewed_phase: Option<PhaseTab>,
+        intake_finished: Option<bool>,
+        investigation_finished: Option<bool>,
+        development_finished: Option<bool>,
+        done: Option<bool>,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            if let Some(p) = viewed_phase {
+                uow.meta.viewed_phase = p;
+            }
+            if let Some(b) = intake_finished {
+                uow.meta.intake_finished = b;
+            }
+            if let Some(b) = investigation_finished {
+                uow.meta.investigation_finished = b;
+            }
+            if let Some(b) = development_finished {
+                uow.meta.development_finished = b;
+            }
+            if let Some(b) = done {
+                uow.meta.done = b;
+            }
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
     }
 
     /// Record an architect's sign-off on a story's governed run (issue #21). Sets the
@@ -2811,5 +3148,125 @@ mod concurrency_regression_tests {
         let back: UnitOfWork = serde_json::from_str(&s).unwrap();
         assert_eq!(back.authoring, uow.authoring);
         assert_eq!(back.work_item, uow.work_item);
+    }
+
+    // ── 3-phase cockpit state (#105) ────────────────────────────────────────────
+
+    #[test]
+    fn three_phase_fields_deserialize_back_compat() {
+        // A legacy uow.json (written before the intake/investigation/development/meta
+        // fields existed) deserializes with those fields defaulted to empty.
+        let legacy = r#"{"story_id":"me/api#1","dev_status":"new"}"#;
+        let uow: UnitOfWork = serde_json::from_str(legacy).expect("legacy uow deserializes");
+        assert_eq!(uow.intake, IntakeState::default());
+        assert_eq!(uow.investigation, InvestigationState::default());
+        assert_eq!(uow.development, DevelopmentState::default());
+        assert_eq!(uow.meta, UowMeta::default());
+    }
+
+    #[test]
+    fn set_intake_context_and_repos_persist() {
+        let store = UowStore::new();
+        let uow = store.set_intake_context("S-1", "extra context");
+        assert_eq!(uow.intake.context, "extra context");
+
+        let repos = vec![
+            RepoScope {
+                repo: "me/fe".into(),
+                branch: BranchMode::NewFromBase {
+                    base: "main".into(),
+                    new_name: String::new(),
+                },
+            },
+            RepoScope {
+                repo: "me/be".into(),
+                branch: BranchMode::Existing {
+                    branch_name: "feature/x".into(),
+                },
+            },
+        ];
+        let uow = store.set_intake_repos("S-1", repos.clone());
+        assert_eq!(uow.intake.repos, repos);
+        // The context is untouched by the repo write.
+        assert_eq!(uow.intake.context, "extra context");
+    }
+
+    #[test]
+    fn branch_mode_serializes_tagged() {
+        let existing = serde_json::to_value(BranchMode::Existing {
+            branch_name: "b".into(),
+        })
+        .unwrap();
+        assert_eq!(existing["mode"], "existing");
+        assert_eq!(existing["branch_name"], "b");
+
+        let new = serde_json::to_value(BranchMode::NewFromBase {
+            base: "main".into(),
+            new_name: "n".into(),
+        })
+        .unwrap();
+        assert_eq!(new["mode"], "new_from_base");
+        assert_eq!(new["base"], "main");
+        assert_eq!(new["new_name"], "n");
+    }
+
+    #[test]
+    fn append_phase_chats_accumulate() {
+        let store = UowStore::new();
+        store.append_investigation_chat("S-2", "user", "hi");
+        let uow = store.append_investigation_chat("S-2", "agent", "hello");
+        assert_eq!(uow.investigation.chat.len(), 2);
+        assert_eq!(uow.investigation.chat[0].role, "user");
+        assert_eq!(uow.investigation.chat[1].text, "hello");
+
+        store.append_development_chat("S-2", "user", "bug");
+        let uow = store.get_or_create("S-2");
+        assert_eq!(uow.development.chat.len(), 1);
+        assert_eq!(uow.development.chat[0].text, "bug");
+    }
+
+    #[test]
+    fn set_contract_persists_prose_and_flag() {
+        let store = UowStore::new();
+        let uow = store.set_contract("S-3", "the API returns a User", true);
+        assert_eq!(uow.investigation.contract, "the API returns a User");
+        assert!(uow.investigation.crosses_boundary);
+    }
+
+    #[test]
+    fn set_meta_patches_only_provided_fields() {
+        let store = UowStore::new();
+        // Mark intake finished; leave the rest unchanged.
+        let uow = store.set_meta("S-4", None, Some(true), None, None, None);
+        assert!(uow.meta.intake_finished);
+        assert!(!uow.meta.investigation_finished);
+        assert_eq!(uow.meta.viewed_phase, PhaseTab::Intake);
+
+        // Patch the viewed phase + done without disturbing intake_finished.
+        let uow = store.set_meta(
+            "S-4",
+            Some(PhaseTab::Development),
+            None,
+            None,
+            None,
+            Some(true),
+        );
+        assert!(uow.meta.intake_finished, "untouched field preserved");
+        assert_eq!(uow.meta.viewed_phase, PhaseTab::Development);
+        assert!(uow.meta.done);
+    }
+
+    #[test]
+    fn phase_tab_from_wire_round_trips() {
+        assert_eq!(PhaseTab::from_wire("intake"), Some(PhaseTab::Intake));
+        assert_eq!(
+            PhaseTab::from_wire("investigation"),
+            Some(PhaseTab::Investigation)
+        );
+        assert_eq!(
+            PhaseTab::from_wire("development"),
+            Some(PhaseTab::Development)
+        );
+        assert_eq!(PhaseTab::from_wire("bogus"), None);
     }
 }

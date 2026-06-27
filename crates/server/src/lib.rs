@@ -43,6 +43,7 @@ pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
+pub mod review_agent;
 pub mod routine;
 pub mod run;
 pub mod scan_cache;
@@ -631,6 +632,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
         .route("/api/uow/:story_id/history", post(uow_append_history))
+        // ── 3-phase cockpit state (#104 / #105) ───────────────────────────────
+        .route("/api/uow/:story_id/intake/context", post(uow_set_intake_context))
+        .route("/api/uow/:story_id/intake/repos", post(uow_set_intake_repos))
+        .route(
+            "/api/uow/:story_id/investigation/chat",
+            post(uow_append_investigation_chat),
+        )
+        .route("/api/uow/:story_id/contract", post(uow_set_contract))
+        .route(
+            "/api/uow/:story_id/development/chat",
+            post(uow_append_development_chat),
+        )
+        .route("/api/uow/:story_id/meta", post(uow_set_meta))
         // ── Governed-development lifecycle (Pillar 2) ─────────────────────────
         .route("/api/uow/:story_id/decisions", post(uow_set_decisions))
         .route(
@@ -974,6 +988,20 @@ fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), Strin
         return Err(reason);
     }
 
+    // Contract precondition (R3.g): when the work crosses a contract boundary,
+    // a non-empty contract must exist before development starts. The orchestrator
+    // refuses and pushes back — as a lead engineer refuses to parallelize a team
+    // across an interface no one has agreed.
+    if uow.investigation.crosses_boundary && uow.investigation.contract.trim().is_empty() {
+        return Err(
+            "This story crosses a contract boundary (crosses_boundary = true) but no \
+             contract has been written yet. Write the interface contract in the \
+             Investigation phase before starting development (R3.g). The refinement \
+             agent may author the contract, but it must exist before code is written."
+                .to_string(),
+        );
+    }
+
     // Gate satisfied — drive the lifecycle stage forward to Development, stepping
     // through any intermediate stages. Each step is best-effort: a transition that is
     // illegal from the current stage (because the UoW is already further along, or was
@@ -1115,6 +1143,26 @@ async fn start_governed_run(
             // implementer writes only to its worktree; these are added READ-ONLY so it can
             // read sibling repos.
             let read_dirs = state.active_repo_dirs();
+            // Layer-3 agentic code review (R7): build the bundle when the active project
+            // has L3 enabled. The bundle captures the LLM + model + story text + rules
+            // prose BEFORE the spawn; the reviewer is BLIND to other-agent transcripts.
+            let l3_bundle: Option<crate::dev_implement_run::L3ReviewBundle> = {
+                state.projects.active().and_then(|proj| {
+                    if !proj.l3_review.enabled {
+                        return None;
+                    }
+                    let l3_model = proj.l3_model().to_string();
+                    let rules_prose = grounding.clone().unwrap_or_default();
+                    let story_text = format!("{title}\n\n{desc}");
+                    let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+                    Some(crate::dev_implement_run::L3ReviewBundle {
+                        story_text,
+                        rules_prose,
+                        model: l3_model,
+                        llm,
+                    })
+                })
+            };
             tokio::spawn(async move {
                 crate::dev_implement_run::execute_dev_implement_run(
                     store,
@@ -1133,6 +1181,7 @@ async fn start_governed_run(
                     skip_layer2,
                     grounding,
                     read_dirs,
+                    l3_bundle,
                 )
                 .await
             });
@@ -7070,6 +7119,141 @@ async fn uow_append_history(
     Json(state.uow.get_or_create(&story_id))
 }
 
+// ── 3-phase cockpit state (#104 / #105) ──────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct UowIntakeContextReq {
+    /// The free-text context for the investigation agent.
+    context: String,
+}
+
+/// `POST /api/uow/:story_id/intake/context` body `{ context }` — set the Intake free-text
+/// context for the investigation agent (3-phase doc §3). Returns the updated UoW.
+async fn uow_set_intake_context(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowIntakeContextReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(state.uow.set_intake_context(&story_id, &req.context))
+}
+
+#[derive(serde::Deserialize)]
+struct UowIntakeReposReq {
+    /// The full in-scope repo/branch set (replaces the prior scope). Out-of-scope repos
+    /// are simply absent from this list (R6).
+    repos: Vec<crate::uow::RepoScope>,
+}
+
+/// `POST /api/uow/:story_id/intake/repos` body `{ repos: [...] }` — replace the per-story
+/// repo/branch scope (R6). Returns the updated UoW.
+async fn uow_set_intake_repos(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowIntakeReposReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(state.uow.set_intake_repos(&story_id, req.repos))
+}
+
+#[derive(serde::Deserialize)]
+struct UowChatReq {
+    /// `"user"` or `"agent"`.
+    role: String,
+    /// The message body.
+    text: String,
+}
+
+/// `POST /api/uow/:story_id/investigation/chat` body `{ role, text }` — append one turn to
+/// the investigation/refinement agent chat transcript (3-phase doc §4). Returns the
+/// updated UoW.
+async fn uow_append_investigation_chat(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowChatReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(
+        state
+            .uow
+            .append_investigation_chat(&story_id, &req.role, &req.text),
+    )
+}
+
+/// `POST /api/uow/:story_id/development/chat` body `{ role, text }` — append one turn to the
+/// development agent chat transcript (3-phase doc §5). Returns the updated UoW.
+async fn uow_append_development_chat(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowChatReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(
+        state
+            .uow
+            .append_development_chat(&story_id, &req.role, &req.text),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct UowContractReq {
+    /// The prose interface contract (free-form).
+    contract: String,
+    /// Whether the work crosses a contract boundary (a contract is then required before
+    /// development per R3.g). Defaults to `false` when absent.
+    #[serde(default)]
+    crosses_boundary: bool,
+}
+
+/// `POST /api/uow/:story_id/contract` body `{ contract, crosses_boundary }` — set the prose
+/// interface contract + the boundary flag (R3.g / §4.6). Returns the updated UoW.
+async fn uow_set_contract(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowContractReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(
+        state
+            .uow
+            .set_contract(&story_id, &req.contract, req.crosses_boundary),
+    )
+}
+
+#[derive(serde::Deserialize)]
+struct UowMetaReq {
+    /// `"intake"` / `"investigation"` / `"development"`. Absent → unchanged.
+    #[serde(default)]
+    viewed_phase: Option<String>,
+    #[serde(default)]
+    intake_finished: Option<bool>,
+    #[serde(default)]
+    investigation_finished: Option<bool>,
+    #[serde(default)]
+    development_finished: Option<bool>,
+    #[serde(default)]
+    done: Option<bool>,
+}
+
+/// `POST /api/uow/:story_id/meta` body `{ viewed_phase?, intake_finished?, … }` — patch the
+/// 3-phase cockpit meta (viewed phase + per-phase finished flags + done/archived). Each
+/// field is optional; absent fields are left unchanged (3-phase doc §2 / §7). An unknown
+/// `viewed_phase` string is ignored (treated as absent) so a typo never wedges the meta.
+/// Returns the updated UoW.
+async fn uow_set_meta(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowMetaReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    let viewed_phase = req
+        .viewed_phase
+        .as_deref()
+        .and_then(crate::uow::PhaseTab::from_wire);
+    Json(state.uow.set_meta(
+        &story_id,
+        viewed_phase,
+        req.intake_finished,
+        req.investigation_finished,
+        req.development_finished,
+        req.done,
+    ))
+}
+
 // ── Project-aware chat grounding (#54) ───────────────────────────────────────
 
 /// The pre-onboard phase: the active project has a saved onboarding draft but has not yet
@@ -9237,6 +9421,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn three_phase_state_endpoints_persist_to_the_uow() {
+        // The #105 cockpit-state endpoints (intake context/repos, per-phase chat, contract,
+        // meta) round-trip onto the UoW so the refinement-session state survives sessions.
+        let state = AppState::new(std::sync::Arc::new(
+            camerata_worktracker::InMemoryStoryStore::new(),
+        ));
+        let app = router(state.clone());
+        let sid = "S-105";
+
+        let post = |uri: String, body: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Intake context.
+        let r = post(
+            format!("/api/uow/{sid}/intake/context"),
+            r#"{"context":"the next agent should know X"}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Intake repo/branch scope (R6) — both branch-mode variants.
+        let r = post(
+            format!("/api/uow/{sid}/intake/repos"),
+            r#"{"repos":[{"repo":"me/fe","branch":{"mode":"new_from_base","base":"main","new_name":""}},{"repo":"me/be","branch":{"mode":"existing","branch_name":"feature/x"}}]}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Investigation + development chat turns.
+        let r = post(
+            format!("/api/uow/{sid}/investigation/chat"),
+            r#"{"role":"user","text":"what about caching?"}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = post(
+            format!("/api/uow/{sid}/development/chat"),
+            r#"{"role":"user","text":"there is a bug in the loop"}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Contract (R3.g).
+        let r = post(
+            format!("/api/uow/{sid}/contract"),
+            r#"{"contract":"GET /users returns [User]","crosses_boundary":true}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Meta — patch only the viewed phase + intake_finished.
+        let r = post(
+            format!("/api/uow/{sid}/meta"),
+            r#"{"viewed_phase":"development","intake_finished":true}"#,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Everything landed on the stored UoW.
+        let uow = state.uow.get_or_create(sid);
+        assert_eq!(uow.intake.context, "the next agent should know X");
+        assert_eq!(uow.intake.repos.len(), 2);
+        assert_eq!(uow.intake.repos[0].repo, "me/fe");
+        assert!(matches!(
+            uow.intake.repos[1].branch,
+            crate::uow::BranchMode::Existing { ref branch_name } if branch_name == "feature/x"
+        ));
+        assert_eq!(uow.investigation.chat.len(), 1);
+        assert_eq!(uow.investigation.contract, "GET /users returns [User]");
+        assert!(uow.investigation.crosses_boundary);
+        assert_eq!(uow.development.chat.len(), 1);
+        assert_eq!(uow.meta.viewed_phase, crate::uow::PhaseTab::Development);
+        assert!(uow.meta.intake_finished);
+        assert!(!uow.meta.investigation_finished, "unpatched field unchanged");
+    }
+
+    #[tokio::test]
     async fn stories_endpoint_returns_the_active_projects_spine() {
         // ISOLATION (A8): /api/stories is project-scoped. A story is in-scope when one of its
         // build-target repos (or its source container) is in the active project's repos.
@@ -9474,6 +9748,94 @@ mod tests {
         assert_eq!(
             state.uow.get_or_create(story).stage,
             lifecycle::UowStage::Development
+        );
+    }
+
+    // ── Contract precondition (R3.g) ─────────────────────────────────────────────
+    // Spec: when a story's UoW has crosses_boundary=true and an empty contract, the
+    // development gate MUST refuse even when all decisions are approved.
+
+    /// Helper: record an approved decision on a story via the UoW store directly.
+    fn seed_approved_decision(state: &AppState, story: &str) {
+        use camerata_worktracker::investigation::DecisionRecord;
+        let d = DecisionRecord::ai_proposed(
+            story,
+            format!("{story}/decision/r3g"),
+            "R3g decision",
+            "Q?",
+            "R",
+            vec![],
+            chrono::Utc::now(),
+        )
+        .approve(chrono::Utc::now());
+        state.uow.set_decisions(story, vec![d]);
+    }
+
+    /// When crosses_boundary=true and no contract exists, the gate refuses even when
+    /// all decisions are approved.
+    #[test]
+    fn contract_precondition_blocks_when_crosses_boundary_and_empty_contract() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let story = "R3G-1";
+        // Seed an approved decision so the decisions check passes.
+        seed_approved_decision(&state, story);
+        // Set crosses_boundary=true with an EMPTY contract.
+        state.uow.set_contract(story, "", true);
+        let result = ensure_development_gate(&state, story);
+        assert!(result.is_err(), "gate must refuse when crosses_boundary=true and contract is empty");
+        let reason = result.unwrap_err();
+        assert!(
+            reason.contains("crosses a contract boundary"),
+            "error must mention the contract boundary: {reason}"
+        );
+        assert!(
+            reason.contains("R3.g"),
+            "error must reference R3.g: {reason}"
+        );
+    }
+
+    /// When crosses_boundary=true but a non-empty contract exists, the gate permits
+    /// development (decisions check passes + contract is present).
+    #[test]
+    fn contract_precondition_permits_when_crosses_boundary_and_contract_present() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let story = "R3G-2";
+        seed_approved_decision(&state, story);
+        state.uow.set_contract(story, "GET /api/users returns [{id, name}]", true);
+        let result = ensure_development_gate(&state, story);
+        assert!(
+            result.is_ok(),
+            "gate must allow when crosses_boundary=true AND contract is present: {result:?}"
+        );
+    }
+
+    /// When crosses_boundary=false, the contract check is skipped entirely — no contract
+    /// is required for single-repo / non-boundary work.
+    #[test]
+    fn contract_precondition_skipped_when_not_crosses_boundary() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let story = "R3G-3";
+        seed_approved_decision(&state, story);
+        // crosses_boundary = false, contract is empty — this must be allowed.
+        state.uow.set_contract(story, "", false);
+        let result = ensure_development_gate(&state, story);
+        assert!(
+            result.is_ok(),
+            "gate must allow when crosses_boundary=false even with empty contract: {result:?}"
+        );
+    }
+
+    /// Whitespace-only contract is treated the same as empty (R3.g).
+    #[test]
+    fn contract_precondition_blocks_whitespace_contract() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let story = "R3G-4";
+        seed_approved_decision(&state, story);
+        state.uow.set_contract(story, "   \n\t  ", true);
+        let result = ensure_development_gate(&state, story);
+        assert!(
+            result.is_err(),
+            "whitespace-only contract is treated as empty — gate must refuse"
         );
     }
 

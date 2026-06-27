@@ -184,6 +184,108 @@ pub(super) async fn open_uow_pr(story_id: &str, base_branch: &str) -> OpenPrOutc
     }
 }
 
+// ── 3-phase cockpit state persistence (#105) ──────────────────────────────────
+
+/// Persist the Intake free-text context for the investigation agent (3-phase doc §3).
+/// Fire-and-forget: returns `true` on a 2xx, `false` on any failure (the UI keeps the
+/// local value either way).
+pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/intake/context",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "context": context }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Persist the per-story repo/branch scope (R6). `repos` is the full in-scope set; each
+/// entry is `{ repo, branch }` where `branch` is the tagged `BranchMode` JSON
+/// (`{"mode":"existing","branch_name":…}` or `{"mode":"new_from_base","base":…,"new_name":…}`).
+/// Fire-and-forget: returns `true` on a 2xx.
+pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/intake/repos",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "repos": repos }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Append one turn (`role` = `"user"` | `"agent"`) to the investigation/refinement agent
+/// chat transcript (3-phase doc §4). Returns `true` on a 2xx.
+pub(super) async fn append_investigation_chat(story_id: &str, role: &str, text: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/investigation/chat",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "role": role, "text": text }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Append one turn (`role` = `"user"` | `"agent"`) to the development agent chat
+/// transcript (3-phase doc §5). Returns `true` on a 2xx.
+pub(super) async fn append_development_chat(story_id: &str, role: &str, text: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/development/chat",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "role": role, "text": text }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Persist the prose interface contract + the boundary flag (R3.g / §4.6). Returns `true`
+/// on a 2xx.
+pub(super) async fn save_contract(story_id: &str, contract: &str, crosses_boundary: bool) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/contract",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&serde_json::json!({ "contract": contract, "crosses_boundary": crosses_boundary }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Patch the 3-phase cockpit meta (any subset of viewed phase + finished flags +
+/// done/archived). `body` is the JSON object with only the fields to change. Returns
+/// `true` on a 2xx.
+pub(super) async fn save_meta(story_id: &str, body: serde_json::Value) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/uow/{}/meta",
+            crate::BFF_URL,
+            enc_seg(story_id)
+        ))
+        .json(&body)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Post a comment on the UoW's PR. Returns the created comment url on success.
 pub(super) async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<String> {
     let resp = reqwest::Client::new()
@@ -541,6 +643,53 @@ pub(super) struct SignOffView {
     pub note: Option<String>,
 }
 
+/// One turn in a per-phase agent chat transcript (mirrors `camerata_server::uow::ChatTurn`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct ChatTurnView {
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// One in-scope repo + its branch mode (mirrors `camerata_server::uow::RepoScope`). The
+/// `branch` field is the tagged-enum `BranchMode` JSON, kept raw so the UI can read either
+/// variant without a sum-type round-trip.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(super) struct RepoScopeView {
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub branch: serde_json::Value,
+}
+
+/// The persisted Intake state (mirrors `camerata_server::uow::IntakeState`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct IntakeStateView {
+    #[serde(default)]
+    pub context: String,
+    #[serde(default)]
+    pub repos: Vec<RepoScopeView>,
+}
+
+/// The persisted Investigation state (mirrors `camerata_server::uow::InvestigationState`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct InvestigationStateView {
+    #[serde(default)]
+    pub chat: Vec<ChatTurnView>,
+    #[serde(default)]
+    pub contract: String,
+    #[serde(default)]
+    pub crosses_boundary: bool,
+}
+
+/// The persisted Development state (mirrors `camerata_server::uow::DevelopmentState`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct DevelopmentStateView {
+    #[serde(default)]
+    pub chat: Vec<ChatTurnView>,
+}
+
 /// The Unit of Work as returned by `GET /api/uow/:story_id`.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct UowView {
@@ -559,6 +708,18 @@ pub(super) struct UowView {
     pub gate_provenance: Option<GateProvenanceView>,
     #[serde(default)]
     pub sign_off: Option<SignOffView>,
+    /// The persisted Intake state (#105): free-text context + repo/branch scope (R6).
+    #[serde(default)]
+    pub intake: IntakeStateView,
+    /// The persisted Investigation state (#105): refinement chat + prose contract (R3.g).
+    #[serde(default)]
+    pub investigation: InvestigationStateView,
+    /// The persisted Development state (#105): dev-agent chat transcript.
+    #[serde(default)]
+    pub development: DevelopmentStateView,
+    /// The 3-phase cockpit meta (#105): viewed phase, finished flags, done/archived.
+    #[serde(default)]
+    pub meta: UowMeta,
     #[serde(default)]
     pub updated: String,
 }
@@ -2745,10 +2906,59 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
     // ── 3-phase shell state ────────────────────────────────────────────────────
     // Phase tab: initialised from the lifecycle stage once known, then freely navigable.
     let mut phase = use_signal(|| PhaseTab::Intake);
-    // Per-phase finish flags.
-    let intake_finished = use_signal(|| false);
-    let investigation_finished = use_signal(|| false);
-    let development_finished = use_signal(|| false);
+    // Per-phase finish flags. Persisted to the UoW meta (#105) so Finish/Reopen survives
+    // sessions; hydrated from the meta on load below.
+    let mut intake_finished = use_signal(|| false);
+    let mut investigation_finished = use_signal(|| false);
+    let mut development_finished = use_signal(|| false);
+
+    // Hydrate the per-phase finished flags from the persisted UoW meta (#105). One-shot so
+    // a refresh doesn't fight a just-toggled Finish/Reopen before it persists.
+    let mut meta_hydrated = use_signal(|| false);
+    {
+        let loaded_meta = uow_for_stage
+            .read()
+            .clone()
+            .flatten()
+            .map(|u| u.meta);
+        use_effect(use_reactive(&loaded_meta, move |loaded_meta| {
+            if meta_hydrated() {
+                return;
+            }
+            if let Some(meta) = loaded_meta {
+                intake_finished.set(meta.intake_finished);
+                investigation_finished.set(meta.investigation_finished);
+                development_finished.set(meta.development_finished);
+                meta_hydrated.set(true);
+            }
+        }));
+    }
+
+    // Persist the finished flags to the UoW meta whenever they change, AFTER hydration (so
+    // the initial hydrate doesn't echo back a redundant write). Fire-and-forget.
+    {
+        let sid = uow_key.clone();
+        use_effect(move || {
+            let i = intake_finished();
+            let v = investigation_finished();
+            let d = development_finished();
+            if !meta_hydrated() {
+                return;
+            }
+            let sid = sid.clone();
+            spawn(async move {
+                let _ = save_meta(
+                    &sid,
+                    serde_json::json!({
+                        "intake_finished": i,
+                        "investigation_finished": v,
+                        "development_finished": d,
+                    }),
+                )
+                .await;
+            });
+        });
+    }
 
     // Seed the phase tab from the lifecycle stage the FIRST time the stage loads.
     // We use a one-shot flag so user navigation isn't overwritten on every refresh.
@@ -2761,6 +2971,29 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
             }
         }
     });
+
+    // Persist the viewed phase to the UoW meta when the architect navigates (#105). The
+    // viewed phase is informational view state; it never drives control flow.
+    {
+        let sid = uow_key.clone();
+        use_effect(move || {
+            let p = phase();
+            // Don't persist the default until the stage-seed has run, to avoid clobbering a
+            // stored viewed_phase with the initial Intake default before seeding.
+            if !phase_seeded() {
+                return;
+            }
+            let wire = match p {
+                PhaseTab::Intake => "intake",
+                PhaseTab::Investigation => "investigation",
+                PhaseTab::Development => "development",
+            };
+            let sid = sid.clone();
+            spawn(async move {
+                let _ = save_meta(&sid, serde_json::json!({ "viewed_phase": wire })).await;
+            });
+        });
+    }
 
     // Informational status label — purely display, never drives control flow.
     let status_label = stage
@@ -2973,6 +3206,60 @@ pub(super) struct RepoBranchScope {
     pub base_branch: String,
 }
 
+/// Map a persisted `BranchMode` JSON value (tagged enum) back into the UI's
+/// `RepoBranchScope`. Unknown / malformed values default to a new-from-base scope.
+pub(super) fn repo_scope_from_view(branch: &serde_json::Value) -> RepoBranchScope {
+    let mode_tag = branch.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+    match mode_tag {
+        "existing" => RepoBranchScope {
+            mode: BranchModeChoice::Existing,
+            existing_branch: branch
+                .get("branch_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            base_branch: String::new(),
+        },
+        _ => RepoBranchScope {
+            mode: BranchModeChoice::NewFromBase,
+            existing_branch: String::new(),
+            base_branch: branch
+                .get("base")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        },
+    }
+}
+
+/// Build the `repos` JSON array (the wire shape `POST /api/uow/:id/intake/repos` expects:
+/// each entry `{ repo, branch: <tagged BranchMode> }`) from the UI's selection + per-repo
+/// branch modes. Repos that are selected but have no explicit mode default to new-from-base.
+pub(super) fn repo_scope_payload(
+    selected: &[String],
+    modes: &std::collections::HashMap<String, RepoBranchScope>,
+) -> serde_json::Value {
+    let entries: Vec<serde_json::Value> = selected
+        .iter()
+        .map(|repo| {
+            let scope = modes.get(repo).cloned().unwrap_or_default();
+            let branch = match scope.mode {
+                BranchModeChoice::Existing => serde_json::json!({
+                    "mode": "existing",
+                    "branch_name": scope.existing_branch,
+                }),
+                BranchModeChoice::NewFromBase => serde_json::json!({
+                    "mode": "new_from_base",
+                    "base": scope.base_branch,
+                    "new_name": "",
+                }),
+            };
+            serde_json::json!({ "repo": repo, "branch": branch })
+        })
+        .collect();
+    serde_json::Value::Array(entries)
+}
+
 /// Oversight mode for phase components — controls where clarification dialogs
 /// and escalations are routed (per §8).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -3052,6 +3339,52 @@ pub(super) fn IntakePhaseView(
     // Free-text context for the investigation agent.
     let mut intake_context = use_signal(String::new);
 
+    // ── Hydrate intake state from the persisted UoW (#105) ────────────────────────
+    // Fetch the UoW once and seed the signals from its `intake` state before the user
+    // has touched them. A one-shot flag prevents a refresh from clobbering edits.
+    let intake_uow_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow(&sid).await }
+        })
+    };
+    let mut intake_hydrated = use_signal(|| false);
+    {
+        let loaded = intake_uow_res.read().clone().flatten();
+        use_effect(use_reactive(&loaded, move |loaded| {
+            if intake_hydrated() {
+                return;
+            }
+            if let Some(uow) = loaded {
+                intake_context.set(uow.intake.context.clone());
+                let mut sel = Vec::new();
+                let mut modes = std::collections::HashMap::new();
+                for rs in uow.intake.repos.iter() {
+                    sel.push(rs.repo.clone());
+                    modes.insert(rs.repo.clone(), repo_scope_from_view(&rs.branch));
+                }
+                selected_repos.set(sel);
+                repo_branch_modes.set(modes);
+                intake_hydrated.set(true);
+            }
+        }));
+    }
+
+    // Persist the current repo/branch scope to the backend (R6). Called after any scope
+    // edit. Fire-and-forget so a transient failure never blocks the UI.
+    let persist_repos = {
+        let sid = story_id.clone();
+        move || {
+            let sid = sid.clone();
+            let payload = repo_scope_payload(&selected_repos(), &repo_branch_modes());
+            spawn(async move {
+                let _ = save_intake_repos(&sid, payload).await;
+            });
+        }
+    };
+
     rsx! {
         div { class: "uow-phase-body",
             // AI-assisted "Update branch" control
@@ -3123,8 +3456,18 @@ pub(super) fn IntakePhaseView(
                     placeholder: "Add extra context for the investigation agent — anything the story doesn't capture…",
                     value: "{intake_context}",
                     oninput: move |e| intake_context.set(e.value()),
+                    // Persist on blur so the free-text context survives sessions (#105).
+                    onblur: {
+                        let sid = story_id.clone();
+                        move |_| {
+                            let sid = sid.clone();
+                            let ctx = intake_context();
+                            spawn(async move {
+                                let _ = save_intake_context(&sid, &ctx).await;
+                            });
+                        }
+                    },
                 }
-                // TODO(#105): persist to UoW intake state via backend
             }
 
             // ── Repos in scope ────────────────────────────────────────────────────
@@ -3146,6 +3489,7 @@ pub(super) fn IntakePhaseView(
                                         checked: is_selected,
                                         onchange: {
                                             let repo = repo.clone();
+                                            let persist_repos = persist_repos.clone();
                                             move |_| {
                                                 let mut cur = selected_repos();
                                                 if let Some(pos) = cur.iter().position(|r| r == &repo) {
@@ -3154,6 +3498,7 @@ pub(super) fn IntakePhaseView(
                                                     cur.push(repo.clone());
                                                 }
                                                 selected_repos.set(cur);
+                                                persist_repos.clone()();
                                             }
                                         },
                                     }
@@ -3172,12 +3517,13 @@ pub(super) fn IntakePhaseView(
                                                         checked: !is_existing,
                                                         onchange: {
                                                             let repo = repo.clone();
+                                                            let persist_repos = persist_repos.clone();
                                                             move |_| {
                                                                 let mut map = repo_branch_modes();
                                                                 let entry = map.entry(repo.clone()).or_default();
                                                                 entry.mode = BranchModeChoice::NewFromBase;
                                                                 repo_branch_modes.set(map);
-                                                                // TODO(#105): persist repo/branch scope to UoW intake state
+                                                                persist_repos.clone()();
                                                             }
                                                         },
                                                     }
@@ -3190,12 +3536,13 @@ pub(super) fn IntakePhaseView(
                                                         checked: is_existing,
                                                         onchange: {
                                                             let repo = repo.clone();
+                                                            let persist_repos = persist_repos.clone();
                                                             move |_| {
                                                                 let mut map = repo_branch_modes();
                                                                 let entry = map.entry(repo.clone()).or_default();
                                                                 entry.mode = BranchModeChoice::Existing;
                                                                 repo_branch_modes.set(map);
-                                                                // TODO(#105): persist repo/branch scope to UoW intake state
+                                                                persist_repos.clone()();
                                                             }
                                                         },
                                                     }
@@ -3215,6 +3562,11 @@ pub(super) fn IntakePhaseView(
                                                                 repo_branch_modes.set(map);
                                                             }
                                                         },
+                                                        // Persist the branch name when the field loses focus (#105).
+                                                        onblur: {
+                                                            let persist_repos = persist_repos.clone();
+                                                            move |_| persist_repos.clone()()
+                                                        },
                                                     }
                                                 } else {
                                                     input {
@@ -3230,6 +3582,11 @@ pub(super) fn IntakePhaseView(
                                                                 repo_branch_modes.set(map);
                                                             }
                                                         },
+                                                        // Persist the base branch when the field loses focus (#105).
+                                                        onblur: {
+                                                            let persist_repos = persist_repos.clone();
+                                                            move |_| persist_repos.clone()()
+                                                        },
                                                     }
                                                 }
                                             }
@@ -3240,7 +3597,6 @@ pub(super) fn IntakePhaseView(
                         }
                     }
                 }
-                // TODO(#105): persist repo/branch scope to UoW intake state
             }
 
             // Add comment to the source issue (with @-mention autocomplete)
@@ -3386,11 +3742,24 @@ pub(super) fn InvestigationPhaseView(
         })
     };
 
-    // Agent chat — client-side only, no backend persistence yet.
-    // TODO(#105): persist to UoW transcript
+    // Agent chat — persisted to the UoW investigation transcript (#105). User turns and
+    // the (stubbed) agent reply are both appended via the backend so the refinement
+    // session survives sessions.
     let mut chat_messages: Signal<Vec<(String, String)>> = use_signal(Vec::new);
     let mut chat_input = use_signal(String::new);
     let mut chat_sending = use_signal(|| false);
+
+    // Hydrate the chat transcript + contract from the persisted UoW (#105). One-shot so a
+    // refresh doesn't clobber in-progress edits.
+    let invest_uow_res = {
+        let sid = story_id.clone();
+        use_resource(move || {
+            let sid = sid.clone();
+            let _dep = uow_refresh();
+            async move { fetch_uow(&sid).await }
+        })
+    };
+    let mut invest_hydrated = use_signal(|| false);
 
     // Board-visible story comments — assignees + comment state.
     let invest_assignees_res = {
@@ -3408,6 +3777,36 @@ pub(super) fn InvestigationPhaseView(
     // Contract section.
     let mut show_contract = use_signal(|| false);
     let mut contract_text = use_signal(String::new);
+    let mut contract_crosses_boundary = use_signal(|| false);
+
+    // Hydrate chat + contract from the persisted UoW investigation state (#105).
+    {
+        let loaded = invest_uow_res.read().clone().flatten();
+        use_effect(use_reactive(&loaded, move |loaded| {
+            if invest_hydrated() {
+                return;
+            }
+            if let Some(uow) = loaded {
+                let msgs: Vec<(String, String)> = uow
+                    .investigation
+                    .chat
+                    .iter()
+                    .map(|t| {
+                        // Normalize the persisted "agent" role to the UI's "assistant" class.
+                        let role = if t.role == "user" { "user" } else { "assistant" };
+                        (role.to_string(), t.text.clone())
+                    })
+                    .collect();
+                chat_messages.set(msgs);
+                contract_text.set(uow.investigation.contract.clone());
+                contract_crosses_boundary.set(uow.investigation.crosses_boundary);
+                if !uow.investigation.contract.trim().is_empty() {
+                    show_contract.set(true);
+                }
+                invest_hydrated.set(true);
+            }
+        }));
+    }
 
     let _ = oversight; // used for routing in a future PR; field is established here
 
@@ -3487,7 +3886,6 @@ pub(super) fn InvestigationPhaseView(
             // ── Agent chat (investigation scope) ──────────────────────────────────
             div { class: "uow-agent-chat",
                 p { class: "uow-dev-section-h", "Agent chat (investigation scope)" }
-                // TODO(#105): persist to UoW transcript
                 for (i , (role , text)) in chat_messages().into_iter().enumerate() {
                     {
                         let role_cls = if role == "user" { "user" } else { "assistant" };
@@ -3510,7 +3908,10 @@ pub(super) fn InvestigationPhaseView(
                     button {
                         class: "btn-run",
                         disabled: chat_sending() || chat_input().trim().is_empty(),
-                        onclick: move |_| {
+                        onclick: {
+                            let sid = story_id.clone();
+                            move |_| {
+                            let sid = sid.clone();
                             let msg = chat_input().trim().to_string();
                             if msg.is_empty() { return; }
                             chat_sending.set(true);
@@ -3519,13 +3920,19 @@ pub(super) fn InvestigationPhaseView(
                             chat_messages.set(msgs);
                             chat_input.set(String::new());
                             spawn(async move {
-                                // TODO(#105): call investigation agent chat endpoint
+                                // Persist the user turn to the UoW investigation transcript (#105).
+                                let _ = append_investigation_chat(&sid, "user", &msg).await;
+                                // TODO(#105): call the real investigation agent chat endpoint (B2).
+                                // For now the agent reply is a stub; still persist it so the
+                                // transcript round-trips on reload.
                                 let stub = "(Investigation agent response — coming soon. TODO #105)".to_string();
+                                let _ = append_investigation_chat(&sid, "agent", &stub).await;
                                 let mut msgs = chat_messages();
                                 msgs.push(("assistant".to_string(), stub));
                                 chat_messages.set(msgs);
                                 chat_sending.set(false);
                             });
+                            }
                         },
                         if chat_sending() { "Sending…" } else { "Send" }
                     }
@@ -3636,17 +4043,37 @@ pub(super) fn InvestigationPhaseView(
                         value: "{contract_text}",
                         oninput: move |e| contract_text.set(e.value()),
                     }
+                    label { class: "uow-contract-boundary",
+                        input {
+                            r#type: "checkbox",
+                            checked: contract_crosses_boundary(),
+                            onchange: move |_| {
+                                let v = !contract_crosses_boundary();
+                                contract_crosses_boundary.set(v);
+                            },
+                        }
+                        " Work crosses a contract boundary (a contract is required before Development)"
+                    }
                     div { class: "uow-contract-actions",
                         button {
                             class: "btn-run",
-                            onclick: move |_| {
-                                // TODO(#105): persist contract to UoW investigation state
-                                let toasts = toasts_inv;
-                                crate::toast::push_toast(
-                                    toasts,
-                                    crate::toast::ToastKind::Info,
-                                    "Contract saved (local)".to_string(),
-                                );
+                            onclick: {
+                                let sid = story_id.clone();
+                                move |_| {
+                                    let sid = sid.clone();
+                                    let contract = contract_text();
+                                    let crosses = contract_crosses_boundary();
+                                    let toasts = toasts_inv;
+                                    spawn(async move {
+                                        // Persist the prose contract + boundary flag (#105 / R3.g).
+                                        let ok = save_contract(&sid, &contract, crosses).await;
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            if ok { crate::toast::ToastKind::Info } else { crate::toast::ToastKind::Warning },
+                                            if ok { "Contract saved.".to_string() } else { "Could not save the contract.".to_string() },
+                                        );
+                                    });
+                                }
                             },
                             "Save contract"
                         }
@@ -3738,12 +4165,30 @@ pub(super) fn DevelopmentPhaseView(
     // TODO(#105): The backend (orchestrator) is the real gatekeeper — it inspects the UoW
     // state and refuses to begin development if a contract boundary is crossed but no contract
     // artifact exists. This UI guard is a UX hint ONLY and does not replace that enforcement.
-    let has_contract = use_signal(|| false);
-    let crosses_contract_boundary = use_signal(|| false);
-    // TODO(#105): derive `crosses_contract_boundary` from UoW investigation state (contract
-    // artifact presence check via GET /api/uow/:id/investigation). For now it defaults false
-    // so Begin Development is always available, matching the spec (§5.1: "always available
-    // unless the story crosses a contract boundary and no contract exists").
+    //
+    // Derive `has_contract` + `crosses_contract_boundary` from the persisted UoW
+    // investigation state (#105). The contract is settled in Investigation & Refinement and
+    // read back here; the orchestrator remains the true run-time enforcer (B2/B3).
+    let invest_state: Option<InvestigationStateView> = uow_for_stage
+        .read()
+        .clone()
+        .flatten()
+        .map(|u| u.investigation);
+    let mut has_contract = use_signal(|| false);
+    let mut crosses_contract_boundary = use_signal(|| false);
+    // Keep the contract-gate signals in sync as the shared UoW resource resolves/refreshes.
+    {
+        let invest_state = invest_state.clone();
+        use_effect(use_reactive(&invest_state, move |invest_state| {
+            has_contract.set(
+                invest_state
+                    .as_ref()
+                    .is_some_and(|i| !i.contract.trim().is_empty()),
+            );
+            crosses_contract_boundary
+                .set(invest_state.as_ref().is_some_and(|i| i.crosses_boundary));
+        }));
+    }
 
     // ── Clarification state ────────────────────────────────────────────────────────
     let mut clarify_refresh = use_signal(|| 0u32);
@@ -3759,10 +4204,37 @@ pub(super) fn DevelopmentPhaseView(
     };
 
     // ── Dev agent chat (development scope) ─────────────────────────────────────────
-    // TODO(#105): persist to UoW development transcript
+    // Persisted to the UoW development transcript (#105). User turns + the stubbed agent
+    // reply are appended via the backend so the chat-back survives sessions.
     let mut dev_chat_messages: Signal<Vec<(String, String)>> = use_signal(Vec::new);
     let mut dev_chat_input = use_signal(String::new);
     let mut dev_chat_sending = use_signal(|| false);
+    // Hydrate the dev chat from the persisted UoW development state (#105). One-shot.
+    let mut dev_chat_hydrated = use_signal(|| false);
+    {
+        let dev_state: Option<DevelopmentStateView> = uow_for_stage
+            .read()
+            .clone()
+            .flatten()
+            .map(|u| u.development);
+        use_effect(use_reactive(&dev_state, move |dev_state| {
+            if dev_chat_hydrated() {
+                return;
+            }
+            if let Some(dev) = dev_state {
+                let msgs: Vec<(String, String)> = dev
+                    .chat
+                    .iter()
+                    .map(|t| {
+                        let role = if t.role == "user" { "user" } else { "assistant" };
+                        (role.to_string(), t.text.clone())
+                    })
+                    .collect();
+                dev_chat_messages.set(msgs);
+                dev_chat_hydrated.set(true);
+            }
+        }));
+    }
 
     // ── Bug-fix loop ─────────────────────────────────────────────────────────────
     let mut bug_report = use_signal(String::new);
@@ -3868,8 +4340,9 @@ pub(super) fn DevelopmentPhaseView(
     // ── Contract boundary block ───────────────────────────────────────────────────
     // When the story's work crosses a contract boundary and no contract has been settled
     // in Investigation & Refinement, show a block instead of the Begin Development button.
-    // This mirrors the orchestrator's refuse-and-push-back behavior (R3.g / §5.1).
-    // TODO(#105): derive crosses_contract_boundary from the UoW investigation state.
+    // This mirrors the orchestrator's refuse-and-push-back behavior (R3.g / §5.1). Both
+    // flags are derived from the persisted UoW investigation state above (#105); the
+    // orchestrator remains the true run-time enforcer (B2/B3).
     let show_contract_block = crosses_contract_boundary() && !has_contract();
 
     rsx! {
@@ -3973,7 +4446,10 @@ pub(super) fn DevelopmentPhaseView(
                                     button {
                                         class: "btn-run",
                                         disabled: dev_chat_sending() || dev_chat_input().trim().is_empty(),
-                                        onclick: move |_| {
+                                        onclick: {
+                                            let sid = story_id.clone();
+                                            move |_| {
+                                            let sid = sid.clone();
                                             let msg = dev_chat_input().trim().to_string();
                                             if msg.is_empty() { return; }
                                             dev_chat_sending.set(true);
@@ -3982,13 +4458,18 @@ pub(super) fn DevelopmentPhaseView(
                                             dev_chat_messages.set(msgs);
                                             dev_chat_input.set(String::new());
                                             spawn(async move {
-                                                // TODO(#105): call dev-agent chat endpoint (this-UoW + repo scope)
+                                                // Persist the user turn to the UoW development transcript (#105).
+                                                let _ = append_development_chat(&sid, "user", &msg).await;
+                                                // TODO(#105): call the real dev-agent chat endpoint (B3). For now the
+                                                // agent reply is a stub; still persist it so the chat round-trips.
                                                 let stub = "(Development agent response — coming soon. TODO #105)".to_string();
+                                                let _ = append_development_chat(&sid, "agent", &stub).await;
                                                 let mut msgs = dev_chat_messages();
                                                 msgs.push(("assistant".to_string(), stub));
                                                 dev_chat_messages.set(msgs);
                                                 dev_chat_sending.set(false);
                                             });
+                                            }
                                         },
                                         if dev_chat_sending() { "Sending…" } else { "Send" }
                                     }

@@ -51,6 +51,7 @@
 //! (`execute_live_run` / `execute_live_run_tiered`) is used as the fallback.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use camerata_agent::prepare_session;
 use camerata_checks::runner_for_worktree;
@@ -58,8 +59,149 @@ use camerata_core::{AgentDriver, RuleId};
 use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::DecisionRecord;
 
+use crate::llm::Completer;
 use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
+use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
 use crate::uow::UowStore;
+
+/// Bundle of inputs for the optional Layer-3 agentic code review (R7).
+///
+/// Passed into `execute_dev_implement_run` when the active project has L3 enabled.
+/// The reviewer sees ONLY story + rules + diff — no agent transcripts or investigation
+/// notes pass through here (the isolation is enforced by the reviewer's prompt).
+pub struct L3ReviewBundle {
+    /// The story text (title + description + contract) presented to the reviewer.
+    pub story_text: String,
+    /// The project's rules for this repo as prose (the SSOT).
+    pub rules_prose: String,
+    /// The model to run the L3 reviewer on.
+    pub model: String,
+    /// The LLM seam to use (typically `Arc<Llm>` from `AppState::llm()`).
+    pub llm: Arc<dyn Completer>,
+}
+
+/// Run `git diff HEAD` in `dir` and return the output. Returns an empty string if the
+/// command fails or there is nothing to diff (the caller treats an empty diff as a clean
+/// tree and skips L3).
+async fn worktree_diff(dir: &std::path::Path) -> String {
+    match tokio::process::Command::new("git")
+        .arg("diff")
+        .arg("HEAD")
+        .current_dir(dir)
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+/// Run the L3 review if the bundle is present and enabled.
+///
+/// Returns:
+/// - `None` when L3 is disabled or the bundle is absent (no action).
+/// - `Some(Vec<String>)` when L3 ran: empty vec = PASS; non-empty = BOUNCE reasons.
+///
+/// The `next_seq` closure is taken as a reference to the caller's counter so the
+/// sequence numbers on emitted events stay monotonic.
+async fn run_l3_if_enabled(
+    runs: &RunStore,
+    run_id: &str,
+    next_seq: &impl Fn() -> usize,
+    l3: &Option<L3ReviewBundle>,
+    dir: &std::path::Path,
+    iteration: usize,
+) -> Option<Vec<String>> {
+    let bundle = l3.as_ref()?;
+    // L3 is explicitly opt-in; the caller sets enabled=true when the project is configured.
+    // We still check here as a defence-in-depth guard.
+    // (The bundle itself is only present when the project opt-in was checked in start_governed_run.)
+    runs.push_event(
+        run_id,
+        GateEvent {
+            seq: next_seq(),
+            layer: "layer-3".to_string(),
+            verdict: "info".to_string(),
+            rule: None,
+            detail: format!(
+                "Layer-3 agentic code review starting (iteration {iteration}, model=`{}`).",
+                bundle.model
+            ),
+            content_hash: None,
+        },
+    );
+    let diff = worktree_diff(dir).await;
+    if diff.trim().is_empty() {
+        runs.push_event(
+            run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "layer-3".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: "Layer-3 skipped: no diff to review (empty worktree diff).".to_string(),
+                content_hash: None,
+            },
+        );
+        return Some(Vec::new());
+    }
+    let input = L3ReviewInput {
+        story: &bundle.story_text,
+        rules_prose: &bundle.rules_prose,
+        diff: &diff,
+        model: &bundle.model,
+    };
+    match run_l3_review(bundle.llm.as_ref(), &input).await {
+        Ok(ReviewVerdict::Pass) => {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "layer-3".to_string(),
+                    verdict: "pass".to_string(),
+                    rule: None,
+                    detail: "Layer-3 reviewer: PASS.".to_string(),
+                    content_hash: None,
+                },
+            );
+            Some(Vec::new())
+        }
+        Ok(ReviewVerdict::Bounce { reasons }) => {
+            let summary = reasons.join("; ");
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "layer-3".to_string(),
+                    verdict: "fail".to_string(),
+                    rule: None,
+                    detail: format!("Layer-3 reviewer: BOUNCE — {summary}"),
+                    content_hash: None,
+                },
+            );
+            Some(reasons)
+        }
+        Err(e) => {
+            // L3 is advisory on error: log but don't block the run.
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "layer-3".to_string(),
+                    verdict: "error".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Layer-3 reviewer error (treating as pass — advisory): {e}"
+                    ),
+                    content_hash: None,
+                },
+            );
+            Some(Vec::new())
+        }
+    }
+}
 
 /// Build the implement-run agent's task prompt from the story + approved decisions.
 ///
@@ -174,6 +316,10 @@ pub async fn execute_dev_implement_run(
     // added READ-ONLY via `--add-dir` so it can read sibling repos (e.g. the backend's API
     // when implementing a frontend UoW). Filtered to exclude `dir` itself.
     read_dirs: Vec<std::path::PathBuf>,
+    // Optional Layer-3 agentic code review (R7). When `Some` and L3 is enabled,
+    // the reviewer runs after a clean Layer-2 pass. When `None` (or L3 is disabled),
+    // the reviewer is skipped and the human is the final reviewer.
+    l3: Option<L3ReviewBundle>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -348,6 +494,21 @@ pub async fn execute_dev_implement_run(
                  The security gate (layer 1) still applied."
                     .to_string(),
             );
+            // Layer-3 (opt-in agentic code review, R7) still applies even when L2 is
+            // skipped, as long as the bundle is present.
+            if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, iteration).await {
+                if !l3_bounce_reasons.is_empty() {
+                    // L3 bounced: send back to the agent for a revise pass.
+                    iteration += 1;
+                    if iteration >= max_iterations {
+                        break Err(format!(
+                            "layer-3 reviewer still failing after {iteration} pass(es): {}",
+                            l3_bounce_reasons.join("; ")
+                        ));
+                    }
+                    continue;
+                }
+            }
             break Ok(());
         }
 
@@ -356,7 +517,7 @@ pub async fn execute_dev_implement_run(
         let check_result = checks.check(&role, &dir).await;
         match &check_result {
             Ok(violations) if violations.is_empty() => {
-                // Clean pass.
+                // Clean L2 pass. Run L3 if enabled before declaring victory.
                 event(&runs, "pass", "Stage 1/1 passed layer-2 checks.".to_string());
                 runs.push_event(
                     &run_id,
@@ -371,6 +532,23 @@ pub async fn execute_dev_implement_run(
                         content_hash: None,
                     },
                 );
+                // Layer-3 (opt-in agentic code review, R7): runs after a clean L2 when
+                // enabled. The reviewer sees story + rules + diff — no agent transcripts.
+                // It bounces exactly like L2: reasons go back to the developer for a
+                // revise pass. The bounce count is shared with L2.
+                if let Some(l3_bounce_reasons) = run_l3_if_enabled(&runs, &run_id, &next_seq, &l3, &dir, iteration).await {
+                    if !l3_bounce_reasons.is_empty() {
+                        iteration += 1;
+                        if iteration >= max_iterations {
+                            break Err(format!(
+                                "layer-3 reviewer still failing after {iteration} pass(es): {}",
+                                l3_bounce_reasons.join("; ")
+                            ));
+                        }
+                        // Bounce: re-run the agent with the L3 reasons.
+                        continue;
+                    }
+                }
                 break Ok(());
             }
             Ok(violations) => {
@@ -804,6 +982,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            None, // L3 not enabled in this test
         )
         .await;
 
