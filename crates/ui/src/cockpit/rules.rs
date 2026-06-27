@@ -420,7 +420,11 @@ pub(super) fn enforcement_tooltip(enforcement: &str) -> &'static str {
     }
 }
 
-pub(super) fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
+pub(super) fn applied_rule_columns(
+    domains: Vec<String>,
+    provenances: Vec<String>,
+    scopes: Vec<String>,
+) -> Vec<ColumnDef<AppliedRuleRow>> {
     let scope_badges = BadgeVariantMap::new()
         .with("repo-local", BadgeVariant::new("Repo-local", "green"))
         .with("cross-repo", BadgeVariant::new("Cross-repo", "yellow"))
@@ -435,7 +439,7 @@ pub(super) fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
             CellValue::Text(r.domain())
         })
         .sortable()
-        .filter(FilterKind::Text)
+        .filter(FilterKind::MultiSelect { options: domains })
         .initial_width(140.0),
         ColumnDef::new(ColumnId("rule"), "Rule", |r: &AppliedRuleRow| {
             CellValue::Text(format!("{} — {}", r.selection.rule_id, r.title()))
@@ -445,6 +449,7 @@ pub(super) fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
         .initial_width(300.0),
         // Provenance badge sourced from the corpus join. Falls back to `draft` for
         // unknown / custom rule ids that have no corpus entry.
+        // Multi-select so the architect can filter to only verified/grounded rules.
         ColumnDef::new(ColumnId("verif"), "Provenance", |r: &AppliedRuleRow| {
             CellValue::Text(
                 r.corpus
@@ -454,12 +459,15 @@ pub(super) fn applied_rule_columns() -> Vec<ColumnDef<AppliedRuleRow>> {
             )
         })
         .sortable()
+        .filter(FilterKind::MultiSelect { options: provenances })
         .render_kind(RenderKind::Badge(verif_badges))
         .initial_width(140.0),
+        // Multi-select: the architect can filter to repo-local / cross-repo / process.
         ColumnDef::new(ColumnId("scope"), "Scope", |r: &AppliedRuleRow| {
             CellValue::Text(r.scope_label().to_string())
         })
         .sortable()
+        .filter(FilterKind::MultiSelect { options: scopes })
         .render_kind(RenderKind::Badge(scope_badges))
         .initial_width(130.0),
         ColumnDef::new(ColumnId("repos"), "Applies to", |r: &AppliedRuleRow| {
@@ -654,7 +662,38 @@ pub(super) fn ProjectRulesTable(
     let id_map_click = id_map.clone();
     let id_map_remove = id_map.clone();
 
-    let handle = use_table(move || TableState::new(rows.clone(), applied_rule_columns()));
+    // Collect distinct values for the Domain / Provenance / Scope multi-select filters.
+    // Derived from the FULL (unfiltered) rows_data so filters stay stable regardless of
+    // the current repo-filter selection.
+    let filter_domains: Vec<String> = {
+        let mut v: Vec<String> = rows_data.iter()
+            .map(|r| r.domain())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    };
+    let filter_provenances: Vec<String> = {
+        let mut v: Vec<String> = rows_data.iter()
+            .map(|r| r.corpus.as_ref().map(|c| c.verification.clone()).unwrap_or_else(|| "draft".to_string()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    };
+    let filter_scopes: Vec<String> = {
+        let mut v: Vec<String> = rows_data.iter()
+            .map(|r| r.scope_label().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        v.sort();
+        v
+    };
+
+    let handle = use_table(move || TableState::new(rows.clone(), applied_rule_columns(filter_domains.clone(), filter_provenances.clone(), filter_scopes.clone())));
     use_hook(move || {
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(2000);
@@ -2099,9 +2138,6 @@ pub(super) fn RulesView() -> Element {
     // Signal from Table 2 to Table 1: "go to this repo".
     let goto_repo: Signal<Option<String>> = use_signal(|| None);
 
-    // pw/cockpit-ui: single-rule editor — the rule currently open for editing (None = closed).
-    let mut single_edit_rule: Signal<Option<ProposedRuleView>> = use_signal(|| None);
-
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
     let corpus = corpus_res.read().clone().flatten().unwrap_or_default();
@@ -2177,24 +2213,9 @@ pub(super) fn RulesView() -> Element {
                     let p_modal = p_owned.clone();
                     let p_t1 = p_owned.clone();
                     let p_t2 = p_owned.clone();
-                    let p_edit = p_owned.clone();
                     let corpus_t1 = corpus.clone();
                     let corpus_t2 = corpus.clone();
                     rsx! {
-                        // pw/cockpit-ui Feature 3: single-rule editor overlay. Rendered at
-                        // the subtree root (same ghost-click-eater rationale as RulesDetailModalHost).
-                        if let Some(rule_for_edit) = single_edit_rule() {
-                            SingleRuleEditor {
-                                project: p_edit.clone(),
-                                rule: rule_for_edit,
-                                on_close: move |_| single_edit_rule.set(None),
-                                on_saved: move |_| {
-                                    single_edit_rule.set(None);
-                                    refresh += 1;
-                                },
-                            }
-                        }
-
                         // The modal host is rendered at this subtree root (outside the chorale
                         // tables) to avoid the ghost-click-eater bug. option_picked persists
                         // the chosen option immediately on every pick.
@@ -2235,37 +2256,6 @@ pub(super) fn RulesView() -> Element {
                         // pw/cockpit-ui Feature 2: rule-drift notice. Shows rules whose corpus
                         // entry changed since they were adopted, with inline diffs and "Update".
                         RuleDriftNotice { project_id: pid_drift }
-
-                        // pw/cockpit-ui Feature 3: "Edit rule" entry point — opens the
-                        // SingleRuleEditor for the currently-selected corpus rule. Placed above
-                        // Table 1 so it's visible without scrolling past the table.
-                        if !corpus.is_empty() {
-                            {
-                                let corpus_for_edit = corpus.clone();
-                                rsx! {
-                                    div { class: "single-rule-edit-entry",
-                                        p { class: "section-hint",
-                                            "To edit a single rule's option (project-level or repo override), "
-                                            "select a rule in the corpus table below and click the button."
-                                        }
-                                        select {
-                                            class: "single-rule-edit-select",
-                                            onchange: move |e: Event<FormData>| {
-                                                let id = e.value();
-                                                if id.is_empty() { return; }
-                                                if let Some(r) = corpus_for_edit.iter().find(|r| r.id == id) {
-                                                    single_edit_rule.set(Some(r.clone()));
-                                                }
-                                            },
-                                            option { value: "", "Choose a rule to edit…" }
-                                            for r in corpus.iter() {
-                                                option { key: "{r.id}", value: "{r.id}", "{r.id} — {r.title}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
 
                         // Table 1: the project's applied rules, filterable by repo, with
                         // option-edit (via modal) and remove-from-repo actions.
