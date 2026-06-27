@@ -28,9 +28,15 @@
   price = 0), `supported_parameters` (**tool_use** = contains `tools`), `context_length`, and a
   coding-suitability heuristic. Cache the list; refresh on demand.
 
-Model selectors populate **from the registry**, grouped by provider, with badges (FREE · tool-use
-✓/✗ · context). Adding a provider = adding a registry source. Requires an OpenRouter key/base-URL
-in settings to call the models API.
+Model selectors populate **from the registry**, grouped by provider, with badges (FREE or
+**$price** · tool-use ✓/✗ · context · **caching-capable**). Adding a provider = adding a registry
+source. Requires an OpenRouter key/base-URL in settings to call the models API.
+
+**Paid OpenRouter models are first-class, not free-only.** There is no free filter — discovery
+returns the full list. Cheap, caching-capable paid models like **DeepSeek** are intended choices:
+surface them with a **price badge** + a **caching-capable** flag (DeepSeek / Gemini / Anthropic
+families), so they're pickable as a thrifty paid chain-rung (e.g. `[qwen:free → deepseek →
+sonnet]`) and as caching targets (§8).
 
 ## 1a. Credentials manager (keychain-backed, UI-set)
 

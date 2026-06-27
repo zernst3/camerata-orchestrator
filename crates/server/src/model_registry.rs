@@ -65,6 +65,11 @@ pub struct RegistryEntry {
     /// Scale: Haiku = 1, Sonnet = 3, Opus = 10 (rough relative quota cost).
     #[serde(default)]
     pub weight: u8,
+    /// Whether this model supports prompt caching. `true` for all Claude-provider models
+    /// and for OpenRouter models whose family is deepseek, google/gemini, or anthropic.
+    /// Used by the UI badge to show a `cache` tag.
+    #[serde(default)]
+    pub caching: bool,
 }
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
@@ -125,8 +130,26 @@ impl RegistryEntryStatic {
             price_in: self.price_in,
             price_out: self.price_out,
             weight: self.weight,
+            caching: true, // All Claude (subscription/CLI) models support prompt caching.
         }
     }
+}
+
+/// Heuristic: does this model support prompt caching?
+///
+/// Returns `true` for:
+/// - Any `claude`-provider model (all support caching).
+/// - OpenRouter models whose id indicates the deepseek, google/gemini, or anthropic family
+///   (these providers offer cache-compatible APIs via OpenRouter).
+pub fn caching_heuristic(provider: &str, id: &str) -> bool {
+    if provider == "claude" {
+        return true;
+    }
+    // For OpenRouter, check the id prefix for supported families.
+    let id_lower = id.to_lowercase();
+    id_lower.starts_with("deepseek/")
+        || id_lower.starts_with("google/")
+        || id_lower.starts_with("anthropic/")
 }
 
 /// Build the static Claude portion of the registry.
@@ -190,6 +213,7 @@ impl OpenRouterModelRaw {
         let price_in = self.pricing.prompt * 1_000_000.0;
         let price_out = self.pricing.completion * 1_000_000.0;
         let coding = coding_score(&self.id, &self.name, tool_use);
+        let caching = caching_heuristic("openrouter", &self.id);
         RegistryEntry {
             provider: "openrouter".to_string(),
             display: self.name.clone(),
@@ -201,6 +225,7 @@ impl OpenRouterModelRaw {
             price_in,
             price_out,
             weight: 0,
+            caching,
         }
     }
 }
@@ -535,6 +560,7 @@ mod tests {
             price_in: 0.0,
             price_out: 0.0,
             weight: 0,
+            caching: false,
         };
         {
             let mut inner = reg.inner.lock().unwrap();
@@ -585,9 +611,51 @@ mod tests {
             price_in: 3.0,
             price_out: 15.0,
             weight: 3,
+            caching: true,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: RegistryEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, back);
+    }
+
+    // ── caching_heuristic ─────────────────────────────────────────────────────
+
+    #[test]
+    fn caching_heuristic_claude_provider_always_true() {
+        // All claude-provider models are caching-capable (the subscription/CLI path).
+        assert!(caching_heuristic("claude", "claude-opus-4-8"));
+        assert!(caching_heuristic("claude", "claude-sonnet-4-6"));
+        assert!(caching_heuristic("claude", "claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn caching_heuristic_deepseek_openrouter_true() {
+        assert!(caching_heuristic("openrouter", "deepseek/deepseek-r1"));
+        assert!(caching_heuristic("openrouter", "deepseek/deepseek-chat"));
+    }
+
+    #[test]
+    fn caching_heuristic_gemini_openrouter_true() {
+        assert!(caching_heuristic("openrouter", "google/gemini-2.0-flash-001"));
+        assert!(caching_heuristic("openrouter", "google/gemini-pro"));
+    }
+
+    #[test]
+    fn caching_heuristic_anthropic_openrouter_true() {
+        assert!(caching_heuristic("openrouter", "anthropic/claude-3-5-sonnet"));
+    }
+
+    #[test]
+    fn caching_heuristic_random_openrouter_model_false() {
+        assert!(!caching_heuristic("openrouter", "meta-llama/llama-3.1-8b-instruct"));
+        assert!(!caching_heuristic("openrouter", "openai/gpt-4o"));
+        assert!(!caching_heuristic("openrouter", "qwen/qwen3-235b-a22b"));
+    }
+
+    #[test]
+    fn claude_entries_all_have_caching_true() {
+        for e in claude_entries() {
+            assert!(e.caching, "{} must have caching=true", e.id);
+        }
     }
 }

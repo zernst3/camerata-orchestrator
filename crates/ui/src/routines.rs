@@ -204,6 +204,10 @@ struct RegistryEntryWire {
     tool_use: bool,
     #[serde(default)]
     context: u64,
+    #[serde(default)]
+    price_out: f64,
+    #[serde(default)]
+    caching: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -226,20 +230,40 @@ async fn fetch_models() -> Option<ModelsResp> {
         .models
         .into_iter()
         .map(|e| {
-            let mut badges = Vec::<String>::new();
+            let mut parts = Vec::<String>::new();
+            // Price: FREE or $<price_out>/M.
             if e.free {
-                badges.push("FREE".to_string());
+                parts.push("FREE".to_string());
+            } else if e.price_out > 0.0 {
+                let formatted = if e.price_out >= 10.0 {
+                    format!("${:.0}/M", e.price_out)
+                } else if e.price_out >= 1.0 {
+                    let s = format!("{:.1}", e.price_out);
+                    format!("${}/M", s.trim_end_matches('0').trim_end_matches('.'))
+                } else {
+                    let s = format!("{:.2}", e.price_out);
+                    format!("${}/M", s.trim_end_matches('0').trim_end_matches('.'))
+                };
+                parts.push(formatted);
             }
-            if e.provider == "openrouter" && !e.tool_use {
-                badges.push("no-tools".to_string());
+            // Tool-use.
+            if e.tool_use {
+                parts.push("tool-use".to_string());
+            } else {
+                parts.push("no-tools".to_string());
             }
+            // Context.
             if e.context > 0 {
-                badges.push(format!("{}K ctx", e.context / 1000));
+                parts.push(format!("{}K", e.context / 1000));
             }
-            let label = if badges.is_empty() {
+            // Caching.
+            if e.caching {
+                parts.push("cache".to_string());
+            }
+            let label = if parts.is_empty() {
                 e.display.clone()
             } else {
-                format!("{} [{}]", e.display, badges.join("] ["))
+                format!("{}  {}", e.display, parts.join(" · "))
             };
             ModelOption { label, id: e.id, provider: e.provider, free: e.free }
         })

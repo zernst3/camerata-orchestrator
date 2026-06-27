@@ -545,7 +545,7 @@ pub(super) async fn audit_against(
 
 /// One model entry in a selector, sourced from `GET /api/models/registry`.
 ///
-/// `label` carries a badge-enriched display string (e.g. "Opus 4.8 [200K ctx]").
+/// `label` carries a badge-enriched display string (e.g. "DeepSeek R1  $0.55/M · tool-use · 64K · cache").
 /// `provider` groups the entry in `<optgroup>` elements ("claude" | "openrouter").
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct AuditModelOption {
@@ -570,29 +570,74 @@ pub(super) struct AuditModelOption {
     pub price_in: f64,
     #[serde(default)]
     pub price_out: f64,
+    /// Whether this model supports prompt caching.
+    #[serde(default)]
+    pub caching: bool,
 }
 
 /// Build a badge-enriched display label from registry entry fields.
 ///
-/// Format: "<display> [FREE] [200K ctx]"  (tool-use is implicit for Claude; shown
-/// for OpenRouter only when the model lacks it so the absence is visible).
-fn model_badge_label(display: &str, free: bool, tool_use: bool, context: u64, provider: &str) -> String {
-    let mut badges = Vec::<String>::new();
+/// Format: "<display>  FREE · tool-use · 200K · cache"
+/// Or for paid: "<display>  $0.55/M · tool-use · 64K · cache"
+///
+/// - Price: `FREE` if free, else `$<price_out>/M` (output price, compact).
+/// - `tool-use`: always shown (absence as `no-tools` for OpenRouter models lacking it).
+/// - Context: `<N>K` (e.g. `200K`, `64K`).
+/// - `cache`: shown only when `caching` is true.
+///
+/// Badges are separated by ` · ` and appended after two spaces following the display name.
+fn model_badge_label(
+    display: &str,
+    free: bool,
+    tool_use: bool,
+    context: u64,
+    price_out: f64,
+    caching: bool,
+) -> String {
+    let mut parts = Vec::<String>::new();
+
+    // Price badge: FREE or $<price>/M (output price).
     if free {
-        badges.push("FREE".to_string());
+        parts.push("FREE".to_string());
+    } else if price_out > 0.0 {
+        // Compact price: show 2 sig figs but strip trailing zeros.
+        // e.g. 15.0 → "$15/M", 0.55 → "$0.55/M", 3.0 → "$3/M"
+        let formatted = if price_out >= 10.0 {
+            format!("${:.0}/M", price_out)
+        } else if price_out >= 1.0 {
+            // Up to 1 decimal place, strip trailing zero.
+            let s = format!("{:.1}", price_out);
+            format!("${}/M", s.trim_end_matches('0').trim_end_matches('.'))
+        } else {
+            // Small prices: 2 decimal places, strip trailing zeros.
+            let s = format!("{:.2}", price_out);
+            format!("${}/M", s.trim_end_matches('0').trim_end_matches('.'))
+        };
+        parts.push(formatted);
     }
-    // Show tool-use badge only for OpenRouter models where absence matters.
-    if provider == "openrouter" && !tool_use {
-        badges.push("no-tools".to_string());
+
+    // Tool-use: always shown (absence flagged for OpenRouter models).
+    if tool_use {
+        parts.push("tool-use".to_string());
+    } else {
+        parts.push("no-tools".to_string());
     }
+
+    // Context window.
     if context > 0 {
         let ctx_k = context / 1000;
-        badges.push(format!("{ctx_k}K ctx"));
+        parts.push(format!("{ctx_k}K"));
     }
-    if badges.is_empty() {
+
+    // Caching tag.
+    if caching {
+        parts.push("cache".to_string());
+    }
+
+    if parts.is_empty() {
         display.to_string()
     } else {
-        format!("{} [{}]", display, badges.join("] ["))
+        format!("{}  {}", display, parts.join(" · "))
     }
 }
 
@@ -620,6 +665,8 @@ struct RegistryEntryWire {
     price_in: f64,
     #[serde(default)]
     price_out: f64,
+    #[serde(default)]
+    caching: bool,
 }
 
 impl RegistryEntryWire {
@@ -630,7 +677,8 @@ impl RegistryEntryWire {
                 self.free,
                 self.tool_use,
                 self.context,
-                &self.provider,
+                self.price_out,
+                self.caching,
             ),
             id: self.id.clone(),
             provider: self.provider.clone(),
@@ -639,6 +687,7 @@ impl RegistryEntryWire {
             context: self.context,
             price_in: self.price_in,
             price_out: self.price_out,
+            caching: self.caching,
         }
     }
 }
@@ -3765,5 +3814,55 @@ mod tests {
             saved.is_none(),
             "fresh view with no saved entry must trigger recommended fallback"
         );
+    }
+
+    // ── model_badge_label ────────────────────────────────────────────────────
+
+    #[test]
+    fn badge_free_model_shows_free_not_price() {
+        let label = super::model_badge_label("DeepSeek R1", true, true, 64_000, 0.0, false);
+        assert!(label.contains("FREE"), "free model must show FREE: {label}");
+        assert!(!label.contains('$'), "free model must not show a price: {label}");
+    }
+
+    #[test]
+    fn badge_paid_model_shows_price_per_million() {
+        // $0.55/M output
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, false);
+        assert!(label.contains("$0.55/M"), "paid model must show output price: {label}");
+        assert!(!label.contains("FREE"), "paid model must not show FREE: {label}");
+    }
+
+    #[test]
+    fn badge_round_price_strips_trailing_decimal() {
+        // $15.0/M → "$15/M" (no trailing zero)
+        let label = super::model_badge_label("Opus", false, true, 200_000, 15.0, false);
+        assert!(label.contains("$15/M"), "round price must strip decimal: {label}");
+    }
+
+    #[test]
+    fn badge_caching_true_shows_cache_tag() {
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true);
+        assert!(label.contains("cache"), "caching model must show cache tag: {label}");
+    }
+
+    #[test]
+    fn badge_caching_false_omits_cache_tag() {
+        let label = super::model_badge_label("Llama 3.1", false, true, 128_000, 0.10, false);
+        assert!(!label.contains("cache"), "non-caching model must not show cache tag: {label}");
+    }
+
+    #[test]
+    fn badge_full_format_example() {
+        // "DeepSeek R1  $0.55/M · tool-use · 64K · cache"
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true);
+        assert_eq!(label, "DeepSeek R1  $0.55/M · tool-use · 64K · cache");
+    }
+
+    #[test]
+    fn badge_free_with_cache() {
+        let label = super::model_badge_label("DeepSeek R1 Free", true, true, 64_000, 0.0, true);
+        assert!(label.contains("FREE"), "free label: {label}");
+        assert!(label.contains("cache"), "free+cache label: {label}");
     }
 }
