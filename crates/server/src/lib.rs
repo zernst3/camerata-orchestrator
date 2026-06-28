@@ -1332,17 +1332,16 @@ async fn start_governed_run(
                 }
             };
 
-            // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): DEFAULT-ON.
-            //
-            // The intended gate is project ruleset selection. But `ProjectRuleset` models
-            // selections as a pure opt-IN list with no per-rule opt-OUT flag, so a clean
-            // selection check would silently disable this brand-new rule for every existing
-            // project (none list it yet) — the opposite of the rule's stated intent (default
-            // = deny + escalate). So we DEFAULT-ON: the guard always runs, and a project that
-            // has explicitly selected the rule is treated as an affirmative confirmation. If a
-            // first-class opt-out flag is added to RuleSelection later, switch this to honour
-            // it. The guard logs that the check ran on every dev-implement run (clean or not).
-            let enforce_test_tamper_guard = true;
+            // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): enforce on TWO conditions —
+            // the rule is SELECTED (active) in the project AND the chosen option is the
+            // (default) escalate option. A project that selected an "allow" option, or has
+            // not selected the rule, is not blocked. `test_tamper_guard_active` is the pure
+            // decision over the project's ruleset selections.
+            let enforce_test_tamper_guard = state
+                .projects
+                .active()
+                .map(|p| crate::test_tamper::test_tamper_guard_active(&p.ruleset.selections))
+                .unwrap_or(false);
             let impl_escalations = state.escalations.clone();
 
             // Clone the provider-dispatch context before the move closure captures it.

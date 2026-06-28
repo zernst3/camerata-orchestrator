@@ -145,9 +145,63 @@ fn parse_diff_git_path(rest: &str) -> String {
     a.trim().to_string()
 }
 
+/// The rule id this guard enforces.
+pub const TEST_TAMPER_RULE_ID: &str = "AGENTIC-NO-TEST-TAMPER-1";
+/// Option ids that DISABLE blocking (the project accepted agent test edits).
+const OPT_ALLOW_JUSTIFIED: &str = "allow-modifying-tests-within-the-same-change-whe";
+const OPT_NO_RESTRICTION: &str = "no-restriction-on-test-edits";
+
+/// Whether the test-tamper guard should BLOCK for this project, derived from its
+/// ruleset. The guard enforces on TWO conditions, both required:
+///   1. the rule `AGENTIC-NO-TEST-TAMPER-1` is **selected** (active), and
+///   2. the **chosen option** is the (default) escalate option.
+///
+/// A project that selected the "allow-with-justification" or "no-restriction" option,
+/// or that has not selected the rule at all, is NOT enforced. A selection with no
+/// explicit option falls to the rule's default (escalate), so it enforces.
+pub fn test_tamper_guard_active(selections: &[crate::project::RuleSelection]) -> bool {
+    selections.iter().any(|s| {
+        s.rule_id == TEST_TAMPER_RULE_ID
+            && match s.chosen_option.as_deref() {
+                None => true, // no explicit option -> the rule's default (escalate)
+                Some(o) => o != OPT_ALLOW_JUSTIFIED && o != OPT_NO_RESTRICTION,
+            }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::RuleSelection;
+
+    fn sel(rule_id: &str, opt: Option<&str>) -> RuleSelection {
+        RuleSelection {
+            rule_id: rule_id.to_string(),
+            chosen_option: opt.map(String::from),
+            repos: vec![],
+        }
+    }
+
+    #[test]
+    fn guard_inactive_when_rule_not_selected() {
+        assert!(!test_tamper_guard_active(&[sel("SOME-OTHER-RULE", None)]));
+        assert!(!test_tamper_guard_active(&[]));
+    }
+
+    #[test]
+    fn guard_active_when_selected_default_or_escalate_option() {
+        assert!(test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, None)]));
+        assert!(test_tamper_guard_active(&[sel(
+            TEST_TAMPER_RULE_ID,
+            Some("escalate-before-modifying-or-deleting-an-existin")
+        )]));
+    }
+
+    #[test]
+    fn guard_inactive_when_selected_with_an_allow_option() {
+        assert!(!test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, Some(OPT_ALLOW_JUSTIFIED))]));
+        assert!(!test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, Some(OPT_NO_RESTRICTION))]));
+    }
 
     /// (a) Adding a brand-new test file → no finding (all `+`, `new file mode`).
     #[test]
