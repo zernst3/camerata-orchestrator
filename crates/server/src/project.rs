@@ -460,6 +460,41 @@ impl Project {
     }
 }
 
+/// The full set of TRANSFERABLE project CONFIG fields that travel through an export →
+/// import round-trip (issue #111). Per the config-vs-data ADR
+/// (`2026-06-21_project_config_vs_data_separation`), every field on `Project` is config
+/// and must round-trip; only DATA (UoW, settings/workspace_root/repo_paths, drafts) — which
+/// lives in separate stores, not on `Project` — stays local.
+///
+/// `name`/`overwrite` are handled separately by [`ProjectStore::import_or_overwrite`]; this
+/// struct carries the remaining transferable fields so they can be applied uniformly in BOTH
+/// the overwrite-in-place and new-project branches.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectImport {
+    /// The repos in scope (`owner/repo`).
+    pub repos: Vec<String>,
+    /// The project's ruleset (the source of truth, including custom rules).
+    pub ruleset: ProjectRuleset,
+    /// Repos already onboarded in the source project.
+    pub onboarded: Vec<String>,
+    /// Loop-guard iteration cap.
+    pub max_iterations: usize,
+    /// Per-capability-band model mapping (ORCH-MODEL-TIERING-1).
+    pub tier_map: TierMap,
+    /// VCS-action gate configuration.
+    pub process_rule_config: ProcessRuleConfig,
+    /// Per-step model configuration for non-fleet AI steps.
+    pub step_models: StepModels,
+    /// Stall-detection thresholds.
+    pub stall_thresholds: StallThresholds,
+    /// Layer-3 agentic code-review gate config.
+    pub l3_review: L3ReviewConfig,
+    /// The model efficiency profile.
+    pub model_profile: ModelProfile,
+    /// Whether the Designer (vision/multimodal) band is enabled.
+    pub vision_enabled: bool,
+}
+
 /// Outcome of a [`ProjectStore::import_or_overwrite`] call.
 #[derive(Debug)]
 pub enum ImportOutcome {
@@ -616,23 +651,36 @@ impl ProjectStore {
         ruleset: ProjectRuleset,
     ) -> Option<Project> {
         Some(
-            self.import_or_overwrite(name, repos, ruleset, Vec::new(), false)?
-                .into_project(),
+            self.import_or_overwrite(
+                name,
+                ProjectImport {
+                    repos,
+                    ruleset,
+                    max_iterations: default_max_iterations(),
+                    ..Default::default()
+                },
+                false,
+            )?
+            .into_project(),
         )
     }
 
     /// Import (or overwrite) a project from an exported JSON document.
     ///
-    /// - No existing project with the same `name` → create a fresh id, make active.
+    /// The full TRANSFERABLE config travels in `import` (issue #111) — repos, ruleset,
+    /// onboarded, plus tier_map / process_rule_config / step_models / stall_thresholds /
+    /// l3_review / model_profile / vision_enabled / max_iterations. Per the config-vs-data
+    /// ADR every `Project` field is config and must round-trip; only DATA (UoW, settings,
+    /// drafts — separate stores) stays local.
+    ///
+    /// - No existing project with the same `name` → create a fresh id from `import`, make active.
     /// - Same `name` exists and `overwrite=false` → return `Conflict` (no mutation).
-    /// - Same `name` exists and `overwrite=true` → replace repos/ruleset/onboarded
-    ///   IN PLACE (same id), make active.
+    /// - Same `name` exists and `overwrite=true` → replace the full config IN PLACE
+    ///   (same id), make active.
     pub fn import_or_overwrite(
         &self,
         name: &str,
-        repos: Vec<String>,
-        ruleset: ProjectRuleset,
-        onboarded: Vec<String>,
+        import: ProjectImport,
         overwrite: bool,
     ) -> Option<ImportOutcome> {
         let outcome = {
@@ -641,10 +689,18 @@ impl ProjectStore {
                 if !overwrite {
                     return Some(ImportOutcome::Conflict);
                 }
-                // Overwrite in place — keep the same id.
-                existing.repos = repos;
-                existing.ruleset = ruleset;
-                existing.onboarded = onboarded;
+                // Overwrite in place — keep the same id, replace the full transferable config.
+                existing.repos = import.repos;
+                existing.ruleset = import.ruleset;
+                existing.onboarded = import.onboarded;
+                existing.max_iterations = import.max_iterations;
+                existing.tier_map = import.tier_map;
+                existing.process_rule_config = import.process_rule_config;
+                existing.step_models = import.step_models;
+                existing.stall_thresholds = import.stall_thresholds;
+                existing.l3_review = import.l3_review;
+                existing.model_profile = import.model_profile;
+                existing.vision_enabled = import.vision_enabled;
                 let updated = existing.clone();
                 s.active = Some(updated.id.clone());
                 ImportOutcome::Overwritten(updated)
@@ -654,17 +710,17 @@ impl ProjectStore {
                 let project = Project {
                     id: id.clone(),
                     name: name.to_string(),
-                    repos,
-                    ruleset,
-                    onboarded,
-                    max_iterations: default_max_iterations(),
-                    tier_map: TierMap::default(),
-                    process_rule_config: ProcessRuleConfig::default(),
-                    step_models: StepModels::default(),
-                    stall_thresholds: StallThresholds::default(),
-                    l3_review: L3ReviewConfig::default(),
-                    model_profile: ModelProfile::default(),
-                    vision_enabled: false,
+                    repos: import.repos,
+                    ruleset: import.ruleset,
+                    onboarded: import.onboarded,
+                    max_iterations: import.max_iterations,
+                    tier_map: import.tier_map,
+                    process_rule_config: import.process_rule_config,
+                    step_models: import.step_models,
+                    stall_thresholds: import.stall_thresholds,
+                    l3_review: import.l3_review,
+                    model_profile: import.model_profile,
+                    vision_enabled: import.vision_enabled,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -1040,9 +1096,12 @@ mod tests {
         let outcome = store
             .import_or_overwrite(
                 "Alpha",
-                vec!["me/api".into()],
-                ruleset_with("R-1"),
-                vec![],
+                ProjectImport {
+                    repos: vec!["me/api".into()],
+                    ruleset: ruleset_with("R-1"),
+                    max_iterations: default_max_iterations(),
+                    ..Default::default()
+                },
                 false,
             )
             .unwrap();
@@ -1069,9 +1128,12 @@ mod tests {
         let outcome = store
             .import_or_overwrite(
                 "Beta",
-                vec!["me/web".into()],
-                ruleset_with("R-NEW"),
-                vec![],
+                ProjectImport {
+                    repos: vec!["me/web".into()],
+                    ruleset: ruleset_with("R-NEW"),
+                    max_iterations: default_max_iterations(),
+                    ..Default::default()
+                },
                 false,
             )
             .unwrap();
@@ -1095,9 +1157,13 @@ mod tests {
         let outcome = store
             .import_or_overwrite(
                 "Gamma",
-                vec!["me/new1".into(), "me/new2".into()],
-                ruleset_with("R-REPLACED"),
-                vec!["me/new1".into()],
+                ProjectImport {
+                    repos: vec!["me/new1".into(), "me/new2".into()],
+                    ruleset: ruleset_with("R-REPLACED"),
+                    onboarded: vec!["me/new1".into()],
+                    max_iterations: default_max_iterations(),
+                    ..Default::default()
+                },
                 true,
             )
             .unwrap();
@@ -1130,9 +1196,12 @@ mod tests {
         let outcome = store
             .import_or_overwrite(
                 "Delta",
-                vec!["me/api".into(), "me/web".into()],
-                Default::default(),
-                onboarded.clone(),
+                ProjectImport {
+                    repos: vec!["me/api".into(), "me/web".into()],
+                    onboarded: onboarded.clone(),
+                    max_iterations: default_max_iterations(),
+                    ..Default::default()
+                },
                 false,
             )
             .unwrap();

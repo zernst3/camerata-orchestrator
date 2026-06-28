@@ -12,12 +12,15 @@
 //!
 //! HERMETIC: NO network, NO disk needed (in-memory `ProjectStore`), NO scan.
 //!
-//! ⚠️ Several assertions here are `#[ignore]`-marked BUG markers: the import path drops
-//! transferable config the export carries. See the per-test BUG notes + the agent summary.
+//! The scope-4 + scope-5 tests assert that ALL transferable config (tier_map, step_models,
+//! model_profile, l3_review, vision_enabled, max_iterations, stall_thresholds,
+//! process_rule_config) round-trips through the import path. These were `#[ignore]` BUG
+//! markers before issue #111; they are live now that the import path applies the full config.
 
 use camerata_server::project::{
-    export_ruleset, parse_ruleset, CustomRule, L3ReviewConfig, ModelProfile, Project,
-    ProjectRuleset, ProjectStore, RuleSelection, StepKind,
+    default_max_iterations, export_ruleset, parse_ruleset, CustomRule, L3ReviewConfig,
+    ModelProfile, Project, ProjectImport, ProjectRuleset, ProjectStore, RuleSelection,
+    StallThresholds, StepKind, StepModels,
 };
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -68,6 +71,15 @@ fn rich_source_project(store: &ProjectStore) -> Project {
             };
             // vision_enabled.
             proj.vision_enabled = true;
+            // max_iterations (non-default).
+            proj.max_iterations = 7;
+            // stall_thresholds (non-default).
+            proj.stall_thresholds = StallThresholds {
+                watched_secs: 999,
+                routine_secs: 4242,
+            };
+            // process_rule_config (non-default: flip branch_naming on).
+            proj.process_rule_config.branch_naming.enabled = true;
             // model_profile (set last; the setters above flip it to Custom anyway).
             proj.model_profile = ModelProfile::Custom;
         })
@@ -81,28 +93,50 @@ fn export_project_json(project: &Project) -> serde_json::Value {
     serde_json::to_value(project).expect("a Project serializes")
 }
 
-/// Simulate the import side EXACTLY as the real `import_project` handler does: read the
-/// fields `ImportProjectReq` deserializes (name / repos / ruleset / onboarded) and call the
-/// public `ProjectStore::import_or_overwrite` the handler invokes. Returns the imported
-/// project.
+/// Read a transferable-config field out of the export JSON the way the real
+/// `ImportProjectReq` does: `serde(default)` for an absent/null key (back-compat with older
+/// exports), otherwise the deserialized value.
+fn field_or_default<T: serde::de::DeserializeOwned + Default>(
+    export: &serde_json::Value,
+    key: &str,
+) -> T {
+    match export.get(key) {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone()).unwrap_or_default(),
+        _ => T::default(),
+    }
+}
+
+/// Simulate the import side EXACTLY as the real `import_project` handler does: read the full
+/// transferable config `ImportProjectReq` deserializes (name / repos / ruleset / onboarded /
+/// tier_map / process_rule_config / step_models / stall_thresholds / l3_review /
+/// model_profile / vision_enabled / max_iterations) and call the public
+/// `ProjectStore::import_or_overwrite` the handler invokes. Returns the imported project.
 fn import_via_handler_path(
     store: &ProjectStore,
     export: &serde_json::Value,
     overwrite: bool,
 ) -> Project {
     let name = export["name"].as_str().unwrap().to_string();
-    let repos: Vec<String> = export["repos"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    let ruleset: ProjectRuleset =
-        serde_json::from_value(export["ruleset"].clone()).unwrap_or_default();
-    let onboarded: Vec<String> = export["onboarded"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
+    let import = ProjectImport {
+        repos: field_or_default(export, "repos"),
+        ruleset: field_or_default::<ProjectRuleset>(export, "ruleset"),
+        onboarded: field_or_default(export, "onboarded"),
+        max_iterations: match export.get("max_iterations") {
+            Some(v) if !v.is_null() => {
+                serde_json::from_value(v.clone()).unwrap_or_else(|_| default_max_iterations())
+            }
+            _ => default_max_iterations(),
+        },
+        tier_map: field_or_default(export, "tier_map"),
+        process_rule_config: field_or_default(export, "process_rule_config"),
+        step_models: field_or_default(export, "step_models"),
+        stall_thresholds: field_or_default(export, "stall_thresholds"),
+        l3_review: field_or_default(export, "l3_review"),
+        model_profile: field_or_default(export, "model_profile"),
+        vision_enabled: field_or_default(export, "vision_enabled"),
+    };
     store
-        .import_or_overwrite(&name, repos, ruleset, onboarded, overwrite)
+        .import_or_overwrite(&name, import, overwrite)
         .unwrap()
         .into_project()
 }
@@ -272,18 +306,16 @@ fn scope3_custom_rules_preserved_on_a_base_rules_import() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
-// SCOPE 4 — TRANSFERABLE CONFIG that the import path DROPS  (BUG markers)
+// SCOPE 4 — TRANSFERABLE CONFIG now travels through the import path (#111 fix)
 //
-//   The export serializes the full Project (so these fields ARE in the export JSON), but
-//   `ImportProjectReq` / `import_or_overwrite` only read name/repos/ruleset/onboarded — so
-//   tier_map, step_models, model_profile, l3_review, and vision_enabled are LOST on import.
-//   The ADR explicitly names tier_map as transferable config, so dropping it is a defect.
-//   These are kept as `#[ignore]` BUG markers (fix requires changing the import handler +
-//   `import_or_overwrite` signature — not a safe blind edit). See the agent summary.
+//   The export serializes the full Project (so these fields ARE in the export JSON), and
+//   `ImportProjectReq` / `import_or_overwrite` (via `ProjectImport`) now read + apply them —
+//   so tier_map, step_models, model_profile, l3_review, and vision_enabled round-trip.
+//   The ADR explicitly names every Project field as transferable config. (These were
+//   `#[ignore]` BUG markers before #111; un-ignored now that the import path is fixed.)
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "BUG: import drops tier_map — export carries it but import_or_overwrite/ImportProjectReq do not read it (ADR names tier_map as transferable config)"]
 fn scope4_bug_tier_map_must_travel_through_import() {
     let src_store = ProjectStore::new();
     let source = rich_source_project(&src_store);
@@ -291,8 +323,7 @@ fn scope4_bug_tier_map_must_travel_through_import() {
     let dst_store = ProjectStore::new();
     let imported = import_via_handler_path(&dst_store, &export, false);
 
-    // FAILS today: imported.tier_map is TierMap::default(), not the exported values.
-    // (Assertion that documents intended behavior — tier_map is transferable config.)
+    // tier_map is transferable config (ADR) and now round-trips through the import path.
     assert_eq!(
         imported.tier_map.strongest, "EXPORT-STRONGEST",
         "tier_map.strongest must travel with the export (ADR: tier_map is transferable config)"
@@ -303,7 +334,6 @@ fn scope4_bug_tier_map_must_travel_through_import() {
 }
 
 #[test]
-#[ignore = "BUG: import drops step_models — export carries them but the import path does not read them"]
 fn scope4_bug_step_models_must_travel_through_import() {
     let src_store = ProjectStore::new();
     let source = rich_source_project(&src_store);
@@ -311,13 +341,12 @@ fn scope4_bug_step_models_must_travel_through_import() {
     let dst_store = ProjectStore::new();
     let imported = import_via_handler_path(&dst_store, &export, false);
 
-    // FAILS today: step models reset to DEFAULT_MODEL on import.
+    // step models now round-trip through the import path (#111).
     assert_eq!(imported.model_for_step(StepKind::Audit), "EXPORT-AUDIT");
     assert_eq!(imported.model_for_step(StepKind::Decomposition), "EXPORT-DECOMP");
 }
 
 #[test]
-#[ignore = "BUG: import drops l3_review + model_profile + vision_enabled — export carries them but the import path does not read them"]
 fn scope4_bug_l3_profile_vision_must_travel_through_import() {
     let src_store = ProjectStore::new();
     let source = rich_source_project(&src_store);
@@ -325,7 +354,7 @@ fn scope4_bug_l3_profile_vision_must_travel_through_import() {
     let dst_store = ProjectStore::new();
     let imported = import_via_handler_path(&dst_store, &export, false);
 
-    // FAILS today: all three reset to defaults on import.
+    // l3_review + model_profile + vision_enabled now round-trip through the import path (#111).
     assert!(imported.l3_review.enabled, "l3_review.enabled must travel");
     assert_eq!(imported.l3_review.model, "EXPORT-L3", "l3_review.model must travel");
     assert_eq!(
@@ -334,4 +363,73 @@ fn scope4_bug_l3_profile_vision_must_travel_through_import() {
         "model_profile must travel"
     );
     assert!(imported.vision_enabled, "vision_enabled must travel");
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════
+// SCOPE 5 — FULL round-trip: EVERY transferable config field survives export -> import
+//
+//   One assertion bundle covering all of #111 at once: a new-project import (fresh store)
+//   AND an overwrite-in-place import must both reproduce every Project config field from
+//   the rich source. Guards against a future field being added to Project but missed in the
+//   import path (the exact class of bug #111 was).
+// ════════════════════════════════════════════════════════════════════════════════════
+
+/// Assert that `imported` reproduces EVERY transferable config field of the rich source.
+fn assert_full_config_round_trips(imported: &Project) {
+    // repos / onboarded / ruleset (selections incl. chosen_option, cross-repo, process, custom).
+    assert_eq!(imported.repos, vec!["me/api".to_string(), "me/web".to_string()]);
+    assert_eq!(imported.onboarded, vec!["me/api".to_string()]);
+    assert_eq!(imported.ruleset.selections[0].rule_id, "RUST-DOMAIN-1");
+    assert_eq!(
+        imported.ruleset.selections[0].chosen_option.as_deref(),
+        Some("opt-b")
+    );
+    assert_eq!(imported.ruleset.cross_repo[0].rule_id, "INTEGRATION-API-CONTRACT-1");
+    assert_eq!(imported.ruleset.process[0].rule_id, "PROCESS-CONVENTIONAL-COMMIT-1");
+    assert_eq!(imported.ruleset.custom.len(), 1);
+    assert_eq!(imported.ruleset.custom[0].name, "house-style");
+
+    // tier_map (full chain incl. vision).
+    assert_eq!(imported.tier_map.strongest, "EXPORT-STRONGEST");
+    assert_eq!(imported.tier_map.balanced, vec!["EXPORT-BALANCED".to_string()]);
+    assert_eq!(imported.tier_map.fast, vec!["EXPORT-FAST".to_string()]);
+    assert_eq!(imported.tier_map.vision, vec!["EXPORT-VISION".to_string()]);
+
+    // step_models.
+    assert_eq!(imported.model_for_step(StepKind::Audit), "EXPORT-AUDIT");
+    assert_eq!(imported.model_for_step(StepKind::Decomposition), "EXPORT-DECOMP");
+
+    // l3_review / model_profile / vision_enabled.
+    assert!(imported.l3_review.enabled);
+    assert_eq!(imported.l3_review.model, "EXPORT-L3");
+    assert_eq!(imported.model_profile, ModelProfile::Custom);
+    assert!(imported.vision_enabled);
+
+    // max_iterations / stall_thresholds / process_rule_config.
+    assert_eq!(imported.max_iterations, 7);
+    assert_eq!(imported.stall_thresholds.watched_secs, 999);
+    assert_eq!(imported.stall_thresholds.routine_secs, 4242);
+    assert!(imported.process_rule_config.branch_naming.enabled);
+}
+
+#[test]
+fn scope5_full_config_round_trips_through_import_new_and_overwrite() {
+    let src_store = ProjectStore::new();
+    let source = rich_source_project(&src_store);
+    let export = export_project_json(&source);
+
+    // (a) New-project import into a fresh store: full config travels.
+    let dst_store = ProjectStore::new();
+    let imported_new = import_via_handler_path(&dst_store, &export, false);
+    assert_full_config_round_trips(&imported_new);
+
+    // (b) Overwrite-in-place import: a target seeded with all-default config, then overwritten
+    //     by the rich export, must end up with the rich config (same id, full replace).
+    let ow_store = ProjectStore::new();
+    let stub = ow_store.create("RichProj", vec!["stale/repo".to_string()]).unwrap();
+    let stub_id = stub.id.clone();
+    let imported_ow = import_via_handler_path(&ow_store, &export, true);
+    assert_eq!(imported_ow.id, stub_id, "overwrite keeps the same id");
+    assert_eq!(ow_store.list().len(), 1, "no duplicate on same-name overwrite");
+    assert_full_config_round_trips(&imported_ow);
 }

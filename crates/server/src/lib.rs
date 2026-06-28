@@ -2120,9 +2120,36 @@ struct ImportProjectReq {
     /// onboarding state is preserved across machines.
     #[serde(default)]
     onboarded: Vec<String>,
+    /// Loop-guard iteration cap (#111). `#[serde(default)]` (via the project's helper) keeps
+    /// back-compat with older exports that omit it.
+    #[serde(default = "crate::project::default_max_iterations")]
+    max_iterations: usize,
+    /// Per-capability-band model mapping (ORCH-MODEL-TIERING-1). Transferable config (#111);
+    /// `#[serde(default)]` for back-compat with older exports.
+    #[serde(default)]
+    tier_map: crate::model_tier::TierMap,
+    /// VCS-action gate configuration. Transferable config (#111).
+    #[serde(default)]
+    process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig,
+    /// Per-step model configuration for non-fleet AI steps. Transferable config (#111).
+    #[serde(default)]
+    step_models: crate::project::StepModels,
+    /// Stall-detection thresholds. Transferable config (#111).
+    #[serde(default)]
+    stall_thresholds: crate::project::StallThresholds,
+    /// Layer-3 agentic code-review gate config. Transferable config (#111).
+    #[serde(default)]
+    l3_review: crate::project::L3ReviewConfig,
+    /// Model efficiency profile. Transferable config (#111).
+    #[serde(default)]
+    model_profile: crate::project::ModelProfile,
+    /// Whether the Designer (vision/multimodal) band is enabled. Transferable config (#111).
+    #[serde(default)]
+    vision_enabled: bool,
     /// When `false` (the default) a name collision returns `conflict: true` so the UI
     /// can ask before overwriting. Pass `true` to overwrite in place (same id, same
-    /// name, replaced repos/ruleset/onboarded).
+    /// name, replacing the full transferable config — repos/ruleset/onboarded plus
+    /// tier_map/step_models/model_profile/l3_review/etc., #111).
     #[serde(default)]
     overwrite: bool,
     /// The source project's routines, travelling with the export. Imported routines are
@@ -2186,16 +2213,26 @@ async fn import_project(
     State(state): State<AppState>,
     Json(req): Json<ImportProjectReq>,
 ) -> Json<serde_json::Value> {
-    use crate::project::ImportOutcome;
+    use crate::project::{ImportOutcome, ProjectImport};
     let name = req.name.clone();
     let imported_routines = req.routines;
-    match state.projects.import_or_overwrite(
-        &req.name,
-        req.repos,
-        req.ruleset,
-        req.onboarded,
-        req.overwrite,
-    ) {
+    let import = ProjectImport {
+        repos: req.repos,
+        ruleset: req.ruleset,
+        onboarded: req.onboarded,
+        max_iterations: req.max_iterations,
+        tier_map: req.tier_map,
+        process_rule_config: req.process_rule_config,
+        step_models: req.step_models,
+        stall_thresholds: req.stall_thresholds,
+        l3_review: req.l3_review,
+        model_profile: req.model_profile,
+        vision_enabled: req.vision_enabled,
+    };
+    match state
+        .projects
+        .import_or_overwrite(&req.name, import, req.overwrite)
+    {
         Some(ImportOutcome::Created(p)) => {
             import_project_routines(&state, &p.id, &imported_routines);
             Json(serde_json::json!({ "ok": true, "project": p, "overwritten": false }))
