@@ -382,7 +382,9 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
 /// `POST /api/projects/:id/step-models` endpoint (patch semantics: one step per call). The
 /// `id` is the SCOPED project id passed into the editor — never a global — so the mutation
 /// targets exactly that project (per-project isolation is preserved end to end).
-async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
+/// `pub(super)` so both `rules.rs` (Settings) and `scan.rs` (onboarding) can call the same
+/// endpoint and keep Audit + Calibration bidirectionally synced.
+pub(super) async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
     reqwest::Client::new()
         .post(format!("{}/api/projects/{}/step-models", crate::BFF_URL, id))
         .json(&serde_json::json!({ "step": step, "model": model }))

@@ -2392,21 +2392,52 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // Company-agnostic list comes from the server (`/api/models`); seed from its default.
     let models_res = use_resource(fetch_audit_models);
     let models = models_res.read().clone().flatten();
+    // Fetch the active project so the Audit + Calibration selectors read their initial
+    // value from `project.step_models` — the same source Settings writes to. This makes
+    // both screens bidirectionally synced: a change here persists to step_models (via the
+    // shared endpoint), so it shows in Settings next time; a change in Settings shows here
+    // next time the onboarding scan mounts (because we seed from step_models, not from the
+    // models-registry default).
+    let active_project_res = use_resource(fetch_active_project);
+    let active_project = active_project_res.read().clone().flatten();
+    // Derive the project id once (empty string = no active project; the persist calls are
+    // no-ops in that case since the endpoint requires a real id). Memoised as a String so
+    // the onchange closures can clone it cheaply.
+    let project_id = active_project
+        .as_ref()
+        .map(|p| p.id.clone())
+        .unwrap_or_default();
+    // Seed priority: project.step_models.audit (Settings-authoritative) → models.default
+    // (registry fallback for first-time / no-project state). The guard is `is_empty()` so
+    // a user actively choosing a different model in THIS session is never overwritten by a
+    // later async re-render of the active-project resource.
     let mut audit_model = use_signal(String::new);
     if audit_model().is_empty() {
-        if let Some(m) = &models {
-            if !m.default.is_empty() {
-                audit_model.set(m.default.clone());
-            }
+        let from_step = active_project
+            .as_ref()
+            .map(|p| p.step_models.audit.clone())
+            .filter(|s| !s.is_empty());
+        let from_default = models
+            .as_ref()
+            .map(|m| m.default.clone())
+            .filter(|s| !s.is_empty());
+        if let Some(m) = from_step.or(from_default) {
+            audit_model.set(m);
         }
     }
-    // Calibration model — its OWN picker (severity recalibration + confidence tagging). A
-    // customer can run a cheap scan with a stronger verify, or keep it end-to-end. Defaults
-    // to the scan model so "the model you picked" is genuinely used across the board unless
-    // the user deliberately splits the tiers.
+    // Calibration model — its OWN picker (severity recalibration + confidence tagging).
+    // Seed priority: project.step_models.calibration (Settings-authoritative) → current
+    // audit_model (so "the model you picked" is used end-to-end unless deliberately split).
     let mut calibration_model = use_signal(String::new);
-    if calibration_model().is_empty() && !audit_model().is_empty() {
-        calibration_model.set(audit_model());
+    if calibration_model().is_empty() {
+        let from_step = active_project
+            .as_ref()
+            .map(|p| p.step_models.calibration.clone())
+            .filter(|s| !s.is_empty());
+        let from_audit = Some(audit_model()).filter(|s| !s.is_empty());
+        if let Some(m) = from_step.or(from_audit) {
+            calibration_model.set(m);
+        }
     }
     // Scan mode (user-facing): "parallel" (default), "sequential" (gentle), or "job"
     // (async — submit, walk away, poll). Job uses parallel execution + async delivery.
@@ -3011,7 +3042,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             class: "audit-model-select",
                             disabled: auditing(),
                             value: "{audit_model}",
-                            onchange: move |e| audit_model.set(e.value()),
+                            onchange: {
+                                let pid = project_id.clone();
+                                move |e: Event<FormData>| {
+                                    let model = e.value();
+                                    audit_model.set(model.clone());
+                                    // Persist to project.step_models so Settings stays in sync.
+                                    let pid = pid.clone();
+                                    spawn(async move {
+                                        if !pid.is_empty() {
+                                            set_project_step_model(&pid, "audit", &model).await;
+                                        }
+                                    });
+                                }
+                            },
                             for (group_label , opts) in m.grouped().into_iter() {
                                 optgroup { label: "{group_label}",
                                     for opt in opts.into_iter() {
@@ -3031,7 +3075,20 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             class: "audit-model-select",
                             disabled: auditing(),
                             value: "{calibration_model}",
-                            onchange: move |e| calibration_model.set(e.value()),
+                            onchange: {
+                                let pid = project_id.clone();
+                                move |e: Event<FormData>| {
+                                    let model = e.value();
+                                    calibration_model.set(model.clone());
+                                    // Persist to project.step_models so Settings stays in sync.
+                                    let pid = pid.clone();
+                                    spawn(async move {
+                                        if !pid.is_empty() {
+                                            set_project_step_model(&pid, "calibration", &model).await;
+                                        }
+                                    });
+                                }
+                            },
                             for (group_label , opts) in m.grouped().into_iter() {
                                 optgroup { label: "{group_label}",
                                     for opt in opts.into_iter() {
