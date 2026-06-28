@@ -234,6 +234,14 @@ impl AppState {
         &self.projects
     }
 
+    /// The app-level (cross-project) settings store. Out-of-crate test seam (mirrors
+    /// [`Self::projects`]): tests set the app-level `chat_model` via this store and then assert
+    /// the chat model resolves back. The field itself stays private (handlers use
+    /// `state.settings` in-crate).
+    pub fn settings(&self) -> &crate::settings::SettingsStore {
+        &self.settings
+    }
+
     /// Resolve the GitHub token: credential store first, then the
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
@@ -660,6 +668,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models/registry/refresh", post(refresh_model_registry))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
+        .route("/api/settings/chat-model", post(set_chat_model))
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
@@ -6233,6 +6242,21 @@ pub(crate) fn render_chat_prompt(history: &[ChatTurn], prompt: &str) -> String {
     out
 }
 
+/// Resolve the GLOBAL chat assistant's model id. Precedence (highest first):
+///   1. `req_model` — an explicit per-request model from the chat UI selector (the override).
+///   2. `app_chat_model` — the app-level (cross-project) [`crate::settings::Settings::chat_model`].
+///   3. [`crate::llm::DEFAULT_MODEL`] — the floor when neither is set.
+///
+/// Blank / whitespace-only candidates are treated as unset (trimmed-empty is ignored), so a
+/// cleared selector or a cleared setting falls through to the next tier. Pure (no I/O) so the
+/// precedence is unit-testable.
+pub fn resolve_chat_model(req_model: Option<&str>, app_chat_model: Option<&str>) -> String {
+    let pick = |m: Option<&str>| m.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    pick(req_model)
+        .or_else(|| pick(app_chat_model))
+        .unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_string())
+}
+
 /// The research chat: one completion through the configured backend. The side-by-side
 /// chatbot uses this; it's also the smoke test that the model wiring works.
 ///
@@ -6245,9 +6269,10 @@ async fn chat(
     State(state): State<AppState>,
     Json(req): Json<ChatReq>,
 ) -> Result<Json<crate::llm::LlmResponse>, AppError> {
-    // Research chat is a UI-PICKED non-fleet step: an explicit request model wins; otherwise
-    // the active project's per-step default applies (DEFAULT_MODEL floor only with no project).
-    let model = step_model_or(&state, crate::project::StepKind::ResearchChat, Some(&req.model));
+    // The chat assistant is a GLOBAL (cross-project) assistant, so its model is an APP-LEVEL
+    // setting — NOT the per-project ResearchChat step. Precedence: explicit per-request model
+    // (the UI override) > app-level `chat_model` setting > DEFAULT_MODEL floor.
+    let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
     // Route to the right Completer: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
     let completer = crate::llm::build_completer(
@@ -6294,6 +6319,20 @@ async fn set_workspace_root(
     Json(req): Json<WorkspaceRootReq>,
 ) -> Json<crate::settings::Settings> {
     Json(state.settings.set_workspace_root(req.path))
+}
+
+#[derive(serde::Deserialize)]
+struct ChatModelReq {
+    model: Option<String>,
+}
+
+/// Set (or clear) the APP-LEVEL chat assistant model. The chat is a global, cross-project
+/// assistant, so its model lives in app settings — not the per-project ResearchChat step.
+async fn set_chat_model(
+    State(state): State<AppState>,
+    Json(req): Json<ChatModelReq>,
+) -> Json<crate::settings::Settings> {
+    Json(state.settings.set_chat_model(req.model))
 }
 
 // ── Credential manager endpoints ──────────────────────────────────────────────
@@ -9812,6 +9851,42 @@ mod tests {
     async fn body_json(resp: Response) -> serde_json::Value {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The GLOBAL chat assistant resolves its model with precedence:
+    /// req.model (UI override) > app-level chat_model > DEFAULT_MODEL.
+    #[test]
+    fn resolve_chat_model_precedence() {
+        // 1. Explicit request model wins over everything.
+        assert_eq!(
+            resolve_chat_model(Some("req-model"), Some("app-model")),
+            "req-model"
+        );
+        // 2. No (or blank) request model -> app-level chat model.
+        assert_eq!(
+            resolve_chat_model(None, Some("app-model")),
+            "app-model"
+        );
+        assert_eq!(
+            resolve_chat_model(Some("   "), Some("app-model")),
+            "app-model",
+            "blank request model is ignored"
+        );
+        // 3. Neither set -> DEFAULT_MODEL floor.
+        assert_eq!(
+            resolve_chat_model(None, None),
+            crate::llm::DEFAULT_MODEL
+        );
+        assert_eq!(
+            resolve_chat_model(Some("  "), Some("   ")),
+            crate::llm::DEFAULT_MODEL,
+            "blank request AND blank app model -> default floor"
+        );
+        // 4. Request model still wins even when the app model is blank.
+        assert_eq!(
+            resolve_chat_model(Some("req-model"), Some("   ")),
+            "req-model"
+        );
     }
 
     /// Scan-type selector flags default to TRUE when absent (today's behaviour: both scans run).

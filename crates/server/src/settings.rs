@@ -23,6 +23,12 @@ pub struct Settings {
     /// and is what makes an imported project's repos resolvable on THIS machine.
     #[serde(default)]
     pub repo_paths: std::collections::HashMap<String, String>,
+    /// APP-LEVEL (cross-project) model id for the GLOBAL chat assistant. The chat is a
+    /// single global assistant, so its model is an app setting, NOT a per-project step.
+    /// `None`/blank means "use the [`crate::llm::DEFAULT_MODEL`] floor". An explicit
+    /// per-request `model` on the chat POST still overrides this (highest precedence).
+    #[serde(default)]
+    pub chat_model: Option<String>,
 }
 
 /// Clone-shareable settings store, persisted to a JSON file so the workspace choice
@@ -92,6 +98,25 @@ impl SettingsStore {
         updated
     }
 
+    /// The app-level chat-assistant model, if one is set and non-empty.
+    pub fn chat_model(&self) -> Option<String> {
+        self.get().chat_model.filter(|m| !m.trim().is_empty())
+    }
+
+    /// Set (or clear) the app-level chat-assistant model, persisting the change.
+    pub fn set_chat_model(&self, model: Option<String>) -> Settings {
+        let updated = {
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return Settings::default(),
+            };
+            s.chat_model = model.filter(|m| !m.trim().is_empty());
+            s.clone()
+        };
+        self.save();
+        updated
+    }
+
     /// The machine-local override path for `repo` (`owner/repo`), if one was set.
     pub fn repo_path(&self, repo: &str) -> Option<String> {
         self.get()
@@ -134,6 +159,17 @@ mod tests {
         // Empty / whitespace clears it.
         store.set_workspace_root(Some("   ".to_string()));
         assert!(store.workspace_root().is_none());
+    }
+
+    #[test]
+    fn set_and_get_chat_model() {
+        let store = SettingsStore::new();
+        assert!(store.chat_model().is_none());
+        store.set_chat_model(Some("claude-opus-4-8".to_string()));
+        assert_eq!(store.chat_model().as_deref(), Some("claude-opus-4-8"));
+        // Empty / whitespace clears it.
+        store.set_chat_model(Some("   ".to_string()));
+        assert!(store.chat_model().is_none());
     }
 
     #[test]

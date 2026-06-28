@@ -725,6 +725,38 @@ async fn fetch_models() -> Option<ModelsResp> {
     Some(ModelsResp { models, default, backend: String::new() })
 }
 
+/// The subset of `GET /api/settings` the chat selector needs: the APP-LEVEL (cross-project)
+/// chat assistant model. The chat is a global assistant, so its model is an app setting.
+#[derive(serde::Deserialize)]
+struct SettingsLite {
+    #[serde(default)]
+    chat_model: Option<String>,
+}
+
+/// Fetch the app-level chat assistant model from `GET /api/settings`. `None` when unset/blank
+/// or the server is unreachable.
+async fn fetch_app_chat_model() -> Option<String> {
+    let s: SettingsLite = reqwest::get(format!("{}/api/settings", crate::BFF_URL))
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    s.chat_model.filter(|m| !m.trim().is_empty())
+}
+
+/// Persist the app-level chat assistant model via `POST /api/settings/chat-model`. Best-effort.
+async fn save_app_chat_model(model: &str) -> bool {
+    let body = serde_json::json!({ "model": model });
+    reqwest::Client::new()
+        .post(format!("{}/api/settings/chat-model", crate::BFF_URL))
+        .json(&body)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// A prior chat turn sent to the server so the model has conversation context.
 /// Mirrors `ChatTurn` in `crates/server/src/lib.rs`; role is "user" or "assistant".
 #[derive(Clone, serde::Serialize)]
@@ -816,10 +848,19 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let models_res = use_resource(fetch_models);
     let models = models_res.read().clone().flatten();
 
+    // The chat assistant is GLOBAL: its model is an APP-LEVEL (cross-project) setting, fetched
+    // from `GET /api/settings`. The selector seeds from it (falling back to the registry default
+    // when unset) and persists changes back via `POST /api/settings/chat-model`. The per-request
+    // `model` sent in the chat body remains the explicit, highest-precedence override server-side.
+    let app_chat_model_res = use_resource(fetch_app_chat_model);
+    let app_chat_model = app_chat_model_res.read().clone().flatten();
+
     let mut model = use_signal(String::new);
-    // Seed the model selection from the server default once models load.
+    // Seed the model selection once: prefer the app-level chat_model, else the registry default.
     if model().is_empty() {
-        if let Some(m) = &models {
+        if let Some(m) = &app_chat_model {
+            model.set(m.clone());
+        } else if let Some(m) = &models {
             if !m.default.is_empty() {
                 model.set(m.default.clone());
             }
@@ -957,7 +998,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             style: "font-size:.8rem;padding:.2rem .4rem;border:1px solid #cbd5e1;\
                                     border-radius:.25rem;background:#fff;color:#334155;",
                             value: "{model}",
-                            onchange: move |e| model.set(e.value()),
+                            onchange: move |e| {
+                                let chosen = e.value();
+                                model.set(chosen.clone());
+                                // Persist the choice as the app-level (cross-project) chat model.
+                                spawn(async move {
+                                    save_app_chat_model(&chosen).await;
+                                });
+                            },
                             if let Some(m) = &models {
                                 for (group_label , opts) in m.grouped().into_iter() {
                                     optgroup { label: "{group_label}",

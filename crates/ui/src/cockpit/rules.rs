@@ -2098,8 +2098,10 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
             "Onboarding scan that proposes governance rules for this project."),
         ("calibration", "Calibration", sm.calibration.clone(),
             "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns."),
-        ("research_chat", "Research chat", sm.research_chat.clone(),
-            "The floating research assistant: answers technical questions in context."),
+        // NOTE: Research chat (the global assistant) is intentionally NOT listed here. Its model
+        // is now an APP-LEVEL (cross-project) setting — see the "Chat assistant model" selector in
+        // the cross-project Settings section. The `step_models.research_chat` field is retained for
+        // back-compat but is no longer surfaced per-project nor used to resolve the chat model.
         ("story_authoring", "Story authoring", sm.story_authoring.clone(),
             "The author-a-story screen: structures requirements into a governed work item."),
         ("decomposition", "Decomposition", sm.decomposition.clone(),
@@ -2115,9 +2117,10 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
             p { class: "tier-map-heading", "Helper-agent models" }
             p { class: "section-hint tier-map-hint",
                 "The model each non-fleet AI step uses for THIS project. Once set, the project's \
-                 value is authoritative (no environment fallback). Audit, calibration, and research \
-                 chat still let an explicit per-run pick override this default; the other steps use \
-                 it directly. Each change saves immediately."
+                 value is authoritative (no environment fallback). Audit and calibration still let \
+                 an explicit per-run pick override this default; the other steps use it directly. \
+                 The chat assistant is global \u{2014} its model is set in the cross-project section. \
+                 Each change saves immediately."
             }
             div { class: "tier-map-rows",
                 for (step_key , label , current , hint) in rows.into_iter() {

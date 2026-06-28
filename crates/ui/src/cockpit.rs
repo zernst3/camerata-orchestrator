@@ -1729,6 +1729,111 @@ pub fn CockpitApp() -> Element {
 ///   2. "This project"  — loop guard, model profile, tier map, step models,
 ///                        stall thresholds, L3 review. All scoped to the
 ///                        active project.
+/// The subset of `GET /api/settings` this control needs: the app-level chat model.
+#[derive(serde::Deserialize)]
+struct ChatModelSettingLite {
+    #[serde(default)]
+    chat_model: Option<String>,
+}
+
+/// Fetch the app-level (cross-project) chat assistant model from `GET /api/settings`.
+async fn fetch_app_chat_model() -> Option<String> {
+    let s: ChatModelSettingLite = reqwest::get(format!("{}/api/settings", crate::BFF_URL))
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    s.chat_model.filter(|m| !m.trim().is_empty())
+}
+
+/// Persist the app-level chat assistant model via `POST /api/settings/chat-model`.
+async fn save_app_chat_model(model: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/settings/chat-model", crate::BFF_URL))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Cross-project chat-assistant model selector. The in-app chat is a GLOBAL assistant, so its
+/// model is an APP-LEVEL setting (applies to every project). Reads/writes the app-level
+/// `chat_model` via `GET /api/settings` + `POST /api/settings/chat-model`, using the same
+/// registry-backed `<select>` pattern as the per-project step-model editors. The default when
+/// unset is the registry's default (first Claude model) — the server applies its DEFAULT_MODEL
+/// floor when the setting is blank.
+#[component]
+fn ChatModelSetting() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let models = use_resource(|| async move { scan::fetch_audit_models().await });
+    let models = models.read().clone().flatten();
+    let app_model = use_resource(fetch_app_chat_model);
+    let app_model = app_model.read().clone().flatten();
+
+    let mut selected = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    // Seed once: prefer the persisted app-level chat model, else the registry default.
+    if selected().is_empty() {
+        if let Some(m) = &app_model {
+            selected.set(m.clone());
+        } else if let Some(m) = &models {
+            if !m.default.is_empty() {
+                selected.set(m.default.clone());
+            }
+        }
+    }
+
+    rsx! {
+        div { class: "tier-map-editor step-models-editor",
+            p { class: "section-hint tier-map-hint",
+                "The model the floating chat assistant uses. It is a single, global assistant, so \
+                 this applies to ALL projects. The per-request override the chat panel may send \
+                 still takes precedence for that one call. Saves immediately."
+            }
+            div { class: "tier-map-rows",
+                div { class: "tier-map-row step-model-row",
+                    span { class: "step-model-label-wrap",
+                        label { class: "tier-map-band-label", "Chat assistant" }
+                    }
+                    if let Some(m) = models {
+                        select {
+                            class: "tier-map-input run-model-select",
+                            value: "{selected}",
+                            disabled: saving(),
+                            onchange: move |e| {
+                                let model = e.value();
+                                selected.set(model.clone());
+                                saving.set(true);
+                                spawn(async move {
+                                    if save_app_chat_model(&model).await {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Chat assistant model saved.");
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the chat assistant model.");
+                                    }
+                                    saving.set(false);
+                                });
+                            },
+                            for (group_label , opts) in m.grouped().into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option {
+                                            value: "{opt.id}",
+                                            selected: selected() == opt.id,
+                                            "{opt.label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn SettingsView() -> Element {
     let refresh = use_signal(|| 0u32);
@@ -1754,6 +1859,12 @@ fn SettingsView() -> Element {
                 "These tokens and keys are shared across every project. Changing them affects all governed runs, regardless of which project is active."
             }
             crate::credentials::CredentialsSettings {}
+
+            // ── Chat assistant model (cross-project) ──────────────────────────
+            // The in-app chat is a GLOBAL assistant, so its model is an app-level
+            // setting that applies to every project (not a per-project step).
+            p { class: "section-label settings-label", "Chat assistant model" }
+            ChatModelSetting {}
 
             // ── Section 2: This project ───────────────────────────────────────
             // All settings below are scoped to the currently active project.

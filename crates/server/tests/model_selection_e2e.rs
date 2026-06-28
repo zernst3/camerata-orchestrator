@@ -33,7 +33,7 @@ use camerata_server::project::{
     L3ReviewConfig, ModelProfile, ProjectStore, StepKind,
 };
 use camerata_server::rate_limit::ProviderRateLimiter;
-use camerata_server::{step_model, step_model_or, AppState};
+use camerata_server::{resolve_chat_model, step_model, step_model_or, AppState};
 
 use camerata_fleet::orchestrator::{delegate_models_json, lead_stage_index};
 use camerata_intake::{Plan, PlanTask, TaskKind};
@@ -350,9 +350,9 @@ fn scope2_step_model_floors_to_default_when_no_active_project() {
     // project-less floor). step_model_or still lets the request override.
     let state = AppState::seeded();
     assert!(state.projects().active().is_none(), "no project seeded");
-    assert_eq!(step_model(&state, StepKind::ResearchChat), DEFAULT_MODEL);
+    assert_eq!(step_model(&state, StepKind::Audit), DEFAULT_MODEL);
     assert_eq!(
-        step_model_or(&state, StepKind::ResearchChat, Some("req-x")),
+        step_model_or(&state, StepKind::Audit, Some("req-x")),
         "req-x"
     );
 }
@@ -673,42 +673,38 @@ fn scope5_cli_driver_carries_selected_model_in_with_model() {
 // ════════════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn scope6_capturing_completer_records_research_chat_step_model() {
-    // Resolve the ResearchChat step model via the REAL resolution helper, then drive a
-    // completion through a capturing completer with that model. The recorded model must be
-    // the SELECTED id — closing the loop from selection to the model-call boundary.
-    let (state, id) = seeded_state_with_project();
-    state
-        .projects()
-        .set_step_model(&id, StepKind::ResearchChat, "selected-research-model".to_string())
-        .unwrap();
+async fn scope6_capturing_completer_records_app_level_chat_model() {
+    // The chat assistant is GLOBAL: its model is the APP-LEVEL `chat_model` setting, NOT the
+    // per-project ResearchChat step. Resolve via the REAL chat helper `resolve_chat_model`,
+    // then drive a completion through a capturing completer with that model. The recorded
+    // model must be the app-level id — closing the loop from setting to the model-call boundary.
+    let state = AppState::seeded();
+    state.settings().set_chat_model(Some("app-chat-model".to_string()));
 
-    // The chat handler resolves: step_model_or(state, ResearchChat, req.model).
-    // Case A: no request override -> project default flows to the boundary.
-    let resolved = step_model_or(&state, StepKind::ResearchChat, None);
-    assert_eq!(resolved, "selected-research-model");
+    // The chat handler resolves: resolve_chat_model(req.model, settings.chat_model).
+    // Case A: no request override -> the app-level chat model flows to the boundary.
+    let resolved = resolve_chat_model(None, state.settings().get().chat_model.as_deref());
+    assert_eq!(resolved, "app-chat-model");
 
     let cap = CapturingCompleter::new("ok");
     let req = LlmRequest::new("hello").with_model(&resolved);
     cap.complete(req).await.unwrap();
     assert_eq!(
         cap.last().as_deref(),
-        Some("selected-research-model"),
-        "boundary received the selected research-chat model"
+        Some("app-chat-model"),
+        "boundary received the app-level chat model"
     );
 }
 
 #[tokio::test]
-async fn scope6_capturing_completer_records_request_override() {
-    // Case B: a request override beats the project default, and the OVERRIDE is what reaches
-    // the boundary (req > project > default precedence, end to end).
-    let (state, id) = seeded_state_with_project();
-    state
-        .projects()
-        .set_step_model(&id, StepKind::ResearchChat, "project-default-model".to_string())
-        .unwrap();
+async fn scope6_capturing_completer_records_chat_request_override() {
+    // Case B: a per-request override beats the app-level chat model, and the OVERRIDE is what
+    // reaches the boundary (req > app chat_model > default precedence, end to end).
+    let state = AppState::seeded();
+    state.settings().set_chat_model(Some("app-chat-model".to_string()));
 
-    let resolved = step_model_or(&state, StepKind::ResearchChat, Some("ui-override-model"));
+    let resolved =
+        resolve_chat_model(Some("ui-override-model"), state.settings().get().chat_model.as_deref());
     assert_eq!(resolved, "ui-override-model");
 
     let cap = CapturingCompleter::new("ok");
@@ -716,6 +712,25 @@ async fn scope6_capturing_completer_records_request_override() {
         .await
         .unwrap();
     assert_eq!(cap.last().as_deref(), Some("ui-override-model"));
+}
+
+#[tokio::test]
+async fn scope6_chat_model_floors_to_default_when_unset() {
+    // Case C: neither a per-request model nor an app-level chat_model -> the DEFAULT_MODEL floor
+    // reaches the boundary (no per-project ResearchChat involvement anymore).
+    let state = AppState::seeded();
+    assert!(
+        state.settings().get().chat_model.is_none(),
+        "no app-level chat model seeded"
+    );
+    let resolved = resolve_chat_model(None, state.settings().get().chat_model.as_deref());
+    assert_eq!(resolved, DEFAULT_MODEL);
+
+    let cap = CapturingCompleter::new("ok");
+    cap.complete(LlmRequest::new("q").with_model(&resolved))
+        .await
+        .unwrap();
+    assert_eq!(cap.last().as_deref(), Some(DEFAULT_MODEL));
 }
 
 #[tokio::test]
