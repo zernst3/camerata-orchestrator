@@ -1764,11 +1764,6 @@ pub(super) fn GovernedDevPage() -> Element {
         div { class: "govdev",
             // ── LEFT NAV: Issue Management + one card per UoW ──────────────────
             aside { class: "govdev-nav",
-                // Gear button: opens the project-settings popup (loop guard + tier map).
-                // Lives at the top of the nav so it's always reachable regardless of UoW selection.
-                div { class: "govdev-gear-row",
-                    ProjectSettingsGear {}
-                }
                 button {
                     class: if sel() == GovDevSel::IssueManagement { "govdev-nav-top on" } else { "govdev-nav-top" },
                     onclick: move |_| sel.set(GovDevSel::IssueManagement),

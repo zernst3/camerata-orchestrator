@@ -2637,45 +2637,6 @@ pub(super) fn RulesView() -> Element {
                             }
                         }
 
-                        // ── SETTINGS: Suggested model levels (PROJECT-WIDE, TOP) ────────
-                        // Governs all model entry points. Apply cascades to all model entry
-                        // points: tier map, step models, and L3 review. Placed first so the
-                        // governing setting is prominent above the per-entry overrides.
-                        p { class: "section-label settings-label", "SETTINGS: Suggested model levels" }
-                        ModelProfileEditor { project: p_owned.clone(), refresh }
-
-                        // ── SETTINGS: Fleet model bands (#63) ─────────────────────────
-                        // NOT a ruleset concern — controls which model the fleet uses
-                        // per-task-tier at runtime. Labeled SETTINGS to distinguish from
-                        // the rule tables above.
-                        p { class: "section-label settings-label", "SETTINGS: Fleet model bands" }
-                        TierMapEditor { project: p_owned.clone() }
-
-                        // ── SETTINGS: Helper-agent models ─────────────────────────────
-                        // The model each non-fleet AI step uses for this project. Distinct
-                        // from the fleet tier map above (that is per-task-tier for governed
-                        // runs); this covers audit / calibration / chat / authoring / etc.
-                        p { class: "section-label settings-label", "SETTINGS: Helper-agent models" }
-                        StepModelsEditor { project: p_owned.clone() }
-
-                        // ── SETTINGS: L3 agentic code review (R7) ────────────────────
-                        // Toggle the L3 reviewer on/off + pick the reviewer model.
-                        p { class: "section-label settings-label", "SETTINGS: L3 AI code review" }
-                        L3ReviewEditor { project: p_owned.clone() }
-
-                        // ── SETTINGS: Stall thresholds ────────────────────────────
-                        p { class: "section-label settings-label", "SETTINGS: Stall thresholds" }
-                        StallThresholdsEditor { project: p_owned.clone() }
-
-                        // ── SETTINGS: Commit / PR gate settings (#65) ──────────────
-                        // The `VcsGateSettings` component owns the `process-rule-config`
-                        // surface: bypass mode + per-rule on/off toggles. It talks
-                        // directly to `/api/projects/:id/process-rule-config`.
-                        // Labeled SETTINGS (not rules) — it is a process configuration
-                        // surface, not part of the emitted ruleset.
-                        p { class: "section-label settings-label", "SETTINGS: Commit / PR gate" }
-                        crate::vcs_settings::VcsGateSettings { project_id: p_owned.id.clone() }
-
                         p { class: "section-label", "Export ruleset (source of truth)" }
                         textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
                         p { class: "section-label", "Import ruleset (upsert base; preserves custom)" }

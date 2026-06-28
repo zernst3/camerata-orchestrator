@@ -1703,7 +1703,7 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
-                    crate::credentials::CredentialsSettings {}
+                    SettingsView {}
                 }
             }
         };
@@ -1722,83 +1722,79 @@ pub fn CockpitApp() -> Element {
     }
 }
 
-/// A gear-icon button that opens the project-settings popup.
+/// The consolidated Settings page.
 ///
-/// Contains project-scoped settings that must NOT live inline in a UoW:
-///   - Loop guard (max revise iterations)
-///   - Default tier-map (fast / balanced / strongest model ids)
+/// Two explicit sections:
+///   1. "Cross-project" — credentials + Bombe. Tokens/keys span all projects.
+///   2. "This project"  — loop guard, model profile, tier map, step models,
+///                        stall thresholds, L3 review. All scoped to the
+///                        active project.
 #[component]
-fn ProjectSettingsGear() -> Element {
-    let mut open = use_signal(|| false);
-    let active = use_resource(fetch_active_project);
+fn SettingsView() -> Element {
+    let refresh = use_signal(|| 0u32);
+    let active = use_resource(move || {
+        let _ = refresh();
+        async move { fetch_active_project().await }
+    });
+
     let proj = active.read().clone().flatten();
 
     rsx! {
-        // The gear trigger button.
-        button {
-            class: "btn-edit-sm govdev-gear-btn",
-            title: "Project settings",
-            onclick: move |_| open.set(true),
-            // Unicode gear character
-            "\u{2699}\u{FE0F} Settings"
-        }
+        div { class: "page",
+            p { class: "eyebrow", "Settings" }
+            h1 { class: "h1", "Settings" }
 
-        // The popup modal — only rendered when open AND we have a project.
-        if open() {
-            if let Some(p) = proj {
-                div { class: "rule-modal-overlay", onclick: move |_| open.set(false),
-                    div { class: "rule-modal proj-settings-modal", onclick: move |e| e.stop_propagation(),
-                        div { class: "rule-modal-head",
-                            span { class: "rule-modal-id", "Project settings" }
-                            button {
-                                class: "rule-modal-close",
-                                onclick: move |_| open.set(false),
-                                "\u{2715}"
-                            }
-                        }
-                        p { class: "proj-settings-scope-note",
-                            "These settings apply to the entire project and affect all governed runs."
-                        }
+            // ── Section 1: Cross-project ──────────────────────────────────────
+            // Credentials and Bombe toggle apply to all projects — they are
+            // stored in the OS keychain and the app-wide local store, not
+            // per-project. Make the scope explicit so users don't expect
+            // per-project isolation here.
+            h2 { class: "settings-section-heading", "Cross-project \u{2014} applies to all projects" }
+            p { class: "proj-settings-scope-note",
+                "These tokens and keys are shared across every project. Changing them affects all governed runs, regardless of which project is active."
+            }
+            crate::credentials::CredentialsSettings {}
 
-                        // ── Loop guard ────────────────────────────────────────────
+            // ── Section 2: This project ───────────────────────────────────────
+            // All settings below are scoped to the currently active project.
+            h2 { class: "settings-section-heading", "This project" }
+            p { class: "proj-settings-scope-note",
+                "These settings apply to the active project and affect all governed runs within it."
+            }
+
+            match &proj {
+                None => rsx! {
+                    p { class: "section-hint", "Create or select a project to configure project-level settings." }
+                },
+                Some(p) => {
+                    let p_owned = p.clone();
+                    rsx! {
+                        // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
 
-                        // ── Default tier-map ──────────────────────────────────────
-                        div { class: "proj-settings-section",
-                            TierMapEditor { project: p.clone() }
-                        }
+                        // ── Suggested model levels ────────────────────────────
+                        p { class: "section-label settings-label", "Suggested model levels" }
+                        rules::ModelProfileEditor { project: p_owned.clone(), refresh }
 
-                        // ── Per-step models ───────────────────────────────────────
-                        div { class: "proj-settings-section",
-                            StepModelsEditor { project: p.clone() }
-                        }
+                        // ── Fleet model bands ─────────────────────────────────
+                        p { class: "section-label settings-label", "Fleet model bands" }
+                        rules::TierMapEditor { project: p_owned.clone() }
 
-                        // ── Stall thresholds ──────────────────────────────────────
-                        div { class: "proj-settings-section",
-                            StallThresholdsEditor { project: p.clone() }
-                        }
+                        // ── Helper-agent models ───────────────────────────────
+                        p { class: "section-label settings-label", "Helper-agent models" }
+                        rules::StepModelsEditor { project: p_owned.clone() }
 
-                        // ── L3 AI code review ─────────────────────────────────────
-                        div { class: "proj-settings-section",
-                            L3ReviewEditor { project: p }
-                        }
-                    }
-                }
-            } else {
-                // No active project: show a minimal modal with instructions.
-                div { class: "rule-modal-overlay", onclick: move |_| open.set(false),
-                    div { class: "rule-modal proj-settings-modal", onclick: move |e| e.stop_propagation(),
-                        div { class: "rule-modal-head",
-                            span { class: "rule-modal-id", "Project settings" }
-                            button {
-                                class: "rule-modal-close",
-                                onclick: move |_| open.set(false),
-                                "\u{2715}"
-                            }
-                        }
-                        p { class: "proj-settings-scope-note",
-                            "Create or select a project to configure project-level settings."
-                        }
+                        // ── L3 agentic code review ────────────────────────────
+                        p { class: "section-label settings-label", "L3 AI code review" }
+                        rules::L3ReviewEditor { project: p_owned.clone() }
+
+                        // ── Stall thresholds ──────────────────────────────────
+                        p { class: "section-label settings-label", "Stall thresholds" }
+                        rules::StallThresholdsEditor { project: p_owned.clone() }
+
+                        // ── Commit / PR gate (#65): bypass mode + per-rule toggles ──
+                        p { class: "section-label settings-label", "Commit / PR gate" }
+                        crate::vcs_settings::VcsGateSettings { project_id: p_owned.id.clone() }
                     }
                 }
             }
