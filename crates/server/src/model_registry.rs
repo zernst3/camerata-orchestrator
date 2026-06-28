@@ -354,11 +354,14 @@ impl ModelRegistry {
         entries
     }
 
-    /// Directly seed the OpenRouter cache with a set of entries. Only available in
-    /// `#[cfg(test)]` so it can never be called from production code paths.
-    /// Used by tests in other modules that need an openrouter-provider model in the
-    /// registry without making a live HTTP call.
-    #[cfg(test)]
+    /// Directly seed the OpenRouter cache with a set of entries — a TEST-ONLY seam.
+    ///
+    /// `#[doc(hidden)]` (not part of the public surface) so it is invisible to normal
+    /// callers, but NOT `#[cfg(test)]` so that integration tests in `tests/` (which compile
+    /// against the non-test build of the lib) can inject an openrouter-provider model into
+    /// the registry without a live HTTP call. Production code never calls it; the
+    /// model-selection e2e regression suite does (`tests/model_selection_e2e.rs`).
+    #[doc(hidden)]
     pub fn seed_openrouter_entries(&self, entries: Vec<RegistryEntry>) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.openrouter_cache = Some(entries);

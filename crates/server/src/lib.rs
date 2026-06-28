@@ -223,6 +223,15 @@ impl AppState {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
     }
 
+    /// Read-only accessor for the project store. Exposed so integration tests can seed a
+    /// project via the REAL [`crate::project::ProjectStore`] write path (e.g.
+    /// `set_step_model`) and then assert that step/tier resolution reads it back — the same
+    /// store the handlers mutate. The field itself stays private (handlers use `state.projects`
+    /// in-crate); this accessor is the out-of-crate test seam.
+    pub fn projects(&self) -> &crate::project::ProjectStore {
+        &self.projects
+    }
+
     /// Resolve the GitHub token: credential store first, then the
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
@@ -2396,7 +2405,7 @@ async fn set_vision_enabled(
 /// created). UI-picked steps (audit / calibration / research chat) do not use this helper
 /// directly — they let an explicit request model override this default at their call site
 /// via [`step_model_or`].
-fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
+pub fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
     state
         .projects
         .active()
@@ -2408,7 +2417,7 @@ fn step_model(state: &AppState, step: crate::project::StepKind) -> String {
 /// otherwise fall back to the active project's per-step default (see [`step_model`]). Used
 /// by the audit / calibration / research-chat steps, where the UI still owns the
 /// speed-vs-thoroughness override but the project supplies the default.
-fn step_model_or(
+pub fn step_model_or(
     state: &AppState,
     step: crate::project::StepKind,
     requested: Option<&str>,
