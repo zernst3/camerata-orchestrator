@@ -56,6 +56,7 @@ pub mod model_tier;
 pub mod settings;
 pub mod suppression;
 pub mod terminal;
+pub mod test_tamper;
 /// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
 /// from the built-in language gate commands + manifest checks. See
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
@@ -1331,6 +1332,19 @@ async fn start_governed_run(
                 }
             };
 
+            // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): DEFAULT-ON.
+            //
+            // The intended gate is project ruleset selection. But `ProjectRuleset` models
+            // selections as a pure opt-IN list with no per-rule opt-OUT flag, so a clean
+            // selection check would silently disable this brand-new rule for every existing
+            // project (none list it yet) — the opposite of the rule's stated intent (default
+            // = deny + escalate). So we DEFAULT-ON: the guard always runs, and a project that
+            // has explicitly selected the rule is treated as an affirmative confirmation. If a
+            // first-class opt-out flag is added to RuleSelection later, switch this to honour
+            // it. The guard logs that the check ran on every dev-implement run (clean or not).
+            let enforce_test_tamper_guard = true;
+            let impl_escalations = state.escalations.clone();
+
             // Clone the provider-dispatch context before the move closure captures it.
             let impl_registry = state.model_registry.clone();
             let impl_creds = state.credential_store.clone();
@@ -1359,6 +1373,8 @@ async fn start_governed_run(
                     impl_registry,
                     impl_creds,
                     impl_limiter,
+                    impl_escalations,
+                    enforce_test_tamper_guard,
                 )
                 .await
             });

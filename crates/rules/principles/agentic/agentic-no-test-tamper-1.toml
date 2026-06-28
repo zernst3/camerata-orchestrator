@@ -1,0 +1,36 @@
+id = "AGENTIC-NO-TEST-TAMPER-1"
+title = "Do not modify existing tests without human review"
+tag = "stack"
+domain = "agentic"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Not enforceable by an off-the-shelf linter (linters check source shape, not the intent of a diff against the existing test surface): this is a change-pipeline contract, codified and enforced by the pipeline itself. The realistic mechanism is a per-diff check that inspects the unified diff, identifies files that are tests or fixtures, and rejects (or escalates) any diff that removes or changes an existing test line or deletes an existing test file, while allowing diffs that only add new test lines or whole new test files. Conformance holds when the pipeline runs such a per-diff check and an agent-authored diff that edits or deletes an existing test is blocked pending human review; it fails when the only gate is a green run of the suite, which an agent can keep green precisely by rewriting the test it just broke."
+verification = "grounded"
+
+[[sources]]
+url = "AGENTS.md"
+title = "AGENTS.md — AGENTIC-NO-TEST-TAMPER-1 (do not modify existing tests without human review)"
+
+[decision]
+question = "What position does the project take on: an agent modifying or deleting existing tests as part of its own change?"
+default = "escalate-before-modifying-or-deleting-an-existin"
+why = "An existing test encodes a contract that already passed; it is the one artifact in the diff the agent cannot be trusted to rewrite, because the cheapest way for an agent to make a failing suite go green is to edit the test that caught its broken code rather than fix the code. Letting the agent modify existing tests freely turns the test suite from a safety net into a rubber stamp: the very signal that should block a bad change is the signal the agent silently rewrites. Adding NEW tests has no such failure mode and is encouraged, because new tests can only widen coverage, never erase an existing contract. Requiring a human to review any modification or deletion of an existing test keeps the safety net under human control while leaving the agent free to extend it. The cost is a real human gate on legitimate test refactors, but that gate is exactly the point: a legitimate refactor survives review, a self-serving rewrite does not."
+
+[[option]]
+id = "escalate-before-modifying-or-deleting-an-existin"
+label = "Escalate before modifying/deleting an existing test (add-new is always allowed)"
+directive = "An agent must escalate to a human reviewer before modifying or deleting any existing test or fixture, with a justification on why the test needs to change; the change is blocked until a human approves it. Adding entirely new tests (new test files, or new test functions appended to an existing test file as pure additions) is always allowed and encouraged. The per-diff check inspects the unified diff: a deleted test file, or any hunk in a test/fixture file that removes or changes an existing line, raises a human escalation and blocks the change; a brand-new test file or a pure-addition hunk passes freely."
+why = "An existing test is the one artifact in the diff the agent cannot be trusted to rewrite, because the cheapest way to make a failing suite go green is to edit the test that caught the broken code."
+
+[[option]]
+id = "allow-modifying-tests-within-the-same-change-whe"
+label = "Allow modifying tests within the same change when justified"
+directive = "the agent may modify or delete existing tests within the same change as the code change, on the strength of a written justification, without a separate human approval of the test edit itself"
+why = "Self-justification by the same agent that wrote the code is exactly the loophole the rule closes: the agent can author a plausible justification for the very test edit that masks its broken code, so a justification field is not a substitute for an independent human review."
+
+[[option]]
+id = "no-restriction-on-test-edits"
+label = "No restriction on test edits"
+directive = "the change pipeline places no restriction on an agent modifying or deleting existing tests; a green run of the resulting suite is the only gate"
+why = "A green suite is precisely the signal an agent can keep green by rewriting the test it just broke, so a green-run-only gate provides no protection against an agent masking its own broken code."
