@@ -1,7 +1,11 @@
 # Tech debt: cargo lock-wait can starve the stall heartbeat (Rust targets, same-repo concurrency)
 
-**Status:** YAGNI for now (solo / low-concurrency). Banked 2026-06-27 as the next build item
-after the current UI/settings queue. Verified, narrow, real.
+**Status:** RESOLVED 2026-06-28 (fix option #1). `run_with_heartbeat`
+(`crates/checks/src/subprocess.rs`) now reads stdout AND stderr concurrently and fires the
+heartbeat on a line from either stream, so cargo's "Blocking waiting for file lock" notice (stderr)
+keeps the run alive during a lock-wait. Covered by `streaming_path_fires_heartbeat_on_stderr_lines`.
+sccache (#2) and per-worktree target dirs (#3) remain optional future levers if same-repo
+concurrency grows. Original analysis below.
 
 ## The edge
 

@@ -118,8 +118,11 @@ async fn run_with_heartbeat(
 
             let mut child = cmd.spawn()?;
             let stdout = child.stdout.take().expect("stdout is piped");
-            let mut lines = BufReader::new(stdout).lines();
-            let mut accumulated = String::new();
+            let stderr = child.stderr.take().expect("stderr is piped");
+            let mut out_lines = BufReader::new(stdout).lines();
+            let mut err_lines = BufReader::new(stderr).lines();
+            let mut stdout_acc = String::new();
+            let mut stderr_acc = String::new();
 
             // Start the mtime probe against the cargo target dir when present.
             // This fires heartbeats during cold compiles where cargo writes objects
@@ -128,29 +131,35 @@ async fn run_with_heartbeat(
                 spawn_mtime_probe(td.to_path_buf(), cb.clone(), MTIME_PROBE_INTERVAL)
             });
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                cb();
-                accumulated.push_str(&line);
-                accumulated.push('\n');
+            // Read stdout AND stderr CONCURRENTLY, firing the heartbeat on a line from
+            // EITHER stream. This is load-bearing for `cargo`'s "Blocking waiting for file
+            // lock on build directory" notice, which it prints to STDERR while it idles on
+            // the target-dir lock. Without folding stderr into the heartbeat, a concurrent
+            // same-repo Rust build that waits on the shared cargo target lock produces no
+            // stdout AND no target-dir writes during the wait, so the heartbeat goes silent
+            // and a wait longer than the stall threshold can trip the run-level stall
+            // detector. See docs/tech-debt/2026-06-27-cargo-lock-wait-heartbeat.md.
+            let mut out_done = false;
+            let mut err_done = false;
+            while !(out_done && err_done) {
+                tokio::select! {
+                    line = out_lines.next_line(), if !out_done => match line {
+                        Ok(Some(l)) => { cb(); stdout_acc.push_str(&l); stdout_acc.push('\n'); }
+                        _ => out_done = true,
+                    },
+                    line = err_lines.next_line(), if !err_done => match line {
+                        Ok(Some(l)) => { cb(); stderr_acc.push_str(&l); stderr_acc.push('\n'); }
+                        _ => err_done = true,
+                    },
+                }
             }
-
-            // Collect stderr after stdout is drained.
-            let stderr_text = if let Some(mut stderr) = child.stderr.take() {
-                use tokio::io::AsyncReadExt;
-                let mut buf = String::new();
-                let _ = stderr.read_to_string(&mut buf).await;
-                buf
-            } else {
-                String::new()
-            };
 
             let status = child.wait().await?;
 
             // _mtime_probe is aborted when it goes out of scope here (JoinHandle drops = abort).
-            accumulated.push('\n');
-            accumulated.push_str(&stderr_text);
-
-            Ok((accumulated, status.success()))
+            // Combined output keeps the original stdout-then-stderr ordering the parse layer expects.
+            let combined = format!("{stdout_acc}\n{stderr_acc}");
+            Ok((combined, status.success()))
         }
     }
 }
@@ -289,6 +298,38 @@ mod tests {
         assert!(
             count.load(Ordering::Relaxed) >= 3,
             "expected at least 3 heartbeat ticks (one per line), got {}",
+            count.load(Ordering::Relaxed)
+        );
+    }
+
+    /// The streaming path also fires the heartbeat on STDERR lines — load-bearing
+    /// for cargo's "Blocking waiting for file lock" notice (stderr) during a same-repo
+    /// concurrent build, which previously left the heartbeat silent during the wait.
+    #[tokio::test]
+    async fn streaming_path_fires_heartbeat_on_stderr_lines() {
+        let tmp = TempDir::new().expect("tmp dir");
+
+        let count = Arc::new(AtomicU64::new(0));
+        let count_cb = count.clone();
+        let cb: HeartbeatFn = Arc::new(move || {
+            count_cb.fetch_add(1, Ordering::Relaxed);
+        });
+
+        // Emit ONLY on stderr (no stdout), the cargo-lock-wait shape.
+        let result = run_command(
+            tmp.path(),
+            "sh",
+            &["-c", "echo err1 >&2; echo err2 >&2"],
+            Some(&cb),
+        )
+        .await
+        .expect("command should succeed");
+
+        assert!(result.success);
+        assert!(result.combined.contains("err1") && result.combined.contains("err2"));
+        assert!(
+            count.load(Ordering::Relaxed) >= 2,
+            "expected >=2 heartbeat ticks from stderr lines, got {}",
             count.load(Ordering::Relaxed)
         );
     }
