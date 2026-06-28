@@ -149,15 +149,38 @@ pub fn prepare_orchestrator_session(
     })
 }
 
-/// The delegation instruction appended to the lead stage's task prompt.
-pub fn orchestrator_prompt_suffix() -> &'static str {
-    "\n\nYou are the LEAD on the strongest tier. Do the complex, one-way-door work \
-     yourself. Delegate well-scoped, simpler subtasks to the balanced or fast tiers \
-     via the `delegate` tool (argument: {\"subtask\": \"...\", \"tier\": \"balanced\" | \
-     \"fast\"}). The delegate runs ONE gated child and returns its full output. If a \
-     delegate returns text starting with `INCOMPLETE:` or otherwise signals the work \
-     is above its tier, do it yourself or re-delegate to a higher tier. You cannot be \
-     delegated to, and your delegates cannot delegate further."
+/// The delegation instruction appended to the lead stage's task prompt. When
+/// `vision_enabled` is true (the project's Designer band is on AND has a model), a
+/// vision-routing block is appended that teaches the lead to route visual/design work
+/// through the `vision` tier using an HTML/Tailwind mockup as the hand-off contract.
+pub fn orchestrator_prompt_suffix(vision_enabled: bool) -> String {
+    let mut s = String::from(
+        "\n\nYou are the LEAD on the strongest tier. Do the complex, one-way-door work \
+         yourself. Delegate well-scoped, simpler subtasks to the balanced or fast tiers \
+         via the `delegate` tool (argument: {\"subtask\": \"...\", \"tier\": \"balanced\" | \
+         \"fast\"}). The delegate runs ONE gated child and returns its full output. If a \
+         delegate returns text starting with `INCOMPLETE:` or otherwise signals the work \
+         is above its tier, do it yourself or re-delegate to a higher tier. You cannot be \
+         delegated to, and your delegates cannot delegate further.",
+    );
+    if vision_enabled {
+        s.push_str(
+            "\n\nVISION/DESIGN WORK: For visual or UI/design subtasks (building or restyling \
+             a page or component, matching a mockup, laying out a screen), route through the \
+             Designer (vision) tier in THREE steps, never directly: (1) FIRST gather the \
+             EXISTING in-code layout and shared styling — read the relevant component file(s) \
+             and the project's style/theme tokens — so the design matches what already exists; \
+             (2) `delegate {\"tier\": \"vision\", \"subtask\": \"Produce an HTML/Tailwind mockup \
+             of <X> using these existing tokens/styles: <paste them>. Output ONLY HTML + \
+             Tailwind classes, no framework code.\"}` — the vision tier returns an HTML/Tailwind \
+             mockup (an intermediate representation), NOT framework code; (3) take that mockup \
+             and `delegate {\"tier\": \"balanced\" or \"strongest\", \"subtask\": \"Translate \
+             this HTML/Tailwind mockup into <the repo's UI framework> components, consistent \
+             with the existing code and tokens: <paste the mockup>.\"}`. The vision model NEVER \
+             writes framework code; a logic tier always does the translation.",
+        );
+    }
+    s
 }
 
 #[cfg(test)]
@@ -317,9 +340,30 @@ mod tests {
 
     #[test]
     fn prompt_suffix_mentions_delegate_and_escalation() {
-        let s = orchestrator_prompt_suffix();
+        let s = orchestrator_prompt_suffix(false);
         assert!(s.contains("delegate"));
         assert!(s.contains("INCOMPLETE:"));
         assert!(s.contains("strongest"));
+    }
+
+    #[test]
+    fn prompt_suffix_omits_vision_block_when_disabled() {
+        let s = orchestrator_prompt_suffix(false);
+        assert!(!s.contains("VISION/DESIGN WORK"), "no vision block when disabled");
+        assert!(!s.to_lowercase().contains("html/tailwind mockup"));
+    }
+
+    #[test]
+    fn prompt_suffix_adds_vision_routing_when_enabled() {
+        let s = orchestrator_prompt_suffix(true);
+        // Keeps the base delegation instruction.
+        assert!(s.contains("delegate"));
+        // Adds the vision-routing + IR-handoff guidance.
+        assert!(s.contains("VISION/DESIGN WORK"));
+        assert!(s.contains("\"tier\": \"vision\""));
+        assert!(s.contains("HTML/Tailwind mockup"));
+        // The contract: vision returns the IR, a logic tier translates it.
+        assert!(s.contains("NEVER writes framework code"));
+        assert!(s.contains("Translate this HTML/Tailwind mockup"));
     }
 }

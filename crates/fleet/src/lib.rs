@@ -820,7 +820,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
         let mut stage_task = stage_task_for(task, &lib_path_display, i == 0);
         // Tell the lead it can delegate (and how escalation works).
         if Some(i) == lead_idx {
-            stage_task.push_str(orchestrator::orchestrator_prompt_suffix());
+            stage_task.push_str(&orchestrator::orchestrator_prompt_suffix(vision_enabled));
         }
         stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
     }
