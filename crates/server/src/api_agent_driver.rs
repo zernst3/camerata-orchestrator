@@ -95,6 +95,30 @@ const TOOL_LS: &str = "LS";
 const TOOL_DELEGATE: &str = "delegate";
 const TOOL_FAN_OUT: &str = "fan_out";
 
+/// Anthropic Messages API version header value, shared with `llm.rs::complete_api`.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+// ─── provider wire shape ─────────────────────────────────────────────────────
+
+/// The HTTP wire shape the `ApiAgentDriver` speaks. Decides the request URL + headers,
+/// the tool-schema format, the tool-result message format, and which normalizer branch
+/// the response is parsed by.
+///
+/// Both shapes route every tool call through the SAME `GovernanceGateway`
+/// (`evaluate_call`) — this enum only chooses the transport, never the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiShape {
+    /// OpenAI-compatible chat-completions shape (OpenRouter):
+    /// `messages` + OpenAI `tools` (`[{type:"function", function:{...}}]`),
+    /// `Authorization: Bearer`, tool results appended as `{role:"tool", tool_call_id, content}`.
+    OpenRouter,
+    /// Anthropic Messages API shape:
+    /// top-level `system` + Anthropic `tools` (`[{name, description, input_schema}]`),
+    /// `x-api-key` + `anthropic-version` headers, tool results appended as a user message
+    /// `{role:"user", content:[{type:"tool_result", tool_use_id, content}]}`.
+    Anthropic,
+}
+
 // ─── normalized tool invocation ──────────────────────────────────────────────
 
 /// One tool call the model has requested, normalized out of provider-specific shapes.
@@ -152,6 +176,16 @@ pub struct ApiAgentDriver {
     /// not yet given a config) those arms return an honest "not configured" message and
     /// NEVER spawn — the gate is never reimplemented here.
     orchestrator_config: Option<camerata_gateway::delegate::OrchestratorConfig>,
+    /// The provider wire shape for the agentic HTTP request side. Default
+    /// [`ApiShape::OpenRouter`] (back-compat: every existing construction stays OpenRouter).
+    /// Set to [`ApiShape::Anthropic`] via [`Self::with_shape`] for the Anthropic Messages
+    /// API path. The shape decides URL + headers + tool-schema format + tool-result format +
+    /// normalizer branch. It does NOT change the gate.
+    shape: ApiShape,
+    /// The Anthropic API key, used ONLY when `shape == ApiShape::Anthropic`. Resolved from
+    /// `ANTHROPIC_API_KEY` (mirroring `llm.rs::complete_api`) and threaded in at build time.
+    /// `None` on the OpenRouter path (the OpenRouter key is read off the completer instead).
+    anthropic_api_key: Option<String>,
 }
 
 impl ApiAgentDriver {
@@ -186,7 +220,33 @@ impl ApiAgentDriver {
             session_id,
             bust_cache: false,
             orchestrator_config: None,
+            shape: ApiShape::OpenRouter,
+            anthropic_api_key: None,
         }
+    }
+
+    /// Set the provider wire shape (URL + headers + tool-schema + tool-result + normalizer
+    /// branch). Builder form. Default is [`ApiShape::OpenRouter`]; use
+    /// [`ApiShape::Anthropic`] for the Anthropic Messages API path.
+    ///
+    /// This is transport-only: the same `evaluate_call` gate runs on every tool call
+    /// regardless of shape. Switching to Anthropic does NOT expose any new tool, does NOT
+    /// loosen the worktree jail, and does NOT enable delegate/fan_out (those still require
+    /// `as_orchestrator(true)` + an attached config).
+    pub fn with_shape(mut self, shape: ApiShape) -> Self {
+        self.shape = shape;
+        self
+    }
+
+    /// Attach the Anthropic API key for the Anthropic shape. Builder form. No-op on the
+    /// OpenRouter path (which reads its key off the completer). Mirrors `llm.rs`'s use of
+    /// `ANTHROPIC_API_KEY`.
+    pub fn with_anthropic_api_key(mut self, key: impl Into<String>) -> Self {
+        let k = key.into();
+        if !k.trim().is_empty() {
+            self.anthropic_api_key = Some(k);
+        }
+        self
     }
 
     /// Attach an orchestrator-mode [`camerata_gateway::delegate::OrchestratorConfig`] (which
@@ -272,7 +332,10 @@ async fn run_loop(
 ) -> anyhow::Result<AgentOutcome> {
     // Build the initial messages array: system (if any) + first user turn.
     let system_prompt = build_system_prompt(role);
-    let tool_schemas = build_tool_schemas(driver.orchestrator);
+    // Tool schemas are produced in the wire shape this driver speaks: OpenAI-shaped
+    // (`function`) for OpenRouter, Anthropic-shaped (`input_schema`) for Anthropic. The
+    // allowlist (which tools exist) is identical; only the JSON envelope differs.
+    let tool_schemas = build_tool_schemas_for(driver.orchestrator, driver.shape);
 
     // Conversation history: starts with just the user task.
     let mut messages: Vec<Value> = vec![serde_json::json!({
@@ -303,12 +366,10 @@ async fn run_loop(
 
         // ── Call the provider ──────────────────────────────────────────────
         let resp = call_provider(
-            driver.completer.as_ref(),
-            &driver.model,
+            driver,
             system_prompt.as_deref(),
             &messages,
             &tool_schemas,
-            &driver.session_id,
             bust_cache_this_turn,
         )
         .await
@@ -345,7 +406,9 @@ async fn run_loop(
                 messages.push(raw_assistant_msg);
 
                 // ── Execute each tool call ─────────────────────────────────
-                let mut tool_results: Vec<Value> = Vec::new();
+                // Collect `(tool_use_id, result_text)` pairs; the per-shape append below
+                // turns them into the right wire format.
+                let mut results: Vec<(String, String)> = Vec::new();
 
                 for invocation in calls {
                     let (result_text, denial) = execute_tool(
@@ -359,21 +422,17 @@ async fn run_loop(
                         denials.push(d);
                     }
 
-                    // Build a tool-result message entry.
-                    // OpenAI/OpenRouter and Anthropic both accept a "tool" role message.
-                    tool_results.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": invocation.id,
-                        "content": result_text,
-                    }));
+                    results.push((invocation.id, result_text));
                 }
 
-                // Append all tool results as individual messages.
-                // (OpenAI-compatible: each tool result is a separate "tool" role message,
-                // or batch them in one message — both are accepted.)
-                for tr in tool_results {
-                    messages.push(tr);
-                }
+                // Append the tool results in the shape the provider expects so the
+                // multi-turn conversation stays valid:
+                // - OpenAI/OpenRouter: one `{role:"tool", tool_call_id, content}` message
+                //   per result.
+                // - Anthropic: a SINGLE user message whose content is an array of
+                //   `{type:"tool_result", tool_use_id, content}` blocks (all results in one
+                //   message — the Anthropic API rejects split/`role:"tool"` shapes).
+                append_tool_results(&mut messages, driver.shape, &results);
             }
         }
     }
@@ -385,6 +444,47 @@ async fn run_loop(
         cost_usd: if total_cost_usd > 0.0 { Some(total_cost_usd) } else { None },
         denials,
     })
+}
+
+// ─── tool-result feedback (per-shape) ──────────────────────────────────────────
+
+/// Append the executed tool results to `messages` in the wire shape `shape` requires.
+///
+/// - [`ApiShape::OpenRouter`] (OpenAI-compatible): each result becomes its own
+///   `{role:"tool", tool_call_id, content}` message.
+/// - [`ApiShape::Anthropic`]: all results go into ONE `{role:"user", content:[...]}`
+///   message whose content is an array of `{type:"tool_result", tool_use_id, content}`
+///   blocks. The Anthropic Messages API requires every tool_use from the preceding
+///   assistant turn to be answered by a tool_result in the immediately following user
+///   message; a `role:"tool"` message or split user messages are rejected.
+fn append_tool_results(messages: &mut Vec<Value>, shape: ApiShape, results: &[(String, String)]) {
+    match shape {
+        ApiShape::OpenRouter => {
+            for (id, text) in results {
+                messages.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": id,
+                    "content": text,
+                }));
+            }
+        }
+        ApiShape::Anthropic => {
+            let blocks: Vec<Value> = results
+                .iter()
+                .map(|(id, text)| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": text,
+                    })
+                })
+                .collect();
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": blocks,
+            }));
+        }
+    }
 }
 
 // ─── provider call ────────────────────────────────────────────────────────────
@@ -405,17 +505,32 @@ async fn run_loop(
 /// shared. TODO(provider-agnostic-followup): extend `LlmRequest` to carry tool schemas so
 /// the `Completer` trait covers the agentic path too.
 async fn call_provider(
-    completer: &dyn Completer,
-    model: &str,
+    driver: &ApiAgentDriver,
     system: Option<&str>,
     messages: &[Value],
     tool_schemas: &[Value],
-    session_id: &str,
     bust_cache: bool,
 ) -> anyhow::Result<LlmResponse> {
+    let completer = driver.completer.as_ref();
+    let model = &driver.model;
+
+    // ── Anthropic Messages API shape ───────────────────────────────────────
+    // Selected explicitly via `with_shape(ApiShape::Anthropic)` AND with a key attached.
+    // The Anthropic key is carried on the driver (resolved from ANTHROPIC_API_KEY), not
+    // read off the completer. If the shape is Anthropic but no key is attached, fall
+    // through to the schema-less Completer path so test stubs still work.
+    if driver.shape == ApiShape::Anthropic {
+        if let Some(key) = driver.anthropic_api_key.as_deref() {
+            return call_anthropic_with_tools(key, model, system, messages, tool_schemas).await;
+        }
+        // No key attached (e.g. a stub-completer unit test on the Anthropic shape):
+        // fall through to the Completer-trait path below.
+    }
+
+    // ── OpenRouter / OpenAI-compatible shape ───────────────────────────────
     // Attempt to downcast to OpenRouterCompleter for tool-schema support.
-    // If the downcast fails (unknown completer type), fall back to a schema-less call
-    // via the Completer trait (works for text-only models).
+    // If the downcast fails (unknown completer type / stub), fall back to a schema-less
+    // call via the Completer trait (works for text-only models + tests).
     let any = completer.as_any();
 
     if any.is::<crate::llm::OpenRouterCompleter>() {
@@ -427,7 +542,7 @@ async fn call_provider(
             system,
             messages,
             tool_schemas,
-            session_id,
+            &driver.session_id,
             bust_cache,
         )
         .await
@@ -561,6 +676,120 @@ async fn call_openrouter_with_tools(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         or_cache_discount,
+    })
+}
+
+/// Build the Anthropic Messages API request body (pure — no HTTP). Returns the body and
+/// whether prompt-caching is active (drives the `anthropic-beta` header in the caller).
+///
+/// Extracted so the request shape is unit-testable without a live HTTP endpoint. The body
+/// carries: `model`, `max_tokens`, `messages` (already Anthropic-shaped, including
+/// tool_result user messages), a top-level `system` text block with a `cache_control`
+/// ephemeral breakpoint (when a system prompt is present), and `tools` in Anthropic format
+/// (`{name, description, input_schema}`) with `tool_choice: {type:"auto"}`.
+fn build_anthropic_request_body(
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+) -> (Value, bool) {
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": 8192,
+        "messages": messages,
+    });
+
+    // Top-level `system` with a prompt-cache breakpoint on the static prefix. Sending it
+    // as a single text block with `cache_control` (rather than a bare string) lets the
+    // Anthropic prompt-caching beta cache the system prefix across the multi-turn loop.
+    let mut use_caching = false;
+    if let Some(sys) = system {
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": sys,
+            "cache_control": {"type": "ephemeral"}
+        }]);
+        use_caching = true;
+    }
+
+    if !tool_schemas.is_empty() {
+        body["tools"] = Value::Array(tool_schemas.to_vec());
+        // "auto" = let the model decide whether to call a tool or respond with text.
+        body["tool_choice"] = serde_json::json!({"type": "auto"});
+    }
+
+    (body, use_caching)
+}
+
+/// POST directly to the Anthropic Messages API (`/v1/messages`) with tool schemas in
+/// Anthropic format.
+///
+/// Mirrors `call_openrouter_with_tools`, but speaks the Anthropic wire shape (verified
+/// against `llm.rs::complete_api` for the exact headers + version):
+/// - URL `https://api.anthropic.com/v1/messages`
+/// - headers `x-api-key: <key>` + `anthropic-version: 2023-06-01` (+ the prompt-caching
+///   beta header when a `cache_control` breakpoint is set on the system block)
+/// - body with a TOP-LEVEL `system` field (with a `cache_control` ephemeral breakpoint so
+///   the static system prefix is cached per Anthropic prompt caching), `messages`,
+///   `max_tokens`, and `tools` in Anthropic format (`[{name, description, input_schema}]`).
+///
+/// The `messages` array already carries Anthropic-shaped tool-result user messages
+/// (see [`append_tool_results`]). The response is passed through verbatim as JSON so the
+/// shared [`parse_response`] normalizer parses the Anthropic `content[].type=="tool_use"`
+/// blocks — the same normalizer the OpenRouter path uses for text/tool calls.
+async fn call_anthropic_with_tools(
+    api_key: &str,
+    model: &str,
+    system: Option<&str>,
+    messages: &[Value],
+    tool_schemas: &[Value],
+) -> anyhow::Result<LlmResponse> {
+    let (body, use_caching) = build_anthropic_request_body(model, system, messages, tool_schemas);
+
+    let mut builder = reqwest::Client::new()
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .header("content-type", "application/json");
+    // Only sent when a cache_control breakpoint is present, mirroring llm.rs::complete_api.
+    if use_caching {
+        builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
+    }
+
+    let resp = builder
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("Anthropic API HTTP {status}: {text}");
+    }
+
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("parse Anthropic response JSON: {e}"))?;
+
+    // Pass the FULL response object through as `text`: it has the `content` array the
+    // normalizer's Anthropic branch reads (`content[].type=="tool_use"` / `"text"`).
+    let raw_json = serde_json::to_string(&v).unwrap_or_default();
+    let input_tokens = v["usage"]["input_tokens"].as_u64();
+    let output_tokens = v["usage"]["output_tokens"].as_u64();
+    let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
+    let cache_creation = v["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    let model_returned = v["model"].as_str().unwrap_or(model).to_string();
+
+    Ok(LlmResponse {
+        text: raw_json,
+        model: model_returned,
+        backend: "anthropic/api/agentic".to_string(),
+        cost_usd: None,
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: cache_read,
+        cache_creation_input_tokens: cache_creation,
+        or_cache_discount: None,
     })
 }
 
@@ -1262,6 +1491,49 @@ fn build_tool_schemas(orchestrator: bool) -> Vec<Value> {
     schemas
 }
 
+/// Build the tool schemas in the wire shape `shape` requires.
+///
+/// The allowlist (which tools are present, gated by `orchestrator`) is identical across
+/// shapes — only the JSON envelope differs:
+/// - [`ApiShape::OpenRouter`]: the OpenAI function-calling shape from [`build_tool_schemas`].
+/// - [`ApiShape::Anthropic`]: each schema converted to Anthropic's tool format
+///   (`{name, description, input_schema}`) via [`openai_tool_to_anthropic`].
+///
+/// Producing Anthropic schemas by CONVERTING the single source-of-truth OpenAI schemas
+/// (rather than maintaining a second hand-written list) guarantees the two shapes always
+/// expose exactly the same tool set — a worker can never gain a tool on one shape that it
+/// lacks on the other.
+fn build_tool_schemas_for(orchestrator: bool, shape: ApiShape) -> Vec<Value> {
+    let openai = build_tool_schemas(orchestrator);
+    match shape {
+        ApiShape::OpenRouter => openai,
+        ApiShape::Anthropic => openai.iter().filter_map(openai_tool_to_anthropic).collect(),
+    }
+}
+
+/// Convert one OpenAI-shaped tool schema (`{type:"function", function:{name, description,
+/// parameters}}`) into Anthropic's tool format (`{name, description, input_schema}`).
+///
+/// Returns `None` if the input isn't a well-formed function tool (shouldn't happen for our
+/// own statically-built schemas; defensive so a malformed entry is dropped rather than sent
+/// in a shape the API would reject).
+fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
+    let func = tool.get("function")?;
+    let name = func.get("name")?.clone();
+    let description = func.get("description").cloned().unwrap_or(Value::Null);
+    // OpenAI calls the JSON-Schema field `parameters`; Anthropic calls it `input_schema`.
+    // The schema body itself is identical.
+    let input_schema = func
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+    Some(serde_json::json!({
+        "name": name,
+        "description": description,
+        "input_schema": input_schema,
+    }))
+}
+
 // ─── system prompt ────────────────────────────────────────────────────────────
 
 /// Build the system prompt for the agent, incorporating the role name and key constraints.
@@ -1289,12 +1561,101 @@ fn build_system_prompt(role: &Role) -> Option<String> {
     ))
 }
 
+// ─── Anthropic-shape routing helpers ───────────────────────────────────────────
+
+/// A no-op `Completer` used as the placeholder completer for an Anthropic-shape
+/// `ApiAgentDriver`. The Anthropic path makes its HTTP call directly in
+/// `call_anthropic_with_tools` (using the key carried on the driver), so this completer's
+/// `complete` is only ever reached on the schema-less fallback — which the Anthropic path
+/// only takes when NO key is attached. With a key attached it is never called; we still
+/// give it an honest implementation so any unexpected use fails loudly rather than silently.
+struct AnthropicNoopCompleter;
+
+#[async_trait]
+impl Completer for AnthropicNoopCompleter {
+    async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+        anyhow::bail!(
+            "AnthropicNoopCompleter::complete reached — the Anthropic ApiAgentDriver should \
+             make its call via call_anthropic_with_tools, not the Completer trait"
+        )
+    }
+    async fn complete_streaming(
+        &self,
+        req: LlmRequest,
+        _on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> anyhow::Result<LlmResponse> {
+        self.complete(req).await
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Decide whether the `claude` provider should run via the Anthropic Messages API
+/// (`ApiAgentDriver` in [`ApiShape::Anthropic`]) instead of the `ClaudeCliDriver`.
+///
+/// Returns `Some(key)` when BOTH `CAMERATA_LLM_BACKEND=api` AND `ANTHROPIC_API_KEY` is set
+/// (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API backend.
+/// Returns `None` otherwise (the default `cli` path, or `api` with no key).
+fn anthropic_api_backend_key() -> Option<String> {
+    let backend = std::env::var("CAMERATA_LLM_BACKEND").ok();
+    if backend.as_deref() != Some("api") {
+        return None;
+    }
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+}
+
+/// Build a `claude`-provider driver: an Anthropic-shape [`ApiAgentDriver`] when
+/// `CAMERATA_LLM_BACKEND=api` + `ANTHROPIC_API_KEY` are set, else the [`ClaudeCliDriver`].
+///
+/// Shared by [`build_agent_driver`], [`ServerChildDriverFactory`], and
+/// [`ServerOrchestratorDriverFactory`] so a Claude tier honors the same per-model provider
+/// coupling everywhere: under backend=api it uses the Anthropic API agent; under cli it
+/// uses the CLI. Either way the result is gated identically (same `evaluate_call`, same
+/// worktree jail, same orchestrator gating).
+fn build_claude_driver(
+    model_id: &str,
+    mcp_config_path: &str,
+    rule_subset: Vec<RuleId>,
+    worktree: Option<PathBuf>,
+    orchestrator: bool,
+) -> Arc<dyn AgentDriver> {
+    if let Some(key) = anthropic_api_backend_key() {
+        // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
+        // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
+        let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
+            .with_rule_subset(rule_subset)
+            .as_orchestrator(orchestrator)
+            .with_shape(ApiShape::Anthropic)
+            .with_anthropic_api_key(key);
+        if let Some(wt) = worktree {
+            driver = driver.with_worktree(wt);
+        }
+        Arc::new(driver)
+    } else {
+        let mut cli_driver =
+            camerata_agent::ClaudeCliDriver::new(mcp_config_path).as_orchestrator(orchestrator);
+        if !model_id.trim().is_empty() {
+            cli_driver = cli_driver.with_model(model_id);
+        }
+        if let Some(wt) = worktree {
+            cli_driver = cli_driver.with_worktree(wt);
+        }
+        Arc::new(cli_driver)
+    }
+}
+
 // ─── driver selection factory ─────────────────────────────────────────────────
 
 /// Select the right `Arc<dyn AgentDriver>` for `model_id` based on its provider.
 ///
 /// - **`"claude"` provider (or unknown):** returns a `ClaudeCliDriver` (the Claude
-///   subscription path — uses the local `claude` CLI, no per-token cost).
+///   subscription path — uses the local `claude` CLI, no per-token cost), OR — when
+///   `CAMERATA_LLM_BACKEND=api` and `ANTHROPIC_API_KEY` is set — an `ApiAgentDriver` in
+///   [`ApiShape::Anthropic`] that drives the same in-process gateway over the Anthropic
+///   Messages API.
 /// - **`"openrouter"` provider:** returns an `ApiAgentDriver` backed by the
 ///   `OpenRouterCompleter` (the native, provider-agnostic loop, in-process gateway).
 ///
@@ -1354,18 +1715,15 @@ pub fn build_agent_driver(
             }
             Ok(Arc::new(driver))
         }
-        // "claude" or any unrecognised provider: use the ClaudeCliDriver.
-        _ => {
-            let mut cli_driver =
-                camerata_agent::ClaudeCliDriver::new(mcp_config_path).as_orchestrator(orchestrator);
-            if !model_id.trim().is_empty() {
-                cli_driver = cli_driver.with_model(model_id);
-            }
-            if let Some(wt) = worktree {
-                cli_driver = cli_driver.with_worktree(wt);
-            }
-            Ok(Arc::new(cli_driver))
-        }
+        // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
+        // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set.
+        _ => Ok(build_claude_driver(
+            model_id,
+            mcp_config_path,
+            rule_subset,
+            worktree,
+            orchestrator,
+        )),
     }
 }
 
@@ -1658,8 +2016,47 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     .with_orchestrator_config(orch_config);
                 Ok(Box::new(driver))
             }
-            // "claude" or any unrecognised provider: the exact current CLI orchestrator path.
+            // "claude" or any unrecognised provider: the Anthropic Messages API native
+            // orchestrator when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set, else
+            // the CLI orchestrator path (unchanged). Either way the lead is the ONLY stage
+            // this factory builds, so only the lead can carry delegate/fan_out; its children
+            // are built per-model + gated by the embedded ServerChildDriverFactory.
             _ => {
+                if let Some(key) = anthropic_api_backend_key() {
+                    // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
+                    // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
+                    // model's provider (CLI / Anthropic API / OpenRouter), gated.
+                    let rule_subset = ctx.session.role_rule_subset.clone();
+
+                    let child_factory = ServerChildDriverFactory::new(
+                        self.registry.clone(),
+                        self.creds.clone(),
+                        self.limiter.clone(),
+                        self.gateway_bin.clone(),
+                        rule_subset.clone(),
+                        self.run_session_id.clone(),
+                    );
+
+                    let orch_config = camerata_gateway::delegate::OrchestratorConfig {
+                        models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
+                        worktree_root: ctx.worktree.to_path_buf(),
+                        gateway_bin: self.gateway_bin.clone(),
+                        depth: 0,
+                        max_depth: 1,
+                        child_driver_factory: Some(Arc::new(child_factory)),
+                    };
+
+                    let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), ctx.strongest_model)
+                        .with_rule_subset(rule_subset)
+                        .with_worktree(ctx.worktree.to_path_buf())
+                        .with_shape(ApiShape::Anthropic)
+                        .with_anthropic_api_key(key)
+                        // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                        .as_orchestrator(true)
+                        .with_orchestrator_config(orch_config);
+                    return Ok(Box::new(driver));
+                }
+
                 let mut cli_driver =
                     camerata_agent::ClaudeCliDriver::new(ctx.session.mcp_config.display().to_string())
                         .with_worktree(ctx.worktree)
@@ -2786,6 +3183,458 @@ mod tests {
         };
         let (result, denial) = execute_tool(&driver, &role, &inv).await;
         assert!(denial.is_some(), "worker delegate must be denied");
+        assert!(result.contains("DENIED"), "got: {result}");
+    }
+
+    // ── Anthropic shape: tool-schema format ───────────────────────────────────
+
+    #[test]
+    fn anthropic_tool_schemas_use_input_schema_not_function() {
+        // The Anthropic shape must produce `{name, description, input_schema}` tools,
+        // NOT OpenAI's `{type:"function", function:{...}}`.
+        let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
+        assert!(!schemas.is_empty());
+        for s in &schemas {
+            assert!(s.get("name").and_then(|v| v.as_str()).is_some(),
+                "anthropic tool must have a top-level `name`: {s}");
+            assert!(s.get("input_schema").is_some(),
+                "anthropic tool must have `input_schema`: {s}");
+            // Must NOT carry the OpenAI envelope.
+            assert!(s.get("function").is_none(),
+                "anthropic tool must NOT have `function`: {s}");
+            assert!(s.get("type").is_none(),
+                "anthropic tool must NOT have a `type` discriminator: {s}");
+        }
+        // gated_write must still be present (allowlist unchanged across shapes).
+        let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(names.contains(&"gated_write"));
+    }
+
+    #[test]
+    fn anthropic_and_openrouter_shapes_expose_identical_tool_sets() {
+        for orchestrator in [false, true] {
+            let openai = build_tool_schemas_for(orchestrator, ApiShape::OpenRouter);
+            let anthropic = build_tool_schemas_for(orchestrator, ApiShape::Anthropic);
+            let mut or_names: Vec<&str> = openai
+                .iter()
+                .filter_map(|s| s["function"]["name"].as_str())
+                .collect();
+            let mut an_names: Vec<&str> =
+                anthropic.iter().filter_map(|s| s["name"].as_str()).collect();
+            or_names.sort_unstable();
+            an_names.sort_unstable();
+            assert_eq!(
+                or_names, an_names,
+                "tool allowlist must match across shapes (orchestrator={orchestrator})"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_worker_schemas_omit_delegate_and_escape_tools() {
+        let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
+        let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
+        for forbidden in [
+            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
+            "NotebookEdit", "shell",
+        ] {
+            assert!(
+                !names.contains(&forbidden),
+                "Anthropic-shape worker must NOT expose `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_tool_to_anthropic_converts_correctly() {
+        let openai = serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "gated_write",
+                "description": "Write a file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        });
+        let an = openai_tool_to_anthropic(&openai).expect("must convert");
+        assert_eq!(an["name"].as_str(), Some("gated_write"));
+        assert_eq!(an["description"].as_str(), Some("Write a file."));
+        // `parameters` becomes `input_schema`, body preserved verbatim.
+        assert_eq!(an["input_schema"]["type"].as_str(), Some("object"));
+        assert_eq!(an["input_schema"]["required"][0].as_str(), Some("path"));
+        assert!(an.get("function").is_none());
+    }
+
+    // ── Anthropic shape: request body ─────────────────────────────────────────
+
+    #[test]
+    fn anthropic_request_body_has_top_level_system_and_tools() {
+        let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
+        let messages = vec![serde_json::json!({"role": "user", "content": "do it"})];
+        let (body, use_caching) = build_anthropic_request_body(
+            "claude-opus-4-8",
+            Some("You are governed."),
+            &messages,
+            &schemas,
+        );
+        assert!(use_caching, "system present → caching active");
+        assert_eq!(body["model"].as_str(), Some("claude-opus-4-8"));
+        assert!(body["max_tokens"].as_u64().is_some());
+        // Top-level system as a cache_control text block (NOT a bare string, NOT inside messages).
+        assert_eq!(body["system"][0]["type"].as_str(), Some("text"));
+        assert_eq!(body["system"][0]["text"].as_str(), Some("You are governed."));
+        assert_eq!(body["system"][0]["cache_control"]["type"].as_str(), Some("ephemeral"));
+        // Anthropic tools format (input_schema, not function) present in the body.
+        assert!(body["tools"].is_array());
+        assert!(body["tools"][0]["input_schema"].is_object());
+        assert!(body["tools"][0].get("function").is_none());
+        assert_eq!(body["tool_choice"]["type"].as_str(), Some("auto"));
+    }
+
+    #[test]
+    fn anthropic_request_body_no_system_no_caching() {
+        let (body, use_caching) =
+            build_anthropic_request_body("claude-opus-4-8", None, &[], &[]);
+        assert!(!use_caching, "no system → no caching header");
+        assert!(body.get("system").is_none());
+        // No tools → no tools/tool_choice keys.
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    // ── Anthropic shape: tool-result feedback format ──────────────────────────
+
+    #[test]
+    fn anthropic_tool_results_are_one_user_message_of_tool_result_blocks() {
+        let mut messages: Vec<Value> = Vec::new();
+        let results = vec![
+            ("toolu_1".to_string(), "OK: wrote a.rs".to_string()),
+            ("toolu_2".to_string(), "OK: wrote b.rs".to_string()),
+        ];
+        append_tool_results(&mut messages, ApiShape::Anthropic, &results);
+        // Exactly ONE message appended (Anthropic batches all results into one user turn).
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m["role"].as_str(), Some("user"));
+        let blocks = m["content"].as_array().expect("content must be an array");
+        assert_eq!(blocks.len(), 2);
+        for (i, (id, text)) in results.iter().enumerate() {
+            assert_eq!(blocks[i]["type"].as_str(), Some("tool_result"));
+            assert_eq!(blocks[i]["tool_use_id"].as_str(), Some(id.as_str()));
+            assert_eq!(blocks[i]["content"].as_str(), Some(text.as_str()));
+        }
+    }
+
+    #[test]
+    fn openrouter_tool_results_are_separate_tool_role_messages() {
+        let mut messages: Vec<Value> = Vec::new();
+        let results = vec![
+            ("call_1".to_string(), "r1".to_string()),
+            ("call_2".to_string(), "r2".to_string()),
+        ];
+        append_tool_results(&mut messages, ApiShape::OpenRouter, &results);
+        // One `{role:"tool"}` message per result (OpenAI shape, unchanged).
+        assert_eq!(messages.len(), 2);
+        for (i, (id, text)) in results.iter().enumerate() {
+            assert_eq!(messages[i]["role"].as_str(), Some("tool"));
+            assert_eq!(messages[i]["tool_call_id"].as_str(), Some(id.as_str()));
+            assert_eq!(messages[i]["content"].as_str(), Some(text.as_str()));
+        }
+    }
+
+    // ── Anthropic shape: normalizer parses tool_use (full response object) ─────
+
+    #[test]
+    fn parse_response_handles_anthropic_full_response_with_tool_use() {
+        // call_anthropic_with_tools passes the FULL response object (with `content`)
+        // through as `text`. The normalizer's Anthropic branch must parse it.
+        let resp = LlmResponse {
+            text: serde_json::json!({
+                "id": "msg_01",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "I'll write the file."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_99",
+                        "name": "gated_write",
+                        "input": {"path": "src/lib.rs", "content": "fn f() {}"}
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5}
+            })
+            .to_string(),
+            model: "claude-opus-4-8".into(),
+            backend: "anthropic/api/agentic".into(),
+            cost_usd: None,
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            or_cache_discount: None,
+        };
+        match parse_response(&resp) {
+            ParsedResponse::ToolCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "toolu_99");
+                assert_eq!(calls[0].name, "gated_write");
+                assert_eq!(calls[0].input["path"].as_str(), Some("src/lib.rs"));
+            }
+            ParsedResponse::FinalText(_) => panic!("expected ToolCalls"),
+        }
+    }
+
+    // ── Anthropic shape: driver flags ─────────────────────────────────────────
+
+    #[test]
+    fn default_shape_is_openrouter_back_compat() {
+        let d = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "m");
+        assert_eq!(d.shape, ApiShape::OpenRouter, "default shape must stay OpenRouter");
+        assert!(d.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn with_shape_and_key_set_anthropic_fields() {
+        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+            .with_shape(ApiShape::Anthropic)
+            .with_anthropic_api_key("sk-ant-test");
+        assert_eq!(d.shape, ApiShape::Anthropic);
+        assert_eq!(d.anthropic_api_key.as_deref(), Some("sk-ant-test"));
+    }
+
+    #[test]
+    fn empty_anthropic_key_is_noop() {
+        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "m")
+            .with_anthropic_api_key("");
+        assert!(d.anthropic_api_key.is_none(), "empty key must not be stored");
+    }
+
+    // ── Routing: build_claude_driver respects backend + key ───────────────────
+    //
+    // anthropic_api_backend_key() reads process env. These tests mutate env, so they
+    // run serially under a shared mutex to avoid cross-test interference.
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// RAII guard that snapshots + restores the two env vars routing depends on.
+    struct EnvSnapshot {
+        backend: Option<String>,
+        key: Option<String>,
+    }
+    impl EnvSnapshot {
+        fn capture() -> Self {
+            Self {
+                backend: std::env::var("CAMERATA_LLM_BACKEND").ok(),
+                key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            }
+        }
+        fn set(name: &str, val: Option<&str>) {
+            match val {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            Self::set("CAMERATA_LLM_BACKEND", self.backend.as_deref());
+            Self::set("ANTHROPIC_API_KEY", self.key.as_deref());
+        }
+    }
+
+    #[test]
+    fn anthropic_backend_key_requires_both_signals() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+
+        // Neither set → None.
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(anthropic_api_backend_key().is_none());
+
+        // backend=api but no key → None.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(anthropic_api_backend_key().is_none());
+
+        // key but backend not api (default cli) → None.
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
+        assert!(anthropic_api_backend_key().is_none());
+
+        // backend=cli explicitly + key → None.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "cli");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
+        assert!(anthropic_api_backend_key().is_none());
+
+        // Both signals → Some(key).
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
+        assert_eq!(anthropic_api_backend_key().as_deref(), Some("sk-ant-x"));
+
+        // backend=api + empty key → None.
+        std::env::set_var("ANTHROPIC_API_KEY", "   ");
+        assert!(anthropic_api_backend_key().is_none());
+    }
+
+    // The driver-selection routing decision is `anthropic_api_backend_key()` (exhaustively
+    // tested above) combined with the construction path. `AgentDriver` is not `Any`, so we
+    // can't downcast `Arc<dyn AgentDriver>` to the concrete type; instead we exercise the
+    // exact Anthropic construction `build_claude_driver` performs (verified separately in
+    // `with_shape_and_key_set_anthropic_fields`) and assert the env-gated path is the one
+    // that fires. End-to-end, both `build_agent_driver` and `build_claude_driver` must
+    // SUCCEED (no spawn, no credential lookup) on the claude+api path.
+
+    #[test]
+    fn build_claude_driver_builds_on_api_and_cli_paths_without_spawn() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+
+        // claude + api + key: routing helper fires, driver builds (no claude spawn).
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+        assert!(anthropic_api_backend_key().is_some());
+        let _api_driver = build_claude_driver(
+            "claude-opus-4-8",
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            Some(PathBuf::from("/tmp/wt")),
+            false,
+        ); // building must not panic / spawn
+
+        // default cli: routing helper does not fire, CLI driver builds.
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(anthropic_api_backend_key().is_none());
+        let _cli_driver = build_claude_driver(
+            "claude-opus-4-8",
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            None,
+            false,
+        );
+    }
+
+    #[test]
+    fn build_agent_driver_claude_api_backend_succeeds() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        // Routing decision fires, and build_agent_driver must succeed (Anthropic API path,
+        // no OpenRouter credential needed, no claude binary spawn at build time).
+        assert!(anthropic_api_backend_key().is_some());
+        let result = build_agent_driver(
+            "claude-sonnet-4-6",
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![],
+            None,
+            false,
+            limiter,
+            None,
+        );
+        assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
+    }
+
+    #[test]
+    fn build_agent_driver_claude_cli_default_succeeds() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
+
+        assert!(anthropic_api_backend_key().is_none());
+        let result = build_agent_driver(
+            "claude-sonnet-4-6",
+            &registry,
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![],
+            None,
+            false,
+            limiter,
+            None,
+        );
+        assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
+    }
+
+    // ── Child factory: claude model under backend=api builds an Anthropic API child ──
+
+    #[test]
+    fn factory_claude_model_under_api_backend_builds_anthropic_api_child() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let factory = factory_with(registry, creds);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        assert!(
+            child.is_ok(),
+            "claude child under backend=api must build (Anthropic API child): {:?}",
+            child.err().map(|e| e.to_string())
+        );
+    }
+
+    // ── GATE INVARIANT: Anthropic-shape worker is non-orchestrator + gated ────
+
+    #[tokio::test]
+    async fn anthropic_shape_worker_is_orchestrator_false_and_gated_write_only() {
+        // An Anthropic-shape worker (what build_claude_driver builds for a Claude tier under
+        // backend=api) must be orchestrator=false (no delegate/fan_out), jailed to a
+        // worktree, and its (Anthropic-format) tool schemas must be gated_write + reads only.
+        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+            .with_rule_subset(vec![gov1_rule()])
+            .with_worktree(PathBuf::from("/tmp/wt"))
+            .with_shape(ApiShape::Anthropic)
+            .with_anthropic_api_key("sk-ant-test");
+        // orchestrator=false (default) → workers can never delegate/fan_out.
+        assert!(!driver.orchestrator, "Anthropic worker must be orchestrator=false");
+        assert!(driver.worktree.is_some(), "Anthropic worker must be jailed to a worktree");
+
+        // delegate/fan_out absent from the Anthropic worker's schemas; gated_write present.
+        let schemas = build_tool_schemas_for(driver.orchestrator, driver.shape);
+        let names: Vec<&str> = schemas.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(names.contains(&"gated_write"));
+        for forbidden in ["delegate", "fan_out", "Bash", "Write", "Edit", "Task", "shell"] {
+            assert!(!names.contains(&forbidden), "`{forbidden}` must not appear");
+        }
+
+        // Gate still runs identically: a delegate call on the worker is hard-denied even
+        // with the Anthropic shape (the `if driver.orchestrator` arm guard).
+        let role = test_role();
+        let inv = ToolInvocation {
+            id: "d".into(),
+            name: "delegate".into(),
+            input: serde_json::json!({"subtask": "x", "tier": "fast"}),
+        };
+        let (result, denial) = execute_tool(&driver, &role, &inv).await;
+        assert!(denial.is_some(), "Anthropic worker delegate must be denied");
         assert!(result.contains("DENIED"), "got: {result}");
     }
 }
