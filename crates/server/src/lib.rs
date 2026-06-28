@@ -54,6 +54,7 @@ pub mod schedule;
 pub mod tool_provisioning;
 pub mod model_tier;
 pub mod settings;
+pub mod story_docs_gate;
 pub mod suppression;
 pub mod terminal;
 pub mod test_tamper;

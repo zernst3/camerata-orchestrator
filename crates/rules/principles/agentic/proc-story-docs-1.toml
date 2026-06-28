@@ -5,6 +5,7 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
+qualifies = "Enforcement reality (read this before assuming you must build a doc emitter): Camerata enforces this deterministically via the post-story documentation hook (PostStoryHook) that fires at sign-off — a Camerata-pipeline enforcement point that emits the per-story docs for you when this rule is selected and its chosen option calls for emission. You do NOT build that emitter; Camerata's pipeline runs it post-sign-off. The one caveat: the hook only covers stories completed THROUGH Camerata's pipeline. If you also want this documentation enforced at layer 4 (the repo's own origin CI, catching commits made outside Camerata), that part still requires a bespoke check wired into the repo's CI — Camerata's post-story hook does not reach origin."
 verification = "grounded"
 
 [[sources]]

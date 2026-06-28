@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use camerata_agent::post_story_hook::{PostStoryHook, StoryCompletion};
+use camerata_agent::post_story_hook::{PostStoryHook, StoryCompletion, StoryDocEmitter};
 use camerata_persistence::{
     encode, ArtifactKind, ArtifactStore, EditActor, NewRevision, RevisionOp,
 };
@@ -604,6 +604,37 @@ impl UowStore {
     pub fn with_story_doc_hook(mut self, hook: Arc<dyn PostStoryHook>) -> Self {
         self.post_story_hook = Some(hook);
         self
+    }
+
+    /// Attach the post-story documentation hook **gated on the project's ruleset**
+    /// (PROC-STORY-DOCS-1), mirroring how the test-tamper guard consults
+    /// [`crate::test_tamper::test_tamper_guard_active`] before it acts.
+    ///
+    /// The hook is attached only when `PROC-STORY-DOCS-1` is SELECTED in the
+    /// project's rule selections, and the emitter is built with the chosen
+    /// option's [`camerata_agent::post_story_hook::DocConvention`]. When the rule
+    /// is NOT selected, NO hook is attached, so [`Self::sign_off`] never emits docs
+    /// for a project that did not opt in. (When selected with a non-`per-story-docs`
+    /// option, the hook IS attached but the emitter no-ops for that convention.)
+    ///
+    /// This closes the same class of gap the test-tamper guard fixed: a mechanism
+    /// that fired structurally (whenever a hook was attached) rather than on the
+    /// project's selection + chosen option.
+    ///
+    /// Builder form: returns a new handle sharing the same in-memory map + file path.
+    pub fn with_story_doc_hook_for_selections(
+        self,
+        selections: &[crate::project::RuleSelection],
+    ) -> Self {
+        match crate::story_docs_gate::story_docs_convention(selections) {
+            // Selected: attach an emitter built with the chosen convention. The
+            // emitter itself honours the option (no-op for non-per-story-docs).
+            Some(convention) => {
+                self.with_story_doc_hook(Arc::new(StoryDocEmitter::new(convention)))
+            }
+            // Not selected: leave the hook unset so sign_off never emits docs.
+            None => self,
+        }
     }
 
     /// Set the workspace root passed to the post-story hook in [`Self::sign_off`].
@@ -2676,6 +2707,94 @@ mod post_story_hook_tests {
         assert!(
             !uow.history.iter().any(|h| h.kind == "story_docs"),
             "no story_docs history without a hook"
+        );
+    }
+
+    // ── Selection + option gating of the hook (mirrors test_tamper_guard) ──────
+    //
+    // `with_story_doc_hook_for_selections` must attach the hook ONLY when
+    // PROC-STORY-DOCS-1 is selected, and build the emitter with the chosen option.
+    // These tests prove the gap is closed: an unselected rule emits nothing even
+    // when sign_off runs, a selected-default emits per-story docs, and a selected
+    // no-op option attaches a hook that no-ops.
+
+    fn rule_sel(rule_id: &str, opt: Option<&str>) -> crate::project::RuleSelection {
+        crate::project::RuleSelection {
+            rule_id: rule_id.to_string(),
+            chosen_option: opt.map(String::from),
+            repos: vec![],
+        }
+    }
+
+    #[test]
+    fn gated_builder_does_not_attach_when_rule_not_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        // Some OTHER rule is selected; PROC-STORY-DOCS-1 is not.
+        let selections = vec![rule_sel("SOME-OTHER-RULE", None)];
+        let store = UowStore::new()
+            .with_story_doc_hook_for_selections(&selections)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-G1", vec![approved_decision("CAM-G1", "auth")]);
+        let uow = store.sign_off("CAM-G1", "zach", "run-1", None);
+
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-G1");
+        assert!(
+            !tech.exists(),
+            "no docs when PROC-STORY-DOCS-1 is not selected"
+        );
+        assert!(
+            !uow.history.iter().any(|h| h.kind == "story_docs"),
+            "no story_docs history when the rule is not selected"
+        );
+    }
+
+    #[test]
+    fn gated_builder_attaches_per_story_docs_when_selected_default() {
+        let dir = tempfile::tempdir().unwrap();
+        // Selected with no explicit option -> corpus default (per-story-docs).
+        let selections = vec![rule_sel("PROC-STORY-DOCS-1", None)];
+        let store = UowStore::new()
+            .with_story_doc_hook_for_selections(&selections)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-G2", vec![approved_decision("CAM-G2", "auth")]);
+        let uow = store.sign_off("CAM-G2", "zach", "run-1", None);
+
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-G2");
+        let guide = StoryDocEmitter::user_path(dir.path(), "CAM-G2");
+        assert!(tech.exists(), "selected default must emit the technical doc");
+        assert!(guide.exists(), "selected default must emit the user guide");
+        assert!(
+            uow.history
+                .iter()
+                .any(|h| h.kind == "story_docs" && h.text.contains("CAM-G2")),
+            "story_docs history must record emission for the selected rule"
+        );
+    }
+
+    #[test]
+    fn gated_builder_attaches_but_noops_for_mechanical_minimum_option() {
+        let dir = tempfile::tempdir().unwrap();
+        // Selected, but the chosen option is the explicit no-op convention.
+        let selections = vec![rule_sel("PROC-STORY-DOCS-1", Some("mechanical-minimum"))];
+        let store = UowStore::new()
+            .with_story_doc_hook_for_selections(&selections)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-G3", vec![approved_decision("CAM-G3", "auth")]);
+        let uow = store.sign_off("CAM-G3", "zach", "run-1", None);
+
+        // Hook is attached (rule selected) but the emitter no-ops for this option,
+        // so no files and no story_docs history entry.
+        let tech = StoryDocEmitter::technical_path(dir.path(), "CAM-G3");
+        assert!(
+            !tech.exists(),
+            "mechanical-minimum option must not write docs"
+        );
+        assert!(
+            !uow.history.iter().any(|h| h.kind == "story_docs"),
+            "no story_docs history for a no-op convention"
         );
     }
 
