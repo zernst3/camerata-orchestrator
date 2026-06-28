@@ -1302,10 +1302,10 @@ pub(super) fn ModelProfileEditor(project: ProjectView, refresh: Signal<u32>) -> 
 
     rsx! {
         div { class: "tier-map-editor model-profile-editor",
-            p { class: "tier-map-heading", "Model Efficiency Profile" }
+            p { class: "tier-map-heading", "Suggested model levels" }
             p { class: "section-hint tier-map-hint",
                 "Applying a profile cascades concrete model assignments to ALL entry points \
-                 (tier map, step models, L3). A confirm popup shows current \u{2192} new changes \
+                 (fleet model bands, helper-agent models, L3). A confirm popup shows current \u{2192} new changes \
                  before applying. After apply, per-entry editors still allow manual override."
             }
 
@@ -1517,9 +1517,10 @@ fn tier_chain_str(v: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// Model-tier editor (#63): a compact dev-console for the project's fast / balanced /
-/// strongest model bindings. Reads from `project.tier_map` and POSTs to
-/// `PATCH /api/projects/:id/tier-map` (patch semantics: all three bands sent each save).
+/// Fleet-model-band editor (#63): a compact dev-console for the project's fast / balanced /
+/// strongest / designer(vision) model bindings. Reads from `project.tier_map` and POSTs to
+/// `POST /api/projects/:id/tier-map` (patch semantics: all bands sent each save).
+/// The Designer (vision) subsection also POSTs to `POST /api/projects/:id/vision-enabled`.
 ///
 /// Placed in the Rules window as a distinct settings section — it is NOT part of the
 /// ruleset (no rule ids, no options, no emit target). It controls which model the fleet
@@ -1528,11 +1529,16 @@ fn tier_chain_str(v: Option<&serde_json::Value>) -> String {
 pub(super) fn TierMapEditor(project: ProjectView) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
+    let pid_vision = project.id.clone();
     // Local editable copies. fast/balanced are ordered chains (Vec<String>).
-    // strongest stays a single model id.
+    // strongest stays a single model id. vision is a chain (Vec<String>), may be empty.
     let mut fast = use_signal(|| project.tier_map.fast.clone());
     let mut balanced = use_signal(|| project.tier_map.balanced.clone());
     let mut strongest = use_signal(|| project.tier_map.strongest.clone());
+    // Designer (vision) band state.
+    let vision_chain = use_signal(|| project.tier_map.vision.clone());
+    let mut vision_enabled = use_signal(|| project.vision_enabled);
+    let mut saving_vision_toggle = use_signal(|| false);
     let mut saving = use_signal(|| false);
     // Model registry for dropdowns (same source as StepModelsEditor and L3ReviewEditor).
     let models = use_resource(|| async move { fetch_audit_models().await });
@@ -1540,7 +1546,7 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
 
     rsx! {
         div { class: "tier-map-editor",
-            p { class: "tier-map-heading", "Model tier map" }
+            p { class: "tier-map-heading", "Fleet model bands" }
             p { class: "section-hint tier-map-hint",
                 "Maps each capability band to a model chain. The fast and balanced bands support \
                  multiple models: the primary is tried first; on a retryable error (429, 5xx, timeout) \
@@ -1550,8 +1556,16 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
             div { class: "tier-map-rows",
                 // Fast band — chain editor with select dropdowns
                 div { class: "tier-map-row tier-map-chain-row",
-                    label { class: "tier-map-band-label tier-map-fast", "Fast" }
-                    span { class: "tier-map-band-desc", "(throughput — tests, simple edits)" }
+                    label { class: "tier-map-band-label tier-map-fast", "Fast \u{00b7} Quick engineer" }
+                    span {
+                        class: "tier-map-band-desc",
+                        "High-throughput work: tests, simple edits."
+                        span {
+                            class: "info-icon",
+                            title: "High-throughput work: tests, simple edits.",
+                            "\u{24d8}"
+                        }
+                    }
                     div { class: "tier-chain-list",
                         for (i, _model) in fast().iter().enumerate() {
                             {
@@ -1642,8 +1656,16 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                 }
                 // Balanced band — chain editor with select dropdowns
                 div { class: "tier-map-row tier-map-chain-row",
-                    label { class: "tier-map-band-label tier-map-balanced", "Balanced" }
-                    span { class: "tier-map-band-desc", "(mid-tier — most tasks)" }
+                    label { class: "tier-map-band-label tier-map-balanced", "Balanced \u{00b7} Mid engineer" }
+                    span {
+                        class: "tier-map-band-desc",
+                        "Most engineering tasks."
+                        span {
+                            class: "info-icon",
+                            title: "Most engineering tasks.",
+                            "\u{24d8}"
+                        }
+                    }
                     div { class: "tier-chain-list",
                         for (i, _model) in balanced().iter().enumerate() {
                             {
@@ -1733,8 +1755,16 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                 }
                 // Strongest band — single model select
                 div { class: "tier-map-row",
-                    label { class: "tier-map-band-label tier-map-strongest", "Strongest" }
-                    span { class: "tier-map-band-desc", "(frontier-class — architecture, security)" }
+                    label { class: "tier-map-band-label tier-map-strongest", "Strongest \u{00b7} Lead / orchestrator" }
+                    span {
+                        class: "tier-map-band-desc",
+                        "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck."
+                        span {
+                            class: "info-icon",
+                            title: "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck.",
+                            "\u{24d8}"
+                        }
+                    }
                     if let Some(ref m) = models {
                         select {
                             class: "tier-map-input run-model-select",
@@ -1782,22 +1812,146 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Each tier requires at least one model id.");
                         return;
                     }
+                    // Include the current vision chain in the save (may be empty).
+                    let vision_chain_val: Vec<String> = vision_chain().into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     let map = TierMapView {
                         fast: fast_chain,
                         balanced: balanced_chain,
                         strongest: strongest_val,
+                        vision: vision_chain_val,
                     };
                     saving.set(true);
                     spawn(async move {
                         if set_project_tier_map(&pid, &map).await {
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Tier map saved.");
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Fleet model bands saved.");
                         } else {
-                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save tier map.");
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save fleet model bands.");
                         }
                         saving.set(false);
                     });
                 },
-                if saving() { "Saving\u{2026}" } else { "Save tier map" }
+                if saving() { "Saving\u{2026}" } else { "Save fleet model bands" }
+            }
+
+            // ── Designer (vision) band ─────────────────────────────────────────
+            // Visually separated from the logic tiers. Controls the optional
+            // multimodal/Designer step: a project-wide toggle + a vision-only model select.
+            div { class: "tier-map-vision-section",
+                p { class: "tier-map-heading",
+                    "Designer (vision)"
+                    span {
+                        class: "info-icon",
+                        title: "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind mockup the engineers translate into Dioxus. Only vision-capable models are listed.",
+                        "\u{24d8}"
+                    }
+                }
+                p { class: "section-hint tier-map-hint",
+                    "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind \
+                     mockup the engineers translate into Dioxus. Only vision-capable models are listed."
+                }
+                // Enable/disable toggle
+                div { class: "tier-map-row vision-toggle-row",
+                    label { class: "tier-map-band-label tier-map-designer", "Enable" }
+                    input {
+                        r#type: "checkbox",
+                        class: "l3-review-checkbox",
+                        checked: vision_enabled(),
+                        disabled: saving_vision_toggle(),
+                        onchange: move |e| {
+                            let en = e.checked();
+                            vision_enabled.set(en);
+                            let pid = pid_vision.clone();
+                            saving_vision_toggle.set(true);
+                            spawn(async move {
+                                if set_project_vision_enabled(&pid, en).await {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        if en { "Designer (vision) band enabled." }
+                                        else { "Designer (vision) band disabled." },
+                                    );
+                                } else {
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not update vision-enabled setting.",
+                                    );
+                                }
+                                saving_vision_toggle.set(false);
+                            });
+                        },
+                    }
+                    span { class: "l3-review-toggle-hint",
+                        if vision_enabled() { "On \u{2014} Designer band is available." }
+                        else { "Off \u{2014} Designer band is inactive." }
+                    }
+                }
+                // Vision model select — only vision-capable models
+                div { class: "tier-map-row",
+                    label { class: "tier-map-band-label tier-map-designer", "Model" }
+                    if let Some(ref m) = models {
+                        {
+                            let vision_groups = m.vision_grouped();
+                            let cur = vision_chain().into_iter().next().unwrap_or_default();
+                            rsx! {
+                                select {
+                                    class: "tier-map-input run-model-select",
+                                    // Disabled when vision band is off or saving
+                                    disabled: !vision_enabled() || saving() || saving_vision_toggle(),
+                                    onchange: {
+                                        let mut vision_chain = vision_chain;
+                                        move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                            let val = e.value();
+                                            if val.is_empty() {
+                                                vision_chain.set(vec![]);
+                                            } else {
+                                                vision_chain.set(vec![val]);
+                                            }
+                                        }
+                                    },
+                                    option {
+                                        value: "",
+                                        selected: cur.is_empty(),
+                                        "— none —"
+                                    }
+                                    for (group_label , opts) in vision_groups.into_iter() {
+                                        optgroup { label: "{group_label}",
+                                            for opt in opts.into_iter() {
+                                                option {
+                                                    value: "{opt.id}",
+                                                    selected: cur == opt.id,
+                                                    "{opt.label}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        input {
+                            class: "tier-map-input addressee-input",
+                            r#type: "text",
+                            placeholder: "vision model id (optional)",
+                            disabled: !vision_enabled(),
+                            value: "{vision_chain().into_iter().next().unwrap_or_default()}",
+                            oninput: {
+                                let mut vision_chain = vision_chain;
+                                move |e: dioxus::prelude::Event<dioxus::prelude::FormData>| {
+                                    let val = e.value();
+                                    if val.is_empty() {
+                                        vision_chain.set(vec![]);
+                                    } else {
+                                        vision_chain.set(vec![val]);
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
             }
         }
     }
@@ -1816,35 +1970,43 @@ pub(super) fn StepModelsEditor(project: ProjectView) -> Element {
     let models = use_resource(|| async move { fetch_audit_models().await });
     let models = models.read().clone().flatten();
 
-    // The (step-key, human label, current model id) tuples, in display order.
+    // The (step-key, human label, current model id, tooltip hint) tuples, in display order.
     let sm = &project.step_models;
-    let rows: Vec<(&'static str, &'static str, String)> = vec![
-        ("audit", "Audit", sm.audit.clone()),
-        ("calibration", "Calibration", sm.calibration.clone()),
-        ("research_chat", "Research chat", sm.research_chat.clone()),
-        ("story_authoring", "Story authoring", sm.story_authoring.clone()),
-        ("decomposition", "Decomposition", sm.decomposition.clone()),
-        ("escalation", "Escalation", sm.escalation.clone()),
-        ("clarification", "Clarification", sm.clarification.clone()),
+    let rows: Vec<(&'static str, &'static str, String, &'static str)> = vec![
+        ("audit", "Audit", sm.audit.clone(),
+            "Onboarding scan that proposes governance rules for this project."),
+        ("calibration", "Calibration", sm.calibration.clone(),
+            "Onboarding calibration: fine-tunes the proposed rule set to the project's actual patterns."),
+        ("research_chat", "Research chat", sm.research_chat.clone(),
+            "The floating research assistant: answers technical questions in context."),
+        ("story_authoring", "Story authoring", sm.story_authoring.clone(),
+            "The author-a-story screen: structures requirements into a governed work item."),
+        ("decomposition", "Decomposition", sm.decomposition.clone(),
+            "Splits a story or issue into sub-issues for parallel fleet execution."),
+        ("escalation", "Escalation", sm.escalation.clone(),
+            "Restates your escalation answer as a resume directive the fleet can act on."),
+        ("clarification", "Clarification", sm.clarification.clone(),
+            "Generates the investigation clarification questions sent to the requester."),
     ];
 
     rsx! {
         div { class: "tier-map-editor step-models-editor",
-            p { class: "tier-map-heading", "Step models" }
+            p { class: "tier-map-heading", "Helper-agent models" }
             p { class: "section-hint tier-map-hint",
-                "The model each NON-FLEET AI step uses for THIS project. Once set, the project's \
+                "The model each non-fleet AI step uses for THIS project. Once set, the project's \
                  value is authoritative (no environment fallback). Audit, calibration, and research \
                  chat still let an explicit per-run pick override this default; the other steps use \
                  it directly. Each change saves immediately."
             }
             div { class: "tier-map-rows",
-                for (step_key , label , current) in rows.into_iter() {
+                for (step_key , label , current , hint) in rows.into_iter() {
                     StepModelRow {
                         key: "{project.id}-{step_key}",
                         project_id: project.id.clone(),
                         step_key,
                         label,
                         current,
+                        hint,
                         models: models.clone(),
                     }
                 }
@@ -1862,6 +2024,7 @@ pub(super) fn StepModelRow(
     step_key: &'static str,
     label: &'static str,
     current: String,
+    hint: &'static str,
     models: Option<AuditModelsResp>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -1870,7 +2033,14 @@ pub(super) fn StepModelRow(
 
     rsx! {
         div { class: "tier-map-row step-model-row",
-            label { class: "tier-map-band-label", "{label}" }
+            span { class: "step-model-label-wrap",
+                label { class: "tier-map-band-label", "{label}" }
+                span {
+                    class: "info-icon",
+                    title: "{hint}",
+                    "\u{24d8}"
+                }
+            }
             if let Some(m) = models {
                 select {
                     class: "tier-map-input run-model-select",
@@ -2467,25 +2637,25 @@ pub(super) fn RulesView() -> Element {
                             }
                         }
 
-                        // ── SETTINGS: Model Efficiency Profile (PROJECT-WIDE, TOP) ───────
+                        // ── SETTINGS: Suggested model levels (PROJECT-WIDE, TOP) ────────
                         // Governs all model entry points. Apply cascades to all model entry
                         // points: tier map, step models, and L3 review. Placed first so the
                         // governing setting is prominent above the per-entry overrides.
-                        p { class: "section-label settings-label", "SETTINGS: Model Efficiency Profile" }
+                        p { class: "section-label settings-label", "SETTINGS: Suggested model levels" }
                         ModelProfileEditor { project: p_owned.clone(), refresh }
 
-                        // ── SETTINGS: Model tier map (#63) ────────────────────────────
+                        // ── SETTINGS: Fleet model bands (#63) ─────────────────────────
                         // NOT a ruleset concern — controls which model the fleet uses
                         // per-task-tier at runtime. Labeled SETTINGS to distinguish from
                         // the rule tables above.
-                        p { class: "section-label settings-label", "SETTINGS: Model tier map" }
+                        p { class: "section-label settings-label", "SETTINGS: Fleet model bands" }
                         TierMapEditor { project: p_owned.clone() }
 
-                        // ── SETTINGS: Per-step models ─────────────────────────────────
+                        // ── SETTINGS: Helper-agent models ─────────────────────────────
                         // The model each non-fleet AI step uses for this project. Distinct
                         // from the fleet tier map above (that is per-task-tier for governed
                         // runs); this covers audit / calibration / chat / authoring / etc.
-                        p { class: "section-label settings-label", "SETTINGS: Step models" }
+                        p { class: "section-label settings-label", "SETTINGS: Helper-agent models" }
                         StepModelsEditor { project: p_owned.clone() }
 
                         // ── SETTINGS: L3 agentic code review (R7) ────────────────────

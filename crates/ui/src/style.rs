@@ -3055,6 +3055,37 @@ html, body {
 .tier-chain-select { flex: 1; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .tier-chain-input { flex: 1; min-width: 0; max-width: 100%; box-sizing: border-box; }
 
+/* Designer (vision) band color: warm amber to distinguish from logic tiers. */
+.tier-map-designer { background: rgba(217,119,6,0.18); color: #fbbf24; }
+
+/* ── Designer (vision) subsection within TierMapEditor ──────────────── */
+.tier-map-vision-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Toggle row for vision-enabled: label + checkbox + hint inline. */
+.vision-toggle-row { display: flex; align-items: center; gap: 10px; }
+
+/* ── Info icon (ⓘ) inline hint marker ───────────────────────────────── */
+.info-icon {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: help;
+  margin-left: 4px;
+  vertical-align: middle;
+  opacity: 0.7;
+  user-select: none;
+}
+.info-icon:hover { opacity: 1; color: var(--accent); }
+
+/* Step-model label + info-icon wrapper (keeps them inline). */
+.step-model-label-wrap { display: flex; align-items: center; gap: 0; }
+
 /* ── Rules-window SETTINGS section label ─────────────────────────────── */
 .settings-label {
   margin-top: 20px;

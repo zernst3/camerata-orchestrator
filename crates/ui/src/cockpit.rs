@@ -97,6 +97,10 @@ struct ProjectView {
     /// Serde default = Balanced.
     #[serde(default = "default_model_profile_str")]
     model_profile: String, // "balanced" | "max_efficiency" | "max_quality" | "custom"
+    /// Whether the Designer (vision/multimodal) band is enabled for this project.
+    /// Defaults to false (disabled). When true, vision-capable stages are available.
+    #[serde(default)]
+    vision_enabled: bool,
 }
 
 /// UI mirror of `camerata_server::project::L3ReviewConfig`.
@@ -178,7 +182,8 @@ impl Default for StallThresholdsView {
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
 /// capability band. `fast` and `balanced` are ordered chains (Vec<String>); `strongest`
-/// stays a single model. Serde defaults match the fleet defaults.
+/// stays a single model. `vision` is an optional chain for the Designer (vision) band.
+/// Serde defaults match the fleet defaults.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct TierMapView {
     #[serde(default = "default_fast_chain_str")]
@@ -187,6 +192,9 @@ struct TierMapView {
     balanced: Vec<String>,
     #[serde(default = "default_strongest_model_str")]
     strongest: String,
+    /// Model chain for the Designer (vision/multimodal) band. Empty = no model pinned.
+    #[serde(default)]
+    vision: Vec<String>,
 }
 
 fn default_fast_chain_str() -> Vec<String> {
@@ -207,6 +215,7 @@ impl Default for TierMapView {
             fast: default_fast_chain_str(),
             balanced: default_balanced_chain_str(),
             strongest: default_strongest_model_str(),
+            vision: Vec::new(),
         }
     }
 }
@@ -339,9 +348,9 @@ async fn set_active_project(id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Update the project's model-tier map (fast / balanced / strongest model ids).
+/// Update the project's model-tier map (fast / balanced / strongest / vision model ids).
 /// Uses the `POST /api/projects/:id/tier-map` endpoint added in #63. Patch semantics:
-/// all three bands are always sent so a single round-trip sets the whole map.
+/// all bands are always sent so a single round-trip sets the whole map.
 async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
     reqwest::Client::new()
         .post(format!("{}/api/projects/{}/tier-map", crate::BFF_URL, id))
@@ -349,7 +358,20 @@ async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
             "fast":     map.fast,
             "balanced": map.balanced,
             "strongest": map.strongest,
+            "vision":   map.vision,
         }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Toggle the Designer (vision) band for a project.
+/// Uses `POST /api/projects/:id/vision-enabled {enabled: bool}`.
+pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/vision-enabled", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "enabled": enabled }))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -2083,6 +2105,7 @@ mod tests {
             strongest: "opus-x".to_string(),
             balanced: vec!["sonnet-x".to_string()],
             fast: vec!["haiku-x".to_string()],
+            vision: vec![],
         };
         let body = dev_run_body(&tm, false);
         let tier = body.get("tier_map").expect("tier_map key present");
@@ -2149,6 +2172,7 @@ mod tests {
             strongest: "opus-x".to_string(),
             balanced: vec!["sonnet-x".to_string()],
             fast: vec!["haiku-x".to_string()],
+            vision: vec![],
         };
         // OFF: no flag at all.
         let off = dev_run_body(&tm, false);

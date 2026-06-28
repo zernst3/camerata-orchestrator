@@ -573,6 +573,10 @@ pub(super) struct AuditModelOption {
     /// Whether this model supports prompt caching.
     #[serde(default)]
     pub caching: bool,
+    /// Whether this model supports vision / multimodal input (images).
+    /// Used to filter the Designer (vision) band model selector.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// Build a badge-enriched display label from registry entry fields.
@@ -667,6 +671,9 @@ struct RegistryEntryWire {
     price_out: f64,
     #[serde(default)]
     caching: bool,
+    /// Whether the model supports vision / multimodal input (images).
+    #[serde(default)]
+    vision: bool,
 }
 
 impl RegistryEntryWire {
@@ -688,6 +695,7 @@ impl RegistryEntryWire {
             price_in: self.price_in,
             price_out: self.price_out,
             caching: self.caching,
+            vision: self.vision,
         }
     }
 }
@@ -711,6 +719,23 @@ impl AuditModelsResp {
             self.models.iter().filter(|m| m.provider == "claude").collect();
         let openrouter: Vec<&AuditModelOption> =
             self.models.iter().filter(|m| m.provider == "openrouter").collect();
+        let mut groups = Vec::new();
+        if !claude.is_empty() {
+            groups.push(("Claude (subscription)", claude));
+        }
+        if !openrouter.is_empty() {
+            groups.push(("OpenRouter", openrouter));
+        }
+        groups
+    }
+
+    /// Return only vision-capable models, grouped by provider.
+    /// Used to populate the Designer (vision) band model selector.
+    pub fn vision_grouped(&self) -> Vec<(&'static str, Vec<&AuditModelOption>)> {
+        let claude: Vec<&AuditModelOption> =
+            self.models.iter().filter(|m| m.provider == "claude" && m.vision).collect();
+        let openrouter: Vec<&AuditModelOption> =
+            self.models.iter().filter(|m| m.provider == "openrouter" && m.vision).collect();
         let mut groups = Vec::new();
         if !claude.is_empty() {
             groups.push(("Claude (subscription)", claude));

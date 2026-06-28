@@ -4452,6 +4452,7 @@ pub(super) fn DevelopmentPhaseView(
                                     strongest: dev_strongest(),
                                     balanced: vec![dev_balanced()],
                                     fast: vec![dev_fast()],
+                                    vision: vec![],
                                 };
                                 let skip_l2 = bootstrap_skip_layer2();
                                 let toasts = toasts;
@@ -4619,6 +4620,7 @@ pub(super) fn DevelopmentPhaseView(
                                     strongest: dev_strongest(),
                                     balanced: vec![dev_balanced()],
                                     fast: vec![dev_fast()],
+                                    vision: vec![],
                                 };
                                 move |_| {
                                     let sid = sid.clone();
