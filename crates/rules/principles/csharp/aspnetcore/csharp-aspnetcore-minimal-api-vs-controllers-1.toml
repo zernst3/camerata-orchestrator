@@ -1,28 +1,27 @@
 id = "CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1"
-title = "The project chooses one routing style (Minimal APIs or MVC controllers) and applies it consistently"
+title = "ASP.NET Core routing style: Minimal APIs or MVC controllers"
 tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
-default = true
+default = false
 
 verification = "grounded"
 [decision]
-question = "What position does the project take on: The project chooses one routing style (Minimal APIs or MVC controllers) and applies it consistently?"
-default = "minimal-apis-throughout"
-why = "ASP.NET Core supports two routing styles: MVC controllers (classes inheriting ControllerBase with attribute routing) and Minimal APIs (MapGet/MapPost lambda endpoints registered in Program.cs). Both work correctly, but mixing them inside a single project creates two separate programming models for what is conceptually identical work. Developers must hold both models in mind simultaneously: where filters apply, how validation hooks wire in, what the response-shaping conventions are, and where endpoints are discovered. A newcomer picking up a mixed codebase must learn both models and track which applies to any given endpoint. Minimal APIs are the modern, lower-overhead path for new services; MVC controllers are the right choice when the project already has deep investment in controller-scoped filters, action result conventions, or an existing large controller surface. The choice between them is a one-time structural decision. Once made it should be enforced consistently so that all endpoints follow the same discovery, validation, and filter pattern."
+question = "What routing style does the project adopt for HTTP endpoints: Minimal APIs (MapGet/MapPost lambda endpoints) or MVC controllers (classes inheriting ControllerBase with attribute routing)?"
+why = "ASP.NET Core supports two first-class routing styles, and the right one follows from the kind of service being built and the investment the project already has, not from a presumed winner. Minimal APIs register endpoints as MapGet/MapPost lambdas in Program.cs (or in IEndpointRouteBuilder extension methods): less framework ceremony, a lower per-endpoint overhead, and the direction modern ASP.NET Core tooling is built around, which makes them the natural fit for new services and small focused APIs. MVC controllers organize endpoints into ControllerBase classes with attribute routing, and bring richer filter and model-binding conventions out of the box (controller-scoped filters, action results, model-state handling), which makes them the natural fit for projects with deep existing investment in those conventions or a large established controller surface. Whichever style is chosen, the one cost worth avoiding is mixing both arbitrarily within a project, since that maintains two programming models for identical work. Choose by the service's shape and the codebase's existing investment, and apply the chosen style consistently."
 
 [[option]]
 id = "minimal-apis-throughout"
 label = "Minimal APIs throughout the project; no MVC controllers"
 directive = "All HTTP endpoints are registered via MapGet, MapPost, MapPut, MapDelete (and MapGroup for prefix grouping) in Program.cs or in IEndpointRouteBuilder extension methods. No ControllerBase subclasses are introduced. Endpoint handlers delegate to service-layer methods; business logic does not live inline in the lambda. Validation occurs via the filter pipeline (AddEndpointFilter) or via a service-layer contract, not scattered per-handler."
-why = "Minimal APIs produce less framework ceremony, are the strategic ASP.NET Core direction, and are trivially testable in isolation."
+why = "Produces the least framework ceremony per endpoint, aligns with the direction modern ASP.NET Core tooling is built around, and keeps each endpoint trivially testable in isolation. The strongest fit for new services and small focused APIs; it offers fewer built-in conventions than controllers, so projects that lean heavily on controller-scoped filters or action-result machinery wire those concerns up themselves."
 
 [[option]]
 id = "mvc-controllers-throughout"
 label = "MVC controllers throughout; no Minimal API registrations"
 directive = "All HTTP endpoints live in classes that inherit ControllerBase (or Controller for MVC views), decorated with [ApiController] and [Route] attributes. No MapGet/MapPost/etc. registrations appear. The [ApiController] attribute is applied on all controllers to enable automatic model-state 400 responses."
-why = "The right choice for projects with deep existing investment in controller-scoped filters, custom action results, or large existing controller surfaces. More ceremony than Minimal APIs but richer filter and model-binding conventions out of the box."
+why = "Brings richer filter, model-binding, and action-result conventions out of the box (controller-scoped filters, automatic model-state 400s via [ApiController]), which a large endpoint surface benefits from. The natural fit for projects with deep existing investment in those conventions or an established controller codebase; the trade-off is more framework ceremony per endpoint than Minimal APIs."
 
 [[option]]
 id = "mixed-minimal-and-controller"
