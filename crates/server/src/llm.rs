@@ -111,6 +111,22 @@ pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 ///
 /// Deliberately NOT `--bare`: that flag forces ANTHROPIC_API_KEY-only auth and never reads
 /// OAuth/keychain, which would break the subscription-based CLI the local app relies on.
+/// Strip NUL bytes from a string destined for a process argument. `std::process`
+/// rejects ANY argument containing a NUL ("nul byte found in provided data"), which
+/// fails the spawn for EVERY CLI completion whose assembled prompt or system prompt
+/// happens to contain a stray `\0` (e.g. anywhere in the chat's big system prompt).
+/// Because `complete_cli` / `harden_completion` are the shared path for all bare-LLM
+/// CLI calls (chat, audit, calibration, story-authoring, decompose, escalation,
+/// clarification, L3), one stray NUL would break that call app-wide. Stripping is
+/// safe: a NUL carries no meaning in prompt text.
+pub(crate) fn nul_safe(s: &str) -> String {
+    if s.contains('\0') {
+        s.replace('\0', "")
+    } else {
+        s.to_string()
+    }
+}
+
 fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
     cmd.arg("--strict-mcp-config")
         .arg("--disable-slash-commands")
@@ -145,7 +161,7 @@ fn harden_completion(cmd: &mut tokio::process::Command, req: &LlmRequest) {
         }
     }
     if let Some(system) = &req.system {
-        cmd.arg("--system-prompt").arg(system);
+        cmd.arg("--system-prompt").arg(nul_safe(system));
     }
 }
 
@@ -648,7 +664,7 @@ impl Llm {
         cmd.kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .arg("-p")
-            .arg(&req.prompt)
+            .arg(nul_safe(&req.prompt))
             .arg("--model")
             .arg(model)
             .arg("--output-format")
@@ -702,7 +718,7 @@ impl Llm {
         cmd.kill_on_drop(true)
             .stdin(std::process::Stdio::null())
             .arg("-p")
-            .arg(&req.prompt)
+            .arg(nul_safe(&req.prompt))
             .arg("--model")
             .arg(model)
             .arg("--output-format")
@@ -1773,6 +1789,20 @@ pub async fn call_with_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nul_safe_strips_nul_bytes_so_cli_spawn_never_fails() {
+        // A stray NUL anywhere in the prompt/system would make std::process reject
+        // the arg ("nul byte found in provided data") and break the CLI call.
+        assert_eq!(nul_safe("hel\0lo"), "hello");
+        assert_eq!(nul_safe("\0lead\0\0and trail\0"), "leadand trail");
+    }
+
+    #[test]
+    fn nul_safe_leaves_clean_text_untouched() {
+        let s = "a normal system prompt with newlines\nand unicode \u{2014} ok";
+        assert_eq!(nul_safe(s), s);
+    }
 
     #[test]
     fn with_repo_read_binds_dir_and_default_is_none() {
