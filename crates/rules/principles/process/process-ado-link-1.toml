@@ -1,0 +1,42 @@
+id = "PROCESS-ADO-LINK-1"
+title = "Commits and PRs reference a work-item / ticket id"
+tag = "stack"
+domain = "process"
+layer = "universal"
+enforcement = "architectural"
+# No adopted default: selecting this rule is a deliberate opt-in (like the CI
+# security rules). It must NEVER be auto-recommended / pre-checked at onboarding.
+default = false
+opt_in_only = true
+verification = "grounded"
+
+# ── Enforcement caveat (read before treating this like a normal SSOT rule) ───────
+# This is a VCS-METADATA process rule. It validates that the commit SUBJECT and
+# PR TITLE carry a work-item reference (e.g. `AB#123` for Azure Boards) —
+# metadata produced at commit/PR time, not the code diff.
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commit-message / PR-title check in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2 — these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (ticket prefix and whether the rule applies to the PR title) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (and, when PR coverage is enabled, the PR title) contains a work-item reference of the form `<prefix>#<id>` (e.g. `AB#123` for Azure Boards); it fails when no reference is present. Because the gate reads metadata Camerata itself authors at commit/PR time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits/PRs made outside Camerata."
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/azure/devops/boards/github/link-to-from-github"
+title = "Azure Boards — link GitHub commits/PRs to work items via AB#<id>"
+
+[[sources]]
+url = "https://commitlint.js.org/"
+title = "commitlint — lint commit messages against a convention (CI-wirable)"
+linter = "commitlint"
+
+[decision]
+question = "Does the project require every commit subject and PR title to carry a work-item / ticket reference (e.g. AB#123), enforced over VCS metadata at the commit/PR gate and in CI?"
+why = "A work-item reference in the commit subject and PR title is what lets the tracker (Azure Boards, Jira, GitHub Issues) auto-link the code change to the work item that motivated it, giving a bidirectional traceability trail from requirement to commit. Because this is a contract over the commit SUBJECT and PR TITLE (metadata authored at commit/PR time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff — it is enforced at layer 4 (CI) and at Camerata's own VCS-action gate when Camerata authors the commit or opens the PR. The ticket prefix and the PR-title application are project-specific and live in project Settings (process_rule_config), not in this rule. Opting out lets commits/PRs land without a tracked-item link, which is faster but breaks the requirement-to-code traceability the tracker provides."
+
+[[option]]
+id = "require-work-item-reference"
+label = "Require a work-item reference in the commit subject / PR title"
+directive = "Every commit subject — and, when PR coverage is enabled, every PR title — must contain a work-item reference of the form `<prefix>#<id>` (e.g. `AB#123` for Azure Boards; the prefix is configured in project Settings → VCS gate → ADO link). Enforced at layer 4 (CI) via a wired commit-message / PR-title metadata check and at Camerata's VCS-action gate when Camerata authors the commit or opens the PR. A commit or PR with no reference is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates commit/PR metadata, not the diff. The ticket prefix and PR-title application live in project Settings."
+why = "A work-item reference auto-links the change to its tracked item, giving requirement-to-code traceability; enforcing it at the metadata gate (CI + the VCS-action gate) is the only place the subject/title is visible, since no code gate sees the commit or PR metadata."
+
+[[option]]
+id = "no-work-item-reference-requirement"
+label = "Do not require a work-item reference"
+directive = "Commit subjects and PR titles need not reference a work item; the project places no ticket-linking requirement on commits or PRs."
+why = "Skipping the reference is faster but breaks the bidirectional requirement-to-code traceability the tracker provides, so the link from a work item back to the commit that resolved it is lost."

@@ -176,7 +176,63 @@ struct ProcessRuleConfigView {
     pr: PrCoverageView,
 }
 
+// ── Corpus rule ids (selection gating) ──────────────────────────────────────────
+//
+// Each VCS-gate parameter sub-section is shown ONLY when its corresponding corpus
+// rule is selected in the active project's ruleset. The rules are opt-in corpus
+// rules (see `crates/rules/principles/process/`); their rich parameters live here
+// in Settings, not in the rule options.
+
+const RULE_COMMIT_DOC: &str = "PROCESS-COMMIT-DOC-1";
+const RULE_CONVENTIONAL_COMMIT: &str = "PROCESS-CONVENTIONAL-COMMIT-1";
+const RULE_BRANCH_NAMING: &str = "PROCESS-BRANCH-NAMING-1";
+const RULE_ADO_LINK: &str = "PROCESS-ADO-LINK-1";
+
+/// Pure predicate: is `rule_id` present in the project's selected rule ids?
+///
+/// `selections` is the flat list of selected corpus rule ids gathered from every
+/// ruleset bucket (base selections + cross-repo + process). Visibility of each
+/// VCS-gate parameter sub-section is gated on this so a project that has not
+/// selected the rule does not see (or accidentally tune) its parameters.
+fn vcs_rule_selected(selections: &[String], rule_id: &str) -> bool {
+    selections.iter().any(|s| s == rule_id)
+}
+
 // ── BFF calls ─────────────────────────────────────────────────────────────────
+
+/// Fetch the project's selected corpus-rule ids from its ruleset.
+///
+/// Returns a flat `Vec<String>` of rule ids gathered from all three ruleset
+/// buckets (`selections`, `cross_repo`, `process`) so the caller does not need to
+/// know which bucket a process rule landed in. `None` on a request/parse failure
+/// (the panel then treats no rules as selected and shows the select-first hint).
+async fn fetch_selected_rule_ids(project_id: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/ruleset",
+        crate::BFF_URL,
+        project_id
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let ruleset = v.get("ruleset")?;
+    let mut ids = Vec::new();
+    for bucket in ["selections", "cross_repo", "process"] {
+        if let Some(arr) = ruleset.get(bucket).and_then(|b| b.as_array()) {
+            for sel in arr {
+                if let Some(rid) = sel.get("rule_id").and_then(|r| r.as_str()) {
+                    ids.push(rid.to_string());
+                }
+            }
+        }
+    }
+    Some(ids)
+}
 
 async fn fetch_process_rule_config(project_id: &str) -> Option<ProcessRuleConfigView> {
     let v: serde_json::Value = reqwest::get(format!(
@@ -269,6 +325,9 @@ pub fn VcsGateSettings(project_id: String) -> Element {
 
     // Config loaded from the BFF (None while loading or on error).
     let mut config = use_signal(|| None::<ProcessRuleConfigView>);
+    // The project's selected corpus-rule ids (gates which param sub-sections show).
+    // `None` while loading; an empty vec means no VCS rules are selected.
+    let mut selected_rules = use_signal(|| None::<Vec<String>>);
     // Saving/loading state.
     let mut saving = use_signal(|| false);
     // Bypass test fields.
@@ -276,7 +335,7 @@ pub fn VcsGateSettings(project_id: String) -> Element {
     let mut bypass_reason = use_signal(String::new);
     let mut bypass_result = use_signal(|| None::<Result<Option<String>, String>>);
 
-    // Load on mount.
+    // Load on mount: both the config and the project's selected rule ids.
     let pid = project_id.clone();
     use_effect(move || {
         let pid = pid.clone();
@@ -284,6 +343,10 @@ pub fn VcsGateSettings(project_id: String) -> Element {
             if let Some(cfg) = fetch_process_rule_config(&pid).await {
                 config.set(Some(cfg));
             }
+            // Always resolve the selection list (empty vec on failure) so the panel
+            // can render the select-first hint rather than hanging on "Loading".
+            let ids = fetch_selected_rule_ids(&pid).await.unwrap_or_default();
+            selected_rules.set(Some(ids));
         });
     });
 
@@ -293,6 +356,19 @@ pub fn VcsGateSettings(project_id: String) -> Element {
         };
     };
     let cfg = cfg.clone();
+
+    // Resolve selection gating. While the selection list is still loading we treat
+    // nothing as selected (the hint shows); once loaded, each rule's params show
+    // only when that rule is selected.
+    let selected = selected_rules.read().clone().unwrap_or_default();
+    let commit_doc_selected = vcs_rule_selected(&selected, RULE_COMMIT_DOC);
+    let conventional_commit_selected = vcs_rule_selected(&selected, RULE_CONVENTIONAL_COMMIT);
+    let branch_naming_selected = vcs_rule_selected(&selected, RULE_BRANCH_NAMING);
+    let ado_link_selected = vcs_rule_selected(&selected, RULE_ADO_LINK);
+    let any_vcs_rule_selected = commit_doc_selected
+        || conventional_commit_selected
+        || branch_naming_selected
+        || ado_link_selected;
 
     let pid_save = project_id.clone();
     let on_save = {
@@ -330,11 +406,31 @@ pub fn VcsGateSettings(project_id: String) -> Element {
         div { class: "vcs-settings-panel",
             h2 { class: "vcs-settings-title", "VCS Gate — Process Rule Configuration" }
             p { class: "vcs-settings-intro",
-                "Configure which process rules the VCS-action gate enforces for this project. \
-                 Changes take effect on the next governed commit or PR."
+                "Configure the parameters for the VCS-gate process rules this project has \
+                 selected. Each rule's parameters appear here only once the rule is selected \
+                 on the Rules page. These rules validate commit/branch metadata and are \
+                 enforced at CI (layer 4) and at Camerata's own commit/PR gate — not at the \
+                 layer-2 code gate. Changes take effect on the next governed commit or PR."
+            }
+
+            // When no VCS process rule is selected, show a single hint instead of
+            // the (now-empty) parameter sections.
+            if !any_vcs_rule_selected {
+                p { class: "vcs-settings-empty-hint",
+                    "No VCS-gate process rules are selected for this project. Select any of "
+                    span { class: "vcs-settings-rule-id", "PROCESS-COMMIT-DOC-1" }
+                    ", "
+                    span { class: "vcs-settings-rule-id", "PROCESS-CONVENTIONAL-COMMIT-1" }
+                    ", "
+                    span { class: "vcs-settings-rule-id", "PROCESS-BRANCH-NAMING-1" }
+                    ", or "
+                    span { class: "vcs-settings-rule-id", "PROCESS-ADO-LINK-1" }
+                    " on the Rules page to configure their parameters here."
+                }
             }
 
             // ── PROCESS-COMMIT-DOC-1 ─────────────────────────────────────────
+            if commit_doc_selected {
             section { class: "vcs-settings-rule-section",
                 h3 { class: "vcs-settings-rule-title",
                     span { class: "vcs-settings-rule-id", "PROCESS-COMMIT-DOC-1" }
@@ -455,7 +551,10 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
 
+            } // end if commit_doc_selected
+
             // ── PROCESS-CONVENTIONAL-COMMIT-1 ────────────────────────────────
+            if conventional_commit_selected {
             section { class: "vcs-settings-rule-section",
                 h3 { class: "vcs-settings-rule-title",
                     span { class: "vcs-settings-rule-id", "PROCESS-CONVENTIONAL-COMMIT-1" }
@@ -508,7 +607,10 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
 
+            } // end if conventional_commit_selected
+
             // ── PROCESS-BRANCH-NAMING-1 ───────────────────────────────────────
+            if branch_naming_selected {
             section { class: "vcs-settings-rule-section",
                 h3 { class: "vcs-settings-rule-title",
                     span { class: "vcs-settings-rule-id", "PROCESS-BRANCH-NAMING-1" }
@@ -562,7 +664,10 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
 
+            } // end if branch_naming_selected
+
             // ── PROCESS-ADO-LINK-1 ────────────────────────────────────────────
+            if ado_link_selected {
             section { class: "vcs-settings-rule-section",
                 h3 { class: "vcs-settings-rule-title",
                     span { class: "vcs-settings-rule-id", "PROCESS-ADO-LINK-1" }
@@ -613,11 +718,15 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                 }
             }
 
+            } // end if ado_link_selected
+
             // ── PR coverage (BUG-2) ──────────────────────────────────────────
             // Controls whether the commit-doc body and ADO/story-id rules also
             // apply to PR bodies and PR titles. Both are ON by default (matches
             // the server default). Exposing them in the UI prevents a round-trip
             // from silently overwriting a custom value with the server default.
+            // Only relevant when one of the rules it extends to PRs is selected.
+            if commit_doc_selected || ado_link_selected {
             section { class: "vcs-settings-rule-section",
                 h3 { class: "vcs-settings-rule-title", "PR coverage" }
                 p { class: "vcs-settings-rule-desc",
@@ -659,6 +768,8 @@ pub fn VcsGateSettings(project_id: String) -> Element {
                     " Apply id rule to PR title (PROCESS-ADO-LINK-1 / story-id)"
                 }
             }
+
+            } // end if commit_doc_selected || ado_link_selected
 
             // ── Save button ───────────────────────────────────────────────────
             div { class: "vcs-settings-actions",
@@ -735,6 +846,50 @@ pub fn VcsGateSettings(project_id: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Selection gating: vcs_rule_selected ────────────────────────────────────
+
+    #[test]
+    fn vcs_rule_selected_true_when_present() {
+        let selections = vec![
+            "SOME-OTHER-RULE-1".to_string(),
+            RULE_COMMIT_DOC.to_string(),
+        ];
+        assert!(vcs_rule_selected(&selections, RULE_COMMIT_DOC));
+    }
+
+    #[test]
+    fn vcs_rule_selected_false_when_absent() {
+        let selections = vec!["SOME-OTHER-RULE-1".to_string()];
+        assert!(!vcs_rule_selected(&selections, RULE_COMMIT_DOC));
+    }
+
+    #[test]
+    fn vcs_rule_selected_false_on_empty() {
+        let selections: Vec<String> = Vec::new();
+        assert!(!vcs_rule_selected(&selections, RULE_CONVENTIONAL_COMMIT));
+        assert!(!vcs_rule_selected(&selections, RULE_BRANCH_NAMING));
+        assert!(!vcs_rule_selected(&selections, RULE_ADO_LINK));
+    }
+
+    #[test]
+    fn vcs_rule_selected_is_exact_match_not_prefix() {
+        // A near-miss id (substring / different suffix) must NOT count as selected.
+        let selections = vec![
+            "PROCESS-COMMIT-DOC-12".to_string(),
+            "PROCESS-COMMIT-DOC".to_string(),
+        ];
+        assert!(!vcs_rule_selected(&selections, RULE_COMMIT_DOC));
+    }
+
+    #[test]
+    fn vcs_rule_selected_each_rule_independently() {
+        let selections = vec![RULE_BRANCH_NAMING.to_string()];
+        assert!(vcs_rule_selected(&selections, RULE_BRANCH_NAMING));
+        assert!(!vcs_rule_selected(&selections, RULE_COMMIT_DOC));
+        assert!(!vcs_rule_selected(&selections, RULE_CONVENTIONAL_COMMIT));
+        assert!(!vcs_rule_selected(&selections, RULE_ADO_LINK));
+    }
 
     // ── BUG-2 regression: PrCoverageView round-trips through serde ──────────────
 

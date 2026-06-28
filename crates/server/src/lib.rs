@@ -4975,27 +4975,142 @@ fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
     )
 }
 
+/// Build the GitHub issue body for the **vcs-metadata** tier story.
+///
+/// These rules (PROCESS-CONVENTIONAL-COMMIT-1, PROCESS-COMMIT-DOC-1,
+/// PROCESS-BRANCH-NAMING-1, PROCESS-ADO-LINK-1) validate VCS METADATA (commit
+/// messages, branch names, PR titles) created at commit/PR time — NOT the code
+/// diff. Unlike the architectural tier, they are NOT wired into
+/// `.camerata/checks.toml` (which drives the layer-2 in-loop code gate): no code
+/// gate ever sees a commit message. Their layer-4 enforcement is a commit/branch
+/// METADATA CI check — a commitlint config plus a branch-name CI step — entirely
+/// separate from the code-check manifest. Camerata's own pipeline already enforces
+/// the same rules at the VCS-action gate (commit/PR time); this story extends that
+/// enforcement to commits/PRs made OUTSIDE Camerata, via the repo's own CI.
+fn ci_story_body_vcs_metadata(repo: &str, rules: &[CiStoryRule]) -> String {
+    let rule_lines: String = rules
+        .iter()
+        .map(|r| format!("- **{}** — {}\n", r.id, r.title))
+        .collect();
+
+    format!(
+        "## VCS-metadata process rules — layer-4 (CI) enforcement\n\n\
+         **This story covers VCS-METADATA process rules.** These rules validate \
+         the commit message, branch name, and PR title — metadata produced at \
+         commit/PR time, **not** the code diff.\n\n\
+         > **Why these are different from the other CI stories.** The mechanical and \
+         > architectural stories register checks in `.camerata/checks.toml`, which \
+         > drives BOTH the layer-2 in-loop code gate and the layer-3 CI code gate. \
+         > **These VCS-metadata rules are NOT enforced at layer 2** — no code gate \
+         > ever sees a commit message, branch name, or PR title. So the usual SSOT \
+         > layer-2+4 parity does not apply. Their enforcement is:\n\
+         > 1. **Camerata's own VCS-action gate** (already active): Camerata validates \
+         >    the metadata at commit/PR time inside its pipeline. Nothing to wire for \
+         >    work that goes through Camerata.\n\
+         > 2. **Layer 4 (this story): a commit/branch METADATA CI check** that catches \
+         >    commits/PRs made OUTSIDE Camerata — a `commitlint` config plus a \
+         >    branch-name CI step. This is separate from `.camerata/checks.toml`.\n\n\
+         **Repo:** `{repo}`\n\n\
+         **VCS-metadata rules selected for this repo:**\n\
+         {rule_lines}\n\
+         > **Parameters live in Camerata Settings, not here.** The allowed \
+         > conventional-commit types, branch prefixes, minimum commit-body length, \
+         > and story-id / ticket format are configured per-project in Camerata \
+         > (Settings → VCS gate, `process_rule_config`). Mirror those same values in \
+         > the CI config below so the layer-4 check agrees with Camerata's gate.\n\n\
+         ---\n\n\
+         ## How to wire the layer-4 metadata check\n\n\
+         ### Commit message + PR title (PROCESS-CONVENTIONAL-COMMIT-1, \
+         PROCESS-COMMIT-DOC-1, PROCESS-ADO-LINK-1)\n\n\
+         Use **commitlint** to validate commit messages (and, via a PR-title lint \
+         step, the PR title). Add a `commitlint.config.js` whose rules mirror the \
+         project's `process_rule_config`:\n\n\
+         ```js\n\
+         // commitlint.config.js\n\
+         module.exports = {{\n\
+           extends: ['@commitlint/config-conventional'],\n\
+           rules: {{\n\
+             // PROCESS-CONVENTIONAL-COMMIT-1: restrict to the configured types\n\
+             'type-enum': [2, 'always', ['feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'perf', 'build', 'ci', 'style', 'revert']],\n\
+             // PROCESS-COMMIT-DOC-1: require a substantive body\n\
+             'body-min-length': [2, 'always', 20],\n\
+             // PROCESS-ADO-LINK-1: require a ticket reference (e.g. AB#123) — a custom\n\
+             // rule or a `references-empty` / regex plugin keyed to your tracker prefix\n\
+           }},\n\
+         }};\n\
+         ```\n\n\
+         Wire it in CI on `pull_request` (lint every commit in the range, and the PR title):\n\n\
+         ```yaml\n\
+         # .github/workflows/commit-metadata.yml\n\
+         name: commit-metadata\n\
+         on: [pull_request]\n\
+         jobs:\n\
+           commitlint:\n\
+             runs-on: ubuntu-latest\n\
+             steps:\n\
+               - uses: actions/checkout@v4\n\
+                 with: {{ fetch-depth: 0 }}\n\
+               - uses: actions/setup-node@v4\n\
+                 with: {{ node-version: '20' }}\n\
+               - run: npm i -D @commitlint/cli @commitlint/config-conventional\n\
+               - run: npx commitlint --from \"${{{{ github.event.pull_request.base.sha }}}}\" --to \"${{{{ github.event.pull_request.head.sha }}}}\"\n\
+         ```\n\n\
+         ### Branch name (PROCESS-BRANCH-NAMING-1)\n\n\
+         No code tool sees the branch name; add a small CI step that inspects the ref \
+         and fails on a name without an allowed prefix (mirror the prefixes from \
+         `process_rule_config`):\n\n\
+         ```yaml\n\
+           branch-name:\n\
+             runs-on: ubuntu-latest\n\
+             steps:\n\
+               - name: Check branch prefix\n\
+                 run: |\n\
+                   branch=\"${{{{ github.head_ref }}}}\"\n\
+                   case \"$branch\" in\n\
+                     feature/*|release/*|hotfix/*) echo \"ok: $branch\" ;;\n\
+                     *) echo \"::error::branch '$branch' must start with feature/, release/, or hotfix/\"; exit 1 ;;\n\
+                   esac\n\
+         ```\n\n\
+         ---\n\n\
+         ## Implementation checklist\n\n\
+         - [ ] Read the project's `process_rule_config` (Camerata → Settings → VCS gate) \
+         and copy the active values (types, prefixes, min body length, ticket/story-id format).\n\
+         - [ ] Add `commitlint.config.js` mirroring those values (only for the selected rules).\n\
+         - [ ] Add the `commit-metadata` workflow (commitlint over the PR commit range + PR title).\n\
+         - [ ] Add the branch-name CI step mirroring the configured prefixes (only if \
+         PROCESS-BRANCH-NAMING-1 is selected).\n\
+         - [ ] Do NOT add these to `.camerata/checks.toml` — they are NOT layer-2 code checks.\n\
+         - [ ] Confirm Camerata's own VCS-action gate is already enforcing the same rules \
+         in-pipeline (no wiring needed for work that goes through Camerata).\n\n\
+         _Filed by Camerata onboarding._"
+    )
+}
+
 /// Emit a tier-specific "wire CI rules" story as a GitHub issue.
 ///
-/// Two tiers are supported:
+/// Three tiers are supported:
 /// - "mechanical"   — rules that map 1:1 to an off-the-shelf linter/analyzer. Wiring is
 ///   straightforward: add a manifest entry to `.camerata/checks.toml` (the SSOT) and both
 ///   Layer 2 (in-loop) and Layer 3 (CI) automatically enforce it.
 /// - "architectural" — rules that are also deterministic but require a bespoke AST or static-
 ///   analysis checker the team must DESIGN before implementing. This story should be scoped
 ///   and refined first; it should NOT ride with the mechanical story.
+/// - "vcs-metadata" — process rules that validate commit/branch/PR METADATA (not the code
+///   diff). NOT layer-2 enforceable and NOT registered in `.camerata/checks.toml`; their
+///   layer-4 enforcement is a commitlint config + a branch-name CI step. Camerata's own
+///   VCS-action gate already enforces them in-pipeline.
 ///
-/// The UI files each story separately so the two tracks land as distinct GitHub issues.
-/// Both stories carry the full SSOT HOW-TO so a developer or AI agent can implement
-/// the check correctly without additional hand-holding.
+/// The UI files each story separately so the tracks land as distinct GitHub issues.
+/// Each story carries the HOW-TO so a developer or AI agent can implement the check
+/// correctly without additional hand-holding.
 async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
     };
-    if req.tier != "mechanical" && req.tier != "architectural" {
+    if req.tier != "mechanical" && req.tier != "architectural" && req.tier != "vcs-metadata" {
         return Json(serde_json::json!({
             "ok": false,
-            "message": format!("unknown tier '{}': must be 'mechanical' or 'architectural'", req.tier)
+            "message": format!("unknown tier '{}': must be 'mechanical', 'architectural', or 'vcs-metadata'", req.tier)
         }));
     }
     if req.rules.is_empty() {
@@ -5017,6 +5132,14 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
         "mechanical" => {
             let t = format!("Wire mechanical (off-the-shelf linter) rules into CI — {}", req.repo);
             let b = ci_story_body_mechanical(repo, &req.rules);
+            (t, b)
+        }
+        "vcs-metadata" => {
+            let t = format!(
+                "Wire VCS-metadata process rules into CI (commit/branch metadata check) — {}",
+                req.repo
+            );
+            let b = ci_story_body_vcs_metadata(repo, &req.rules);
             (t, b)
         }
         _ => {
@@ -12585,6 +12708,59 @@ mod tests {
                 linter: None,
             },
         ]
+    }
+
+    fn vcs_metadata_rules_fixture() -> Vec<CiStoryRule> {
+        vec![
+            CiStoryRule {
+                id: "PROCESS-CONVENTIONAL-COMMIT-1".to_string(),
+                title: "Commit subjects follow the conventional-commits shape".to_string(),
+                linter: Some("commitlint".to_string()),
+            },
+            CiStoryRule {
+                id: "PROCESS-BRANCH-NAMING-1".to_string(),
+                title: "Branch names start with an allowed prefix".to_string(),
+                linter: None,
+            },
+        ]
+    }
+
+    // ── vcs-metadata tier body ────────────────────────────────────────────────
+
+    #[test]
+    fn vcs_metadata_body_lists_each_rule() {
+        let body = ci_story_body_vcs_metadata("owner/repo", &vcs_metadata_rules_fixture());
+        assert!(body.contains("PROCESS-CONVENTIONAL-COMMIT-1"));
+        assert!(body.contains("PROCESS-BRANCH-NAMING-1"));
+        assert!(body.contains("owner/repo") || body.contains("`repo`"));
+    }
+
+    #[test]
+    fn vcs_metadata_body_is_layer4_only_not_layer2() {
+        // The defining caveat: these are layer-4 (CI) metadata checks, NOT layer-2
+        // code checks, and must NOT be registered in the code-check manifest.
+        let body = ci_story_body_vcs_metadata("owner/repo", &vcs_metadata_rules_fixture());
+        assert!(
+            body.contains("NOT enforced at layer 2") || body.contains("NOT layer-2"),
+            "vcs-metadata body must state these are not layer-2 enforced"
+        );
+        assert!(
+            body.contains(".camerata/checks.toml"),
+            "vcs-metadata body must explicitly reference the code-check manifest to say NOT to use it"
+        );
+        assert!(
+            body.to_lowercase().contains("commitlint"),
+            "vcs-metadata body must describe the commitlint layer-4 check"
+        );
+    }
+
+    #[test]
+    fn vcs_metadata_body_points_params_to_settings() {
+        let body = ci_story_body_vcs_metadata("owner/repo", &vcs_metadata_rules_fixture());
+        assert!(
+            body.contains("process_rule_config") || body.contains("Settings"),
+            "vcs-metadata body must point the parameters at project Settings (process_rule_config)"
+        );
     }
 
     // ── shared SSOT content (must appear in BOTH tier bodies) ─────────────────

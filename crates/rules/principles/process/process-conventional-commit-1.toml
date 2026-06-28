@@ -1,0 +1,49 @@
+id = "PROCESS-CONVENTIONAL-COMMIT-1"
+title = "Commit subjects follow the conventional-commits shape"
+tag = "stack"
+domain = "process"
+layer = "universal"
+enforcement = "architectural"
+# No adopted default: selecting this rule is a deliberate opt-in (like the CI
+# security rules). It must NEVER be auto-recommended / pre-checked at onboarding.
+default = false
+opt_in_only = true
+verification = "grounded"
+
+# ── Enforcement caveat (read before treating this like a normal SSOT rule) ───────
+# This is a VCS-METADATA process rule. It validates the shape of the commit
+# SUBJECT (a `<type>(scope)!: subject` line), which is metadata produced at
+# commit time — not the code diff. Enforced at layer 4 (CI) via a wired
+# commit-message metadata check (e.g. a commitlint config running in CI), and in
+# Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced
+# at layer 2 — these validate VCS metadata created at commit/PR, not the code
+# diff, so the typical SSOT layer-2+4 pattern does not apply. The specific
+# parameters (allowed conventional-commit types) are configured in project
+# Settings (process_rule_config), not in this rule's options.
+qualifies = "Enforced at layer 4 (CI) via a wired commit/branch metadata check (e.g. a commitlint config in CI), and in Camerata's own pipeline at the VCS-action gate (commit/PR time). NOT enforced at layer 2 — these validate VCS metadata created at commit/PR, not the code diff, so the typical SSOT layer-2+4 pattern does not apply. The specific parameters (allowed conventional-commit types) are configured in project Settings (process_rule_config), not in this rule's options. Conformance holds when the commit subject (first line) parses as a conventional-commit header `<type>(optional-scope)!: subject` whose type is one of the configured allowed types; it fails when the subject is free-form. Because the gate reads metadata Camerata itself authors at commit time, the chokepoint is complete by construction inside the pipeline; the layer-4 CI check extends the same contract to commits made outside Camerata."
+
+[[sources]]
+url = "https://www.conventionalcommits.org/"
+title = "Conventional Commits — specification"
+linter = "commitlint"
+
+[[sources]]
+url = "https://commitlint.js.org/"
+title = "commitlint — lint commit messages against a convention (CI-wirable)"
+linter = "commitlint"
+
+[decision]
+question = "Does the project require commit subjects to follow the conventional-commits shape (<type>(scope)!: subject), enforced over VCS metadata at the commit/PR gate and in CI?"
+why = "A conventional-commit subject makes the commit history machine-parseable: changelog generation, semver bumping, and release tooling all key off the type prefix. Because this is a contract over the commit SUBJECT (metadata authored at commit time, not the code diff), it cannot be enforced at the layer-2 code gate that inspects the diff — it is enforced at layer 4 (CI, via a commitlint-style check) and at Camerata's own VCS-action gate when Camerata authors the commit. The allowed type list is project-specific and lives in project Settings (process_rule_config), not in this rule, so a team can widen or narrow it without re-authoring the rule. Opting out keeps commit subjects free-form, which keeps the history human-readable but forfeits the machine-parseable release tooling that the convention enables."
+
+[[option]]
+id = "enforce-conventional-commit-subject"
+label = "Enforce the conventional-commits subject shape"
+directive = "Every commit subject (the first line of the message) must parse as a conventional-commit header of the form `<type>(optional-scope)!: subject`, where `<type>` is one of the project's configured allowed types (see project Settings → VCS gate → conventional-commit). Enforced at layer 4 (CI) via a wired commit-message metadata check (e.g. commitlint) and at Camerata's VCS-action gate when Camerata authors the commit. A free-form subject is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates commit metadata, not the diff."
+why = "A conventional-commit subject makes the history machine-parseable for changelog/semver/release tooling; enforcing it at the metadata gate (CI + the VCS-action gate) is the only place the subject is actually visible, since no code gate ever sees the commit message."
+
+[[option]]
+id = "no-conventional-commit-requirement"
+label = "Do not require a conventional-commits subject"
+directive = "Commit subjects are free-form; the project places no shape requirement on the first line of the commit message."
+why = "Free-form subjects stay human-readable but forfeit machine-parseable release tooling (changelog generation, semver bumps) that keys off the conventional-commit type prefix."

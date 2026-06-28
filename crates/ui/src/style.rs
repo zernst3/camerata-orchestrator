@@ -2744,6 +2744,16 @@ html, body {
   color: var(--ink-soft);
   line-height: 1.5;
 }
+.vcs-settings-empty-hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-soft);
+  line-height: 1.6;
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-md);
+  padding: 16px 20px;
+}
 .vcs-settings-rule-section {
   background: var(--surface);
   border: 1px solid var(--line);

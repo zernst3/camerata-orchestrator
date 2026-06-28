@@ -5096,6 +5096,72 @@ pub(super) fn ci_rule_items_from_selections(
         .collect()
 }
 
+/// The VCS-metadata process rule ids. These are `architectural` enforcement in the
+/// corpus, but they validate commit/branch/PR METADATA (not the code diff), so they
+/// are wired into CI as a commit/branch metadata check (commitlint + branch-name
+/// step) — the "vcs-metadata" CI story tier — NOT as a `.camerata/checks.toml`
+/// custom checker. See `crates/rules/principles/process/`.
+pub(super) const VCS_METADATA_RULE_IDS: [&str; 4] = [
+    "PROCESS-CONVENTIONAL-COMMIT-1",
+    "PROCESS-COMMIT-DOC-1",
+    "PROCESS-BRANCH-NAMING-1",
+    "PROCESS-ADO-LINK-1",
+];
+
+/// The CI story tier a rule belongs to: `"vcs-metadata"` for the four process
+/// metadata rules, otherwise the rule's own enforcement level (`"mechanical"` /
+/// `"architectural"`). This keeps the metadata rules out of the architectural
+/// custom-checker story and into their own commitlint/branch-name story.
+pub(super) fn ci_story_tier_for(item: &CiRuleItem) -> &'static str {
+    if VCS_METADATA_RULE_IDS.contains(&item.id.as_str()) {
+        "vcs-metadata"
+    } else if item.enforcement == "mechanical" {
+        "mechanical"
+    } else {
+        "architectural"
+    }
+}
+
+#[cfg(test)]
+mod ci_story_tier_tests {
+    use super::{ci_story_tier_for, CiRuleItem, VCS_METADATA_RULE_IDS};
+
+    fn item(id: &str, enforcement: &str) -> CiRuleItem {
+        CiRuleItem {
+            id: id.to_string(),
+            title: "t".to_string(),
+            enforcement: enforcement.to_string(),
+            linter: None,
+        }
+    }
+
+    #[test]
+    fn process_metadata_rules_route_to_vcs_metadata_tier() {
+        for id in VCS_METADATA_RULE_IDS {
+            // Even though their corpus enforcement is "architectural", they route
+            // to the vcs-metadata tier — not the architectural custom-checker story.
+            assert_eq!(
+                ci_story_tier_for(&item(id, "architectural")),
+                "vcs-metadata",
+                "{id} must route to the vcs-metadata tier"
+            );
+        }
+    }
+
+    #[test]
+    fn mechanical_rule_stays_mechanical() {
+        assert_eq!(ci_story_tier_for(&item("LINT-NO-ANY-1", "mechanical")), "mechanical");
+    }
+
+    #[test]
+    fn architectural_rule_stays_architectural() {
+        assert_eq!(
+            ci_story_tier_for(&item("ARCH-API-LAYERING-1", "architectural")),
+            "architectural"
+        );
+    }
+}
+
 /// POST /api/onboard/ci-rules for a single tier. Returns the GitHub issue URL on success.
 pub(super) async fn wire_ci_rules_tier(
     repo: &str,
@@ -5144,34 +5210,47 @@ pub(super) fn CiRulesPanel(repos: Vec<String>, rules: Vec<CiRuleItem>) -> Elemen
     let mut msg = use_signal(String::new);
     let mut busy = use_signal(|| false);
 
+    // Partition by CI story tier. The four VCS-metadata process rules are
+    // `architectural` enforcement in the corpus but route to their own
+    // "vcs-metadata" tier (commitlint + branch-name CI check), NOT the
+    // architectural custom-checker story.
     let mechanical: Vec<CiRuleItem> = rules
         .iter()
-        .filter(|r| r.enforcement == "mechanical")
+        .filter(|r| ci_story_tier_for(r) == "mechanical")
         .cloned()
         .collect();
     let architectural: Vec<CiRuleItem> = rules
         .iter()
-        .filter(|r| r.enforcement == "architectural")
+        .filter(|r| ci_story_tier_for(r) == "architectural")
+        .cloned()
+        .collect();
+    let vcs_metadata: Vec<CiRuleItem> = rules
+        .iter()
+        .filter(|r| ci_story_tier_for(r) == "vcs-metadata")
         .cloned()
         .collect();
 
     let has_mechanical = !mechanical.is_empty();
     let has_architectural = !architectural.is_empty();
+    let has_vcs_metadata = !vcs_metadata.is_empty();
 
     rsx! {
         div { class: "fix-panel",
             p { class: "scan-section-h", "Add CI-enforced rules" }
             p { class: "scan-section-sub",
-                "Mechanical and architectural rules are both deterministic CI-tier checks. \
+                "Mechanical, architectural, and VCS-metadata rules are all deterministic CI-tier checks. \
                  Mechanical rules map to an existing off-the-shelf linter (simple to wire). \
                  Architectural rules require a custom checker and team refinement before implementing. \
-                 Each tier files a separate GitHub issue so the two tracks can be scheduled independently."
+                 VCS-metadata rules validate commit/branch/PR metadata (not the code diff) and wire up \
+                 as a commitlint config + branch-name CI step (layer 4 only — never a layer-2 code check). \
+                 Each tier files a separate GitHub issue so the tracks can be scheduled independently."
             }
             for repo in repos.iter() {
                 {
                     let repo = repo.clone();
                     let mech_rules = mechanical.clone();
                     let arch_rules = architectural.clone();
+                    let vcs_rules = vcs_metadata.clone();
                     rsx! {
                         div { class: "fix-row", key: "{repo}",
                             span { class: "fix-repo", "{repo}" }
@@ -5231,6 +5310,36 @@ pub(super) fn CiRulesPanel(repos: Vec<String>, rules: Vec<CiRuleItem>) -> Elemen
                                                 });
                                             },
                                             "Create architectural-rules CI story"
+                                        }
+                                    }
+                                }
+                            }
+                            if has_vcs_metadata {
+                                {
+                                    let repo_v = repo.clone();
+                                    let rules_v = vcs_rules.clone();
+                                    rsx! {
+                                        button {
+                                            class: "btn-run",
+                                            disabled: busy(),
+                                            onclick: move |_| {
+                                                let r = repo_v.clone();
+                                                let rules = rules_v.clone();
+                                                busy.set(true);
+                                                msg.set(String::new());
+                                                spawn(async move {
+                                                    match wire_ci_rules_tier(&r, "vcs-metadata", rules).await {
+                                                        Ok(url) => msg.set(format!(
+                                                            "Filed VCS-metadata CI-rules story for {r}: {url}"
+                                                        )),
+                                                        Err(e) => msg.set(format!(
+                                                            "Could not file VCS-metadata story for {r}: {e}"
+                                                        )),
+                                                    }
+                                                    busy.set(false);
+                                                });
+                                            },
+                                            "Create VCS-metadata CI story"
                                         }
                                     }
                                 }

@@ -1616,6 +1616,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn corpus_loads_process_vcs_metadata_rules() {
+        // The four VCS-gate process rules live in `principles/process/`, so their
+        // domain must derive to "process". They are architectural + opt-in only
+        // (deliberate opt-in, like the CI security rules — never pre-checked).
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "PROCESS-CONVENTIONAL-COMMIT-1",
+            "PROCESS-COMMIT-DOC-1",
+            "PROCESS-BRANCH-NAMING-1",
+            "PROCESS-ADO-LINK-1",
+        ] {
+            let rule = set
+                .get_by_id(id)
+                .unwrap_or_else(|| panic!("{id} must load from the corpus"));
+            assert_eq!(
+                rule.domain, "process",
+                "{id} must derive domain 'process' from its folder"
+            );
+            assert_eq!(
+                rule.enforcement,
+                EnforcementKind::Architectural,
+                "{id} must be the Architectural tier"
+            );
+            assert!(rule.opt_in_only, "{id} must be opt-in only (never pre-checked)");
+            // The caveat that distinguishes these from the usual SSOT layer-2+4
+            // pattern must be present in the rule summary.
+            assert!(
+                rule.summary.contains("NOT enforced at layer 2"),
+                "{id} summary must carry the layer-2 caveat"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn corpus_loads_architectural_tier_rules() {
         // The bundled corpus ships the example Architectural-tier rules; loading
         // them exercises the serde rename round-trip against real files.
