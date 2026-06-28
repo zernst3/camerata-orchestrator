@@ -1,36 +1,35 @@
 id = "ARCH-API-VERSIONING-1"
-title = "API versions live in the URL prefix; changes within a version are additive only"
+title = "API versioning scheme: URL prefix, request header, in-place evolution, or content negotiation"
 tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
-default = true
+default = false
 
 [decision]
-question = "What position does the project take on: API versions live in the URL prefix; changes within a version are additive only?"
-default = "api-versions-live-in-the-url-prefix-changes-with"
-why = "Versioning in the URL is the most discoverable and toolable scheme: a curl command, a router log, and a trace all surface the version at a glance. Strict additive evolution within a version means any client that worked on day one of v1 still works on day N of v1; client teams plan version migrations on their own schedule rather than reacting to every server release. Header-based versioning (an Accept header naming the version) is less discoverable than URL versioning, and the failure mode is subtle: clients that forget or mis-set the header silently land on the wrong version. Evolving without versioning at all turns every change into a breaking change for some client, and cross-team coordination becomes the bottleneck on every shipping decision. Content negotiation across multiple representations is powerful but heavy, and most teams underuse the machinery they paid for, since few clients implement it correctly."
+question = "What versioning scheme does the project's API adopt: a version in the URL prefix, a version selected by request header, in-place evolution with no version segment, or content negotiation across representations?"
+why = "All four are real ways to evolve an API, and the right one follows from who consumes the API and how independently it must evolve, not from a presumed winner. A version in the URL path is the most discoverable scheme — the version is visible in a curl command, a router log, and a trace — and pairs naturally with strict additive evolution within a version, which lets client teams migrate on their own schedule; it is the natural fit for a public or multi-team API where versions must be obvious and long-lived. Header-based versioning keeps URLs clean and lets a resource keep one canonical address across versions, which suits content-type-driven APIs and clients that already negotiate via headers, in exchange for the version being less visible at a glance. In-place evolution with no version segment is the lightest scheme and the right fit when the server and its only client ship together (one team, one deployable), where a coordinated change costs nothing and a version segment would be pure ceremony. Content negotiation across multiple representations is the most expressive scheme and earns its weight where clients genuinely need to select among representations, at the cost of machinery most clients must implement correctly. Choose by how the API is consumed — public/multi-team and long-lived (favoring URL or header versioning), internal and co-deployed (favoring in-place evolution), or representation-driven (favoring content negotiation)."
 
 [[option]]
 id = "api-versions-live-in-the-url-prefix-changes-with"
 label = "API versions live in the URL prefix; changes within a version are additive only"
 directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs, and so on. Within a published version, no field is renamed, removed, or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
-why = "Versioning in the URL is the most discoverable and toolable scheme: a curl command, a router log, and a trace all surface the version at a glance."
+why = "Makes the version the most discoverable and toolable part of every request: a curl command, a router log, and a trace all surface it at a glance, and strict additive evolution within a version means a client that worked on day one of v1 still works on day N of v1. The natural fit for a public or multi-team API where versions must be obvious and clients migrate on their own schedule; the cost is that each live major version is a separate route tree to maintain through its deprecation window."
 
 [[option]]
 id = "the-api-version-is-selected-by-a-request-header"
-label = "the API version is selected by a request header …"
-directive = "the API version is selected by a request header (such as Accept: application/vnd.api.v2+json) rather than appearing in the URL path"
-why = "Header-based versioning is less discoverable than URL versioning, and the failure mode is subtle: clients that forget or mis-set the header silently land on the wrong version."
+label = "the API version is selected by a request header"
+directive = "The API version is selected by a request header (such as Accept: application/vnd.api.v2+json) rather than appearing in the URL path; a resource keeps one canonical URL across versions and the server resolves the requested version from the header."
+why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behaviour through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version — worth managing with a clear default and good observability when header negotiation fits the consumers."
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
-label = "the API has no version segment at all and …"
-directive = "the API has no version segment at all and evolves in place, with each change applying to all current clients"
-why = "Evolving without versioning turns every change into a potential breaking change for some client; cross-team coordination becomes the bottleneck on every shipping decision."
+label = "the API has no version segment at all and evolves in place"
+directive = "The API has no version segment at all and evolves in place; each change applies to all current clients, and breaking changes are coordinated directly with the consumers rather than isolated behind a version."
+why = "The lightest scheme, and the right fit when the server and its only client ship together as one product (one team, one deployable): a coordinated change costs nothing because both sides deploy at once, and a version segment would be pure ceremony. It asks that every consumer move in lockstep with the server, so it stops fitting once the API gains consumers that upgrade on their own cadence."
 
 [[option]]
 id = "the-api-exposes-multiple-representations-of-each"
-label = "the API exposes multiple representations of each resource and …"
-directive = "the API exposes multiple representations of each resource and clients negotiate version through a content-negotiation handshake"
-why = "Content negotiation is powerful but heavy, and most teams underuse the machinery they paid for; few clients implement it correctly, so the protocol adds complexity without reliably delivering the version-isolation benefit."
+label = "the API exposes multiple representations of each resource and clients negotiate via content negotiation"
+directive = "The API exposes multiple representations of each resource and clients negotiate version (and format) through a content-negotiation handshake over the standard Accept/Content-Type mechanism."
+why = "The most expressive scheme: it lets clients select among genuinely different representations and formats per request through standard HTTP content negotiation, which earns its weight where that flexibility is a real requirement (varied client formats, hypermedia APIs). The cost is the machinery, which every client and the server must implement correctly, so it pays off when representation choice is a first-class need rather than a stand-in for plain version isolation."

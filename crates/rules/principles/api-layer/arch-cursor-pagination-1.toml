@@ -1,36 +1,35 @@
 id = "ARCH-CURSOR-PAGINATION-1"
-title = "List endpoints paginate by cursor, not by offset"
+title = "List-endpoint pagination: cursor, offset, no pagination, or both shapes"
 tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
-default = true
+default = false
 
 [decision]
-question = "What position does the project take on: List endpoints paginate by cursor, not by offset?"
-default = "list-endpoints-paginate-by-cursor-not-by-offset"
-why = "Offset pagination has a correctness bug under concurrent writes that the client cannot detect. Cursors anchor each page to a stable position in the result set and remain correct under inserts and deletes. Offset pagination is simpler to implement but silently drops or duplicates records when the underlying list changes mid-session, which is exactly the correctness bug cursors exist to fix. Returning the full list with no pagination breaks at scale: the response grows without bound and the client has to handle arbitrarily large payloads. Exposing both cursor and offset shapes doubles the surface area and the testing burden for marginal client convenience, and the simpler offset shape becomes the path of least resistance for clients that should be using cursors."
+question = "How do list endpoints paginate: by opaque cursor, by offset (page/page_size), no pagination at all, or by exposing both cursor and offset shapes?"
+why = "The right pagination shape follows from how the list is consumed — its size, how often it changes under the reader, and whether clients need random page access — not from a presumed winner. Cursors anchor each page to a stable position in the result set, so they stay correct under concurrent inserts and deletes; they are the natural fit for large or actively-changing lists (feeds, activity, anything that grows) where a reader paging through must not silently skip or repeat rows. Offset pagination (page=N, page_size=K) is simpler to implement and is the shape that supports random page access (jump to page 7, show a numbered page bar), which suits stable or slowly-changing datasets and admin tables where a clickable page index matters more than read-during-write consistency. Returning the full result set with no pagination is the simplest contract and is correct precisely when the list has a hard, low upper bound that does not grow (a country list, a fixed enum), where paging machinery would be pure overhead. Exposing both shapes maximises client flexibility at the cost of a larger surface to build, test, and document. Choose by the list's size and volatility and by whether random page access is a real client need."
 
 [[option]]
 id = "list-endpoints-paginate-by-cursor-not-by-offset"
-label = "List endpoints paginate by cursor, not by offset"
-directive = "Any list endpoint that can grow uses opaque cursor tokens for pagination: the response includes a next_cursor, the next request passes it back. Offset pagination (page=N, page_size=K) is forbidden for unbounded lists because inserts and deletes during a paging session silently shift records across pages. Bounded lists below a hard cap that does not grow may skip pagination entirely."
-why = "Offset pagination has a correctness bug under concurrent writes that the client cannot detect."
+label = "list endpoints paginate by opaque cursor"
+directive = "Any list endpoint that can grow uses opaque cursor tokens for pagination: the response includes a next_cursor, the next request passes it back. Bounded lists below a hard cap that does not grow may skip pagination entirely."
+why = "Anchors each page to a stable position in the result set, so a reader stays correct under concurrent inserts and deletes rather than silently skipping or duplicating rows. The natural fit for large or actively-changing lists (feeds, activity, anything unbounded); the trade-off is that cursors are opaque, so they do not support jumping to an arbitrary page or showing a numbered page bar."
 
 [[option]]
 id = "list-endpoints-paginate-by-offset-page-n-page-si"
-label = "list endpoints paginate by offset (page=N, page_size=K) regardless of …"
-directive = "list endpoints paginate by offset (page=N, page_size=K) regardless of whether the underlying list can grow"
-why = "Offset pagination is simpler to implement but silently drops or duplicates records when the underlying list changes mid-session, which is the correctness bug cursors exist to fix."
+label = "list endpoints paginate by offset (page=N, page_size=K)"
+directive = "List endpoints paginate by offset: the client requests a page number and page size (page=N, page_size=K), and the server returns that slice along with a total count where useful for a page index."
+why = "Simple to implement and the shape that supports random page access — jump to page 7, render a numbered page bar — which is exactly what admin tables and report views often need. The fit for stable or slowly-changing datasets where read-during-write consistency is not the dominant concern; its known trade-off is that inserts and deletes during a paging session can shift rows across pages, so it is the wrong choice for lists that change rapidly under the reader."
 
 [[option]]
 id = "list-endpoints-return-the-full-result-set-in-a-s"
-label = "list endpoints return the full result set in a …"
-directive = "list endpoints return the full result set in a single response and do not paginate at all, regardless of list size"
-why = "No pagination breaks at scale: the response grows without bound and the client has to handle arbitrarily large payloads."
+label = "list endpoints return the full result set in one response"
+directive = "List endpoints return the full result set in a single response and do not paginate, reserved for lists with a hard, low upper bound that does not grow over time."
+why = "The simplest possible contract — one request, the whole list — and exactly right when the list has a small fixed ceiling (a country list, a status enum, a short reference table) where any paging machinery would be overhead the data never justifies. It depends on that bound actually holding, so it is the wrong shape for any list that can grow without limit."
 
 [[option]]
 id = "list-endpoints-expose-both-cursor-and-offset-pag"
-label = "list endpoints expose both cursor and offset pagination shapes …"
-directive = "list endpoints expose both cursor and offset pagination shapes and let the client choose which to use per request"
-why = "Exposing both shapes doubles the surface area and the testing burden for marginal client convenience, and the simpler offset shape becomes the path of least resistance for clients that should be using cursors."
+label = "list endpoints expose both cursor and offset pagination shapes"
+directive = "List endpoints expose both cursor and offset pagination shapes and let the client choose which to use per request."
+why = "Maximises client flexibility: consumers that need stable streaming pick the cursor shape and consumers that need random page access pick the offset shape, from the same endpoint. The cost is a larger surface to build, test, and document, and a default shape clients reach for, so it is worth it when the endpoint genuinely serves both kinds of consumer rather than when one shape would do."

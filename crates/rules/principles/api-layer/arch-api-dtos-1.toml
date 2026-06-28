@@ -1,31 +1,30 @@
 id = "ARCH-API-DTOS-1"
-title = "API request and response types are DTOs, never domain types"
+title = "API wire types: dedicated DTOs, the domain types directly, or one shared model"
 tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
-default = true
+default = false
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'controller/route-handler files must not import domain types' (which modules count as 'domain' and which as 'controller' is project-specific), so it requires a custom AST/static-analysis CI gate — a project-configured import-boundary rule (ESLint no-restricted-imports / import/no-restricted-paths with the project's domain and controller paths wired in, dependency-cruiser, a Rust module-visibility constraint, or the stack equivalent). The off-the-shelf rule-ids exist but carry no DTO/domain semantics until the project configures the zones, so this is a custom check, not a citable off-the-shelf rule. Conformance holds when that custom gate runs in CI and a controller referencing a domain type fails the build; it fails when no rule blocks the import and a controller can return a domain type directly."
 
 [decision]
-question = "What position does the project take on: API request and response types are DTOs, never domain types?"
-default = "api-request-and-response-types-are-dtos-never-do"
-why = "Coupling the wire format to the domain model means every internal refactor risks breaking external consumers, and every external API requirement leaks into the domain core. The mapping cost is one tier of code; the decoupling buys independent evolution on both sides. Returning domain types directly is cheaper to write at first but turns every internal refactor into a breaking API change, since the wire shape moves whenever the internal model moves. Sharing models across wire and domain (one type to rule them all) pulls API concerns into the domain core and ties release cadence to client tolerance, so internal evolution waits on external upgrades."
+question = "What types cross the API boundary: dedicated DTOs mapped to and from domain types, the domain types directly, or a single model shared between the wire and the domain?"
+why = "The right answer follows from how independently the wire format and the internal model need to evolve, which in turn follows from who consumes the API — not from a presumed winner. Dedicated DTOs with a mapping layer keep the two free to change on their own schedules: the domain can be refactored without breaking clients, and external API requirements stay out of the domain core; the price is one tier of mapping code to write and maintain. Returning the domain types directly removes that tier entirely and is the lightest option, which fits an internal API whose only consumer ships alongside it, where a coordinated change is cheap and the mapping layer would be pure ceremony. A single shared model keeps exactly one type per concept across wire and domain, which is attractive in a small or monorepo codebase where the wire shape and the domain shape are genuinely the same thing and double-definition would be the larger cost. Choose by whether the API has consumers that evolve independently (favoring DTOs) or is an internal detail of one co-deployed app (favoring direct domain types or a shared model), and revisit when that changes."
 
 [[option]]
 id = "api-request-and-response-types-are-dtos-never-do"
-label = "API request and response types are DTOs, never domain types"
+label = "endpoints use dedicated request/response DTOs mapped to and from domain types"
 directive = "Endpoints accept request DTOs and return response DTOs; the controller layer maps DTOs to and from domain types. The wire format and the internal model evolve independently. Enforce with a lint rule that blocks imports of domain types from controller files. Adding a field to a domain type does not silently change the API; renaming or restructuring a domain field does not break clients."
-why = "Coupling the wire format to the domain model means every internal refactor risks breaking external consumers, and every external API requirement leaks into the domain core."
+why = "Decouples the wire format from the domain model so each evolves on its own schedule: an internal refactor cannot break external consumers, and an external API requirement cannot leak into the domain core. The strongest fit when the API has consumers that upgrade independently (public clients, other teams, mobile apps); the cost is the mapping tier, which a lint-enforced import boundary keeps honest."
 
 [[option]]
 id = "endpoints-return-domain-types-directly-in-the-re"
-label = "endpoints return domain types directly in the response body …"
-directive = "endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between"
-why = "Returning domain types directly is cheaper to write at first but turns every internal refactor into a breaking API change, since the wire shape moves whenever the internal model moves."
+label = "endpoints return domain types directly, with no DTO layer"
+directive = "Endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between."
+why = "The lightest option: no mapping tier to write or maintain, and one type per concept. The natural fit for an internal API whose only consumer ships alongside it, where the wire shape and the domain shape move together anyway and a coordinated change is free. Its trade-off is that the wire shape follows the internal model, so it stops fitting once the API gains consumers that must not be broken by an internal refactor."
 
 [[option]]
 id = "the-project-uses-a-single-shared-model-type-acro"
-label = "the project uses a single shared model type across …"
-directive = "the project uses a single shared model type across both the wire format and the domain core, rather than maintaining separate DTOs and domain types"
-why = "A single shared type pulls API concerns into the domain core and ties release cadence to client tolerance, so internal evolution waits on external upgrades."
+label = "the project uses one shared model type across wire and domain"
+directive = "The project uses a single shared model type across both the wire format and the domain core, rather than maintaining separate DTOs and domain types."
+why = "Keeps exactly one definition per concept, avoiding the double-definition and drift between a DTO and its domain twin. The fit for a small or monorepo codebase where the wire shape and the domain shape are genuinely the same thing and maintaining two would be the larger cost. The trade-off is coupling: API concerns sit in the domain core and release cadence is tied to client tolerance, which is acceptable while the API and its clients evolve together."

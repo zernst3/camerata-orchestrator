@@ -1,17 +1,16 @@
 id = "JAVA-PACKAGE-BY-FEATURE-1"
-title = "Packages are organized by feature (domain) not by layer; each feature contains controller, service, and repository classes"
+title = "Java package organization: by feature (domain), by layer, or a flat namespace"
 tag = "stack"
 domain = "java"
 layer = "architecture"
 enforcement = "prose"
-default = true
+default = false
 qualifies = "Enforced by package structure conventions and code review. The directory structure reflects feature boundaries (users, organizations, projects) not horizontal layers."
 verification = "grounded"
 
 [decision]
-question = "Should packages be organized by layer or by feature?"
-default = "package-by-feature"
-why = "Organizing by layer (com.example.controllers.*, com.example.services.*, com.example.repositories.*) spreads a single feature's code across many packages, making it hard to locate and understand the feature as a unit. It also encourages tight coupling across layers (controllers and services in the same layer often have implicit dependencies). Organizing by feature (com.example.users.*, com.example.organizations.*, com.example.projects.*) groups all code for a feature together, makes dependencies between features explicit (imports across packages), and makes it easier to understand a feature in isolation. Each feature package contains its own controller, service, repository, and domain model; this is sometimes called 'vertical slicing' or 'package-by-feature.' Dependencies flow between features (users depend on organizations) not within layers. It also makes it easier to extract a feature into a separate microservice later."
+question = "How are Java packages organized: by feature (domain), by layer (presentation/business/data), or as a flat namespace?"
+why = "The right package structure follows from the size of the codebase and how its team and features are likely to evolve, not from a presumed winner. Organizing by feature (com.example.users, com.example.organizations) groups all of a feature's code — controller, service, repository, model — in one place, makes cross-feature dependencies explicit as package imports, and makes a feature easy to understand or later extract; it is the natural fit for a codebase with several distinct features and an eye toward feature-level ownership or extraction. Organizing by layer (com.example.controllers, com.example.services, com.example.repositories) groups code by technical role, which makes a layer's conventions and shared infrastructure easy to see in one place and matches how many Spring tutorials and teams already think; it is a familiar fit for layer-oriented teams and smaller apps where the feature set is stable. A flat namespace keeps everything in one or two packages, which is the right amount of structure for a genuinely tiny project or a prototype where any package hierarchy would be premature. Choose by the codebase's size and the boundaries it actually has, and graduate from flat to feature or layer structure as it grows."
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#loosepackagecoupling"
@@ -22,16 +21,16 @@ linter = "PMD: LoosePackageCoupling"
 id = "package-by-feature"
 label = "organize packages by feature (domain); each feature contains its own layers"
 directive = "Packages are named by domain or feature (com.example.users, com.example.organizations, com.example.reports). Each feature package contains its own controller, service, repository, and domain model classes. Dependencies flow between features explicitly (com.example.users depends on com.example.organizations, not the reverse). Common/shared code lives in a separate package (com.example.common or com.example.shared)."
-why = "Feature-based packages group related code, make dependencies explicit, and are easier to refactor or extract."
+why = "Groups all of a feature's code in one package, so a feature can be read, owned, or extracted as a unit, and cross-feature dependencies show up as explicit package imports rather than hidden coupling. The strongest fit for a codebase with several distinct features and an eye toward feature-level ownership or later extraction into a service; it asks that feature boundaries be drawn deliberately and shared code factored out."
 
 [[option]]
 id = "package-by-layer"
 label = "organize packages by layer (presentation, business, data)"
 directive = "Packages are named by layer (com.example.controllers, com.example.services, com.example.repositories). Each controller, service, or repository class is placed in its corresponding layer package."
-why = "Separates technical concerns, but spreads a single feature across many packages. Makes feature-level dependencies harder to see and encourages tight coupling within layers."
+why = "Groups code by technical role, so a layer's conventions and shared infrastructure sit together and the structure matches how many Spring tutorials and layer-oriented teams already think. A familiar fit for smaller apps and teams organized around layers; its trade-off is that a single feature's code is spread across the layer packages, which makes feature-level boundaries and dependencies harder to see as the feature set grows."
 
 [[option]]
 id = "no-hierarchy"
-label = "all classes in a single package or a flat namespace"
-directive = "Classes are not organized by package; they are all in com.example or com.example.* with no clear structure."
-why = "Simple for tiny projects but quickly becomes difficult to navigate as the codebase grows. Hard to identify feature boundaries."
+label = "keep all classes in a single package or a flat namespace"
+directive = "Classes are not partitioned into a package hierarchy; they live in com.example (or com.example.* with no role/feature split)."
+why = "The right amount of structure for a genuinely tiny project or a prototype, where any package hierarchy would be premature ceremony over a handful of classes. It depends on the codebase staying small: once it grows, the absence of feature or layer boundaries makes it hard to navigate, which is the cue to graduate to a feature or layer structure."

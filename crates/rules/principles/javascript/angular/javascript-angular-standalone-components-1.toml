@@ -1,10 +1,10 @@
 id = "JAVASCRIPT-ANGULAR-STANDALONE-COMPONENTS-1"
-title = "Components are standalone (modern Angular) with explicit dependency imports"
+title = "Angular component organization: standalone components, or NgModule declarations"
 tag = "stack"
 domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [[sources]]
@@ -17,18 +17,17 @@ title = "angular-eslint — prefer-standalone"
 linter = "@angular-eslint/prefer-standalone"
 
 [decision]
-question = "What position does the project take on: Components are standalone (modern Angular) with explicit dependency imports?"
-default = "components-are-standalone-with-explicit-dependenc"
-why = "Angular 14+ introduced standalone components, eliminating NgModule boilerplate and making dependencies explicit and co-located with the component. A standalone component explicitly imports its dependencies (pipes, directives, other components) via the imports array rather than relying on an NgModule to declare them transitively. This explicitness surfaces missing dependencies at compile time, not runtime, and makes component dependencies auditable without traversing module hierarchies. Standalone components also reduce the abstraction layers required to bootstrap a feature and make tree-shaking and lazy loading more predictable. Defaulting to standalone components is the modern Angular best practice; NgModules introduce ceremony and indirect dependency resolution that is difficult to audit and test. The boundary rule is clear: new components and services default to standalone=true (or standalone services via providedIn), and the set of supported NgModules is bounded and explicitly documented."
+question = "How are Angular components organized: as standalone components with explicit per-component imports, or declared in NgModules with transitive dependency resolution?"
+why = "Both are supported ways to organize an Angular app, and the right one follows from the Angular version the project targets and the codebase it already has, not from a presumed winner. Standalone components (Angular 14+) declare their own dependencies in an imports array, so a component's dependencies are explicit and co-located, missing ones surface at build time, tree-shaking and lazy loading are more predictable, and no NgModule wrapper is needed; this is the natural fit for new apps on modern Angular. NgModule declarations group components, directives, and pipes into modules that resolve dependencies transitively, which gives a single place to assemble a feature's providers and declarations; this is the fit for codebases already built on NgModules or on Angular versions before standalone existed, where converting wholesale would be a large migration for little immediate gain. Choose by the Angular version and the existing structure, and keep the two from being mixed arbitrarily within one codebase."
 
 [[option]]
 id = "components-are-standalone-with-explicit-dependenc"
-label = "Components are standalone (modern Angular) with explicit dependency imports"
-directive = "All new components use standalone: true with explicit imports arrays listing their dependencies (pipes, directives, other components). Standalone services use providedIn: 'root' (or equivalent) rather than being declared in an NgModule. NgModules are only used for shared configuration (e.g., HTTP interceptors) or third-party libraries that require them, and their list is documented in a CONVENTIONS or README file. Standalone components that forget to import a required pipe or directive are rejected at build time before reaching the browser."
-why = "Modern Angular (14+) standalone components are explicit, tree-shakeable, and auditable. Lazy-loaded routes and feature modules need no NgModule wrapper; the component's imports array is the source of truth."
+label = "components are standalone with explicit per-component imports"
+directive = "Components use standalone: true with explicit imports arrays listing their dependencies (pipes, directives, other components). Standalone services use providedIn: 'root' (or equivalent). NgModules are used only for shared configuration (e.g., HTTP interceptors) or third-party libraries that require them, and that set is documented. A standalone component that forgets to import a required pipe or directive is rejected at build time."
+why = "Makes each component's dependencies explicit and co-located in its imports array, so a missing one fails the build rather than surfacing at runtime, and tree-shaking and lazy loading are more predictable because nothing is pulled in transitively. The strongest fit for new apps on modern Angular (14+); it requires that version's standalone support."
 
 [[option]]
 id = "all-components-are-declared-in-ngmodules-with-tran"
-label = "All components are declared in NgModules with transitive …"
-directive = "all components are declared in NgModules, and dependencies are managed transitively through module declarations rather than explicit imports on each component. Standalone: true is not used."
-why = "NgModule-based components resolve their dependencies transitively through module declarations, which means a missing dependency is not surfaced at the component level and the module hierarchy must be traversed to audit what any component can access. NgModules introduce an additional abstraction layer between a component and its dependencies that is difficult to audit and test, and transitive imports from shared modules can pull in far more code than any single component needs, limiting tree-shaking effectiveness."
+label = "components are declared in NgModules with transitive resolution"
+directive = "Components, directives, and pipes are declared in NgModules, and dependencies are managed transitively through module declarations and imports rather than per-component imports arrays."
+why = "Groups a feature's components, providers, and shared declarations into one module that resolves dependencies transitively, giving a single assembly point per feature. The fit for codebases already built on NgModules or on Angular versions predating standalone, where the structure is established and a wholesale conversion would be a large migration; its trade-off is that a component's available dependencies are resolved through the module hierarchy rather than stated on the component, so they are less locally auditable and transitive imports can reduce tree-shaking effectiveness."
