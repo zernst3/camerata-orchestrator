@@ -64,3 +64,16 @@ exactly this swap (a non-Claude driver stub already exists in the live demo).
 3. **Separate concern:** the *cost-optimization policy* (prompt caching, Batch API for routines,
    free-as-primary-with-paid-fallback) is orthogonal to this runtime decision — to be banked in
    its own note once chosen.
+
+## Update (2026-06-27): domain-aware bands (Designer/vision)
+
+Provider-agnosticism enables **domain-aware routing**, now decided: the dev fleet's bands split
+into a **logic ladder** (`Strongest`/`Balanced`/`Fast`, orchestrator = `Strongest`) plus an
+optional, **project-wide**, flat **`Designer` (vision)** band. Routing is **domain first** (visual
+→ Designer) **then hierarchy within logic** (by difficulty). The vision model produces an
+HTML/Tailwind **IR** that a logic tier translates into Dioxus `rsx!` — the vision model never emits
+Rust. Build the **routing seams** (per-band/per-domain model selection + the IR handoff), never
+hard-code model→domain assignments (models churn; the routing architecture is durable). The
+registry flags vision-capable models via OpenRouter `architecture.input_modalities`. Full design:
+`docs/plans/2026-06-27_model-efficiency-and-provider-agnostic-plan.md` §10. Orchestrator tiering is
+unchanged (escalation already routes to `Strongest`).

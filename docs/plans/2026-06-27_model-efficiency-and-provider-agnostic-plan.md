@@ -173,6 +173,54 @@ The estimator prices each call by **the assigned model's registry price** (chunk
 $0**, paid → per-token price, subscription → quota-weight (not $). So the estimate tracks whatever
 profile is active (Max efficiency → near-$0 on offloaded work).
 
+## 10. Designer (vision) band + domain routing (2026-06-27, with Zach)
+
+The dev fleet's capability bands become **domain-aware**. Routing is **domain first, then
+hierarchy within the logic domain**:
+
+- **Logic ladder** (engineering): `Strongest` (lead/orchestrator) · `Balanced` (mid) · `Fast`
+  (quick). Unchanged; the orchestrator stays Strongest.
+- **Vision band** (`Designer`): a single, flat, multimodal slot — orthogonal to the logic ladder
+  (NOT a fast/strong vision ladder; one good multimodal coding model at a time, and mockup work is
+  uniform).
+
+Data model = a **band list**, not a domain×tier matrix (shape is asymmetric: logic has 3 rungs,
+vision has 1; a matrix creates empty cells). The list can grow other domains later (security,
+docs) without a rigid grid.
+
+**Project-wide toggle (not per-story):** `vision_enabled: bool` on the project. ON → the band is
+available; the orchestrator decides per-story whether it's needed (DB-only story → never calls the
+designer). OFF → design-flavored stories still get built; the orchestrator delegates that work to
+the logic tiers as it sees fit. The toggle gates *availability*, never *per-story behavior*.
+
+**Orchestrator gathers the existing visual context.** In Dioxus/React, layout + styling live
+inside the code (`rsx!` tree + the CSS string), not a separate design file. The **orchestrator**
+assembles a context bundle (relevant component code + shared theme/CSS tokens; a rendered
+screenshot later if we can capture one) and hands it to the designer. Start with **code + theme
+tokens** (always available, cheap); screenshot capture is a later enhancement.
+
+**HTML/Tailwind IR is the handoff contract.** The designer emits an HTML/Tailwind mockup styled
+consistent with the surfaced tokens; a **logic tier** translates the IR into Dioxus `rsx!`. The
+vision model **never touches `rsx!`** — which dissolves the "vision models are weak at Rust
+frontends" problem. The IR is reviewable before any Rust is generated (keeps MoA governable).
+
+**Registry:** flag **vision/multimodal** models (parse OpenRouter `architecture.input_modalities`)
+so the Designer selector shows only vision-capable models.
+
+**Customizable per environment** (example): Opus = Strongest/lead · MiniMax = Designer/vision ·
+DeepSeek = Balanced · Sonnet/Haiku/DeepSeek-flash = Fast.
+
+**Designer AGENT ≠ Designer MODULE.** This band is the **designer agent inside the dev hierarchy**
+(so an abstract story "design the page like this" builds end-to-end through dev work). The future
+**designer module** is a separate user-facing UI/UX mockup tool; when it exists a story may simply
+arrive with a pre-existing mockup. The module has **zero bearing** on whether the dev hierarchy
+includes a designer agent.
+
+**Settings UI (re-told), three sections:** (1) *Suggested model levels* (profile; cascades over
+everything), (2) *Fleet model bands* (Strongest/Balanced/Fast logic + optional Designer/vision row
++ the project-wide vision toggle), (3) *Helper-agent models* (bare-LLM one-shots). (i) info icons
+on every selector; in-context selectors bidirectionally synced with Settings.
+
 ## Build sequencing (on go)
 
 1. ✅ **Credentials manager** (keychain; OpenRouter + GitHub) — `acb7867`.
@@ -196,6 +244,14 @@ profile is active (Max efficiency → near-$0 on offloaded work).
    Max efficiency trades reliability, not caching value (§5).
 4. **Fallback policy:** 429 / 402 / 5xx / timeout / bad-tool-call → fall back; **selective on 400**
    (capability only); **never** on 401/403; cap + escalate (§4).
+5. **Orchestrator tiering — no change:** orchestrator stays `Strongest`. "Delegate upward" = it
+   does the task itself (nothing above it); worker escalation (`INCOMPLETE`, L2/L3 bounce) already
+   routes the hard re-handle to the Strongest lead. No 4th "escalation" band, no self-assessment
+   trigger. (Verified in `live_fleet.rs:293`, `dev_implement_run.rs:851`, `api_agent_driver.rs:272`.)
+6. **Designer (vision) band:** add an optional, **project-wide** `Designer` band (§10) — a flat
+   multimodal slot orthogonal to the logic ladder; orchestrator gathers in-code layout/styling as
+   context; HTML/Tailwind IR is the handoff contract to the logic tiers. Distinct from the future
+   designer *module*.
 
 ## Scope notes
 
