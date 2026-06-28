@@ -53,6 +53,12 @@ pub const GLOBAL_CSS: &str = r#"
   --bombe-overlay-idle-alpha: 0.28;   /* idle:    0.82 was too dark; lower = bombe peeks through more */
   --bombe-overlay-run-alpha:  0.10;   /* running: 0.48 was too dark; lower = bombe glows through clearly */
 
+  /* Page tint — the SINGLE translucent dark layer in front of the Bombe. One value
+     for ALL pages' main content (no double-stacking) so no page reads denser/clearer
+     than another. Side panels use the denser --rail-tint. NOT the bombe overlay (above). */
+  --page-tint: rgba(20,18,17,0.66);   /* main content tint over the Bombe — one per page, never stacked */
+  --rail-tint: rgba(20,18,17,0.92);   /* denser side-panel tint (rail / inspector / govdev nav) */
+
   /* chorale table palette → mapped onto the Bletchley amber scheme so the
      grouped tables read as part of the same dark-industrial surface.
      (chorale exposes these as overridable CSS variables.) */
@@ -1179,8 +1185,8 @@ html, body {
 /* Three-pane body */
 .cockpit-body { flex: 1; display: grid; grid-template-columns: 250px 1fr 290px; min-height: 0; }
 .cockpit-rail, .cockpit-inspector { padding: 14px; overflow-y: auto; }
-.cockpit-rail { border-right: 1px solid var(--line); background: rgba(20,18,17,0.92); }
-.cockpit-inspector { border-left: 1px solid var(--line); background: rgba(20,18,17,0.97); }
+.cockpit-rail { border-right: 1px solid var(--line); background: var(--rail-tint); }
+.cockpit-inspector { border-left: 1px solid var(--line); background: var(--rail-tint); }
 .cockpit-rail-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: var(--ink-faint); margin: 0 0 8px; }
 .cockpit-rail-label.needs { margin-top: 20px; color: var(--accent-ink); }
 
@@ -1329,7 +1335,7 @@ html, body {
 .needs-you { margin: 14px 0 4px; }
 
 /* Center stage */
-.cockpit-stage { display: flex; flex-direction: column; min-width: 0; padding: 14px 18px; background: rgba(20,18,17,0.66); }
+.cockpit-stage { display: flex; flex-direction: column; min-width: 0; padding: 14px 18px; background: var(--page-tint); }
 .stage-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
 .stage-tab {
   font-size: 10.5px; font-weight: 700; letter-spacing: .05em; color: var(--ink-faint);
@@ -1464,7 +1470,10 @@ html, body {
    makes position:fixed resolve against that ancestor — the root cause of "modal opens
    mid-page instead of viewport-centered".  Use clip-path or scrollbar-gutter to
    suppress unwanted horizontal scroll instead of overflow-x:hidden. */
-.cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: clip; min-width: 0; min-height: 0; background: rgba(20,18,17,0.66); }
+/* The single page-filling layer present on EVERY cockpit page. It carries the one
+   --page-tint over the Bombe. Anything nested inside it (e.g. .govdev-main) must stay
+   transparent so the tint never stacks. */
+.cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: clip; min-width: 0; min-height: 0; background: var(--page-tint); }
 .cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
 .cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }
 
@@ -3550,7 +3559,7 @@ html, body {
    and a main area that shows the issue-management panel or a UoW's dev controls. */
 .govdev { display: grid; grid-template-columns: 260px 1fr; min-height: 0; gap: 0; height: 100%; }
 .govdev-nav {
-  border-right: 1px solid var(--line); background: rgba(20,18,17,0.92); padding: 14px;
+  border-right: 1px solid var(--line); background: var(--rail-tint); padding: 14px;
   display: flex; flex-direction: column; gap: 6px; overflow-y: auto;
   height: 100%; min-height: 0;
 }
@@ -3596,7 +3605,10 @@ html, body {
   font-size: 10px; font-weight: 700; letter-spacing: .03em; color: var(--accent-ink);
   background: var(--accent-wash); border: 1px solid #e5c9bd; padding: 1px 7px; border-radius: 5px;
 }
-.govdev-main { padding: 18px 22px; overflow-y: auto; min-width: 0; background: rgba(20,18,17,0.66); }
+/* Transparent: this sits INSIDE .cockpit-scroll, which already carries the single
+   --page-tint. Tinting here too would double-stack and make gov-dev read denser than
+   every other page. Letting the .cockpit-scroll tint show through keeps it identical. */
+.govdev-main { padding: 18px 22px; overflow-y: auto; min-width: 0; background: transparent; }
 .govdev-h { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
 
 /* Gear-button row at the top of the govdev left nav. */
@@ -4476,7 +4488,7 @@ select:focus {
    ─────────────────────────────────────────────────────────────────────── */
 
 .cockpit-rail {
-  background: rgba(20,18,17,0.97);
+  background: var(--rail-tint);
   border-right: 2px solid var(--line);
 }
 
