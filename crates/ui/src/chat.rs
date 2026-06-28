@@ -752,22 +752,41 @@ async fn send_chat(
     model: &str,
     system: &str,
     history: Vec<ChatHistoryTurn>,
-) -> Option<ChatResp> {
+) -> Result<ChatResp, String> {
     let body = serde_json::json!({
         "prompt": prompt,
         "model": model,
         "system": system,
         "history": history,
     });
-    reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(format!("{}/api/chat", crate::BFF_URL))
         .json(&body)
         .send()
         .await
-        .ok()?
-        .json::<ChatResp>()
-        .await
-        .ok()
+        .map_err(|e| format!("request to /api/chat failed: {e}"))?;
+    let status = resp.status();
+    // Read the body as text first so a non-2xx error body (e.g. the real `claude`
+    // CLI failure the server surfaces) is preserved instead of being swallowed by
+    // a failed `ChatResp` deserialize. This is the difference between the user
+    // seeing the actual error and seeing a generic "(no response)".
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("backend error {status}: {text}"));
+    }
+    serde_json::from_str::<ChatResp>(&text)
+        .map_err(|e| format!("could not parse chat response ({e}); raw body: {text}"))
+}
+
+/// Decide the assistant turn text from a `send_chat` outcome. Pure (no I/O) so it
+/// is unit-testable: a real backend error is now shown verbatim instead of a
+/// generic "no response" line that hid the cause.
+fn chat_reply_text(reply: Result<ChatResp, String>) -> String {
+    match reply {
+        Ok(r) if !r.text.trim().is_empty() => r.text,
+        Ok(_) => "(the model returned an empty response)".to_string(),
+        Err(e) => format!("\u{26a0} chat failed — {e}"),
+    }
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
@@ -1221,18 +1240,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         );
                                         let reply = send_chat(&prompt, &mdl, &sys, history).await;
                                         sending.set(false);
-                                        match reply {
-                                            Some(r) if !r.text.trim().is_empty() => {
-                                                turns.write().push(Turn { role: "ai", text: r.text });
-                                            }
-                                            _ => turns.write().push(Turn {
-                                                role: "ai",
-                                                text: "(no response — is the model backend \
-                                                       reachable? CLI needs `claude` on PATH; \
-                                                       API needs ANTHROPIC_API_KEY.)"
-                                                    .to_string(),
-                                            }),
-                                        }
+                                        turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
                                     });
                                 }
                             }
@@ -1288,16 +1296,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                         );
                                         let reply = send_chat(&prompt, &mdl, &sys, history).await;
                                         sending.set(false);
-                                        match reply {
-                                            Some(r) if !r.text.trim().is_empty() => {
-                                                turns.write().push(Turn { role: "ai", text: r.text });
-                                            }
-                                            _ => turns.write().push(Turn {
-                                                role: "ai",
-                                                text: "(no response — is the model backend reachable?)"
-                                                    .to_string(),
-                                            }),
-                                        }
+                                        turns.write().push(Turn { role: "ai", text: chat_reply_text(reply) });
                                     });
                                 }
                             },
@@ -1337,9 +1336,33 @@ fn rules_catalog_loaded(catalog: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_uow_section, unified_system_prompt, DevelopmentContextResponse, FindingContext,
-        GateProvenanceLite, UowSnapshot, TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
+        chat_reply_text, render_uow_section, unified_system_prompt, ChatResp,
+        DevelopmentContextResponse, FindingContext, GateProvenanceLite, UowSnapshot, TECHNICAL_DOC,
+        UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
     };
+
+    // ── chat_reply_text: backend errors are surfaced, not hidden ──────────────
+
+    #[test]
+    fn chat_reply_text_shows_backend_error_verbatim() {
+        // A real backend failure (e.g. the `claude` CLI error) must be shown to
+        // the user, not swallowed into a generic "no response" line.
+        let out = chat_reply_text(Err("backend error 500: claude CLI exited 1: rate limited".into()));
+        assert!(out.contains("chat failed"), "got: {out}");
+        assert!(out.contains("claude CLI exited 1: rate limited"), "got: {out}");
+    }
+
+    #[test]
+    fn chat_reply_text_returns_model_text_on_success() {
+        let out = chat_reply_text(Ok(ChatResp { text: "hello".into(), backend: "cli".into() }));
+        assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn chat_reply_text_flags_empty_success() {
+        let out = chat_reply_text(Ok(ChatResp { text: "   ".into(), backend: "cli".into() }));
+        assert!(out.contains("empty response"), "got: {out}");
+    }
 
     // ── fixtures ─────────────────────────────────────────────────────────────
 
