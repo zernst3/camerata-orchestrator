@@ -2499,9 +2499,11 @@ pub enum IntegrationGateResult {
 ### What it is
 
 The **L3 reviewer** (`crates/server/src/review_agent.rs`, `run_l3_review`) is an **opt-in,
-per-project, model-selectable** AI code reviewer that runs **parallel to Layer-2** after a dev
-run iteration. It is the third enforcement stage in the canonical model (L1 Security · L2
-Mechanical · **L3 AI code review** · L4 Origin/CI).
+per-project, model-selectable** AI code reviewer that runs **only after a clean L1+L2 pass** — it
+is the code-reviewer stage, so the change must already be code-complete and have passed the
+security gate (L1) and the mechanical checks (L2) before L3 runs. It is NOT parallel to Layer-2.
+It is the third enforcement stage in the canonical model (L1 Security · L2 Mechanical · **L3 AI
+code review** · L4 Origin/CI).
 
 ### Isolation: blind to other agents
 
@@ -2551,14 +2553,20 @@ path; adding a route and UI control is a follow-up.
 In `execute_dev_implement_run` (`crates/server/src/dev_implement_run.rs`):
 
 1. The dev agent runs (Layer-1 gated — same as always).
-2. Layer-2 post-task checks run (`CheckRunner`).
-3. **If L3 bundle is present**, `run_l3_if_enabled` runs: calls `worktree_diff`, feeds
-   story + rules + diff to `run_l3_review`, and emits a `layer-3` gate event (info/pass/bounce).
-4. If L3 bounces, the bounce reasons are fed back to the agent on the next iteration (same
-   bounce-and-revise mechanism as Layer-2). A `layer-3 bounce` event is recorded in the run log.
+2. Layer-2 post-task checks run (`CheckRunner`). **If L2 has violations, the iteration bounces
+   immediately and L3 does NOT run** — the code must be accepted by L1+L2 first.
+3. **Only on a clean L2 pass**, and if the L3 bundle is present, `run_l3_if_enabled` runs: calls
+   `worktree_diff`, feeds story + rules + diff to `run_l3_review`, and emits a `layer-3` gate event
+   (info/pass/bounce). (Code path: the `Ok(violations) if violations.is_empty()` arm in the bounce
+   loop.)
+4. If L3 bounces, the bounce reasons are fed back to the agent on the next iteration (shared
+   bounce-and-revise budget with L2). A `layer-3 bounce` event is recorded in the run log.
 
-L3 runs **per dev iteration**, not just once at the end. An empty diff skips the L3 call (logged
-as "Layer-3 skipped: no diff to review").
+L3 therefore runs **once the change is code-complete and has passed L1+L2** (the reviewer never
+sees code that hasn't cleared the mechanical checks). It can run on more than one iteration only
+because an L3 bounce sends the agent back, after which L1+L2 must pass clean again before L3 re-runs
+— it is never parallel to L2. An empty diff skips the L3 call (logged as "Layer-3 skipped: no diff
+to review").
 
 ### `ReviewVerdict`
 
