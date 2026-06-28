@@ -1,34 +1,33 @@
 id = "RUST-SEAORM-INTRA-AGGREGATE-TX-1"
-title = "Intra-aggregate atomicity stays inside the repository implementation"
+title = "Where intra-aggregate atomicity lives: inside the repository method, on a uniform unit-of-work parameter, or not provided"
 tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [decision]
-question = "Where does atomicity for multiple writes within a single aggregate live: inside the repository method, or surfaced as a unit-of-work parameter on the repository trait?"
-default = "repository-owns-intra-aggregate-transaction"
-why = "Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern that the service layer should know about. Forcing the service to construct a unit of work solely so the repository can guarantee an internal invariant leaks the abstraction across the aggregate boundary without buying any service-level coordination benefit. Two repositories that participate in the same business transaction do need the unit-of-work handoff (that is what the cross-aggregate rule covers), but a single repository whose method needs three writes to land together does not. Keeping the boundary at the aggregate matches the broader convention that the repository owns persistence-side invariants and the service owns business-process coordination."
+question = "Where does atomicity for multiple writes within a single aggregate live: inside the repository method, surfaced as a unit-of-work parameter on the repository trait, or not provided at the repository at all?"
+why = "All three are coherent positions on where an aggregate's internal write-atomicity belongs, and the right one follows from how the project divides responsibility between repository and service. Letting the repository open and commit its own transaction treats intra-aggregate atomicity as an implementation detail of that aggregate: the service never sees it, and the unit-of-work parameter is reserved for cross-aggregate coordination — the fit when the project draws a line between persistence-side invariants (the repository's job) and business-process coordination (the service's job), at the cost that two different transaction mechanisms coexist. Expressing even intra-aggregate atomicity through the same unit-of-work parameter the cross-aggregate writes use gives every transactional method one uniform signature, so there is a single transaction mechanism to learn and reason about; its trade-off is that the service must construct a unit of work even for an operation it does not coordinate, pushing a detail across the aggregate boundary. Not providing repository transaction boundaries at all keeps repositories free of transaction concerns entirely, redesigning operations as single writes or accepting and reconciling intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system must defend against. Choose by where the project wants the transaction boundary to be visible."
 
 [[option]]
 id = "repository-owns-intra-aggregate-transaction"
 label = "Repository opens and commits its own transaction"
 directive = "Repository methods that require multiple writes to be atomic within a single aggregate open and commit their own database transaction inside the method, rather than requiring callers to supply a unit-of-work handle. The unit-of-work parameter on the repository trait is reserved for cross-aggregate coordination owned by the service layer; intra-aggregate atomicity is the repository's own responsibility and does not appear in the method signature."
-why = "Atomicity inside one aggregate is an implementation detail of that aggregate, not a coordination concern the service layer should know about, so the transaction stays where the invariant lives."
+why = "Treats atomicity inside one aggregate as an implementation detail of that aggregate: the transaction stays where the invariant lives, the service never has to know about it, and the unit-of-work parameter is reserved for genuine cross-aggregate coordination. The fit when the project separates persistence-side invariants from business-process coordination; its trade-off is that two transaction mechanisms coexist (repository-internal for one aggregate, unit-of-work for several)."
 
 [[option]]
 id = "uniform-unit-of-work-parameter"
 label = "One unit-of-work parameter for intra- and cross-aggregate writes alike"
 directive = "Even intra-aggregate atomicity is expressed through the same unit-of-work parameter the cross-aggregate writes use, so every repository method that needs to land multiple writes atomically exposes a transaction-handle parameter in its trait signature and refuses to open its own transaction."
-why = "Trades a leaky abstraction across the aggregate boundary for uniformity of method signatures; the service layer must construct a unit of work even for operations it does not coordinate."
+why = "Gives every transactional method one uniform signature, so there is a single transaction mechanism to learn, reason about, and test rather than two. The fit when signature uniformity and a single transaction story are valued; its trade-off is that the service must construct a unit of work even for an operation it does not actually coordinate, pushing a transaction detail across the aggregate boundary."
 
 [[option]]
 id = "no-repository-transaction-boundaries"
 label = "No repository transaction boundaries at all"
 directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
-why = "Trades architectural simplicity for accepting partial-write states as a normal failure mode the rest of the system has to be defensive against."
+why = "Keeps repositories entirely free of transaction concerns, with no transaction parameter or internal boundary anywhere — the simplest repository surface. The fit when operations can be redesigned as single writes, or when the system is already built to observe and reconcile intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system has to defend against."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"

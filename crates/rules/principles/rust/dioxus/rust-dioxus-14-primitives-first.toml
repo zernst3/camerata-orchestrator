@@ -1,36 +1,35 @@
 id = "RUST-DIOXUS-14"
-title = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
+title = "Where common UI elements come from: a shared primitives layer, per-feature elements, a third-party library, or inline markup"
 tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
-default = true
+default = false
 
 [decision]
-question = "What position does the project take on: Common UI elements have one canonical implementation in a primitives layer; views compose primitives?"
-default = "common-ui-elements-have-one-canonical-implementa"
-why = "Per-view reimplementation of common UI elements is the largest single source of visual drift in component-based UIs. Five views that each implement their own button slowly become five subtly different buttons, and design-system changes become a codebase-wide refactor instead of a single-file change. Centralizing primitives means design decisions have exactly one home, reviewers know where to look for design-system questions, and an AI agent porting or generating a view can compose primitives rather than reinvent them. Automated agents in particular fail at the second pattern: an agent given a feature view will inline a hand-rolled button rather than reach for an existing primitive unless the primitive is already there and the rule says to use it. A feature-folder structure where each feature owns its own bespoke buttons, modals, and toasts works for very large UIs with strong team ownership boundaries, but it produces visual drift across features and makes design-system changes a feature-by-feature edit. Adopting a pre-existing third-party component library wholesale loses the project's specific design vocabulary and constrains visual identity to whatever the library exposes, which limits the design system to the library's surface area. Skipping primitives entirely and inlining utility classes in every view works for a ten-page product but produces unreadable churn at any larger scale, and design-system changes become a codebase-wide search-and-replace rather than a single-file edit."
+question = "Where do common UI elements (buttons, modals, toasts, inputs) come from: a shared primitives layer that views compose, bespoke elements owned per feature, a wholesale third-party component library, or inline markup in each view?"
+why = "All of these are legitimate sources for common UI elements, and the right one follows from how large the UI is, how much it needs a distinct design identity, and how its ownership is divided. A shared primitives layer gives each common element one canonical implementation that every view composes, so design decisions (palette, radii, focus rings, motion) live in one place and a change propagates everywhere — the strongest fit when one team owns the UI and visual consistency across it matters, at the cost of building and maintaining the primitives. Bespoke elements owned per feature co-locate a feature's UI with the feature, which suits large UIs with strong feature-team ownership; its trade-off is visual drift across features and design-system changes that become a feature-by-feature edit. A wholesale third-party component library gives a complete, maintained element set immediately with no primitives to build, which is the fastest path when a standard look is acceptable; its trade-off is that visual identity is constrained to what the library exposes, and anything outside it means fighting or forking the library. Inline markup with utility classes in each view is the most direct for a small UI with no design-system ambitions; its trade-off is that consistency degrades and a design change becomes a codebase-wide search-and-replace as the UI grows. Choose by the UI's scale, design-identity needs, and ownership shape."
 
 [[option]]
 id = "common-ui-elements-have-one-canonical-implementa"
 label = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
 directive = "The UI crate has two distinct kinds of components: primitives (Button, Modal, Toast, Card, Input, and similar reusable elements) and views (page-level components that compose primitives to express a feature). Every primitive has exactly one canonical implementation in a shared components directory. Views compose those primitives; views never reimplement a primitive inline or fork one for local convenience. Design-system decisions (color palette, corner radii, type system, focus rings, motion) live in the primitive component, so every view that composes the primitive inherits those decisions for free. A view that needs behavior a primitive does not yet expose extends the primitive's API rather than copying the primitive."
-why = "Per-view reimplementation of common UI elements is the largest single source of visual drift in component-based UIs."
+why = "Gives each common element one canonical implementation that every view composes, so design decisions live in a single home and a change to the palette, radii, focus rings, or motion propagates everywhere at once. The strongest fit when one team owns the UI and visual consistency across it matters — and the shape automated agents apply most reliably, since they reach for an existing primitive rather than inlining a hand-rolled element; its trade-off is the cost of building and maintaining the primitives layer."
 
 [[option]]
 id = "the-ui-is-organized-into-feature-folders-where-e"
 label = "the UI is organized into feature folders where each …"
 directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
-why = "Produces visual drift across features: five views that each implement their own button slowly become five subtly different buttons, and design-system changes become a codebase-wide edit instead of a single-file change; automated agents in particular will inline a hand-rolled element rather than reach for a shared primitive unless one already exists."
+why = "Keeps a feature's UI elements co-located with the feature, so a feature can be built, changed, or owned by a team without coordinating on a shared layer. The fit for a large UI with strong feature-team ownership boundaries; its trade-off is visual drift across features as each independently implements its own button or modal, and design-system changes that become a feature-by-feature edit rather than a single change."
 
 [[option]]
 id = "the-ui-adopts-a-pre-existing-third-party-compone"
 label = "the UI adopts a pre-existing third-party component library wholesale …"
 directive = "the UI adopts a pre-existing third-party component library wholesale and composes views directly from that library's components, rather than maintaining its own primitives"
-why = "Loses the project's specific design vocabulary and constrains visual identity to whatever the library exposes: any design decision that falls outside the library's surface area requires either fighting the library's styles or forking its components, which is the maintenance burden the primitives layer was meant to avoid."
+why = "Gives a complete, maintained, accessible element set immediately, with no primitives to build and upstream improvements arriving for free. The fastest path when a standard look is acceptable and design identity is not a differentiator; its trade-off is that visual identity is constrained to what the library exposes, and any decision outside its surface means fighting its styles or forking its components."
 
 [[option]]
 id = "the-ui-has-no-primitives-layer-views-inline-util"
 label = "the UI has no primitives layer; views inline utility …"
 directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
-why = "Works for a ten-page product but produces unreadable churn at any larger scale: design-system changes become a codebase-wide search-and-replace, visual consistency degrades as each view independently interprets the design tokens, and reviewers cannot tell whether a button in a new view matches the intended design without comparing it to every other view."
+why = "The most direct approach: a view writes the markup it needs with no primitives layer to build or indirection to follow. The fit for a small UI with no design-system ambitions, where the overhead of shared primitives would not pay back; its trade-off is that visual consistency degrades as each view interprets the design tokens independently and a design change becomes a codebase-wide search-and-replace as the UI grows."

@@ -1,10 +1,10 @@
 id = "RUST-DOMAIN-2"
-title = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
+title = "How IDs are typed: per-type newtypes, bare Uuid, or a single phantom-parameterized generic"
 tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [[sources]]
@@ -22,24 +22,23 @@ target = "aicodingrules"
 scope = "**/*.rs"
 
 [decision]
-question = "What position does the project take on: Newtype IDs (every ID is a wrapper, never a bare Uuid)?"
-default = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
-why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time. The idea is universal; Rust enforces it via the type system. Using bare Uuid everywhere loses the compile-time safety entirely, because every ID becomes the same type and any function taking a UserId cheerfully accepts an OrganizationId or any other Uuid. A generic EntityId-of-T parameterized on a phantom type catches some bugs at compile time but has no runtime distinction, so any code path that converts between representations (a JSON payload, a SQL row, a log line) collapses the parameter and loses the guarantee at the boundary."
+question = "How are entity identifiers typed: a distinct newtype per entity, a bare Uuid everywhere, or a single generic ID type parameterized on a phantom marker?"
+why = "All three are legitimate ways to represent IDs, and the right one follows from how much the project values compile-time distinction between identifier kinds against how much type machinery it wants to carry. A distinct newtype per entity (UserId(Uuid), OrganizationId(Uuid)) makes the type system reject passing one kind of ID where another is expected, moving wrong-ID-to-wrong-function mistakes from runtime to compile time; its cost is a wrapper type and conversions at the persistence and HTTP boundaries. A bare Uuid everywhere is the simplest and most direct representation, with no wrappers to define or convert and trivial interop at every boundary; its trade-off is that every ID is the same type, so the compiler cannot catch a UserId used where an OrganizationId was meant. A single generic ID type parameterized on a phantom marker gives one ID definition while still distinguishing kinds at compile time; its trade-off is that the phantom parameter has no runtime presence, so any conversion through a representation that drops it (a JSON payload, a SQL row, a log line) collapses the distinction at the boundary. Choose by how much the project weights compile-time ID safety against representational simplicity."
 
 [[option]]
 id = "newtype-ids-every-id-is-a-wrapper-never-a-bare-u"
 label = "Newtype IDs (every ID is a wrapper, never a bare Uuid)"
 directive = "UserId(Uuid), OrganizationId(Uuid); bare Uuid only at persistence and HTTP boundaries."
-why = "Moves wrong-ID-to-wrong-function bugs from runtime to compile time."
+why = "Makes each identifier kind its own type, so the compiler rejects passing a UserId where an OrganizationId is expected — wrong-ID-to-wrong-function mistakes become compile errors rather than silent runtime mismatches. The strongest fit when ID safety matters and the entity set is large enough that mix-ups are plausible; its trade-off is a wrapper type per entity and explicit conversion to and from bare Uuid at the persistence and HTTP boundaries."
 
 [[option]]
 id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
 label = "every ID in the codebase is a bare Uuid, …"
 directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
-why = "Loses the compile-time safety entirely: every ID becomes the same type and any function taking a UserId cheerfully accepts an OrganizationId or any other Uuid, turning wrong-ID-to-wrong-function bugs from compile errors into silent runtime mismatches."
+why = "The simplest, most direct representation: no wrapper types to define, no conversions at any boundary, and trivial interop with databases, serialization, and logging where Uuid is already the native shape. The fit when ID mix-ups are a small risk (a small entity set, or IDs that rarely cross between kinds); its trade-off is that every ID is the same type, so the compiler cannot catch a UserId used where an OrganizationId was meant."
 
 [[option]]
 id = "all-ids-use-a-single-generic-entityid-of-t-type"
 label = "all IDs use a single generic EntityId-of-T type parameterized …"
 directive = "all IDs use a single generic EntityId-of-T type parameterized on a phantom marker, rather than each ID being its own concrete newtype"
-why = "Catches some bugs at compile time but has no runtime distinction: any code path that converts between representations (a JSON payload, a SQL row, a log line) collapses the phantom parameter and loses the guarantee at the boundary, leaving the same class of wrong-ID bugs visible only at runtime."
+why = "Gives one ID definition that still distinguishes kinds at compile time, so the type machinery is written once and every entity reuses it while retaining the compiler's mix-up protection. The fit when the project wants typed IDs without a wrapper per entity; its trade-off is that the phantom parameter has no runtime presence, so any path that converts through a representation that drops it (a JSON payload, a SQL row, a log line) collapses the distinction at that boundary."

@@ -1,17 +1,14 @@
 id = "RUST-DOMAIN-7"
-title = "Explicit UnitOfWork parameter on transactional repository methods"
+title = "How transactional posture reaches the repository: explicit UnitOfWork param, generic Tx, ambient context, or concrete ORM type"
 tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-default = true
+default = false
 
 [decision]
-question = "What position does the project take on: Explicit UnitOfWork parameter on transactional repository methods?"
-default = "explicit-unitofwork-parameter-on-transactional-r"
-why = """
-Compile-time visibility of transactional posture at every call site. A call to save(item, None) is textually different from save(item, Some(uow)): code review, refactoring tools, and grep all catch a method silently dropping out of a transaction. The closure-based ambient-context alternative (task-local storage) is cleaner in TS or Node but in Rust runs into ownership friction (the database transaction is owned, not Clone) and produces silent partial-commit failures when a service forgets to wrap its body. Loud failures (compile error, visible None, downcast panic) beat silent failures (half-updated database rows with no error). Matches the explicit-tx convention every major Rust ORM (sqlx, diesel-async, SeaORM, tokio-postgres) has converged on; future maintainers recognize the shape immediately. Making the repository generic over Tx is bureaucratically compile-time correct but forces every consumer to carry Tx through the type graph, and the ceremony compounds badly across service composition. Letting the ORM type leak into the domain trait violates the hexagonal-architecture commitment that domain has zero framework deps; it can feel tempting in TS where import-type is free, but it is structurally wrong in Rust because the domain crate then transitively depends on the ORM.
-"""
+question = "How does a repository method participate in a multi-write transaction: an explicit domain-defined UnitOfWork parameter, a generic Tx type parameter, an ambient closure-based context, or the concrete ORM transaction type in the signature?"
+why = "Each of these is a legitimate way to thread a transaction through the persistence layer, and the right one follows from how much the project values call-site visibility versus signature cleanliness, and how strictly it holds the domain free of framework types. An explicit domain-defined UnitOfWork parameter (an Option carried in the method signature) makes transactional posture visible at every call site — save(item, None) reads differently from save(item, Some(uow)) — while keeping the trait surface free of any concrete ORM type, at the cost of a parameter on every transactional method and an internal downcast in the implementation. A generic Tx type parameter is fully compile-time-correct and lets the transaction type be abstract, but forces every consumer to carry the generic through its type graph, so the ceremony compounds across service composition. An ambient closure-based context (task-local storage) keeps the trait signature clean with no transaction parameter at all, reading the transaction from ambient state at call time; it is ergonomic but trades visible call-site posture for the risk of a silent partial commit if a service forgets to establish the context, and in Rust it contends with the owned, non-Clone transaction. The concrete ORM transaction type directly in the signature is the simplest to write and needs no abstraction, but puts a framework type on the domain trait, coupling the domain to the ORM and making a driver swap a domain-signature change. Choose by how much the project weights call-site visibility and domain purity against signature simplicity."
 
 [[option]]
 id = "explicit-unitofwork-parameter-on-transactional-r"
@@ -19,22 +16,22 @@ label = "Explicit UnitOfWork parameter on transactional repository methods"
 directive = """
 Repository write methods that may participate in a multi-write transaction take an explicit Option of UnitOfWork (a marker trait defined in the domain crate so the trait surface carries no concrete ORM or database type). Infrastructure implements UnitOfWork on its concrete transaction wrapper and downcasts internally via Any to access the underlying ORM transaction. Services wrap multi-write operations in a closure run on the unit of work and pass Some(uow) to each participating repo call.
 """
-why = "Compile-time visibility of transactional posture at every call site."
+why = "Makes transactional posture visible at every call site — save(item, None) reads differently from save(item, Some(uow)), so review, refactoring tools, and grep all catch a method silently dropping out of a transaction — while keeping the trait surface free of any concrete ORM type via a domain-defined marker that infrastructure downcasts internally. The strongest fit when the project weights loud, visible transaction boundaries and a framework-free domain highly; its trade-off is a parameter on every transactional method and the internal downcast in the implementation."
 
 [[option]]
 id = "repository-write-methods-take-a-generic-tx-param"
 label = "Repository write methods take a generic Tx parameter, and …"
 directive = "Repository write methods take a generic Tx parameter, and every consumer of the repository must carry that generic through its type graph"
-why = "Bureaucratically compile-time correct but forces every consumer to carry Tx through the type graph, and the ceremony compounds badly across service composition: each additional layer of abstraction inherits the generic and the noise accumulates well before any real benefit materializes."
+why = "Fully compile-time-correct with no runtime downcast: the transaction type stays abstract and the compiler proves every participant uses the same one. The right fit when a project wants maximal static guarantees and is willing to pay for them in signatures; its trade-off is that every consumer must carry the generic through its type graph, so the ceremony compounds across each layer of service composition."
 
 [[option]]
 id = "transactional-context-is-provided-as-a-closure-b"
 label = "Transactional context is provided as a closure-based ambient via …"
 directive = "Transactional context is provided as a closure-based ambient via task-local storage, so the repository trait carries no transaction parameter and the transaction is read from task-local state at call time"
-why = "Cleaner-looking in TypeScript or Node but runs into ownership friction in Rust (the database transaction is owned, not Clone), and produces silent partial-commit failures when a service forgets to wrap its body; the ambient context trades visible call-site noise for invisible correctness risk."
+why = "Keeps the repository trait signatures clean — no transaction parameter to thread anywhere — and reads naturally for teams coming from ecosystems where ambient request/transaction context is idiomatic. Its trade-off is that posture is invisible at the call site and a service that forgets to establish the context produces a silent partial commit rather than a loud error; in Rust it also contends with the owned, non-Clone transaction, which the task-local design must work around."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"
 label = "Repository write methods take a parameter typed as the …"
 directive = "Repository write methods take a parameter typed as the concrete ORM transaction type directly, with the ORM type appearing in the domain trait surface"
-why = "Violates the hexagonal-architecture commitment that domain has zero framework deps: the domain crate then transitively depends on the ORM, and swapping drivers later requires changing domain signatures, not just infrastructure."
+why = "The simplest to write: no marker trait, no generic, no downcast — the method just takes the transaction type it actually uses, and the type is visible at the call site. The right fit when the project does not separate domain from persistence (no hexagonal boundary to protect) and is committed to one ORM; its trade-off is that the domain trait then carries a framework type, so the domain depends on the ORM and a driver swap becomes a domain-signature change rather than an infrastructure-only one."

@@ -1,36 +1,35 @@
 id = "RUST-DIOXUS-1"
-title = "UI crate is organized by file role: views, components, hooks, contexts, services"
+title = "How the UI crate is organized: by file role, by feature, flat, or file-based routing"
 tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
-default = true
+default = false
 
 [decision]
-question = "What position does the project take on: UI crate is organized by file role: views, components, hooks, contexts, services?"
-default = "ui-crate-is-organized-by-file-role-views-compone"
-why = "A predictable file-path-to-role mapping is the foundation every other UI convention sits on. Without it, primitives leak into pages, context providers spread across the tree, and review-time questions like 'is this the right place for this code' become judgment calls each time. With it, every other rule in this stack has a clear scope, and an AI porting agent can apply per-folder rules mechanically. A feature-folder structure where everything for feature X lives under feature-X works for very large UIs with strong feature-team ownership, but it is overkill for a single-app product and makes primitive reuse harder to discover, since reusable primitives end up either duplicated across features or hidden inside whichever feature first authored them. A flat module structure with every file at the crate root is fast to start, becomes unmaintainable past about fifty files, and forces a re-derive of file role from naming each time the codebase is touched. File-based routing under a single src tree imitates a pattern the framework does not provide as a default; building it via custom build scripts adds tooling debt without buying anything the role-based layout does not already give."
+question = "How is the UI crate organized: split by file role (views/components/hooks/contexts/services), grouped into feature folders, kept flat at the crate root, or driven by a file-based routing convention?"
+why = "All of these are legitimate ways to lay out a UI crate, and the right one follows from the UI's size, team structure, and how reuse flows through it, not from a presumed winner. Splitting by file role gives a predictable file-path-to-role mapping that every other UI convention can attach to, so per-folder rules apply mechanically and reusable primitives have one obvious home — the natural fit for a single-app product where one team owns the whole tree. A feature-folder structure co-locates everything for one feature, which keeps a feature's code together and supports independent feature-team ownership; it suits large UIs with strong ownership boundaries, at the cost that shared primitives are harder to discover. A flat module structure with every file at the crate root is the fastest to start and has no folder taxonomy to learn, which fits a small UI that is not expected to grow much past a few dozen files. A file-based routing convention derives the route tree from the file layout, which some teams prefer for the directness of route-equals-path; in a framework that does not provide it natively it requires custom build tooling. Choose by the UI's scale and ownership shape, and revisit when those change."
 
 [[option]]
 id = "ui-crate-is-organized-by-file-role-views-compone"
 label = "UI crate is organized by file role: views, components, hooks, contexts, services"
 directive = "The UI crate splits source by what a file does, not by what feature it belongs to. Page-level components (one folder per route) live under views. Reusable primitives and composites (Button, Modal, Toast and similar) live under components. Custom hooks live under hooks. Cross-tree context providers live under contexts. Server-call wrappers live under services. Pure helpers (formatting, validation, class composition) live under lib. A central Routable enum lives at the top of the crate. Page-level views compose primitives; primitives never compose views. Per-folder rules (no rsx in lib, no service calls in components, and similar) attach to the folder names, so the role of any file is obvious from its path."
-why = "A predictable file-path-to-role mapping is the foundation every other UI convention sits on."
+why = "Gives a predictable file-path-to-role mapping that every other UI convention can sit on: per-folder rules apply mechanically, reusable primitives have one obvious home so they are easy to discover and hard to duplicate, and the role of any file is clear from its path. The strongest fit when one team owns the whole UI and primitive reuse across the app matters more than co-locating a single feature's code; its trade-off is that all of one feature's files are spread across role folders rather than gathered in one place."
 
 [[option]]
 id = "the-ui-crate-is-organized-into-feature-folders-w"
 label = "the UI crate is organized into feature folders where …"
 directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services, and lib"
-why = "Overkill for a single-app product and makes primitive reuse harder to discover: reusable primitives end up either duplicated across features or hidden inside whichever feature first authored them, so a contributor starting a new feature cannot easily tell what already exists."
+why = "Co-locates everything a feature needs in one place, so a feature can be understood, changed, or owned by a team without touching the rest of the tree. The natural fit for a large UI with strong feature-team ownership boundaries; its trade-off is that shared primitives are harder to discover and tend to be duplicated across features or hidden inside whichever feature first authored them, so cross-feature reuse needs deliberate attention."
 
 [[option]]
 id = "the-ui-crate-uses-a-flat-module-structure-with-e"
 label = "the UI crate uses a flat module structure with …"
 directive = "the UI crate uses a flat module structure with every file directly at the crate root, with no folder-level partitioning by role or feature"
-why = "Fast to start but becomes unmaintainable past about fifty files: without folder-level partitioning, file role must be derived from naming each time the codebase is touched, and 'where does this go' becomes a judgment call rather than a rule."
+why = "The simplest possible layout: no folder taxonomy to learn or maintain, and every file is one hop from the crate root. The right fit for a small UI that is not expected to grow much, where the overhead of a folder structure would outweigh its benefit; its trade-off is that past roughly fifty files file role has to be inferred from naming and 'where does this go' becomes a judgment call rather than a rule."
 
 [[option]]
 id = "the-ui-crate-adopts-a-file-based-routing-convent"
 label = "the UI crate adopts a file-based routing convention under …"
 directive = "the UI crate adopts a file-based routing convention under a single src tree, with custom build scripts wiring the routes from the file layout rather than declaring routes through a central Routable enum"
-why = "The framework does not provide file-based routing as a default, so this requires custom build scripts that add tooling debt without buying anything the role-based layout does not already give; any framework upgrade that touches routing can break the custom scripts unpredictably."
+why = "Makes the route tree a direct reflection of the file layout, so route-equals-path and adding a page is adding a file, with no central enum to keep in sync. Worth it for teams that prefer that directness and value convention over explicit declaration; its trade-off is that a framework which does not provide file-based routing natively requires custom build tooling to wire it, and a framework upgrade that touches routing can break that tooling."

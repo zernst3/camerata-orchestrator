@@ -1,10 +1,10 @@
 id = "RUST-DOMAIN-3"
-title = "Newtype validated strings (Email, Url, Slug, …)"
+title = "How validated text is represented: newtype with fallible constructor, inline call-site checks, runtime tag, or plain String"
 tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [[sources]]
@@ -16,30 +16,29 @@ url = "https://rust-lang.github.io/api-guidelines/dependability.html"
 title = "Rust API Guidelines — C-VALIDATE: Functions validate their arguments (static enforcement via constrained types)"
 
 [decision]
-question = "What position does the project take on: Newtype validated strings (Email, Url, Slug, …)?"
-default = "newtype-validated-strings-email-url-slug"
-why = "Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time. Validating at each call site is repetitive and easy to miss, since the rule's existence becomes a discipline check at every consumer rather than a guarantee carried by the type. A metadata tag on a plain String holds the validation status at runtime but not at compile time, so the type system stops helping and a forgotten check produces a silent invalid-state bug rather than a build failure. Treating validated and raw text as the same type loses the guarantee entirely; there is no signal in the type system that a string was ever validated, and downstream consumers must re-check or trust."
+question = "How is constrained text (Email, Url, Slug and similar) represented: a newtype with a fallible constructor, inline validation at each call site, a runtime validation tag, or a plain String?"
+why = "All of these are ways to handle text that must satisfy a constraint, and the right one follows from how much the project wants the type system to carry the proof of validation versus how lightweight it wants string handling to stay. A newtype with a fallible constructor (Email::try_new) makes the type itself proof that validation ran, so 'is this validated?' stops being a question at every call site and a never-validated value cannot be constructed; its cost is a type and constructor per constrained kind. Inline validation at each call site keeps every value a plain String and validates where needed, which is the lightest representation and fine when constrained values are few and centralized; its trade-off is that correctness becomes a discipline check at each consumer, so a missed call site is a silent invalid-state bug rather than a build failure. A runtime validation tag records whether a String was checked, which lets validation status travel with the value without a distinct type; its trade-off is that the status lives at runtime only, so the compiler does not enforce it and a forgotten check still slips through. A plain String with no distinction is the simplest of all and fine when constraints are weak or enforced entirely at the boundary; its trade-off is that the type carries no signal of validation, so downstream code must re-check or trust. Choose by how much the project weights type-carried validation against representational lightness."
 
 [[option]]
 id = "newtype-validated-strings-email-url-slug"
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
-why = "Removes 'is this validated?' as a question at every call site; moves it from runtime to compile time."
+why = "Makes the type itself proof that validation ran, so a value of the type cannot exist without having passed its constructor and 'is this validated?' stops being a question at every call site. The strongest fit when a project wants the type system to carry the invariant; its trade-off is a newtype and fallible constructor per constrained kind, with free-form text left as plain String."
 
 [[option]]
 id = "every-call-site-that-needs-a-validated-string-ru"
 label = "every call site that needs a validated string runs …"
 directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
-why = "Repetitive and easy to miss: the validation rule's existence becomes a discipline check at every consumer rather than a guarantee carried by the type, so a forgotten check at any one call site produces a silent invalid-state bug rather than a build failure."
+why = "The lightest representation: every value stays a plain String and validation runs only where it is actually needed, with no types or constructors to define. The fit when constrained values are few and their validation is centralized; its trade-off is that correctness becomes a discipline check at each consumer, so a forgotten check at any one call site is a silent invalid-state bug rather than a build failure."
 
 [[option]]
 id = "validation-status-is-recorded-as-a-metadata-tag"
 label = "validation status is recorded as a metadata tag attached …"
 directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
-why = "Holds validation status at runtime but not at compile time: the type system stops helping and a forgotten check produces a silent invalid-state bug rather than a build failure, which is exactly the guarantee the newtype constructor gives back."
+why = "Lets validation status travel with a value without introducing a distinct type per constrained kind, so a single String-plus-tag shape can represent checked and unchecked text. The fit when the project wants the status available at runtime but does not want a newtype taxonomy; its trade-off is that the status lives at runtime only, so the compiler does not enforce it and a forgotten check still produces an invalid-state bug rather than a build failure."
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
 label = "the codebase makes no distinction between validated and raw …"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
-why = "Loses the guarantee entirely: there is no signal in the type system that a string was ever validated, and downstream consumers must re-check or trust without any compiler help, producing the widest possible surface for invalid-data bugs."
+why = "The simplest possible representation: one String type for all text, with no types, tags, or constructors to define and no conversions anywhere. The fit when constraints are weak or are enforced entirely at the system boundary so internal code can trust its inputs; its trade-off is that the type carries no signal that a value was ever validated, so downstream code must re-check or trust, which is the widest surface for invalid-data bugs."

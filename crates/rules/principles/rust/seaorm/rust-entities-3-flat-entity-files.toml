@@ -1,40 +1,39 @@
 id = "RUST-ENTITIES-3"
-title = "One file per entity under entities/, named for the table"
+title = "How entity files are laid out: one file per table, grouped by domain concept, a prelude re-export, or inlined together"
 tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [decision]
-question = "What position does the project take on: One file per entity under entities/, named for the table?"
-default = "one-file-per-entity-under-entities-named-for-the"
-why = "SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge. Re-export preludes add a level of indirection that buys nothing until the crate is large enough to justify a public API surface that is not just the entity list. Grouping entities by domain concept inside the entities crate forces a reader who knows the table name to first map it to whichever grouping the project chose, which adds a project-specific lookup step that the flat shape does not require. Adding a prelude module re-exporting many entities under shorter paths is extra indirection without payoff until the crate becomes a published public API, which an internal entities crate generally never is. Inlining multiple small entities into a single file saves a few files but breaks the table-name-to-file-name lookup the generator output relies on, so the convenience of one less file is paid back at every navigation event afterwards."
+question = "How are entity definitions laid out within the entities crate: one file per table named for the table, grouped by domain concept, exposed through a prelude re-export module, or several small entities inlined per file?"
+why = "These are all workable file layouts for an entities crate, and the right one follows from how the project navigates entities and how it regenerates them, not from a presumed winner. One file per table named for the table matches what SeaORM's code generator emits, so generated and hand-written entities read alike and regenerating a single table is a one-file replacement rather than a merge — the natural fit when the entities are generated and a reader expects to find a table by its name. Grouping entities by domain concept gives a reader who thinks in concepts a structure that mirrors how they reason about the data; its trade-off is that finding an entity by table name requires knowing the project's grouping, and the grouping diverges from generator output. A prelude module re-exporting many entities under shorter paths gives consumers concise imports, which is worth it for a crate with a curated public API; its trade-off is the prelude must be kept in sync as entities change. Inlining several small related entities per file reduces file count and keeps closely-related definitions together; its trade-off is that the table-name-to-file-name lookup no longer holds, so navigating to an entity means knowing which multi-entity file it lives in. Choose by whether entities are generator-driven and how readers expect to locate them."
 
 [[option]]
 id = "one-file-per-entity-under-entities-named-for-the"
 label = "One file per entity under entities/, named for the table"
 directive = "Inside the entities crate, every entity lives in its own file under entities/<table_name>.rs. No prelude module that re-exports many entities under one name, no grouping by domain concept inside the crate. The flat shape matches SeaORM's code-generator output and lets a reader find an entity by its table name without learning a project-specific organization."
-why = "SeaORM's generator emits one file per table; matching that shape keeps generated and hand-written entities reading the same way, and makes regenerating a single table a one-file operation rather than a merge."
+why = "Matches SeaORM's generator output, which emits one file per table, so generated and hand-written entities read the same way and a reader finds an entity by its table name with no project-specific lookup. The strongest fit when entities are generator-driven; its trade-off is that the crate root holds one file per table with no higher-level grouping, which is flat by design rather than organized by concept."
 
 [[option]]
 id = "entities-are-grouped-by-domain-concept-inside-th"
 label = "entities are grouped by domain concept inside the entities …"
 directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
-why = "Forces a reader who knows the table name to first map it to whichever grouping the project chose, adding a project-specific lookup step that the flat shape does not require; domain-concept groupings also diverge from generator output, making regenerating a table a merge rather than a file replacement."
+why = "Mirrors how a reader who thinks in domain concepts reasons about the data, so related entities are gathered and the crate's structure carries meaning. The fit when navigation is concept-driven rather than table-driven; its trade-off is that finding an entity by table name requires knowing the project's grouping, and the grouping diverges from generator output, making a single-table regeneration a merge rather than a file replacement."
 
 [[option]]
 id = "the-entities-crate-exposes-a-prelude-module-that"
 label = "the entities crate exposes a prelude module that re-exports …"
 directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
-why = "Extra indirection that buys nothing until the crate becomes a published public API, which an internal entities crate generally never is; the prelude must be kept in sync as entities are added or removed, adding a maintenance surface for no practical gain."
+why = "Gives consumers concise, stable import paths and a curated public surface, which is worth it for a crate whose API is meant to be presented as more than a raw entity list. Its trade-off is the indirection of the prelude and the need to keep it in sync as entities are added or removed, which is maintenance an internal entities crate may not earn back."
 
 [[option]]
 id = "multiple-small-related-entities-are-inlined-into"
 label = "multiple small related entities are inlined into a single …"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
-why = "Saves a few files but breaks the table-name-to-file-name lookup the generator output relies on: every navigation event to an entity requires knowing which multi-entity file it lives in rather than simply opening the file named for the table."
+why = "Reduces file count and keeps closely-related definitions side by side, so a small cluster of entities that are always read together lives in one place. Its trade-off is that the table-name-to-file-name lookup no longer holds, so navigating to an entity requires knowing which multi-entity file it lives in rather than opening the file named for the table."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
