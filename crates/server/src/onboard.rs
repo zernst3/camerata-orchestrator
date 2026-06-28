@@ -1854,6 +1854,50 @@ mod tests {
         );
     }
 
+    // ── corpus-rules wire payload carries full content ────────────────────────
+    // The Applied/Project Rules modal joins each ruleset selection against the
+    // `/api/corpus-rules` payload (which is `propose_corpus_rules(&[])`). This test
+    // proves the SERVER side: a real corpus rule (RUST-DIOXUS-12) is present in that
+    // payload WITH its full content — decision question + multiple options — so the
+    // UI has everything it needs to render the real modal (not a stub). If this
+    // regresses, the modal can only ever show a stub no matter what the UI does.
+    #[tokio::test]
+    async fn propose_corpus_rules_includes_rust_dioxus_12_with_full_content() {
+        let proposed = propose_corpus_rules(&[]).await;
+        assert!(
+            !proposed.is_empty(),
+            "the corpus must load at least one rule (CARGO_MANIFEST_DIR-relative principles dir)"
+        );
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == "RUST-DIOXUS-12")
+            .expect("RUST-DIOXUS-12 must be present in the corpus-rules payload");
+        // Full content the modal renders: a decision question and a multi-option set.
+        assert!(
+            rule.decision_question
+                .as_deref()
+                .map(|q| !q.trim().is_empty())
+                .unwrap_or(false),
+            "RUST-DIOXUS-12 must carry a non-empty decision_question on the wire: {:?}",
+            rule.decision_question
+        );
+        assert!(
+            rule.options.len() >= 2,
+            "RUST-DIOXUS-12 must carry its alternatives (it has 4): got {}",
+            rule.options.len()
+        );
+        // Title is the human description shown at the top of the modal.
+        assert!(
+            !rule.title.trim().is_empty(),
+            "RUST-DIOXUS-12 must carry a non-empty title"
+        );
+        // It is a real corpus rule, so it must NOT look like a single-variant stub.
+        assert!(
+            !rule.options.is_empty(),
+            "a real corpus rule must not have empty options (that is the stub the bug showed)"
+        );
+    }
+
     // ── opt_in_only gate: recommended + is_auto_recommended ───────────────────
     // These tests verify that opt_in_only rules (e.g. CICD-CODEQL-SECURITY-SCAN-1,
     // CICD-SEMGREP-SECURITY-SCAN-1) yield BOTH `recommended = false` AND

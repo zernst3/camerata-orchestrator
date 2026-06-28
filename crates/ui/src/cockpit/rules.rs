@@ -354,6 +354,24 @@ pub(super) fn bucket_of(rule: &ProposedRuleView) -> SelectionBucket {
     }
 }
 
+/// True when this rule id is a *truly inline* rule built by `propose_rules` and is
+/// therefore legitimately ABSENT from the corpus TOML (so `AppliedRuleRow.corpus`
+/// being `None` is expected, not a bug). These are the deterministic security-floor
+/// content rules, the cross-repo API-contract rule, and the conventional-commit
+/// process rule. Every OTHER rule id is a real corpus rule and MUST resolve a corpus
+/// entry — if it doesn't, the corpus simply hasn't loaded yet (a timing bug), not an
+/// inline rule, and it must not fall through to the single-variant stub.
+///
+/// Kept in sync with `AUDIT_RULES` + the two inline ids in
+/// `crates/server/src/onboard/propose.rs::propose_rules`.
+/// Pure, so it is unit-testable without a Dioxus context.
+pub(super) fn is_inline_only_rule_id(rule_id: &str) -> bool {
+    rule_id.starts_with("SEC-")
+        || rule_id == "ARCH-NO-SECRETS-IN-URL-1"
+        || rule_id == "INTEGRATION-API-CONTRACT-1"
+        || rule_id == "PROCESS-CONVENTIONAL-COMMIT-1"
+}
+
 /// Derive a display domain from a rule ID prefix when the rule has no corpus entry.
 ///
 /// Inline rules produced by `propose_rules` (security audit rules, the cross-repo
@@ -865,28 +883,45 @@ pub(super) fn ProjectRulesTable(
             row_cell_renderers: applied_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(row) = id_map_click.get(&rid) {
-                    // Prefer the full corpus entry. For inline rules that are not present
-                    // in the corpus TOML (SEC-*, INTEGRATION-*, PROCESS-*), build a minimal
-                    // stub so the modal still opens with the rule id, domain, and any
-                    // chosen option visible rather than silently doing nothing.
-                    let corpus_rule = row.corpus.clone().unwrap_or_else(|| ProposedRuleView {
-                        id: row.selection.rule_id.clone(),
-                        title: row.selection.rule_id.clone(),
-                        kind: "mechanical".to_string(),
-                        enforcement: String::new(),
-                        options: Vec::new(),
-                        default_option: None,
-                        decision_question: None,
-                        decision_why: None,
-                        scope: row.scope_label().to_string(),
-                        domain: row.domain(),
-                        repos: row.selection.repos.clone(),
-                        placement: String::new(),
-                        finding_count: 0,
-                        recommended: false,
-                        is_auto_recommended: false,
-                        verification: "draft".to_string(),
-                        sources: Vec::new(),
+                    // Prefer the full corpus entry — this is the normal path and it now
+                    // resolves for every real corpus rule (the table remounts when the
+                    // corpus resource loads; see the `t1_key` corpus.len() note).
+                    //
+                    // When `row.corpus` is None we are in one of two cases, distinguished
+                    // by `is_inline_only_rule_id`:
+                    //   * a TRULY inline rule (SEC-*, ARCH-NO-SECRETS-IN-URL-1,
+                    //     INTEGRATION-API-CONTRACT-1, PROCESS-CONVENTIONAL-COMMIT-1) that has
+                    //     no corpus TOML by design — a single-variant stub is correct;
+                    //   * a real corpus rule whose corpus simply hasn't loaded yet — we must
+                    //     NOT pretend it is a single-variant rule. Surface a clear "still
+                    //     loading" title with no fabricated decision so the architect knows
+                    //     to retry rather than trusting a false "nothing to choose" note.
+                    let corpus_rule = row.corpus.clone().unwrap_or_else(|| {
+                        let inline = is_inline_only_rule_id(&row.selection.rule_id);
+                        let title = if inline {
+                            row.selection.rule_id.clone()
+                        } else {
+                            format!("{} (corpus still loading — reopen to see full details)", row.selection.rule_id)
+                        };
+                        ProposedRuleView {
+                            id: row.selection.rule_id.clone(),
+                            title,
+                            kind: "mechanical".to_string(),
+                            enforcement: String::new(),
+                            options: Vec::new(),
+                            default_option: None,
+                            decision_question: None,
+                            decision_why: None,
+                            scope: row.scope_label().to_string(),
+                            domain: row.domain(),
+                            repos: row.selection.repos.clone(),
+                            placement: String::new(),
+                            finding_count: 0,
+                            recommended: false,
+                            is_auto_recommended: false,
+                            verification: "draft".to_string(),
+                            sources: Vec::new(),
+                        }
                     });
                     if let Some(opt) = &row.selection.chosen_option {
                         chosen_ctx.write().insert(corpus_rule.id.clone(), opt.clone());
@@ -1301,7 +1336,15 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                     }
                 }
                 if r.options.is_empty() {
-                    p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
+                    // A real corpus rule that hasn't loaded yet is tagged in its title by the
+                    // Table-1 click handler; never claim it is single-variant. Genuinely
+                    // single-variant rules (inline floor rules, variant-less corpus rules)
+                    // show the "nothing to choose" note as before.
+                    if r.title.contains("corpus still loading") {
+                        p { class: "rule-modal-note", "The rule library is still loading. Close this and reopen the rule to see its full description, decision, and options." }
+                    } else {
+                        p { class: "rule-modal-note", "Single-variant rule — nothing to choose; arm it as-is." }
+                    }
                 } else {
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
@@ -2516,7 +2559,15 @@ pub(super) fn RulesView() -> Element {
                         // row ids) when the ruleset or corpus changes. The key is on the div
                         // itself, which IS the first node of each expression block below.
                         {
-                            let t1_key = format!("pt-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len());
+                            // The corpus length MUST be part of this key. `ProjectRulesTable`
+                            // mints its rows once (via use_hook) by joining each selection
+                            // against `corpus_by_id`. On first paint `corpus_res` is still
+                            // resolving, so `corpus` is the empty fallback and every
+                            // `AppliedRuleRow.corpus` is None — which is what made the detail
+                            // modal show a stub for every rule. Keying on `corpus.len()`
+                            // remounts the table the moment the corpus resolves, re-minting the
+                            // rows with their real corpus join. (Table 2's key already does this.)
+                            let t1_key = format!("pt-{}-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len(), corpus.len());
                             rsx! {
                                 div {
                                     key: "{t1_key}",
@@ -4568,7 +4619,11 @@ pub(super) fn SingleRuleEditor(
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_from_rule_id, selection_key, SINGLE_REPO_SELECTION_KEY};
+    use super::{
+        domain_from_rule_id, is_inline_only_rule_id, selection_key, AppliedRuleRow,
+        ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
+        SINGLE_REPO_SELECTION_KEY,
+    };
 
     #[test]
     fn selection_key_empty_returns_sentinel() {
@@ -4768,5 +4823,80 @@ mod tests {
     fn domain_from_rule_id_no_dash_lowercases_whole_id() {
         // No dashes at all: the whole id is the "prefix".
         assert_eq!(domain_from_rule_id("NORULE"), "norule");
+    }
+
+    // --- is_inline_only_rule_id: the inline-vs-corpus distinction that decides whether a
+    // missing corpus join is expected (inline floor rule) or a load-timing bug (real corpus
+    // rule). A real corpus rule (e.g. RUST-DIOXUS-12) must NEVER be treated as inline, or it
+    // falls through to the misleading single-variant stub. ---
+
+    #[test]
+    fn inline_only_true_for_security_floor_rules() {
+        // Every AUDIT_RULES id is inline (no corpus TOML by design).
+        assert!(is_inline_only_rule_id("SEC-NO-HARDCODED-SECRETS-1"));
+        assert!(is_inline_only_rule_id("SEC-NO-RAW-SQL-CONCAT-1"));
+        assert!(is_inline_only_rule_id("SEC-NO-UNSAFE-DESERIALIZATION-1"));
+        assert!(is_inline_only_rule_id("ARCH-NO-SECRETS-IN-URL-1"));
+    }
+
+    #[test]
+    fn inline_only_true_for_contract_and_process_rules() {
+        assert!(is_inline_only_rule_id("INTEGRATION-API-CONTRACT-1"));
+        assert!(is_inline_only_rule_id("PROCESS-CONVENTIONAL-COMMIT-1"));
+    }
+
+    #[test]
+    fn inline_only_false_for_real_corpus_rules() {
+        // RUST-DIOXUS-12 is the regression case from the bug report: a real corpus rule
+        // that was being shown as a stub. It must NOT be classified as inline.
+        assert!(!is_inline_only_rule_id("RUST-DIOXUS-12"));
+        assert!(!is_inline_only_rule_id("RUST-DOMAIN-1"));
+        assert!(!is_inline_only_rule_id("ARCH-STRICT-LAYERING-1"));
+        // A non-floor ARCH-* id (not the one inline secrets rule) is a real corpus rule.
+        assert!(!is_inline_only_rule_id("ARCH-NO-SECRETS-IN-HEADERS-1"));
+    }
+
+    #[test]
+    fn applied_row_domain_prefers_corpus_over_prefix_fallback() {
+        // With a real corpus join, domain() returns the corpus domain (the post-fix
+        // behaviour), not the rule-id-prefix fallback.
+        let corpus = ProposedRuleView {
+            id: "RUST-DIOXUS-12".to_string(),
+            title: "Icons render as inline SVG".to_string(),
+            kind: "structured".to_string(),
+            enforcement: "structured".to_string(),
+            options: vec![RuleOptionView {
+                id: "a".to_string(),
+                label: "Inline SVG".to_string(),
+                directive: "…".to_string(),
+                why: "…".to_string(),
+            }],
+            default_option: Some("a".to_string()),
+            decision_question: Some("What position…?".to_string()),
+            decision_why: Some("Smallest bundle.".to_string()),
+            scope: "repo-local".to_string(),
+            domain: "rust:dioxus".to_string(),
+            repos: vec![],
+            placement: String::new(),
+            finding_count: 0,
+            recommended: false,
+            is_auto_recommended: false,
+            verification: "grounded".to_string(),
+            sources: vec![],
+        };
+        let row = AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: "RUST-DIOXUS-12".to_string(),
+                chosen_option: Some("a".to_string()),
+                repos: vec![],
+            },
+            bucket: SelectionBucket::Selections,
+            corpus: Some(corpus.clone()),
+        };
+        assert_eq!(row.domain(), "rust:dioxus");
+        assert_eq!(row.title(), "Icons render as inline SVG");
+        // The corpus carries real options, so the modal would render the option chooser,
+        // not the single-variant stub.
+        assert!(!row.corpus.as_ref().unwrap().options.is_empty());
     }
 }
