@@ -1402,6 +1402,11 @@ async fn start_governed_run(
                 // TIERED path (ORCH-MODEL-TIERING-1): each task on its band's model, the
                 // strongest tier leading. The single `model` is ignored when a map is given.
                 Some(map) => {
+                    // Provider-dispatch context for the LEAD/orchestrator driver factory
+                    // (the lead runs on the strongest model's OWN provider).
+                    let live_registry = state.model_registry.clone();
+                    let live_creds = state.credential_store.clone();
+                    let live_limiter = state.rate_limiter.clone();
                     tokio::spawn(async move {
                         live_fleet::execute_live_run_tiered(
                             store,
@@ -1412,6 +1417,9 @@ async fn start_governed_run(
                             max_iterations,
                             skip_layer2,
                             vision_enabled,
+                            live_registry,
+                            live_creds,
+                            live_limiter,
                         )
                         .await
                     });

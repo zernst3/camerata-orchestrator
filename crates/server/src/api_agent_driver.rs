@@ -1503,6 +1503,181 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
     }
 }
 
+// ─── per-model LEAD/orchestrator driver factory (provider coupling) ─────────────
+
+/// Server-side [`camerata_fleet::orchestrator::OrchestratorDriverFactory`] that builds the
+/// LEAD/orchestrator stage on the STRONGEST model's OWN provider.
+///
+/// This is the orchestrator analogue of [`ServerChildDriverFactory`]: where that seam fixes
+/// per-model provider coupling for delegated/fanned-out CHILDREN, this one fixes it for the
+/// LEAD itself. The fleet's tiered build calls [`Self::build_lead`] for the single lead
+/// stage; this routes the strongest model to its provider:
+///
+/// - **Claude strongest** (`claude` provider): a [`camerata_agent::ClaudeCliDriver`] in
+///   orchestrator mode, using the lead session's orchestrator mcp-config (delegate ON, the
+///   per-tier models, depth=0, the worktree jail). Identical to the current CLI path.
+/// - **OpenRouter strongest** (`openrouter` provider): an [`ApiAgentDriver`] with
+///   `as_orchestrator(true)` + [`ApiAgentDriver::with_orchestrator_config`], where the
+///   attached [`camerata_gateway::delegate::OrchestratorConfig`] carries a
+///   [`ServerChildDriverFactory`]. So the native lead's `delegate`/`fan_out` resolve each
+///   child per-model + gated, through the SAME gated `run_delegated`/`run_fan_out`
+///   primitives.
+///
+/// # Gate contract (held for BOTH provider paths)
+///
+/// - The lead is the ONLY stage this factory is ever called for, so only the lead can carry
+///   `delegate`/`fan_out`. The factory NEVER builds a non-lead/worker driver in orchestrator
+///   mode.
+/// - The native lead's children are built by the embedded [`ServerChildDriverFactory`],
+///   which makes every child gated_write-only, worktree-jailed, depth-1, non-orchestrator —
+///   the exact same contract as the CLI delegate path. The depth guard (`depth=0`,
+///   `max_depth=1`) lives in the gated primitive; this factory only supplies the config.
+pub struct ServerOrchestratorDriverFactory {
+    registry: crate::model_registry::ModelRegistry,
+    creds: Arc<dyn crate::credentials::CredentialStore>,
+    limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    /// Located `camerata-gateway` binary (each native child wires its own gated gateway).
+    gateway_bin: PathBuf,
+    /// Stable per-run session id (OpenRouter sticky routing / KV-cache warmth). Optional.
+    run_session_id: Option<String>,
+}
+
+impl ServerOrchestratorDriverFactory {
+    /// Build the factory with the provider-dispatch context the lead (and its children) need.
+    pub fn new(
+        registry: crate::model_registry::ModelRegistry,
+        creds: Arc<dyn crate::credentials::CredentialStore>,
+        limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+        gateway_bin: PathBuf,
+        run_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            registry,
+            creds,
+            limiter,
+            gateway_bin,
+            run_session_id,
+        }
+    }
+
+    /// Resolve a model id's provider, defaulting to `"claude"` for unknown ids (mirrors
+    /// [`build_agent_driver`]).
+    fn provider_of(&self, model_id: &str) -> String {
+        self.registry
+            .all_entries()
+            .into_iter()
+            .find(|e| e.id == model_id)
+            .map(|e| e.provider)
+            .unwrap_or_else(|| "claude".to_string())
+    }
+
+    /// Build the per-tier [`camerata_gateway::delegate::DelegateModels`] the native lead's
+    /// delegate/fan_out children resolve through. Mirrors the CLI path's
+    /// [`camerata_fleet::orchestrator::delegate_models_json`] vision gating: the vision key is
+    /// populated ONLY when the band is enabled AND a non-empty primary model exists.
+    fn delegate_models(
+        tier_map: &camerata_fleet::tier::TierMap,
+        vision_enabled: bool,
+    ) -> camerata_gateway::delegate::DelegateModels {
+        use camerata_fleet::tier::CapabilityBand;
+        let vision = if vision_enabled {
+            tier_map
+                .vision
+                .first()
+                .filter(|m| !m.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        camerata_gateway::delegate::DelegateModels {
+            fast: tier_map.model_for(CapabilityBand::Fast).to_string(),
+            balanced: tier_map.model_for(CapabilityBand::Balanced).to_string(),
+            strongest: tier_map.model_for(CapabilityBand::Strongest).to_string(),
+            vision,
+        }
+    }
+}
+
+impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestratorDriverFactory {
+    fn build_lead(
+        &self,
+        ctx: &camerata_fleet::orchestrator::LeadBuildContext<'_>,
+    ) -> anyhow::Result<Box<dyn AgentDriver>> {
+        match self.provider_of(ctx.strongest_model).as_str() {
+            "openrouter" => {
+                // Native orchestrator: an ApiAgentDriver in orchestrator mode whose
+                // delegate/fan_out resolve children per-model + gated via a
+                // ServerChildDriverFactory. The lead runs under the SAME rule subset its
+                // children inherit (the orchestrator session's role subset).
+                let rule_subset = ctx.session.role_rule_subset.clone();
+
+                let key = self
+                    .creds
+                    .get(crate::credentials::OPENROUTER_API_KEY)
+                    .map_err(|e| anyhow::anyhow!("credential store error: {e}"))?
+                    .filter(|k| !k.trim().is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "lead model `{}` is an OpenRouter model but OPENROUTER_API_KEY is \
+                             not set — add it via Settings → Credentials before using this model",
+                            ctx.strongest_model
+                        )
+                    })?;
+
+                let mut or_completer =
+                    crate::llm::OpenRouterCompleter::for_agent(key, self.limiter.clone());
+                if let Some(sid) = self.run_session_id.as_deref() {
+                    or_completer = or_completer.with_session_id(sid);
+                }
+                let completer = Arc::new(or_completer);
+
+                let child_factory = ServerChildDriverFactory::new(
+                    self.registry.clone(),
+                    self.creds.clone(),
+                    self.limiter.clone(),
+                    self.gateway_bin.clone(),
+                    rule_subset.clone(),
+                    self.run_session_id.clone(),
+                );
+
+                let orch_config = camerata_gateway::delegate::OrchestratorConfig {
+                    models: Self::delegate_models(ctx.tier_map, ctx.vision_enabled),
+                    worktree_root: ctx.worktree.to_path_buf(),
+                    gateway_bin: self.gateway_bin.clone(),
+                    depth: 0,
+                    max_depth: 1,
+                    child_driver_factory: Some(Arc::new(child_factory)),
+                };
+
+                let driver = ApiAgentDriver::new(completer, ctx.strongest_model)
+                    .with_rule_subset(rule_subset)
+                    .with_worktree(ctx.worktree.to_path_buf())
+                    // ORCHESTRATOR-ONLY: only the lead is ever built here.
+                    .as_orchestrator(true)
+                    .with_orchestrator_config(orch_config);
+                Ok(Box::new(driver))
+            }
+            // "claude" or any unrecognised provider: the exact current CLI orchestrator path.
+            _ => {
+                let mut cli_driver =
+                    camerata_agent::ClaudeCliDriver::new(ctx.session.mcp_config.display().to_string())
+                        .with_worktree(ctx.worktree)
+                        // ORCHESTRATOR-ONLY: delegate/fan_out in --allowedTools, delegate
+                        // env in the session mcp-config (delegate ON).
+                        .as_orchestrator(true);
+                if !ctx.strongest_model.trim().is_empty() {
+                    cli_driver = cli_driver.with_model(ctx.strongest_model);
+                }
+                if let Some(cb) = ctx.on_activity.clone() {
+                    cli_driver = cli_driver.with_on_activity(cb);
+                }
+                Ok(Box::new(cli_driver))
+            }
+        }
+    }
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

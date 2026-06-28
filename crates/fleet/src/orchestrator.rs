@@ -15,12 +15,67 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use camerata_agent::{render_rules_file, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
-use camerata_core::Role;
+use camerata_agent::{render_rules_file, HeartbeatFn, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
+use camerata_core::{AgentDriver, Role};
 
 use crate::tier::{CapabilityBand, TierMap};
 use camerata_intake::PlanTask;
+
+/// Context the [`OrchestratorDriverFactory`] needs to build the LEAD driver on the
+/// strongest model's OWN provider.
+///
+/// This is the orchestrator analogue of the gateway's `ChildDriverFactory`: it lets the
+/// LEAD/orchestrator stage run via whichever provider the strongest tier resolves to
+/// (Claude CLI today; the native `ApiAgentDriver` when the strongest tier is an
+/// OpenRouter model), while every gate invariant is preserved by the factory impl.
+///
+/// All fields are borrows valid for the duration of the `build_lead` call; the returned
+/// driver is owned (`Box<dyn AgentDriver>`).
+pub struct LeadBuildContext<'a> {
+    /// The strongest-tier model id (what the lead runs on). The factory routes THIS to
+    /// its own provider.
+    pub strongest_model: &'a str,
+    /// The prepared orchestrator session (rules + orchestrator mcp-config with delegate
+    /// ON). The CLI path uses `session.mcp_config`; the native path uses the tier map +
+    /// worktree to build its `OrchestratorConfig` (the session env is CLI-only).
+    pub session: &'a OrchestratorSession,
+    /// The shared worktree all agents are jailed to.
+    pub worktree: &'a Path,
+    /// The full tier map, so the native path can build its per-tier `DelegateModels` (the
+    /// CLI path already has them baked into the session's mcp-config env).
+    pub tier_map: &'a TierMap,
+    /// Whether the Designer (vision) band is reachable for delegation this run.
+    pub vision_enabled: bool,
+    /// Optional activity heartbeat; the CLI path wires it into the driver so streamed
+    /// output keeps `last_activity_ms` fresh for the parent tracked run.
+    pub on_activity: Option<HeartbeatFn>,
+}
+
+/// Builds the LEAD/orchestrator driver for a tiered run on the strongest model's OWN
+/// provider, already in orchestrator mode and gated.
+///
+/// Mirrors the child-driver-factory seam (`ChildDriverFactory` in the gateway): the fleet
+/// owns the build loop and only calls this to obtain the lead driver, keeping the provider
+/// dispatch (and the credential / registry machinery it needs) out of the fleet crate.
+///
+/// # Gate contract
+///
+/// The returned driver MUST be in orchestrator mode (it is the ONLY stage that may carry
+/// `delegate`/`fan_out`) AND every child it can spawn MUST stay gated_write-only, jailed,
+/// depth-1, non-orchestrator. The factory upholds this by reusing the existing gated
+/// primitives (the orchestrator mcp-config for the CLI path, the
+/// `OrchestratorConfig` + per-model `ChildDriverFactory` for the native path). The factory
+/// MUST NOT widen the gate for non-lead stages — it is only ever called for the lead.
+pub trait OrchestratorDriverFactory: Send + Sync {
+    /// Build the lead driver for `ctx.strongest_model`, returning an owned,
+    /// orchestrator-mode, gated `Box<dyn AgentDriver>`.
+    fn build_lead(&self, ctx: &LeadBuildContext<'_>) -> anyhow::Result<Box<dyn AgentDriver>>;
+}
+
+/// Convenience alias for the injected, optional, shared orchestrator-driver factory.
+pub type SharedOrchestratorDriverFactory = Arc<dyn OrchestratorDriverFactory>;
 
 /// Env names that the gateway's `delegate` module reads. Kept in sync with
 /// `crates/gateway/src/delegate.rs`. Duplicated here (rather than depending on the
@@ -113,6 +168,11 @@ pub struct OrchestratorSession {
     pub rules_file: PathBuf,
     /// Path to the orchestrator mcp-config (delegate env enabled).
     pub mcp_config: PathBuf,
+    /// The lead role's rule subset (`role.rule_subset`). The native (non-CLI) lead path
+    /// needs this to evaluate `gated_write`s and to seed the per-model child factory under
+    /// the SAME subset; the CLI path reads it from `rules_file` on disk, so it is kept here
+    /// only for the in-process native driver.
+    pub role_rule_subset: Vec<camerata_core::RuleId>,
     /// RAII handle: the temp dir is deleted when this field is dropped.
     /// ARCH-RESOURCE-LIFECYCLE-1: every temp artifact must be RAII-cleaned.
     pub _dir: tempfile::TempDir,
@@ -145,6 +205,7 @@ pub fn prepare_orchestrator_session(
     Ok(OrchestratorSession {
         rules_file,
         mcp_config,
+        role_rule_subset: role.rule_subset.clone(),
         _dir: dir,
     })
 }

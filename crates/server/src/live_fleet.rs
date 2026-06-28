@@ -302,6 +302,7 @@ pub async fn execute_live_run(
 /// universal tool gate (every spawned agent keeps `--allowedTools` = gated tools only,
 /// `Task` disallowed) are unchanged: this path reuses the exact same
 /// `build_from_plan_*` machinery, only varying which model each stage's driver pins.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_live_run_tiered(
     store: RunStore,
     run_id: String,
@@ -311,6 +312,9 @@ pub async fn execute_live_run_tiered(
     max_iterations: usize,
     skip_layer2: bool,
     vision_enabled: bool,
+    registry: crate::model_registry::ModelRegistry,
+    creds: Arc<dyn crate::credentials::CredentialStore>,
+    limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -400,6 +404,21 @@ pub async fn execute_live_run_tiered(
     let rid_hb = run_id.clone();
     let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
 
+    // Provider-agnostic LEAD/orchestrator seam: the lead runs on the strongest model's OWN
+    // provider (Claude -> CLI orchestrator; OpenRouter -> native ApiAgentDriver orchestrator
+    // whose delegate/fan_out children resolve per-model + gated via ServerChildDriverFactory).
+    // `run_id` is the stable per-run session id (OpenRouter sticky routing / KV-cache warmth).
+    let orch_factory: Option<camerata_fleet::orchestrator::SharedOrchestratorDriverFactory> =
+        Some(Arc::new(
+            crate::api_agent_driver::ServerOrchestratorDriverFactory::new(
+                registry,
+                creds,
+                limiter,
+                gateway_bin.clone(),
+                Some(run_id.clone()),
+            ),
+        ));
+
     let result = build_from_plan_with_tier_map_layer2_and_activity(
         &plan,
         root,
@@ -410,6 +429,7 @@ pub async fn execute_live_run_tiered(
         &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
         Some(on_activity),
         vision_enabled,
+        orch_factory,
     )
     .await;
 

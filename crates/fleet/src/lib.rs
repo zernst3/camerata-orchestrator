@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use camerata_agent::{prepare_session, HeartbeatFn, GATED_WRITE_TOOL};
 use camerata_checks::{runner_for_worktree, runner_for_worktree_with_heartbeat};
-use camerata_core::{CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
+use camerata_core::{AgentDriver, CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
 use camerata_gateway::enforced_gate_rules;
 use camerata_intake::{Plan, PlanTask, TaskKind};
 use camerata_rules::role_from_corpus;
@@ -699,6 +699,9 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
         // Back-compat wrapper: vision band off. The live server path calls the deepest
         // function directly and passes the project's real vision_enabled flag.
         false,
+        // Back-compat wrapper: no orchestrator-driver factory => the lead runs on the
+        // exact current `ClaudeCliDriver` orchestrator path.
+        None,
     )
     .await
 }
@@ -707,6 +710,16 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
 /// `on_activity` heartbeat into every agent driver so streamed output keeps
 /// `last_activity_ms` fresh for the parent tracked run. Pass `None` for
 /// identical behaviour to the non-activity variant.
+///
+/// `orch_factory` is the provider-agnostic LEAD/orchestrator seam (mirrors the
+/// child-driver-factory): when `Some`, the LEAD stage's driver is built via
+/// [`orchestrator::OrchestratorDriverFactory::build_lead`], so the lead runs on the
+/// strongest model's OWN provider (Claude CLI today; native `ApiAgentDriver` when the
+/// strongest tier is an OpenRouter model). When `None` (BACK-COMPAT), the lead uses the
+/// exact current `ClaudeCliDriver` orchestrator path — every existing caller/test is
+/// unchanged. Non-lead stages ALWAYS use the `ClaudeCliDriver` builder either way; only
+/// the lead is ever routed through the factory, preserving the orchestrator-only gate.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     plan: &Plan,
     root: &Path,
@@ -717,6 +730,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
     on_activity: Option<HeartbeatFn>,
     vision_enabled: bool,
+    orch_factory: Option<orchestrator::SharedOrchestratorDriverFactory>,
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
@@ -784,21 +798,55 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
         .map(|task| tier_map.model_for_task(task).to_string())
         .collect();
 
-    let drivers: Vec<camerata_agent::ClaudeCliDriver> = (0..total)
-        .map(|i| {
-            let d = camerata_agent::ClaudeCliDriver::new(mcp_config_paths[i].clone())
-                .with_worktree(&worktree)
-                .with_model(&per_stage_models[i])
-                // Only the lead gets the delegate tool in --allowedTools.
-                .as_orchestrator(is_orchestrator[i]);
-            // Wire the activity heartbeat so streamed agent output keeps
-            // last_activity_ms fresh for the parent tracked run.
-            match &on_activity {
-                Some(cb) => d.with_on_activity(cb.clone()),
-                None => d,
+    // Heterogeneous drivers: non-lead stages are always the `ClaudeCliDriver` (boxed,
+    // identical behavior incl. the activity heartbeat); the LEAD is built via the injected
+    // `orch_factory` when present (provider follows the strongest model), else the same
+    // CLI orchestrator driver as before. `FleetStage::new` coerces `&dyn AgentDriver`, so a
+    // boxed mix is fine.
+    let build_cli_driver = |i: usize| -> Box<dyn AgentDriver> {
+        let d = camerata_agent::ClaudeCliDriver::new(mcp_config_paths[i].clone())
+            .with_worktree(&worktree)
+            .with_model(&per_stage_models[i])
+            // Only the lead gets the delegate tool in --allowedTools.
+            .as_orchestrator(is_orchestrator[i]);
+        // Wire the activity heartbeat so streamed agent output keeps
+        // last_activity_ms fresh for the parent tracked run.
+        let d = match &on_activity {
+            Some(cb) => d.with_on_activity(cb.clone()),
+            None => d,
+        };
+        Box::new(d)
+    };
+
+    let drivers: Vec<Box<dyn AgentDriver>> = (0..total)
+        .map(|i| -> anyhow::Result<Box<dyn AgentDriver>> {
+            // The LEAD is routed through the injected factory when present; every non-lead
+            // stage (and the lead when no factory is given) uses the CLI driver. Only the
+            // lead can ever reach the factory, so non-lead stages can NEVER carry
+            // delegate/fan_out — the orchestrator-only gate is preserved by construction.
+            if Some(i) == lead_idx {
+                if let Some(factory) = orch_factory.as_ref() {
+                    // The lead's orchestrator session is the sole entry in `orch_spawns`.
+                    // Build the lead on the strongest model's OWN provider, in orchestrator
+                    // mode + gated. The factory upholds the gate.
+                    let session = orch_spawns
+                        .first()
+                        .expect("a lead stage prepared exactly one orchestrator session");
+                    let ctx = orchestrator::LeadBuildContext {
+                        strongest_model: &per_stage_models[i],
+                        session,
+                        worktree: &worktree,
+                        tier_map,
+                        vision_enabled,
+                        on_activity: on_activity.clone(),
+                    };
+                    return factory.build_lead(&ctx);
+                }
+                // No factory => exact current CLI orchestrator behavior (back-compat).
             }
+            Ok(build_cli_driver(i))
         })
-        .collect();
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     // ── Build the stage list ─────────────────────────────────────────────────
     let mut stages: Vec<FleetStage> = Vec::with_capacity(total);
@@ -822,7 +870,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
         if Some(i) == lead_idx {
             stage_task.push_str(&orchestrator::orchestrator_prompt_suffix(vision_enabled));
         }
-        stages.push(FleetStage::new(roles[i].clone(), stage_task, &drivers[i]));
+        stages.push(FleetStage::new(roles[i].clone(), stage_task, drivers[i].as_ref()));
     }
 
     // ── Run the governed fleet with the language-matched layer-2 runner ──────
@@ -1360,5 +1408,136 @@ mod tests {
                 task.description, task.kind
             );
         }
+    }
+
+    // ── OrchestratorDriverFactory seam (provider-agnostic LEAD) ───────────────
+
+    use crate::orchestrator::{
+        LeadBuildContext, OrchestratorDriverFactory, SharedOrchestratorDriverFactory,
+    };
+    use camerata_core::{AgentDriver, AgentOutcome};
+    use std::sync::{Arc, Mutex};
+
+    /// A no-op driver standing in for whatever the factory would build. Records nothing;
+    /// `run` returns immediately so it never spawns a real subprocess.
+    struct StubLeadDriver;
+    #[async_trait::async_trait]
+    impl AgentDriver for StubLeadDriver {
+        async fn run(&self, _role: &Role, _task: &str) -> anyhow::Result<AgentOutcome> {
+            Ok(AgentOutcome {
+                session_id: "stub".into(),
+                result: "stub".into(),
+                cost_usd: None,
+                denials: vec![],
+            })
+        }
+    }
+
+    /// A recording `OrchestratorDriverFactory` double: captures the model + worktree it was
+    /// asked to build the LEAD for, and how many times `build_lead` ran.
+    struct RecordingOrchestratorFactory {
+        calls: Mutex<Vec<(String, std::path::PathBuf, bool)>>,
+    }
+    impl RecordingOrchestratorFactory {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl OrchestratorDriverFactory for RecordingOrchestratorFactory {
+        fn build_lead(&self, ctx: &LeadBuildContext<'_>) -> anyhow::Result<Box<dyn AgentDriver>> {
+            self.calls.lock().unwrap().push((
+                ctx.strongest_model.to_string(),
+                ctx.worktree.to_path_buf(),
+                ctx.on_activity.is_some(),
+            ));
+            Ok(Box::new(StubLeadDriver))
+        }
+    }
+
+    /// The factory's `build_lead` receives the STRONGEST model id and the shared worktree,
+    /// and returns an orchestrator driver the fleet will box and use for the lead stage.
+    /// (Pure-logic: drives the factory through a synthesized `LeadBuildContext`, exactly the
+    /// shape the build loop constructs — no gateway/cargo/`claude` needed.)
+    #[test]
+    fn orchestrator_factory_build_lead_receives_strongest_model() {
+        let factory = RecordingOrchestratorFactory::new();
+        let role = Role {
+            name: "Lead".into(),
+            rule_subset: vec![RuleId("GOV-1".into())],
+            allowed_paths: vec!["crate/".into()],
+        };
+        let session = orchestrator::prepare_orchestrator_session(
+            std::path::Path::new("/bin/camerata-gateway"),
+            &role,
+            std::path::Path::new("/work/crate"),
+            &crate::tier::TierMap::default(),
+            false,
+        )
+        .unwrap();
+        let cb: HeartbeatFn = Arc::new(|| {});
+        let ctx = LeadBuildContext {
+            strongest_model: "claude-opus-4-8",
+            session: &session,
+            worktree: std::path::Path::new("/work/crate"),
+            tier_map: &crate::tier::TierMap::default(),
+            vision_enabled: false,
+            on_activity: Some(cb),
+        };
+        let _driver = factory.build_lead(&ctx).unwrap();
+        let calls = factory.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "build_lead called exactly once for the lead");
+        assert_eq!(calls[0].0, "claude-opus-4-8", "lead built for the strongest model");
+        assert_eq!(calls[0].1, std::path::PathBuf::from("/work/crate"));
+        assert!(calls[0].2, "the activity heartbeat is threaded to build_lead");
+    }
+
+    /// The session carries the lead role's rule subset so the native (non-CLI) lead path can
+    /// evaluate writes + seed its per-model child factory under the SAME subset (the contract
+    /// the gate depends on).
+    #[test]
+    fn orchestrator_session_carries_role_rule_subset() {
+        let role = Role {
+            name: "Lead".into(),
+            rule_subset: vec![RuleId("GOV-1".into()), RuleId("SEC-NO-PATH-ESCAPE-1".into())],
+            allowed_paths: vec!["crate/".into()],
+        };
+        let session = orchestrator::prepare_orchestrator_session(
+            std::path::Path::new("/bin/camerata-gateway"),
+            &role,
+            std::path::Path::new("/work/crate"),
+            &crate::tier::TierMap::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(session.role_rule_subset, role.rule_subset);
+    }
+
+    /// Compile-time / API-shape test: the deepest tiered build fn accepts the optional
+    /// `orch_factory` (BACK-COMPAT: both `None` and `Some` are callable; `None` keeps the
+    /// exact current CLI orchestrator behavior). Not run (needs a live gateway + corpus).
+    #[test]
+    fn build_with_orch_factory_signature_compiles_none_and_some() {
+        fn _check(
+            plan: &camerata_intake::Plan,
+            root: &std::path::Path,
+            bin: &std::path::Path,
+            factory: SharedOrchestratorDriverFactory,
+        ) {
+            let tier_map = crate::tier::TierMap::default();
+            // None => CLI orchestrator (back-compat).
+            let _none: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
+                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, None,
+                ));
+            // Some => lead via the factory.
+            let _some: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
+                Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
+                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, Some(factory),
+                ));
+        }
+        let _ = _check
+            as fn(_, _, _, SharedOrchestratorDriverFactory);
     }
 }
