@@ -1153,6 +1153,15 @@ async fn start_governed_run(
         let tier_map: Option<crate::model_tier::TierMap> = tier_map
             .or_else(|| state.projects.active().map(|p| p.tier_map));
 
+        // The active project's Designer (vision) band toggle. Gates whether the
+        // orchestrator's delegate-models map carries a `"vision"` tier at all; when
+        // false (the default), `delegate {tier:"vision"}` is refused on the child side.
+        let vision_enabled = state
+            .projects
+            .active()
+            .map(|p| p.vision_enabled)
+            .unwrap_or(false);
+
         // The active project's loop-guard ceiling (#29) governs how many times a dirty
         // stage may bounce-and-revise before its residual violations are surfaced.
         let max_iterations = state
@@ -1402,6 +1411,7 @@ async fn start_governed_run(
                             map,
                             max_iterations,
                             skip_layer2,
+                            vision_enabled,
                         )
                         .await
                     });

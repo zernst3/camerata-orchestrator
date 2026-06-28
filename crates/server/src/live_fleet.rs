@@ -310,6 +310,7 @@ pub async fn execute_live_run_tiered(
     tier_map: TierMap,
     max_iterations: usize,
     skip_layer2: bool,
+    vision_enabled: bool,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -408,6 +409,7 @@ pub async fn execute_live_run_tiered(
         skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
         Some(on_activity),
+        vision_enabled,
     )
     .await;
 

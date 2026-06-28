@@ -64,22 +64,51 @@ pub const DEFAULT_MAX_DEPTH: u32 = 1;
 /// orchestrator's own tier (delegating to it would be a no-op self-delegate), but
 /// it is carried so the map is complete and a future re-delegate-higher path can
 /// resolve it.
+///
+/// `vision` is the optional Designer (multimodal) band — orthogonal to the logic
+/// ladder. It is reachable as the `"vision"` tier (alias `"designer"`) ONLY when
+/// the orchestrator was configured with a non-empty vision model (which the fleet
+/// only does when the active project's `vision_enabled` flag is set). When unset,
+/// the field is an empty string and `resolve("vision")` returns `None`, so a
+/// `delegate {tier:"vision"}` is refused cleanly exactly like an unknown tier — no
+/// new authority, no panic.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DelegateModels {
     pub fast: String,
     pub balanced: String,
     pub strongest: String,
+    /// Optional Designer/vision model id. Empty (the default when the project's
+    /// vision band is disabled/unset) means `resolve("vision")` returns `None`.
+    /// Serde-defaulted so a model map serialized before this field existed (e.g. an
+    /// orchestrator booted by an older fleet build) deserializes cleanly to empty.
+    #[serde(default)]
+    pub vision: String,
 }
 
 impl DelegateModels {
-    /// Resolve a tier label (`"fast"` | `"balanced"` | `"strongest"`,
-    /// case-insensitive) to a concrete model id. Returns `None` for anything else.
+    /// Resolve a tier label to a concrete model id. Returns `None` for anything
+    /// unrecognised OR for a tier whose model is unconfigured (empty), so an
+    /// unconfigured `vision` tier is refused the same way an unknown tier is.
+    ///
+    /// Accepted labels (case-insensitive, surrounding whitespace trimmed):
+    /// - `"fast"` / `"balanced"` / `"strongest"` — the logic ladder.
+    /// - `"vision"` (alias `"designer"`) — the Designer band; only resolves when a
+    ///   non-empty vision model was configured.
     pub fn resolve(&self, tier: &str) -> Option<&str> {
-        match tier.trim().to_ascii_lowercase().as_str() {
-            "fast" => Some(&self.fast),
-            "balanced" => Some(&self.balanced),
-            "strongest" => Some(&self.strongest),
-            _ => None,
+        let model = match tier.trim().to_ascii_lowercase().as_str() {
+            "fast" => &self.fast,
+            "balanced" => &self.balanced,
+            "strongest" => &self.strongest,
+            // "designer" is an alias for the vision band.
+            "vision" | "designer" => &self.vision,
+            _ => return None,
+        };
+        // An empty model id (e.g. the vision band when disabled/unconfigured) is
+        // treated as "not available" → refuse cleanly, never spawn an unmodeled child.
+        if model.is_empty() {
+            None
+        } else {
+            Some(model.as_str())
         }
     }
 }
@@ -158,7 +187,9 @@ impl std::fmt::Display for DelegateError {
         match self {
             DelegateError::UnknownTier(t) => write!(
                 f,
-                "DELEGATE REFUSED: unknown tier '{t}' (expected fast | balanced | strongest)"
+                "DELEGATE REFUSED: unknown or unconfigured tier '{t}' \
+                 (expected fast | balanced | strongest, or vision/designer when a \
+                 vision model is configured)"
             ),
             DelegateError::DepthExceeded { depth, max_depth } => write!(
                 f,
@@ -340,6 +371,16 @@ mod tests {
             fast: "claude-haiku-4-5-20251001".to_string(),
             balanced: "claude-sonnet-4-6".to_string(),
             strongest: "claude-opus-4-8".to_string(),
+            // Default test map: vision UNSET (the common case — vision off).
+            vision: String::new(),
+        }
+    }
+
+    /// A model map WITH a configured vision/Designer model (vision_enabled case).
+    fn models_with_vision() -> DelegateModels {
+        DelegateModels {
+            vision: "claude-vision-model".to_string(),
+            ..models()
         }
     }
 
@@ -361,6 +402,44 @@ mod tests {
         assert_eq!(m.resolve("  Strongest "), Some("claude-opus-4-8"));
         assert_eq!(m.resolve("ultra"), None);
         assert_eq!(m.resolve(""), None);
+    }
+
+    #[test]
+    fn resolve_vision_tier_returns_model_when_set() {
+        let m = models_with_vision();
+        // The vision band resolves to the configured vision model...
+        assert_eq!(m.resolve("vision"), Some("claude-vision-model"));
+        // ...case-insensitively + trimmed, same contract as the logic tiers.
+        assert_eq!(m.resolve("  VISION "), Some("claude-vision-model"));
+        // ...and the `designer` alias resolves to the same model.
+        assert_eq!(m.resolve("designer"), Some("claude-vision-model"));
+        assert_eq!(m.resolve("DESIGNER"), Some("claude-vision-model"));
+    }
+
+    #[test]
+    fn resolve_vision_tier_returns_none_when_unset() {
+        // Vision UNSET (vision_enabled off / no model configured): a vision delegate
+        // is refused cleanly — `resolve` returns None exactly like an unknown tier,
+        // never a panic, never an empty-string model that would spawn an unmodeled child.
+        let m = models(); // vision == ""
+        assert_eq!(m.resolve("vision"), None);
+        assert_eq!(m.resolve("designer"), None);
+    }
+
+    #[tokio::test]
+    async fn run_delegated_refuses_vision_when_unset_without_spawning() {
+        // depth allows, tier label is valid, but vision is unconfigured -> refuse
+        // BEFORE any spawn/IO, surfacing as UnknownTier (the same clean-refusal path
+        // as a genuinely unknown tier). No child process, no token spend.
+        let err = run_delegated(
+            &cfg(0, 1),
+            vec![RuleId("GOV-1".to_string())],
+            "design a hero section",
+            "vision",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, DelegateError::UnknownTier("vision".to_string()));
     }
 
     #[test]

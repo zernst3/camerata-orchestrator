@@ -43,12 +43,30 @@ pub fn lead_stage_index(tasks: &[PlanTask]) -> Option<usize> {
 
 /// Serialize the per-tier model ids the orchestrator may delegate to, as the JSON
 /// object the gateway's `DelegateModels` expects.
-pub fn delegate_models_json(tier_map: &TierMap) -> Result<String, serde_json::Error> {
-    let obj = serde_json::json!({
+///
+/// The Designer (vision) band is included as the `"vision"` key ONLY when
+/// `vision_enabled` is `true` AND the project's vision chain holds a non-empty
+/// primary model. When the band is disabled or unconfigured, the key is OMITTED
+/// entirely, so the gateway's `DelegateModels::vision` deserializes to its empty
+/// default and `resolve("vision")` returns `None` — a `delegate {tier:"vision"}` is
+/// then refused cleanly, exactly like an unknown tier. This keeps the gating in ONE
+/// place (the toggle controls availability, not configuration): a populated vision
+/// chain with the toggle off still emits no key, and the band stays unreachable.
+pub fn delegate_models_json(
+    tier_map: &TierMap,
+    vision_enabled: bool,
+) -> Result<String, serde_json::Error> {
+    let mut obj = serde_json::json!({
         "fast": tier_map.model_for(CapabilityBand::Fast),
         "balanced": tier_map.model_for(CapabilityBand::Balanced),
         "strongest": tier_map.model_for(CapabilityBand::Strongest),
     });
+    // Designer/vision band: reachable only when enabled AND a model is configured.
+    if vision_enabled {
+        if let Some(model) = tier_map.vision.first().filter(|m| !m.trim().is_empty()) {
+            obj["vision"] = serde_json::Value::String(model.clone());
+        }
+    }
     serde_json::to_string(&obj)
 }
 
@@ -64,6 +82,7 @@ pub fn render_orchestrator_mcp_config(
     rules_file: &Path,
     worktree: &Path,
     tier_map: &TierMap,
+    vision_enabled: bool,
 ) -> Result<String, serde_json::Error> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert(RULES_FILE_ENV.to_string(), rules_file.display().to_string());
@@ -72,7 +91,10 @@ pub fn render_orchestrator_mcp_config(
         worktree.display().to_string(),
     );
     env.insert(DELEGATE_ENABLED_ENV.to_string(), "1".to_string());
-    env.insert(DELEGATE_MODELS_ENV.to_string(), delegate_models_json(tier_map)?);
+    env.insert(
+        DELEGATE_MODELS_ENV.to_string(),
+        delegate_models_json(tier_map, vision_enabled)?,
+    );
     env.insert(GATEWAY_BIN_ENV.to_string(), gateway_bin.display().to_string());
     env.insert(DELEGATE_DEPTH_ENV.to_string(), "0".to_string());
 
@@ -107,6 +129,7 @@ pub fn prepare_orchestrator_session(
     role: &Role,
     worktree: &Path,
     tier_map: &TierMap,
+    vision_enabled: bool,
 ) -> anyhow::Result<OrchestratorSession> {
     let dir = tempfile::TempDir::new()?;
     let session_dir = dir.path();
@@ -115,7 +138,8 @@ pub fn prepare_orchestrator_session(
     std::fs::write(&rules_file, render_rules_file(role)?)?;
 
     let mcp_config = session_dir.join("gateway.json");
-    let cfg = render_orchestrator_mcp_config(gateway_bin, &rules_file, worktree, tier_map)?;
+    let cfg =
+        render_orchestrator_mcp_config(gateway_bin, &rules_file, worktree, tier_map, vision_enabled)?;
     std::fs::write(&mcp_config, cfg)?;
 
     Ok(OrchestratorSession {
@@ -181,11 +205,52 @@ mod tests {
 
     #[test]
     fn delegate_models_json_has_all_three_tiers() {
-        let json = delegate_models_json(&TierMap::default()).unwrap();
+        // vision_enabled=false: the three logic tiers, NO vision key.
+        let json = delegate_models_json(&TierMap::default(), false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["fast"], "claude-haiku-4-5-20251001");
         assert_eq!(v["balanced"], "claude-sonnet-4-6");
         assert_eq!(v["strongest"], "claude-opus-4-8");
+        assert!(v.get("vision").is_none(), "no vision key when disabled");
+    }
+
+    #[test]
+    fn delegate_models_json_omits_vision_when_disabled_even_if_configured() {
+        // Gating is the toggle, not configuration: a populated vision chain with the
+        // toggle OFF still emits NO vision key, so the band stays unreachable.
+        let mut m = TierMap::default();
+        m.vision = vec!["claude-vision-model".to_string()];
+        let json = delegate_models_json(&m, false).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v.get("vision").is_none(),
+            "vision must be omitted when vision_enabled is false"
+        );
+    }
+
+    #[test]
+    fn delegate_models_json_includes_vision_when_enabled_and_configured() {
+        let mut m = TierMap::default();
+        m.vision = vec!["claude-vision-model".to_string()];
+        let json = delegate_models_json(&m, true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["vision"], "claude-vision-model",
+            "vision key present when enabled + configured (primary of the chain)"
+        );
+    }
+
+    #[test]
+    fn delegate_models_json_omits_vision_when_enabled_but_unconfigured() {
+        // Enabled but no model assigned (empty chain): no key, so resolve("vision")
+        // returns None on the child side and the delegate is refused cleanly.
+        let m = TierMap::default(); // vision == []
+        let json = delegate_models_json(&m, true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v.get("vision").is_none(),
+            "no vision key when enabled but no model configured"
+        );
     }
 
     #[test]
@@ -195,6 +260,7 @@ mod tests {
             Path::new("/tmp/s/rules.json"),
             Path::new("/work/crate"),
             &TierMap::default(),
+            false,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
@@ -211,6 +277,27 @@ mod tests {
     }
 
     #[test]
+    fn orchestrator_mcp_config_includes_vision_model_when_enabled() {
+        // With vision enabled + a configured vision model, the orchestrator's delegate
+        // models env carries the vision key, making the Designer band reachable.
+        let mut m = TierMap::default();
+        m.vision = vec!["claude-vision-model".to_string()];
+        let cfg = render_orchestrator_mcp_config(
+            Path::new("/bin/camerata-gateway"),
+            Path::new("/tmp/s/rules.json"),
+            Path::new("/work/crate"),
+            &m,
+            true,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        let env = &v["mcpServers"][MCP_SERVER_KEY]["env"];
+        let models: serde_json::Value =
+            serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
+        assert_eq!(models["vision"], "claude-vision-model");
+    }
+
+    #[test]
     fn prepare_orchestrator_session_writes_both_files() {
         // prepare_orchestrator_session now manages its own TempDir (ARCH-RESOURCE-LIFECYCLE-1).
         let s = prepare_orchestrator_session(
@@ -218,6 +305,7 @@ mod tests {
             &role(),
             Path::new("/work/crate"),
             &TierMap::default(),
+            false,
         )
         .unwrap();
         assert!(s.rules_file.exists());

@@ -229,7 +229,8 @@ fn scope1_delegate_children_resolve_to_balanced_and_fast() {
     // `strongest` is carried for completeness. This is the gateway DelegateModels::resolve
     // contract, asserted via the JSON the orchestrator emits.
     let m = distinct_tier_map();
-    let json = delegate_models_json(&m).unwrap();
+    // vision_enabled=false here: the logic-ladder tiers only (no vision key).
+    let json = delegate_models_json(&m, false).unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["fast"], "FAST-id", "delegate fast child -> fast model");
     assert_eq!(
@@ -265,6 +266,23 @@ fn scope1_vision_band_routing_when_enabled() {
         .unwrap();
     assert!(updated.vision_enabled);
     assert_eq!(updated.tier_map.vision, vec!["VISION-id".to_string()]);
+
+    // End-to-end gating of the delegate-models JSON the orchestrator emits:
+    // - enabled + configured  -> the "vision" tier is present (Designer band reachable).
+    let enabled_json = delegate_models_json(&m, true).unwrap();
+    let ev: serde_json::Value = serde_json::from_str(&enabled_json).unwrap();
+    assert_eq!(
+        ev["vision"], "VISION-id",
+        "vision band reachable when project vision_enabled is true"
+    );
+    // - disabled -> NO "vision" key even though a model is configured (toggle gates
+    //   availability), so a delegate {tier:\"vision\"} is refused on the child side.
+    let disabled_json = delegate_models_json(&m, false).unwrap();
+    let dv: serde_json::Value = serde_json::from_str(&disabled_json).unwrap();
+    assert!(
+        dv.get("vision").is_none(),
+        "vision band unreachable when project vision_enabled is false"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════

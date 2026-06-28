@@ -696,6 +696,9 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
         skip_layer2,
         on_event,
         None,
+        // Back-compat wrapper: vision band off. The live server path calls the deepest
+        // function directly and passes the project's real vision_enabled flag.
+        false,
     )
     .await
 }
@@ -713,6 +716,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     skip_layer2: bool,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
     on_activity: Option<HeartbeatFn>,
+    vision_enabled: bool,
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
@@ -757,6 +761,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
                 role,
                 &worktree,
                 tier_map,
+                vision_enabled,
             )?;
             mcp_config_paths.push(orch.mcp_config.display().to_string());
             is_orchestrator.push(true);

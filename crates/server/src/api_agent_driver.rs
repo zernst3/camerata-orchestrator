@@ -694,15 +694,56 @@ async fn execute_tool(
         TOOL_LS => (execute_ls(inv, driver.worktree.as_deref()), None),
         TOOL_DELEGATE if driver.orchestrator => {
             // TODO(provider-agnostic-followup): wire real orchestrator delegation.
+            //
+            // MISSING SEAM (do NOT half-wire — the gate path stays honest):
+            // `camerata_gateway::delegate::run_delegated` requires an
+            // `OrchestratorConfig` { models: DelegateModels, gateway_bin, depth,
+            // max_depth }. `ApiAgentDriver` carries NONE of these — it only holds
+            // `worktree`, `orchestrator`, `rule_subset` (see the struct above), and
+            // is constructed by `build_agent_driver` strictly as a WORKER
+            // (orchestrator=false everywhere today; see dev_implement_run.rs). Two
+            // gaps must close first, both routing changes (ROUTE-1):
+            //   1) Thread the project's TierMap + located gateway_bin + depth into
+            //      `build_agent_driver` and store an `OrchestratorConfig` on the
+            //      driver, so this arm can build it without bypassing the gate.
+            //   2) `run_delegated` spawns ClaudeCliDriver (`claude -p`) children, NOT
+            //      API children. An OpenRouter orchestrator delegating would fan work
+            //      to CLI/subscription children — a provider-mixing decision, not a
+            //      mechanical wire-up. Resolve the provider/seam first.
+            // When (1)+(2) land, this arm calls `run_delegated(&cfg,
+            // driver.rule_subset.clone(), subtask, tier)` — REUSING the gated
+            // primitive (gated_write-only, jailed, non-orchestrator child gateway,
+            // depth+1). It must never reimplement the gate.
             (
-                "delegate: not yet implemented in ApiAgentDriver (TODO)".to_string(),
+                "delegate: not yet implemented in ApiAgentDriver — orchestrator-via-API \
+                 delegation requires threading an OrchestratorConfig (models/gateway_bin/depth) \
+                 into the driver and resolving the CLI-vs-API child-spawn seam first (TODO)"
+                    .to_string(),
                 None,
             )
         }
         TOOL_FAN_OUT if driver.orchestrator => {
             // TODO(provider-agnostic-followup): wire real fan_out dispatch.
+            //
+            // MISSING SEAM (same blocker as `delegate` above):
+            // `camerata_gateway::fan_out::run_fan_out` already enforces the depth
+            // guard + per-repo jail + the gate (it calls `run_delegated` per entry).
+            // The wire-up here is mechanical ONCE the driver can build an
+            // `OrchestratorConfig`:
+            //   let entries: Vec<FanOutEntry> = serde_json::from_value(inv.input["entries"].clone())?;
+            //   let results = run_fan_out(&cfg, driver.rule_subset.clone(), entries).await?;
+            //   let by_repo = assemble_by_repo(&results); // -> return to orchestrator
+            // But `cfg: OrchestratorConfig` is NOT reachable in-process today
+            // (ApiAgentDriver carries no models/gateway_bin/depth — see the
+            // `delegate` arm's note), AND `run_fan_out` spawns ClaudeCliDriver
+            // children. Wiring this now would either reimplement the gate (forbidden)
+            // or silently fan API work to CLI children (a routing decision). Leaving
+            // the stub rather than a fragile half-wire on the gate path.
             (
-                "fan_out: not yet implemented in ApiAgentDriver (TODO)".to_string(),
+                "fan_out: not yet implemented in ApiAgentDriver — dispatch via the gated \
+                 run_fan_out primitive requires an OrchestratorConfig on the driver and the \
+                 CLI-vs-API child-spawn seam to be resolved first; not half-wired (TODO)"
+                    .to_string(),
                 None,
             )
         }
