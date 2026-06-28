@@ -2364,6 +2364,8 @@ async fn set_tier_map(
         if let Some(vision) = req.vision {
             p.tier_map.vision = vision;
         }
+        // A manual tier-band edit deviates from any preset -> the project is now Custom.
+        p.mark_profile_custom();
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),

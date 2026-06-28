@@ -404,6 +404,16 @@ impl Project {
             StepKind::Escalation => self.step_models.escalation = model,
             StepKind::Clarification => self.step_models.clarification = model,
         }
+        self.mark_profile_custom();
+    }
+
+    /// Mark the project's model profile as `Custom`. Any single-entry model override
+    /// (a tier band, a helper-step model, or the L3 model) means the active set no
+    /// longer matches a named preset, so it is recorded as Custom. Only
+    /// `apply_model_profile` re-establishes a non-Custom profile (it writes the
+    /// cascade fields directly, bypassing these setters).
+    pub(crate) fn mark_profile_custom(&mut self) {
+        self.model_profile = ModelProfile::Custom;
     }
 
     /// Explicitly remove a custom rule by name (the ONLY way a custom rule leaves
@@ -446,6 +456,7 @@ impl Project {
     /// Replace the L3 review configuration for this project in place.
     pub fn set_l3_review(&mut self, config: L3ReviewConfig) {
         self.l3_review = config;
+        self.mark_profile_custom();
     }
 }
 
@@ -814,6 +825,48 @@ mod tests {
             body: body.to_string(),
             domain: "*".to_string(),
         }
+    }
+
+    fn proj_on_balanced() -> Project {
+        Project {
+            id: "p".into(),
+            name: "P".into(),
+            repos: vec![],
+            onboarded: vec![],
+            max_iterations: default_max_iterations(),
+            tier_map: crate::model_tier::TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::Balanced,
+            vision_enabled: false,
+            ruleset: ProjectRuleset {
+                selections: vec![],
+                cross_repo: vec![],
+                process: vec![],
+                custom: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn manual_step_model_override_flips_profile_to_custom() {
+        let mut p = proj_on_balanced();
+        assert_eq!(p.model_profile, ModelProfile::Balanced);
+        p.set_model_for_step(StepKind::Audit, "some-other-model".into());
+        assert_eq!(
+            p.model_profile,
+            ModelProfile::Custom,
+            "a per-step override must deviate the project off its preset"
+        );
+    }
+
+    #[test]
+    fn manual_l3_override_flips_profile_to_custom() {
+        let mut p = proj_on_balanced();
+        p.set_l3_review(L3ReviewConfig { enabled: true, model: "pinned-l3".into() });
+        assert_eq!(p.model_profile, ModelProfile::Custom);
     }
 
     #[test]
