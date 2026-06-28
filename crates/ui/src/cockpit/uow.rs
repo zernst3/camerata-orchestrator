@@ -2922,11 +2922,6 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
     // Pull-latest state.
     let mut refreshing = use_signal(|| false);
 
-    // ── Work-item modal (opened from inside the UoW) ───────────────────────────
-    let mut wi_modal_open = use_signal(|| false);
-    let modal_uows_refresh = use_signal(|| 0u32);
-    let modal_sel = use_signal(|| GovDevSel::IssueManagement);
-
     // ── 3-phase shell state ────────────────────────────────────────────────────
     // Phase tab: initialised from the lifecycle stage once known, then freely navigable.
     let mut phase = use_signal(|| PhaseTab::Intake);
@@ -3037,27 +3032,11 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 span { class: "uow-dev-repo", "{it.repo}" }
                 span { class: "uow-dev-num", "#{it.number}" }
                 span { class: "wi-state {state_cls}", "{state_label}" }
-                button {
-                    class: "btn-edit-sm",
-                    onclick: move |_| wi_modal_open.set(true),
-                    "Open work item"
-                }
                 if !it.url.is_empty() {
                     a { class: "wi-detail-link", href: "{it.url}", target: "_blank", "Open issue ↗" }
                 }
             }
             p { class: "uow-dev-title", "{it.title}" }
-
-            if wi_modal_open() {
-                WorkItemDetail {
-                    item: it.clone(),
-                    uows: Vec::new(),
-                    on_close: EventHandler::new(move |_| wi_modal_open.set(false)),
-                    uows_refresh: modal_uows_refresh,
-                    sel: modal_sel,
-                    show_uow_action: false,
-                }
-            }
 
             // ── Top bar: status · pull · phase selector · stop ────────────────
             div { class: "uow-phase-topbar",
@@ -3284,6 +3263,37 @@ pub(super) fn repo_scope_payload(
     serde_json::Value::Array(entries)
 }
 
+/// Returns `true` when the investigation-context string is empty (after trimming
+/// whitespace), so the UI can distinguish "nothing entered yet" from "content saved".
+///
+/// Extracted as a named function so the logic is testable and the call-site intent
+/// is explicit (`is_context_empty` reads clearer than `s.trim().is_empty()`).
+pub(super) fn is_context_empty(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+#[cfg(test)]
+mod context_empty_tests {
+    use super::is_context_empty;
+
+    #[test]
+    fn empty_string_is_empty() {
+        assert!(is_context_empty(""));
+    }
+
+    #[test]
+    fn whitespace_only_is_empty() {
+        assert!(is_context_empty("   "));
+        assert!(is_context_empty("\t\n"));
+    }
+
+    #[test]
+    fn non_empty_string_is_not_empty() {
+        assert!(!is_context_empty("some context"));
+        assert!(!is_context_empty("  padded  "));
+    }
+}
+
 /// Oversight mode for phase components — controls where clarification dialogs
 /// and escalations are routed (per §8).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -3409,6 +3419,12 @@ pub(super) fn IntakePhaseView(
         }
     };
 
+    // Edit/delete state for the investigation context (#fix3).
+    // `editing_context` — whether the edit textarea is open.
+    // `context_draft`   — the in-progress value while editing.
+    let mut editing_context = use_signal(|| false);
+    let mut context_draft = use_signal(String::new);
+
     rsx! {
         div { class: "uow-phase-body",
             // "Update branch" controls — one per in-scope repo (populated from Intake
@@ -3432,80 +3448,8 @@ pub(super) fn IntakePhaseView(
                 }
             }
 
-            // ── Story + comments inline ───────────────────────────────────────────
-            div { class: "uow-dev-section",
-                p { class: "uow-dev-section-h", "{item.read().title}" }
-                {
-                    let body = item.read().body.clone();
-                    if body.is_empty() {
-                        rsx! { p { class: "wi-detail-body empty", "(no description)" } }
-                    } else {
-                        rsx! {
-                            div {
-                                class: "wi-detail-body md chat-turn-text",
-                                dangerous_inner_html: crate::md::md_to_html(&body),
-                            }
-                        }
-                    }
-                }
-                div { class: "wi-comments",
-                    p { class: "wi-comments-h", "Comments" }
-                    {
-                        let comments = comments_res.read().clone();
-                        match comments {
-                            None => rsx! { p { class: "section-hint", "Loading comments…" } },
-                            Some(list) if list.is_empty() => rsx! {
-                                p { class: "wi-comments-empty section-hint", "No comments." }
-                            },
-                            Some(list) => rsx! {
-                                for (i , c) in list.into_iter().enumerate() {
-                                    div { key: "{i}", class: "wi-comment",
-                                        div { class: "wi-comment-meta",
-                                            span { class: "wi-comment-author", "{c.author}" }
-                                            if !c.created_at.is_empty() {
-                                                span { class: "wi-comment-date", "{c.created_at}" }
-                                            }
-                                        }
-                                        if c.body.is_empty() {
-                                            p { class: "wi-comment-body empty", "(empty comment)" }
-                                        } else {
-                                            div {
-                                                class: "wi-comment-body md chat-turn-text",
-                                                dangerous_inner_html: crate::md::md_to_html(&c.body),
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-
-            // ── Free-text context for investigation agent ─────────────────────────
-            div { class: "uow-dev-section",
-                p { class: "uow-dev-section-h", "Context for the investigation agent" }
-                textarea {
-                    class: "intake-context-input",
-                    rows: "4",
-                    placeholder: "Add extra context for the investigation agent — anything the story doesn't capture…",
-                    value: "{intake_context}",
-                    oninput: move |e| intake_context.set(e.value()),
-                    // Persist on blur so the free-text context survives sessions (#105).
-                    onblur: {
-                        let sid = story_id.clone();
-                        move |_| {
-                            let sid = sid.clone();
-                            let ctx = intake_context();
-                            spawn(async move {
-                                let _ = save_intake_context(&sid, &ctx).await;
-                            });
-                        }
-                    },
-                }
-            }
-
             // ── Repos in scope ────────────────────────────────────────────────────
+            // (Placed directly under the Update branch notice, which references it.)
             div { class: "uow-dev-section",
                 p { class: "uow-dev-section-h", "Repos in scope" }
                 p { class: "section-hint",
@@ -3629,6 +3573,134 @@ pub(super) fn IntakePhaseView(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // ── Story + comments inline ───────────────────────────────────────────
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "{item.read().title}" }
+                {
+                    let body = item.read().body.clone();
+                    if body.is_empty() {
+                        rsx! { p { class: "wi-detail-body empty", "(no description)" } }
+                    } else {
+                        rsx! {
+                            div {
+                                class: "wi-detail-body md chat-turn-text",
+                                dangerous_inner_html: crate::md::md_to_html(&body),
+                            }
+                        }
+                    }
+                }
+                div { class: "wi-comments",
+                    p { class: "wi-comments-h", "Comments" }
+                    {
+                        let comments = comments_res.read().clone();
+                        match comments {
+                            None => rsx! { p { class: "section-hint", "Loading comments…" } },
+                            Some(list) if list.is_empty() => rsx! {
+                                p { class: "wi-comments-empty section-hint", "No comments." }
+                            },
+                            Some(list) => rsx! {
+                                for (i , c) in list.into_iter().enumerate() {
+                                    div { key: "{i}", class: "wi-comment",
+                                        div { class: "wi-comment-meta",
+                                            span { class: "wi-comment-author", "{c.author}" }
+                                            if !c.created_at.is_empty() {
+                                                span { class: "wi-comment-date", "{c.created_at}" }
+                                            }
+                                        }
+                                        if c.body.is_empty() {
+                                            p { class: "wi-comment-body empty", "(empty comment)" }
+                                        } else {
+                                            div {
+                                                class: "wi-comment-body md chat-turn-text",
+                                                dangerous_inner_html: crate::md::md_to_html(&c.body),
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+
+            // ── Free-text context for investigation agent ─────────────────────────
+            // Supports inline edit and delete after initial save (#fix3).
+            div { class: "uow-dev-section",
+                p { class: "uow-dev-section-h", "Context for the investigation agent" }
+                if editing_context() {
+                    // Edit mode — large textarea (same class as "Add comment" box) + Save/Cancel row.
+                    textarea {
+                        class: "clarify-q",
+                        rows: "6",
+                        placeholder: "Add extra context for the investigation agent — anything the story doesn't capture…",
+                        value: "{context_draft}",
+                        oninput: move |e| context_draft.set(e.value()),
+                    }
+                    div { class: "uow-phase-finish-row",
+                        button {
+                            class: "btn-run",
+                            onclick: {
+                                let sid = story_id.clone();
+                                move |_| {
+                                    let sid = sid.clone();
+                                    let ctx = context_draft();
+                                    intake_context.set(ctx.clone());
+                                    editing_context.set(false);
+                                    spawn(async move {
+                                        let _ = save_intake_context(&sid, &ctx).await;
+                                    });
+                                }
+                            },
+                            "Save context"
+                        }
+                        button {
+                            class: "btn-secondary",
+                            onclick: move |_| editing_context.set(false),
+                            "Cancel"
+                        }
+                    }
+                } else if is_context_empty(&intake_context()) {
+                    // No context saved yet — show add button.
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| {
+                            context_draft.set(String::new());
+                            editing_context.set(true);
+                        },
+                        "Add context"
+                    }
+                } else {
+                    // Context is saved — show it with Edit and Delete controls.
+                    div { class: "wi-detail-body md chat-turn-text",
+                        dangerous_inner_html: crate::md::md_to_html(&intake_context()),
+                    }
+                    div { class: "uow-phase-finish-row",
+                        button {
+                            class: "btn-edit-sm",
+                            onclick: move |_| {
+                                context_draft.set(intake_context());
+                                editing_context.set(true);
+                            },
+                            "Edit"
+                        }
+                        button {
+                            class: "btn-edit-sm",
+                            onclick: {
+                                let sid = story_id.clone();
+                                move |_| {
+                                    let sid = sid.clone();
+                                    intake_context.set(String::new());
+                                    spawn(async move {
+                                        let _ = save_intake_context(&sid, "").await;
+                                    });
+                                }
+                            },
+                            "Delete"
                         }
                     }
                 }
