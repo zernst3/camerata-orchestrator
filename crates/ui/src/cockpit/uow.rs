@@ -2151,12 +2151,14 @@ pub(super) fn WorkItemTable(items: Vec<WorkItem>, on_open: EventHandler<String>)
         TableState::new(rows.clone(), work_item_columns(max_depth, repo_options.clone(), state_options.clone()))
     });
     // Group by all hierarchy levels (lvl0..lvl{max_depth}), producing genuinely
-    // nested subgroups. Mirrors the 2-level findings-triage pattern.
+    // nested subgroups. Mirrors the 2-level findings-triage pattern. Collapse all
+    // groups on initial mount so the architect drills in deliberately.
     use_hook(move || {
         let grouping: Vec<ColumnId> = (0..=max_depth)
             .map(|lvl| ColumnId(Box::leak(format!("lvl{lvl}").into_boxed_str())))
             .collect();
         handle.set_grouping(grouping);
+        handle.collapse_all_groups();
     });
     rsx! {
         Table {

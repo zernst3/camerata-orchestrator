@@ -2229,7 +2229,7 @@ html, body {
   border-radius: 999px; padding: 1px 8px; margin-left: 6px; letter-spacing: .02em;
 }
 .rule-modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34); display: flex; align-items: center; justify-content: center; padding: 24px; }
-.rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: #16130f; border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
+.rule-modal { width: 100%; max-width: 640px; max-height: 84vh; overflow-y: auto; background: #16130f; color: var(--ink); border-radius: var(--r-md); box-shadow: var(--shadow-pop); padding: 22px 24px; }
 .rule-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .rule-modal-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 700; color: var(--accent-ink); }
 .rule-modal-close { border: none; background: transparent; font-size: 16px; color: var(--ink-soft); cursor: pointer; padding: 2px 6px; }
@@ -2248,12 +2248,16 @@ html, body {
 /* Strip the system webview's native button chrome (beveled/gray / blue focus glow) that
    shows through on chorale's inline-styled pager buttons on initial render AND after
    page-change re-renders.  appearance + box-shadow are not set inline, so this stylesheet
-   rule wins and lets chorale's own border/bg/shadow render consistently on every render. */
+   rule wins and lets chorale's own border/bg/shadow render consistently on every render.
+   BUG D: in wry/WebKit, `:focus-visible` may match on mouse clicks (non-standard), so
+   the `:focus:not(:focus-visible)` guard never fires.  We also set `:focus` directly so
+   the native focus ring is suppressed regardless of how the webview evaluates :focus-visible. */
 .chorale-root button {
   -webkit-appearance: none; appearance: none;
   box-shadow: none;   /* kill native focus glow that persists after page-change clicks */
   outline: none;      /* belt-and-suspenders: wry sometimes retains focus outline on re-render */
 }
+.chorale-root button:focus { outline: none; box-shadow: none; }
 .chorale-root button:focus:not(:focus-visible) { outline: none; box-shadow: none; }
 .rule-modal-title-row {
   display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
