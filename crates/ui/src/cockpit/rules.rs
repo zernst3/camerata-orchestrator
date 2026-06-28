@@ -1396,6 +1396,8 @@ pub(super) fn ModelProfileEditor(project: ProjectView, refresh: Signal<u32>) -> 
                             label {
                                 key: "{value}",
                                 class: if is_selected { "profile-option profile-option-selected" } else { "profile-option" },
+                                // Hidden radio — card border highlights selection; onclick on
+                                // the label element fires the onchange because it wraps the input.
                                 input {
                                     r#type: "radio",
                                     name: "model-profile",
@@ -1407,9 +1409,11 @@ pub(super) fn ModelProfileEditor(project: ProjectView, refresh: Signal<u32>) -> 
                                         move |_| selected_profile.set(v.clone())
                                     },
                                 }
-                                span { class: "profile-option-label", "{label}" }
-                                if is_current {
-                                    span { class: "profile-option-active-badge", "active" }
+                                div { class: "profile-option-label-row",
+                                    span { class: "profile-option-label", "{label}" }
+                                    if is_current {
+                                        span { class: "profile-option-active-badge", "active" }
+                                    }
                                 }
                                 span { class: "profile-option-desc", "{desc}" }
                             }
@@ -1915,19 +1919,15 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
 
             // ── Designer (vision) band ─────────────────────────────────────────
             // Visually separated from the logic tiers. Controls the optional
-            // multimodal/Designer step: a project-wide toggle + a vision-only model select.
+            // multimodal/Designer step: a project-wide toggle + a model select.
             div { class: "tier-map-vision-section",
                 p { class: "tier-map-heading",
                     "Designer (vision)"
                     span {
                         class: "info-icon",
                         "\u{24d8}"
-                        span { class: "info-tip", "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind mockup the engineers translate into Dioxus. Only vision-capable models are listed." }
+                        span { class: "info-tip", "Optional, project-wide. Handles visual/design work: turns design requirements into an HTML/Tailwind mockup that an engineering tier then implements. Any model can be selected; multimodal models handle visual input best." }
                     }
-                }
-                p { class: "section-hint tier-map-hint",
-                    "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind \
-                     mockup the engineers translate into Dioxus. Only vision-capable models are listed."
                 }
                 // Enable/disable toggle
                 div { class: "tier-map-row vision-toggle-row",
@@ -1966,12 +1966,13 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         else { "Off \u{2014} Designer band is inactive." }
                     }
                 }
-                // Vision model select — only vision-capable models
+                // Designer model select — all models (any model can be selected;
+                // multimodal models handle visual input best).
                 div { class: "tier-map-row",
                     label { class: "tier-map-band-label tier-map-designer", "Model" }
                     if let Some(ref m) = models {
                         {
-                            let vision_groups = m.vision_grouped();
+                            let all_groups = m.grouped();
                             let cur = vision_chain().into_iter().next().unwrap_or_default();
                             rsx! {
                                 select {
@@ -1994,7 +1995,7 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                                         selected: cur.is_empty(),
                                         "— none —"
                                     }
-                                    for (group_label , opts) in vision_groups.into_iter() {
+                                    for (group_label , opts) in all_groups.into_iter() {
                                         optgroup { label: "{group_label}",
                                             for opt in opts.into_iter() {
                                                 option {
@@ -2226,8 +2227,9 @@ pub(super) fn StallThresholdsEditor(project: ProjectView) -> Element {
 
 /// L3 agentic code-review gate editor (R7): a toggle (on/off) and a model selector.
 ///
-/// When enabled, the L3 reviewer runs after each governed development stage, checking
-/// the generated diff against story intent and the project's rules. The model selector
+/// When enabled, runs after the development task is code-complete and Layers 1 and 2
+/// have passed; an agentic reviewer checks the final diff against story intent and the
+/// project rules. The model selector
 /// offers the same Anthropic tier options as the step-model and tier-map editors; an
 /// empty selection means "use the project's Balanced tier model" (the fallback defined
 /// in `Project::l3_model`).
@@ -2252,9 +2254,9 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
         div { class: "tier-map-editor l3-review-editor",
             p { class: "tier-map-heading", "L3 AI code review" }
             p { class: "section-hint tier-map-hint",
-                "When enabled, an agentic reviewer checks each governed development stage's diff \
-                 against story intent and the project rules. Off by default. The model falls back \
-                 to the Balanced tier when left blank."
+                "Runs after the development task is code-complete and Layers 1 and 2 have passed; \
+                 an agentic reviewer checks the final diff against story intent and the project rules. \
+                 Off by default."
             }
 
             div { class: "tier-map-rows",
@@ -2272,8 +2274,8 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
                         },
                     }
                     span { class: "l3-review-toggle-hint",
-                        if enabled() { "On — L3 reviewer runs after each stage." }
-                        else { "Off — human is the reviewer." }
+                        if enabled() { "On \u{2014} L3 reviewer runs after code-complete + L1/L2 pass." }
+                        else { "Off \u{2014} human is the reviewer." }
                     }
                 }
 

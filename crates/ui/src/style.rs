@@ -50,8 +50,8 @@ pub const GLOBAL_CSS: &str = r#"
   --ease: cubic-bezier(.22,.61,.36,1);
 
   /* Bombe overlay opacity — TWEAK HERE (lower = bombe more visible) */
-  --bombe-overlay-idle-alpha: 0.49;   /* idle:    0.82 was too dark; lower = bombe peeks through more */
-  --bombe-overlay-run-alpha:  0.25;   /* running: 0.48 was too dark; lower = bombe glows through clearly */
+  --bombe-overlay-idle-alpha: 0.28;   /* idle:    0.82 was too dark; lower = bombe peeks through more */
+  --bombe-overlay-run-alpha:  0.10;   /* running: 0.48 was too dark; lower = bombe glows through clearly */
 
   /* chorale table palette → mapped onto the Bletchley amber scheme so the
      grouped tables read as part of the same dark-industrial surface.
@@ -1458,7 +1458,13 @@ html, body {
 .usage-breakdown-table td { color: var(--ink-soft); padding: 3px 6px; border-bottom: 1px solid var(--line-soft); }
 .usage-breakdown-table .usage-r { text-align: right; }
 
-.cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-width: 0; min-height: 0; background: rgba(20,18,17,0.66); }
+/* overflow-x MUST be visible (not hidden/auto/clip) so that position:fixed children
+   (modals, overlays) resolve against the viewport rather than this scroll container.
+   In WebKit-based webviews (wry), setting overflow-x:hidden on a scrolling ancestor
+   makes position:fixed resolve against that ancestor — the root cause of "modal opens
+   mid-page instead of viewport-centered".  Use clip-path or scrollbar-gutter to
+   suppress unwanted horizontal scroll instead of overflow-x:hidden. */
+.cockpit-scroll { flex: 1; overflow-y: auto; overflow-x: clip; min-width: 0; min-height: 0; background: rgba(20,18,17,0.66); }
 .cockpit-notice-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 0; }
 .cockpit-notice-body { font-size: 13.5px; color: var(--ink-soft); margin: 0; max-width: 44ch; line-height: 1.5; }
 
@@ -3117,8 +3123,93 @@ html, body {
 }
 .info-icon:hover .info-tip { display: block; }
 
-/* Step-model label + info-icon wrapper (keeps them inline). */
-.step-model-label-wrap { display: flex; align-items: center; gap: 0; }
+/* Step-model label + info-icon wrapper (keeps them inline).
+   The label column is wide enough so it never overlaps the select.
+   The .step-model-row overrides .tier-map-row's 3-column grid to give the
+   label column more room and the select min-width: 0 so it shrinks gracefully. */
+.step-model-label-wrap { display: flex; align-items: center; gap: 0; min-width: 0; }
+.step-model-row {
+  /* Override the default 90px label column — step labels can be longer. */
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.step-model-row .tier-map-band-label {
+  white-space: normal;
+  word-break: break-word;
+  text-align: left;
+}
+.step-model-row .tier-map-input {
+  min-width: 0;
+  width: 100%;
+}
+
+/* ── Model-profile selector (ModelProfileEditor) ──────────────────────── */
+/* Each option is its own distinct visual block: label on one line, muted   */
+/* description beneath. Clicking the whole label row selects the radio.    */
+.profile-selector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.profile-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--paper);
+  cursor: pointer;
+  transition: border-color .15s var(--ease), background .15s var(--ease);
+}
+.profile-option:hover { border-color: var(--ink-faint); }
+.profile-option-selected {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+/* Visually hide the native radio dot while keeping it in the accessibility tree
+   and allowing label-click to trigger onchange (display:none disables events
+   in some WebKit embeddings; position:absolute + clip is the safe alternative). */
+.profile-option input[type="radio"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  pointer-events: none;
+}
+.profile-option-label-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.profile-option-label {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.profile-option-active-badge {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+.profile-option-desc {
+  font-size: 12px;
+  color: var(--ink-soft);
+  line-height: 1.45;
+}
+.profile-apply-row { margin-top: 4px; }
 
 /* ── Rules-window SETTINGS section label ─────────────────────────────── */
 .settings-label {
