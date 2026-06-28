@@ -1385,8 +1385,8 @@ fn rules_catalog_loaded(catalog: &str) -> bool {
 mod tests {
     use super::{
         chat_reply_text, render_uow_section, unified_system_prompt, ChatResp,
-        DevelopmentContextResponse, FindingContext, GateProvenanceLite, UowSnapshot, TECHNICAL_DOC,
-        UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
+        DevelopmentContextResponse, FindingContext, GateProvenanceLite, ModelsResp, UowSnapshot,
+        TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
     };
 
     // ── chat_reply_text: backend errors are surfaced, not hidden ──────────────
@@ -2185,5 +2185,60 @@ mod tests {
             layer3c_pos < layer3d_pos,
             "LAYER 3c must precede LAYER 3d ({layer3c_pos} < {layer3d_pos})"
         );
+    }
+
+    // ── ModelsResp::grouped: provider partitioning for <optgroup> ─────────────
+
+    fn models_resp_from(json: &str) -> ModelsResp {
+        serde_json::from_str(json).expect("valid ModelsResp json")
+    }
+
+    #[test]
+    fn grouped_partitions_claude_and_openrouter_in_order() {
+        let resp = models_resp_from(
+            r#"{"models":[
+                {"label":"Opus","id":"opus","provider":"claude"},
+                {"label":"DeepSeek","id":"ds","provider":"openrouter"},
+                {"label":"Sonnet","id":"sonnet","provider":"claude"}
+            ]}"#,
+        );
+        let groups = resp.grouped();
+        assert_eq!(groups.len(), 2);
+        // Claude group comes first and holds both claude entries.
+        assert_eq!(groups[0].0, "Claude (subscription)");
+        assert_eq!(groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["opus", "sonnet"]);
+        // OpenRouter group second.
+        assert_eq!(groups[1].0, "OpenRouter");
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn grouped_omits_an_empty_provider_group() {
+        let resp = models_resp_from(
+            r#"{"models":[{"label":"Opus","id":"opus","provider":"claude"}]}"#,
+        );
+        let groups = resp.grouped();
+        // Only the Claude group is present; no empty OpenRouter optgroup.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Claude (subscription)");
+    }
+
+    #[test]
+    fn grouped_falls_back_to_generic_header_when_provider_unset() {
+        // Entries with no provider must still render under a generic "Models" header
+        // rather than vanishing.
+        let resp = models_resp_from(
+            r#"{"models":[{"label":"Mystery","id":"m"}]}"#,
+        );
+        let groups = resp.grouped();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Models");
+        assert_eq!(groups[0].1.len(), 1);
+    }
+
+    #[test]
+    fn grouped_empty_models_yields_no_groups() {
+        let resp = models_resp_from(r#"{"models":[]}"#);
+        assert!(resp.grouped().is_empty());
     }
 }

@@ -3947,4 +3947,82 @@ mod tests {
         assert!(label.contains("FREE"), "free label: {label}");
         assert!(label.contains("cache"), "free+cache label: {label}");
     }
+
+    // ── AuditModelsResp::grouped / vision_grouped ─────────────────────────────
+
+    fn audit_models(json: &str) -> super::AuditModelsResp {
+        serde_json::from_str(json).expect("valid AuditModelsResp json")
+    }
+
+    #[test]
+    fn audit_grouped_partitions_by_provider_claude_first() {
+        let resp = audit_models(
+            r#"{"models":[
+                {"label":"Opus","id":"opus","provider":"claude"},
+                {"label":"DeepSeek","id":"ds","provider":"openrouter"},
+                {"label":"Sonnet","id":"sonnet","provider":"claude"}
+            ]}"#,
+        );
+        let groups = resp.grouped();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Claude (subscription)");
+        assert_eq!(
+            groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["opus", "sonnet"]
+        );
+        assert_eq!(groups[1].0, "OpenRouter");
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn audit_grouped_empty_yields_no_groups() {
+        let resp = audit_models(r#"{"models":[]}"#);
+        assert!(resp.grouped().is_empty());
+    }
+
+    #[test]
+    fn vision_grouped_includes_only_vision_capable_models() {
+        let resp = audit_models(
+            r#"{"models":[
+                {"label":"Opus","id":"opus","provider":"claude","vision":true},
+                {"label":"Haiku","id":"haiku","provider":"claude","vision":false},
+                {"label":"Pixtral","id":"pixtral","provider":"openrouter","vision":true},
+                {"label":"DeepSeek","id":"ds","provider":"openrouter","vision":false}
+            ]}"#,
+        );
+        let groups = resp.vision_grouped();
+        assert_eq!(groups.len(), 2);
+        // Only the vision-capable claude model survives.
+        assert_eq!(
+            groups[0].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["opus"]
+        );
+        // Only the vision-capable openrouter model survives.
+        assert_eq!(
+            groups[1].1.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["pixtral"]
+        );
+    }
+
+    #[test]
+    fn vision_grouped_drops_provider_group_with_no_vision_models() {
+        let resp = audit_models(
+            r#"{"models":[
+                {"label":"Opus","id":"opus","provider":"claude","vision":true},
+                {"label":"DeepSeek","id":"ds","provider":"openrouter","vision":false}
+            ]}"#,
+        );
+        let groups = resp.vision_grouped();
+        // OpenRouter has no vision models, so its group must be omitted entirely.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "Claude (subscription)");
+    }
+
+    #[test]
+    fn vision_grouped_empty_when_no_vision_models_at_all() {
+        let resp = audit_models(
+            r#"{"models":[{"label":"Haiku","id":"haiku","provider":"claude","vision":false}]}"#,
+        );
+        assert!(resp.vision_grouped().is_empty());
+    }
 }

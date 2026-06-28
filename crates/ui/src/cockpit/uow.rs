@@ -608,6 +608,41 @@ pub(super) fn stage_to_status_label(stage: UowStage) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod stage_mapping_tests {
+    use super::{stage_to_phase, stage_to_status_label, PhaseTab, UowStage};
+
+    #[test]
+    fn stage_to_phase_maps_every_stage_to_its_bucket() {
+        // Intake is its own phase.
+        assert_eq!(stage_to_phase(UowStage::Intake), PhaseTab::Intake);
+        // Both investigation-era stages collapse into Investigation.
+        assert_eq!(stage_to_phase(UowStage::Investigating), PhaseTab::Investigation);
+        assert_eq!(stage_to_phase(UowStage::DecisionsApproved), PhaseTab::Investigation);
+        // Development, Awaiting QA, and the terminal Signed Off all map to Development
+        // (the caller separately stamps `meta.done` for SignedOff).
+        assert_eq!(stage_to_phase(UowStage::Development), PhaseTab::Development);
+        assert_eq!(stage_to_phase(UowStage::AwaitingQa), PhaseTab::Development);
+        assert_eq!(stage_to_phase(UowStage::SignedOff), PhaseTab::Development);
+    }
+
+    #[test]
+    fn stage_to_phase_default_stage_is_intake() {
+        // The default UowStage must not silently land in a non-Intake phase.
+        assert_eq!(stage_to_phase(UowStage::default()), PhaseTab::Intake);
+    }
+
+    #[test]
+    fn stage_to_status_label_covers_all_stages() {
+        assert_eq!(stage_to_status_label(UowStage::Intake), "Intake");
+        assert_eq!(stage_to_status_label(UowStage::Investigating), "Investigating");
+        assert_eq!(stage_to_status_label(UowStage::DecisionsApproved), "Decisions Approved");
+        assert_eq!(stage_to_status_label(UowStage::Development), "In Development");
+        assert_eq!(stage_to_status_label(UowStage::AwaitingQa), "Awaiting QA");
+        assert_eq!(stage_to_status_label(UowStage::SignedOff), "Signed Off");
+    }
+}
+
 // ── End 3-phase cockpit types ─────────────────────────────────────────────────
 
 /// A single entry in the AI development history.
@@ -876,6 +911,36 @@ pub(super) fn ancestor_path(by_number: &std::collections::HashMap<u64, &WorkItem
 /// Format a `WorkItem` reference as a group-header label: `"#N: <title>"`.
 pub(super) fn issue_group_label(item: &WorkItem) -> String {
     format!("#{}: {}", item.number, item.title)
+}
+
+#[cfg(test)]
+mod issue_group_label_tests {
+    use super::{issue_group_label, WorkItem};
+
+    fn wi(number: u64, title: &str) -> WorkItem {
+        WorkItem {
+            id: format!("github:o/r#{number}"),
+            provider: "github".to_string(),
+            repo: "o/r".to_string(),
+            number,
+            title: title.to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            url: String::new(),
+            labels: vec![],
+            parent_number: None,
+        }
+    }
+
+    #[test]
+    fn formats_number_and_title() {
+        assert_eq!(issue_group_label(&wi(42, "Add CSV export")), "#42: Add CSV export");
+    }
+
+    #[test]
+    fn empty_title_still_renders_number_prefix() {
+        assert_eq!(issue_group_label(&wi(7, "")), "#7: ");
+    }
 }
 
 /// Build the table rows for the work-item table, computing per-depth hierarchy

@@ -4891,4 +4891,177 @@ mod tests {
         // not the single-variant stub.
         assert!(!row.corpus.as_ref().unwrap().options.is_empty());
     }
+
+    // ── AppliedRuleRow::title / scope_label / chosen_label fallbacks ───────────
+
+    fn corpus_with_options(domain: &str, options: Vec<RuleOptionView>) -> ProposedRuleView {
+        ProposedRuleView {
+            id: "RULE-1".to_string(),
+            title: "Corpus title".to_string(),
+            kind: "structured".to_string(),
+            enforcement: "structured".to_string(),
+            options,
+            default_option: None,
+            decision_question: None,
+            decision_why: None,
+            scope: "repo-local".to_string(),
+            domain: domain.to_string(),
+            repos: vec![],
+            placement: String::new(),
+            finding_count: 0,
+            recommended: false,
+            is_auto_recommended: false,
+            verification: "grounded".to_string(),
+            sources: vec![],
+        }
+    }
+
+    fn opt(id: &str, label: &str) -> RuleOptionView {
+        RuleOptionView {
+            id: id.to_string(),
+            label: label.to_string(),
+            directive: "d".to_string(),
+            why: "w".to_string(),
+        }
+    }
+
+    fn row(
+        rule_id: &str,
+        chosen: Option<&str>,
+        bucket: SelectionBucket,
+        corpus: Option<ProposedRuleView>,
+    ) -> AppliedRuleRow {
+        AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: rule_id.to_string(),
+                chosen_option: chosen.map(String::from),
+                repos: vec![],
+            },
+            bucket,
+            corpus,
+        }
+    }
+
+    #[test]
+    fn title_falls_back_to_rule_id_when_no_corpus() {
+        // No corpus join: title() must surface the raw rule id, never panic.
+        let r = row("CUSTOM-7", None, SelectionBucket::Selections, None);
+        assert_eq!(r.title(), "CUSTOM-7");
+    }
+
+    #[test]
+    fn scope_label_maps_each_bucket() {
+        assert_eq!(
+            row("R", None, SelectionBucket::Selections, None).scope_label(),
+            "repo-local"
+        );
+        assert_eq!(
+            row("R", None, SelectionBucket::CrossRepo, None).scope_label(),
+            "cross-repo"
+        );
+        assert_eq!(row("R", None, SelectionBucket::Process, None).scope_label(), "process");
+    }
+
+    #[test]
+    fn chosen_label_returns_option_label_when_found() {
+        let corpus = corpus_with_options("d", vec![opt("a", "Alpha"), opt("b", "Beta")]);
+        let r = row("R", Some("b"), SelectionBucket::Selections, Some(corpus));
+        assert_eq!(r.chosen_label(), "Beta");
+    }
+
+    #[test]
+    fn chosen_label_falls_back_to_option_id_when_not_in_corpus_options() {
+        // The chosen option id is not present among the corpus options: show the id,
+        // not the em-dash sentinel (the user did make a choice).
+        let corpus = corpus_with_options("d", vec![opt("a", "Alpha")]);
+        let r = row("R", Some("zzz"), SelectionBucket::Selections, Some(corpus));
+        assert_eq!(r.chosen_label(), "zzz");
+    }
+
+    #[test]
+    fn chosen_label_is_em_dash_when_no_choice_or_no_corpus() {
+        // No chosen option at all -> em-dash.
+        let corpus = corpus_with_options("d", vec![opt("a", "Alpha")]);
+        let r = row("R", None, SelectionBucket::Selections, Some(corpus));
+        assert_eq!(r.chosen_label(), "\u{2014}");
+        // Chosen option but no corpus to resolve it against -> em-dash.
+        let r2 = row("R", Some("a"), SelectionBucket::Selections, None);
+        assert_eq!(r2.chosen_label(), "\u{2014}");
+    }
+
+    // ── enforcement badges + tooltip ──────────────────────────────────────────
+
+    #[test]
+    fn enforcement_badges_resolve_each_modality_with_distinct_colors() {
+        let m = super::enforcement_badges();
+        assert_eq!(m.resolve("prose").unwrap().color, "gray");
+        assert_eq!(m.resolve("structured").unwrap().color, "blue");
+        assert_eq!(m.resolve("mechanical").unwrap().color, "green");
+        assert_eq!(m.resolve("architectural").unwrap().color, "yellow");
+        assert_eq!(m.resolve("mechanical").unwrap().label, "Mechanical");
+        // Unknown value resolves via the fallback badge (em-dash), never None.
+        assert_eq!(m.resolve("totally-unknown").unwrap().label, "\u{2014}");
+    }
+
+    #[test]
+    fn enforcement_tooltip_known_values_and_unknown_fallback() {
+        assert!(super::enforcement_tooltip("prose").contains("AGENTS.md"));
+        assert!(super::enforcement_tooltip("structured").contains("CONVENTIONS.md"));
+        assert!(super::enforcement_tooltip("mechanical").contains("linter"));
+        assert!(super::enforcement_tooltip("architectural").contains("custom checker"));
+        // Unknown enforcement falls back to the "not yet classified" message (no panic).
+        assert_eq!(
+            super::enforcement_tooltip("weird"),
+            "The enforcement modality for this rule is not yet classified."
+        );
+    }
+
+    // ── is_custom_rule_id / is_enforced_floor ─────────────────────────────────
+
+    #[test]
+    fn is_custom_rule_id_matches_only_custom_prefix() {
+        assert!(super::is_custom_rule_id("CUSTOM-12"));
+        assert!(!super::is_custom_rule_id("SEC-NO-HARDCODED-SECRETS-1"));
+        assert!(!super::is_custom_rule_id("custom-12")); // case-sensitive prefix
+        assert!(!super::is_custom_rule_id(""));
+    }
+
+    #[test]
+    fn is_enforced_floor_recognizes_floor_set_only() {
+        for id in super::FLOOR_RULE_IDS {
+            assert!(super::is_enforced_floor(id), "{id} must be a floor rule");
+        }
+        assert!(!super::is_enforced_floor("RUST-DIOXUS-12"));
+        assert!(!super::is_enforced_floor(""));
+    }
+
+    // ── tier_chain_str ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tier_chain_str_joins_array_of_strings() {
+        let v = serde_json::json!(["opus", "sonnet", "haiku"]);
+        assert_eq!(super::tier_chain_str(Some(&v)), "opus, sonnet, haiku");
+    }
+
+    #[test]
+    fn tier_chain_str_passes_through_single_string() {
+        let v = serde_json::json!("opus");
+        assert_eq!(super::tier_chain_str(Some(&v)), "opus");
+    }
+
+    #[test]
+    fn tier_chain_str_filters_non_string_array_members() {
+        // Numbers / nulls inside the array are skipped, not stringified.
+        let v = serde_json::json!(["opus", 5, null, "haiku"]);
+        assert_eq!(super::tier_chain_str(Some(&v)), "opus, haiku");
+    }
+
+    #[test]
+    fn tier_chain_str_none_and_other_values_yield_empty() {
+        assert_eq!(super::tier_chain_str(None), "");
+        let num = serde_json::json!(42);
+        assert_eq!(super::tier_chain_str(Some(&num)), "");
+        let obj = serde_json::json!({"k": "v"});
+        assert_eq!(super::tier_chain_str(Some(&obj)), "");
+    }
 }
