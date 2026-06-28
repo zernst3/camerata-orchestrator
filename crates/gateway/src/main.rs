@@ -44,13 +44,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-mod delegate;
+// The spawn modules now live in the gateway LIBRARY (so the in-process server path can
+// reuse the SAME gated `run_delegated`/`run_fan_out` primitives). The binary references
+// them through the crate's own lib rather than re-declaring the module files (which would
+// compile them twice under two distinct paths).
+use camerata_gateway::{delegate, fan_out};
 use delegate::OrchestratorConfig;
-
-mod fan_out;
 use fan_out::FanOutEntry;
-
-mod integration_gate;
 
 /// Env var the orchestrator points at the per-session rules JSON file.
 pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
@@ -1097,7 +1097,9 @@ mod fan_out_gate_invariant_tests {
 
 #[cfg(test)]
 mod integration_gate_module_tests {
-    use super::integration_gate::{check_integration_gate, IntegrationGateInput, IntegrationGateResult};
+    use camerata_gateway::integration_gate::{
+        check_integration_gate, IntegrationGateInput, IntegrationGateResult,
+    };
     use super::fan_out::WorkerResult;
 
     fn no_workers() -> Vec<WorkerResult> {

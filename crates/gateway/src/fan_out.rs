@@ -180,6 +180,10 @@ pub async fn run_fan_out(
             gateway_bin: config.gateway_bin.clone(),
             depth: config.depth,
             max_depth: config.max_depth,
+            // Share the SAME per-model provider factory with every worker (cheap Arc
+            // clone). Each worker then resolves ITS tier's model to that model's OWN
+            // provider via `run_delegated`. `None` keeps the legacy CLI child path.
+            child_driver_factory: config.child_driver_factory.clone(),
         };
         let rule_subset_clone = rule_subset.clone();
 
@@ -271,6 +275,7 @@ mod tests {
             gateway_bin: std::path::PathBuf::from("/bin/camerata-gateway"),
             depth,
             max_depth,
+            child_driver_factory: None,
         }
     }
 
@@ -377,6 +382,90 @@ mod tests {
     fn assemble_by_repo_empty_results_gives_empty_map() {
         let map = assemble_by_repo(&[]);
         assert!(map.is_empty());
+    }
+
+    // ── per-model coupling via injected factory ───────────────────────────────
+
+    use camerata_core::{AgentDriver, AgentOutcome, Role};
+    use std::sync::Arc;
+
+    /// Records which models + worktrees the factory was asked to build, then returns a
+    /// non-spawning child (echo) so the test stays token-free.
+    #[derive(Default)]
+    struct RecordingFactory {
+        models: Arc<std::sync::Mutex<Vec<String>>>,
+        worktrees: Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    }
+
+    struct EchoChild {
+        model: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDriver for EchoChild {
+        async fn run(&self, _role: &Role, _task: &str) -> anyhow::Result<AgentOutcome> {
+            Ok(AgentOutcome {
+                session_id: "echo".into(),
+                result: format!("ECHO model={}", self.model),
+                cost_usd: None,
+                denials: vec![],
+            })
+        }
+    }
+
+    impl crate::delegate::ChildDriverFactory for RecordingFactory {
+        fn build_child(
+            &self,
+            model: &str,
+            worktree: &std::path::Path,
+            _read_dirs: &[std::path::PathBuf],
+        ) -> std::io::Result<Box<dyn AgentDriver>> {
+            self.models.lock().unwrap().push(model.to_string());
+            self.worktrees.lock().unwrap().push(worktree.to_path_buf());
+            Ok(Box::new(EchoChild { model: model.into() }))
+        }
+    }
+
+    #[tokio::test]
+    async fn fan_out_builds_each_worker_via_factory_with_per_worker_jail() {
+        // Fan-out workers default to the "balanced" tier. With a factory injected, each
+        // worker is built via the factory for the balanced model AND jailed to its own
+        // repo partition (write-isolation), proving both per-model coupling and the jail.
+        let factory = Arc::new(RecordingFactory::default());
+        let config = OrchestratorConfig {
+            models: models(), // balanced = claude-sonnet-4-6
+            worktree_root: std::path::PathBuf::from("/work/project"),
+            gateway_bin: std::path::PathBuf::from("/bin/camerata-gateway"),
+            depth: 0,
+            max_depth: 1,
+            child_driver_factory: Some(factory.clone()),
+        };
+        let entries = vec![
+            entry("backend", "api", "add endpoint"),
+            entry("frontend", "ui", "add page"),
+        ];
+        let results = run_fan_out(&config, vec![RuleId("GOV-1".to_string())], entries)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // Both workers ran via the factory (echo marker for the balanced model).
+        assert!(results.iter().all(|r| r.output.contains("ECHO model=claude-sonnet-4-6")));
+
+        // The factory was asked for the balanced model TWICE (one per worker).
+        let asked = factory.models.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2);
+        assert!(asked.iter().all(|m| m == "claude-sonnet-4-6"));
+
+        // Each worker was jailed to its OWN repo partition (write-isolation invariant).
+        let jails: std::collections::HashSet<String> = factory
+            .worktrees
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        assert!(jails.contains("/work/project/backend"));
+        assert!(jails.contains("/work/project/frontend"));
     }
 
     // ── error display ─────────────────────────────────────────────────────────

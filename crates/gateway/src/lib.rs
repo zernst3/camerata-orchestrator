@@ -37,6 +37,18 @@ use regex::Regex;
 use std::sync::OnceLock;
 use thiserror::Error;
 
+// ─── orchestrator spawn modules (moved from the binary so the server can reuse them) ──
+//
+// `delegate` (the `ChildDriverFactory` seam + `run_delegated`), `fan_out`
+// (`run_fan_out`), and `integration_gate` were previously private modules of the
+// gateway BINARY (`main.rs`). They are declared here in the LIBRARY so the in-process
+// server path (native delegate/fan_out in `camerata-server::api_agent_driver`) can call
+// the SAME gated spawn primitives — reusing the gate rather than reimplementing it. The
+// binary now references them via `camerata_gateway::{delegate, fan_out, integration_gate}`.
+pub mod delegate;
+pub mod fan_out;
+pub mod integration_gate;
+
 // ─── error type (RUST-DOMAIN-4 / RUST-DOMAIN-6) ──────────────────────────────
 
 #[derive(Debug, Error)]

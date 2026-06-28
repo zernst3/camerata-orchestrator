@@ -143,6 +143,15 @@ pub struct ApiAgentDriver {
     /// a fresh model response even when a cached response exists. Reset to `false` after
     /// each use. Set this on a stuck-loop retry via [`Self::bust_cache_on_next_call`].
     bust_cache: bool,
+    /// Orchestrator-mode config carrying the per-model [`ServerChildDriverFactory`] (via
+    /// [`camerata_gateway::delegate::OrchestratorConfig::child_driver_factory`]). When
+    /// `Some` (set only on an orchestrator-mode driver via
+    /// [`Self::with_orchestrator_config`]) the native `delegate`/`fan_out` tool arms
+    /// dispatch through the gated `run_delegated`/`run_fan_out` primitives — each child
+    /// resolved per-model via the factory. When `None` (every worker, and any orchestrator
+    /// not yet given a config) those arms return an honest "not configured" message and
+    /// NEVER spawn — the gate is never reimplemented here.
+    orchestrator_config: Option<camerata_gateway::delegate::OrchestratorConfig>,
 }
 
 impl ApiAgentDriver {
@@ -176,7 +185,23 @@ impl ApiAgentDriver {
             rule_subset: Vec::new(),
             session_id,
             bust_cache: false,
+            orchestrator_config: None,
         }
+    }
+
+    /// Attach an orchestrator-mode [`camerata_gateway::delegate::OrchestratorConfig`] (which
+    /// carries the per-model [`ServerChildDriverFactory`]) so the native `delegate`/`fan_out`
+    /// arms dispatch through the gated `run_delegated`/`run_fan_out` primitives. Builder form.
+    ///
+    /// Only meaningful together with `as_orchestrator(true)`. Setting it does NOT loosen the
+    /// gate: children are still built by the factory as gated_write-only, jailed, depth-1
+    /// workers; this driver only ROUTES to the existing gated primitive, never reimplements it.
+    pub fn with_orchestrator_config(
+        mut self,
+        config: camerata_gateway::delegate::OrchestratorConfig,
+    ) -> Self {
+        self.orchestrator_config = Some(config);
+        self
     }
 
     /// Request that the next provider call clears the OpenRouter response cache.
@@ -678,8 +703,10 @@ fn normalize_anthropic_tool_use(block: &Value) -> Option<ToolInvocation> {
 ///
 /// - For `gated_write`: evaluate via the gateway library; if allowed, write the file.
 /// - For read tools (`Read`, `Glob`, `Grep`, `LS`): execute directly on the filesystem.
-/// - For `delegate` / `fan_out`: only reachable when `orchestrator = true`; stubs
-///   currently — `TODO(provider-agnostic-followup)`: wire orchestrator delegation.
+/// - For `delegate` / `fan_out`: only reachable when `orchestrator = true`; dispatched
+///   through the gated `run_delegated`/`run_fan_out` primitives (per-model child provider
+///   coupling) when an `OrchestratorConfig` (with factory) is attached, else an honest
+///   "not configured" message and NO spawn.
 /// - For anything else (including `shell`, `Task`, `Write`, `Edit`, `Bash`): deny.
 async fn execute_tool(
     driver: &ApiAgentDriver,
@@ -693,59 +720,19 @@ async fn execute_tool(
         TOOL_GREP => (execute_grep(inv, driver.worktree.as_deref()), None),
         TOOL_LS => (execute_ls(inv, driver.worktree.as_deref()), None),
         TOOL_DELEGATE if driver.orchestrator => {
-            // TODO(provider-agnostic-followup): wire real orchestrator delegation.
-            //
-            // MISSING SEAM (do NOT half-wire — the gate path stays honest):
-            // `camerata_gateway::delegate::run_delegated` requires an
-            // `OrchestratorConfig` { models: DelegateModels, gateway_bin, depth,
-            // max_depth }. `ApiAgentDriver` carries NONE of these — it only holds
-            // `worktree`, `orchestrator`, `rule_subset` (see the struct above), and
-            // is constructed by `build_agent_driver` strictly as a WORKER
-            // (orchestrator=false everywhere today; see dev_implement_run.rs). Two
-            // gaps must close first, both routing changes (ROUTE-1):
-            //   1) Thread the project's TierMap + located gateway_bin + depth into
-            //      `build_agent_driver` and store an `OrchestratorConfig` on the
-            //      driver, so this arm can build it without bypassing the gate.
-            //   2) `run_delegated` spawns ClaudeCliDriver (`claude -p`) children, NOT
-            //      API children. An OpenRouter orchestrator delegating would fan work
-            //      to CLI/subscription children — a provider-mixing decision, not a
-            //      mechanical wire-up. Resolve the provider/seam first.
-            // When (1)+(2) land, this arm calls `run_delegated(&cfg,
-            // driver.rule_subset.clone(), subtask, tier)` — REUSING the gated
-            // primitive (gated_write-only, jailed, non-orchestrator child gateway,
-            // depth+1). It must never reimplement the gate.
-            (
-                "delegate: not yet implemented in ApiAgentDriver — orchestrator-via-API \
-                 delegation requires threading an OrchestratorConfig (models/gateway_bin/depth) \
-                 into the driver and resolving the CLI-vs-API child-spawn seam first (TODO)"
-                    .to_string(),
-                None,
-            )
+            // Native orchestrator delegation. The gate is NOT reimplemented here: we
+            // dispatch through the SAME gated `run_delegated` primitive the CLI
+            // orchestrator uses. The `OrchestratorConfig` carries a per-model
+            // `ServerChildDriverFactory`, so the child resolves to ITS OWN model's
+            // provider (Claude CLI / Anthropic API / OpenRouter) — gated_write-only,
+            // worktree-jailed, depth-1/non-orchestrator by the factory's contract.
+            execute_delegate(driver, inv).await
         }
         TOOL_FAN_OUT if driver.orchestrator => {
-            // TODO(provider-agnostic-followup): wire real fan_out dispatch.
-            //
-            // MISSING SEAM (same blocker as `delegate` above):
-            // `camerata_gateway::fan_out::run_fan_out` already enforces the depth
-            // guard + per-repo jail + the gate (it calls `run_delegated` per entry).
-            // The wire-up here is mechanical ONCE the driver can build an
-            // `OrchestratorConfig`:
-            //   let entries: Vec<FanOutEntry> = serde_json::from_value(inv.input["entries"].clone())?;
-            //   let results = run_fan_out(&cfg, driver.rule_subset.clone(), entries).await?;
-            //   let by_repo = assemble_by_repo(&results); // -> return to orchestrator
-            // But `cfg: OrchestratorConfig` is NOT reachable in-process today
-            // (ApiAgentDriver carries no models/gateway_bin/depth — see the
-            // `delegate` arm's note), AND `run_fan_out` spawns ClaudeCliDriver
-            // children. Wiring this now would either reimplement the gate (forbidden)
-            // or silently fan API work to CLI children (a routing decision). Leaving
-            // the stub rather than a fragile half-wire on the gate path.
-            (
-                "fan_out: not yet implemented in ApiAgentDriver — dispatch via the gated \
-                 run_fan_out primitive requires an OrchestratorConfig on the driver and the \
-                 CLI-vs-API child-spawn seam to be resolved first; not half-wired (TODO)"
-                    .to_string(),
-                None,
-            )
+            // Native fan-out dispatch through the gated `run_fan_out` primitive, which
+            // already enforces the depth guard + per-repo jail + (via `run_delegated`)
+            // the gate. Each worker is built per-model via the injected factory.
+            execute_fan_out(driver, inv).await
         }
         other => {
             // Any unlisted tool (including shell, Task, Write, Edit, Bash,
@@ -756,6 +743,94 @@ async fn execute_tool(
             );
             (msg.clone(), Some(msg))
         }
+    }
+}
+
+/// Native `delegate`: dispatch one subtask through the gated `run_delegated` primitive.
+///
+/// Reuses the gateway's gated child-spawn (gated_write-only, jailed, depth-1,
+/// non-orchestrator), with the child's provider resolved per-model by the factory carried
+/// on the attached [`camerata_gateway::delegate::OrchestratorConfig`]. The gate is never
+/// reimplemented here. When no config is attached (no factory), returns honestly and does
+/// NOT spawn.
+async fn execute_delegate(
+    driver: &ApiAgentDriver,
+    inv: &ToolInvocation,
+) -> (String, Option<String>) {
+    let Some(config) = driver.orchestrator_config.as_ref() else {
+        return (
+            "delegate: this orchestrator has no OrchestratorConfig attached (no child \
+             driver factory), so delegation is unavailable; do the work yourself."
+                .to_string(),
+            None,
+        );
+    };
+    let subtask = inv.input["subtask"]
+        .as_str()
+        .or_else(|| inv.input["task"].as_str())
+        .unwrap_or("");
+    let tier = inv.input["tier"].as_str().unwrap_or("balanced");
+    if subtask.trim().is_empty() {
+        let msg = "DENIED: delegate requires a non-empty `subtask` string".to_string();
+        return (msg.clone(), Some(msg));
+    }
+    let output = camerata_gateway::delegate::run_delegated(
+        config,
+        driver.rule_subset.clone(),
+        subtask,
+        tier,
+    )
+    .await
+    .unwrap_or_else(|e| e.to_string());
+    (output, None)
+}
+
+/// Native `fan_out`: dispatch a multi-repo work set through the gated `run_fan_out`
+/// primitive (depth guard + per-repo jail + per-entry gate via `run_delegated`). Each
+/// worker's provider is resolved per-model by the factory on the attached config. Returns
+/// a per-repo assembled summary. No-spawn + honest message when no config is attached.
+async fn execute_fan_out(
+    driver: &ApiAgentDriver,
+    inv: &ToolInvocation,
+) -> (String, Option<String>) {
+    let Some(config) = driver.orchestrator_config.as_ref() else {
+        return (
+            "fan_out: this orchestrator has no OrchestratorConfig attached (no child \
+             driver factory), so fan-out is unavailable; do the work yourself."
+                .to_string(),
+            None,
+        );
+    };
+    // Accept `entries` (canonical) or `tasks` (schema alias).
+    let raw = if !inv.input["entries"].is_null() {
+        inv.input["entries"].clone()
+    } else {
+        inv.input["tasks"].clone()
+    };
+    let entries: Vec<camerata_gateway::fan_out::FanOutEntry> =
+        match serde_json::from_value(raw) {
+            Ok(e) => e,
+            Err(e) => {
+                let msg = format!(
+                    "DENIED: fan_out `entries` must be an array of {{repo, domain, subtask}}: {e}"
+                );
+                return (msg.clone(), Some(msg));
+            }
+        };
+    match camerata_gateway::fan_out::run_fan_out(config, driver.rule_subset.clone(), entries).await {
+        Ok(results) => {
+            let by_repo = camerata_gateway::fan_out::assemble_by_repo(&results);
+            let mut summary = format!("fan_out complete: {} worker(s).\n", results.len());
+            for (repo, r) in &by_repo {
+                let marker = if r.incomplete { "INCOMPLETE" } else { "OK" };
+                summary.push_str(&format!(
+                    "\n── repo={repo} domain={} [{marker}] ──\n{}\n",
+                    r.domain, r.output
+                ));
+            }
+            (summary, None)
+        }
+        Err(e) => (e.to_string(), None),
     }
 }
 
@@ -1291,6 +1366,140 @@ pub fn build_agent_driver(
             }
             Ok(Arc::new(cli_driver))
         }
+    }
+}
+
+// ─── per-model child driver factory (provider coupling) ────────────────────────
+
+/// Server-side [`camerata_gateway::delegate::ChildDriverFactory`] backed by
+/// [`build_agent_driver`].
+///
+/// This is the seam that fixes per-model provider coupling for delegated / fanned-out
+/// children: `run_delegated`/`run_fan_out` (in the gateway lib) ask this factory to build
+/// each child for ITS tier's model, and the factory routes the model to its OWN provider
+/// (Claude CLI, Anthropic API, or OpenRouter) via [`build_agent_driver`] — the child does
+/// NOT inherit the parent orchestrator's provider.
+///
+/// # Gate contract (held for BOTH driver kinds)
+///
+/// Every child this returns is built as a WORKER (`orchestrator = false`) jailed to the
+/// child `worktree`:
+/// - **CLI child** (`claude` provider): [`build_agent_driver`] returns a `ClaudeCliDriver`
+///   whose `--allowedTools` is `gated_write` + read-only tools (NO `delegate`/`fan_out`,
+///   since `orchestrator = false`) and whose `--disallowedTools` is
+///   `Task`/`Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`. Its session mcp-config is the
+///   ordinary [`camerata_agent::prepare_session`] config (NO `CAMERATA_DELEGATE_ENABLED`),
+///   so its gateway never registers `delegate`/`fan_out` and its writes are jailed to the
+///   worktree.
+/// - **API child** (`openrouter` provider): [`build_agent_driver`] returns an
+///   [`ApiAgentDriver`] with `orchestrator = false`, so [`build_tool_schemas`] omits
+///   `delegate`/`fan_out`, the only mutation tool is `gated_write` (evaluated through the
+///   same `evaluate_call` gate), and the worktree jail is enforced in
+///   [`execute_gated_write`] + [`assert_in_worktree`].
+///
+/// Either way the child is **gated_write-only, worktree-jailed, depth-1 / non-orchestrator**
+/// — identical to the legacy hard-coded CLI child, just on the correct provider.
+pub struct ServerChildDriverFactory {
+    registry: crate::model_registry::ModelRegistry,
+    creds: Arc<dyn crate::credentials::CredentialStore>,
+    limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    /// Located `camerata-gateway` binary, used to wire each CLI child's own gated gateway.
+    gateway_bin: PathBuf,
+    /// The orchestrator's active rule subset; every child is born under the SAME subset
+    /// (so the child's session rules + the gate evaluation match the gateway's `child_role`).
+    rule_subset: Vec<RuleId>,
+    /// Stable per-run session id (OpenRouter sticky routing / KV-cache warmth). Optional.
+    run_session_id: Option<String>,
+}
+
+impl ServerChildDriverFactory {
+    /// Build the factory with the provider-dispatch context the children need.
+    pub fn new(
+        registry: crate::model_registry::ModelRegistry,
+        creds: Arc<dyn crate::credentials::CredentialStore>,
+        limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+        gateway_bin: PathBuf,
+        rule_subset: Vec<RuleId>,
+        run_session_id: Option<String>,
+    ) -> Self {
+        Self {
+            registry,
+            creds,
+            limiter,
+            gateway_bin,
+            rule_subset,
+            run_session_id,
+        }
+    }
+}
+
+/// A child driver that keeps its gated CLI session alive.
+///
+/// [`build_agent_driver`]'s CLI path needs a per-child gated session (rules + mcp-config)
+/// on disk; that session lives in a [`tempfile::TempDir`] that must outlive the driver. We
+/// wrap the inner `Arc<dyn AgentDriver>` together with the [`camerata_agent::SessionSpawn`]
+/// so the `_dir` TempDir is dropped (and cleaned up) only when this child driver is. For
+/// API children the spawn is still held (harmless) so the one wrapper type covers both.
+struct SessionBoundChildDriver {
+    inner: Arc<dyn AgentDriver>,
+    // Held purely for its RAII `_dir`: dropping this removes the child's session dir.
+    _session: camerata_agent::SessionSpawn,
+}
+
+#[async_trait]
+impl AgentDriver for SessionBoundChildDriver {
+    async fn run(&self, role: &Role, task: &str) -> anyhow::Result<AgentOutcome> {
+        self.inner.run(role, task).await
+    }
+}
+
+impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory {
+    fn build_child(
+        &self,
+        model: &str,
+        worktree: &Path,
+        read_dirs: &[PathBuf],
+    ) -> std::io::Result<Box<dyn AgentDriver>> {
+        // The child runs under the orchestrator's own rule subset, jailed to `worktree`.
+        // The name is provenance only; the tool surface is decided by orchestrator=false.
+        let child_role = Role {
+            name: "delegate-child".to_string(),
+            rule_subset: self.rule_subset.clone(),
+            allowed_paths: vec![worktree.display().to_string()],
+        };
+
+        // Build the gated, NON-orchestrator CLI session (rules + mcp-config WITHOUT the
+        // delegate env). Even when the model resolves to the API provider we still create
+        // this so the wrapper holds a uniform RAII handle; `build_agent_driver`'s API path
+        // ignores the mcp-config path. `prepare_session` jails writes to `worktree`.
+        let spawn = camerata_agent::prepare_session(
+            &self.gateway_bin,
+            &child_role,
+            Some(worktree),
+            read_dirs,
+        )
+        .map_err(|e| std::io::Error::other(format!("prepare child session: {e}")))?;
+        let mcp_config_path = spawn.mcp_config.display().to_string();
+
+        // Route the model to its OWN provider; build a WORKER (orchestrator = false),
+        // jailed to `worktree`, under the orchestrator's rule subset.
+        let inner = build_agent_driver(
+            model,
+            &self.registry,
+            self.creds.as_ref(),
+            &mcp_config_path,
+            self.rule_subset.clone(),
+            Some(worktree.to_path_buf()),
+            false, // depth-1 worker: NEVER an orchestrator
+            self.limiter.clone(),
+            self.run_session_id.as_deref(),
+        )
+        .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
+
+        Ok(Box::new(SessionBoundChildDriver {
+            inner,
+            _session: spawn,
+        }))
     }
 }
 
@@ -2185,5 +2394,223 @@ mod tests {
         // A response with a discount set (simulates what call_api_inner would produce).
         let resp_cached = LlmResponse { or_cache_discount: Some(0.75), ..resp.clone() };
         assert_eq!(resp_cached.or_cache_discount, Some(0.75));
+    }
+
+    // ── ServerChildDriverFactory: per-model provider coupling + gate ──────────
+
+    use camerata_gateway::delegate::ChildDriverFactory as _;
+
+    fn factory_with(
+        registry: crate::model_registry::ModelRegistry,
+        creds: Arc<dyn crate::credentials::CredentialStore>,
+    ) -> ServerChildDriverFactory {
+        ServerChildDriverFactory::new(
+            registry,
+            creds,
+            Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
+            PathBuf::from("/tmp/fake-camerata-gateway"), // path only; binary need not exist
+            vec![gov1_rule()],
+            None,
+        )
+    }
+
+    /// A Claude-provider child model builds successfully through the factory WITHOUT any
+    /// OpenRouter credential — proving the factory routed it to the CLI provider (the CLI
+    /// path never reads creds). The build is the gated, non-orchestrator worker path.
+    #[test]
+    fn factory_routes_claude_model_to_cli_child_no_creds_needed() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let factory = factory_with(registry, creds);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        assert!(
+            child.is_ok(),
+            "claude model must build a CLI child without an OpenRouter key: {:?}",
+            child.err().map(|e| e.to_string())
+        );
+    }
+
+    /// An OpenRouter-provider child model builds successfully through the factory WHEN the
+    /// OpenRouter key is present — proving the factory routed it to the API (ApiAgentDriver)
+    /// provider, NOT the parent's CLI provider. Gated worker (orchestrator=false).
+    #[test]
+    fn factory_routes_openrouter_model_to_api_child_with_key() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
+        let mem = crate::credentials::MemoryCredentialStore::new();
+        mem.set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test").unwrap();
+        let creds: Arc<dyn crate::credentials::CredentialStore> = Arc::new(mem);
+        let factory = factory_with(registry, creds);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let child = factory.build_child("openrouter/mistral-7b", tmp.path(), &[]);
+        assert!(
+            child.is_ok(),
+            "openrouter model with key must build an API child: {:?}",
+            child.err().map(|e| e.to_string())
+        );
+    }
+
+    /// An OpenRouter child model with NO key errors at build time (fail-closed). The
+    /// factory never silently falls back to the parent's provider.
+    #[test]
+    fn factory_openrouter_model_errors_without_key() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        registry.seed_openrouter_entries(vec![openrouter_test_entry("openrouter/mistral-7b")]);
+        let creds: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let factory = factory_with(registry, creds);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let child = factory.build_child("openrouter/mistral-7b", tmp.path(), &[]);
+        assert!(child.is_err(), "openrouter child without key must fail closed");
+        assert!(
+            child.err().unwrap().to_string().contains("OPENROUTER_API_KEY"),
+            "error must mention the missing OpenRouter key"
+        );
+    }
+
+    /// GATE INVARIANT (API child kind): the factory builds workers with
+    /// `orchestrator = false`, and a non-orchestrator API driver's tool schemas are
+    /// gated_write-only — NO delegate/fan_out, NO escape tools. (The CLI child kind's
+    /// equivalent gate is asserted by the gateway/agent allowed/disallowed-tools tests.)
+    #[test]
+    fn factory_built_api_child_is_gated_write_only_non_orchestrator() {
+        // A non-orchestrator API driver (what the factory builds for an OpenRouter model)
+        // exposes gated_write + reads only; delegate/fan_out and all escape tools absent.
+        let schemas = build_tool_schemas(false);
+        let names: Vec<&str> = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"gated_write"));
+        for forbidden in [
+            "delegate", "fan_out", "Task", "Bash", "Write", "Edit", "MultiEdit",
+            "NotebookEdit", "shell",
+        ] {
+            assert!(
+                !names.contains(&forbidden),
+                "factory-built API child must NOT expose `{forbidden}`"
+            );
+        }
+    }
+
+    // ── Native delegate/fan_out wiring on ApiAgentDriver ──────────────────────
+
+    /// Build an OrchestratorConfig whose factory is a server factory (claude-only registry,
+    /// no creds) so the test exercises the wiring without spawning `claude` (the CLI child's
+    /// run is what would spawn; we assert the routing + no-config behavior instead).
+    fn orchestrator_config_with_server_factory() -> camerata_gateway::delegate::OrchestratorConfig {
+        let registry = crate::model_registry::ModelRegistry::new();
+        let creds: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let factory = Arc::new(factory_with(registry, creds));
+        camerata_gateway::delegate::OrchestratorConfig {
+            models: camerata_gateway::delegate::DelegateModels {
+                fast: "claude-haiku-4-5-20251001".to_string(),
+                balanced: "claude-sonnet-4-6".to_string(),
+                strongest: "claude-opus-4-8".to_string(),
+                vision: String::new(),
+            },
+            worktree_root: PathBuf::from("/tmp/wt"),
+            gateway_bin: PathBuf::from("/tmp/fake-camerata-gateway"),
+            depth: 0,
+            max_depth: 1,
+            child_driver_factory: Some(factory),
+        }
+    }
+
+    /// Without an attached OrchestratorConfig, an orchestrator-mode API driver's `delegate`
+    /// arm returns an honest "no config" message and does NOT spawn.
+    #[tokio::test]
+    async fn native_delegate_without_config_is_honest_no_spawn() {
+        let role = test_role();
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone())
+            .as_orchestrator(true); // orchestrator, but no config attached
+        let inv = ToolInvocation {
+            id: "d".into(),
+            name: "delegate".into(),
+            input: serde_json::json!({"subtask": "do x", "tier": "fast"}),
+        };
+        let (result, denial) = execute_tool(&driver, &role, &inv).await;
+        assert!(denial.is_none());
+        assert!(
+            result.contains("no OrchestratorConfig attached"),
+            "got: {result}"
+        );
+    }
+
+    /// The `delegate` arm refuses cleanly (no spawn) when the depth guard is tripped, even
+    /// with a config attached — proving the wiring routes through the gated primitive's
+    /// guards rather than reimplementing them.
+    #[tokio::test]
+    async fn native_delegate_routes_through_gated_primitive_depth_guard() {
+        let role = test_role();
+        let mut cfg = orchestrator_config_with_server_factory();
+        cfg.depth = 1; // == max_depth: depth guard must trip in run_delegated
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone())
+            .as_orchestrator(true)
+            .with_orchestrator_config(cfg);
+        let inv = ToolInvocation {
+            id: "d".into(),
+            name: "delegate".into(),
+            input: serde_json::json!({"subtask": "do x", "tier": "fast"}),
+        };
+        let (result, _denial) = execute_tool(&driver, &role, &inv).await;
+        assert!(
+            result.contains("depth guard tripped"),
+            "must route through run_delegated's depth guard: {result}"
+        );
+    }
+
+    /// The `fan_out` arm validates entries through the gated `run_fan_out` primitive:
+    /// a duplicate-repo set is refused (partition-collision invariant) with no spawn.
+    #[tokio::test]
+    async fn native_fan_out_routes_through_gated_primitive_duplicate_repo() {
+        let role = test_role();
+        let cfg = orchestrator_config_with_server_factory();
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone())
+            .as_orchestrator(true)
+            .with_orchestrator_config(cfg);
+        let inv = ToolInvocation {
+            id: "fo".into(),
+            name: "fan_out".into(),
+            input: serde_json::json!({"entries": [
+                {"repo": "backend", "domain": "api", "subtask": "a"},
+                {"repo": "backend", "domain": "api2", "subtask": "b"}
+            ]}),
+        };
+        let (result, _denial) = execute_tool(&driver, &role, &inv).await;
+        assert!(
+            result.contains("partition collision"),
+            "must route through run_fan_out's duplicate-repo guard: {result}"
+        );
+    }
+
+    /// A non-orchestrator driver still hard-denies delegate/fan_out even if a config were
+    /// present (the `if driver.orchestrator` arm guard), preserving depth-1.
+    #[tokio::test]
+    async fn worker_with_config_still_denies_delegate() {
+        let role = test_role();
+        let cfg = orchestrator_config_with_server_factory();
+        let driver = ApiAgentDriver::new(Arc::new(StubCompleter("x".into())), "stub")
+            .with_rule_subset(role.rule_subset.clone())
+            // orchestrator = false (worker) even though a config is attached
+            .with_orchestrator_config(cfg);
+        assert!(!driver.orchestrator);
+        let inv = ToolInvocation {
+            id: "d".into(),
+            name: "delegate".into(),
+            input: serde_json::json!({"subtask": "x", "tier": "fast"}),
+        };
+        let (result, denial) = execute_tool(&driver, &role, &inv).await;
+        assert!(denial.is_some(), "worker delegate must be denied");
+        assert!(result.contains("DENIED"), "got: {result}");
     }
 }

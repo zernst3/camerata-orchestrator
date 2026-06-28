@@ -28,7 +28,8 @@
 //! that re-enabled orchestrator mode on a child cannot recurse past the cap.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use camerata_agent::{
     ClaudeCliDriver, GATED_WRITE_TOOL, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV,
@@ -58,6 +59,52 @@ pub const DELEGATE_MAX_DEPTH_ENV: &str = "CAMERATA_DELEGATE_MAX_DEPTH";
 
 /// The default maximum delegation depth when [`DELEGATE_MAX_DEPTH_ENV`] is unset.
 pub const DEFAULT_MAX_DEPTH: u32 = 1;
+
+// ─── per-model child driver seam (provider coupling) ─────────────────────────
+
+/// Factory that produces a fully-GATED, NON-orchestrator child [`AgentDriver`] for a
+/// given model + worktree, resolving the model's OWN provider (Claude CLI, Anthropic
+/// API, or OpenRouter) rather than inheriting the parent's.
+///
+/// # Why this seam exists
+///
+/// `run_delegated`/`run_fan_out` historically hard-coded a [`ClaudeCliDriver`] pinned to
+/// the tier's model. A tier set to an OpenRouter model then spawned `claude -p --model
+/// <openrouter-id>`, which the Claude CLI cannot run. The provider must be resolved
+/// PER CHILD MODEL. The provider-routing machinery (`build_agent_driver` + the model
+/// registry + keychain creds) lives in `camerata-server`, and the gateway crate must not
+/// depend on the server. So the server injects an implementation of this trait into
+/// [`OrchestratorConfig::child_driver_factory`]; the gateway only calls it.
+///
+/// # Gate contract (MUST hold for every driver this returns)
+///
+/// The returned driver MUST be:
+/// - **`gated_write`-only** — `Task`/`Bash`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`
+///   disallowed; the sole mutation path is the governed write tool;
+/// - **worktree-jailed** to `worktree` (writes outside are denied);
+/// - **depth-1 / NON-orchestrator** — no `CAMERATA_DELEGATE_ENABLED`, no `delegate`/
+///   `fan_out` tools; the child cannot re-delegate.
+///
+/// The gateway frames the subtask + records gate decisions IDENTICALLY regardless of
+/// which provider the factory returns; the factory's ONLY job is provider coupling +
+/// constructing the child under the gate contract above.
+pub trait ChildDriverFactory: Send + Sync {
+    /// Build a gated, non-orchestrator child driver for `model`, jailed to `worktree`,
+    /// with `read_dirs` as the (read-only) multi-repo read scope.
+    ///
+    /// The `rule_subset` the child enforces is supplied by the gateway at run time
+    /// (it is the orchestrator's own active subset) via the [`child_role`] the gateway
+    /// passes to `driver.run`; an API-backed implementation that needs the subset at
+    /// construction time should accept it through its own constructor before being
+    /// boxed here. (The CLI child reads its subset from the per-session rules file the
+    /// gateway already writes, so the gateway-built child path needs nothing extra.)
+    fn build_child(
+        &self,
+        model: &str,
+        worktree: &Path,
+        read_dirs: &[PathBuf],
+    ) -> std::io::Result<Box<dyn AgentDriver>>;
+}
 
 /// The per-tier model ids the orchestrator delegates to. Only `fast` and
 /// `balanced` are valid `tier` arguments to the tool; `strongest` is the
@@ -115,7 +162,10 @@ impl DelegateModels {
 
 /// The orchestrator-mode configuration the gateway reads from the environment.
 /// `None` (the default) means the `delegate` tool is disabled.
-#[derive(Debug, Clone)]
+///
+/// `Clone` is derived; the `child_driver_factory` is an `Arc`, so cloning a config
+/// (e.g. per fan-out worker) shares the SAME factory cheaply.
+#[derive(Clone)]
 pub struct OrchestratorConfig {
     /// Per-tier model ids.
     pub models: DelegateModels,
@@ -127,6 +177,30 @@ pub struct OrchestratorConfig {
     pub depth: u32,
     /// Maximum delegation depth.
     pub max_depth: u32,
+    /// Optional per-model provider seam. When `Some`, `run_delegated`/`run_fan_out` build
+    /// each child via this factory so the child runs on ITS OWN model's provider
+    /// (Claude CLI, Anthropic API, or OpenRouter) — NOT the parent's. When `None` (the
+    /// default, and what [`OrchestratorConfig::from_env`] always produces in the gateway
+    /// BINARY process, which cannot reach the server's provider machinery) the legacy
+    /// hard-coded [`ClaudeCliDriver`] path is used — exact back-compat for the CLI
+    /// orchestrator. Either way the child is gated_write-only, jailed, and depth-1.
+    pub child_driver_factory: Option<Arc<dyn ChildDriverFactory>>,
+}
+
+impl std::fmt::Debug for OrchestratorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrchestratorConfig")
+            .field("models", &self.models)
+            .field("worktree_root", &self.worktree_root)
+            .field("gateway_bin", &self.gateway_bin)
+            .field("depth", &self.depth)
+            .field("max_depth", &self.max_depth)
+            .field(
+                "child_driver_factory",
+                &self.child_driver_factory.as_ref().map(|_| "<factory>"),
+            )
+            .finish()
+    }
 }
 
 impl OrchestratorConfig {
@@ -164,6 +238,13 @@ impl OrchestratorConfig {
             gateway_bin,
             depth,
             max_depth,
+            // The gateway BINARY process (which is the only caller of `from_env`) has no
+            // access to the server's provider machinery (`build_agent_driver` + model
+            // registry + keychain), so it cannot construct a cross-provider factory. It
+            // keeps the legacy hard-coded ClaudeCliDriver child path (back-compat). The
+            // factory is injected only by the in-process server path (native delegate /
+            // fan_out), which builds the `OrchestratorConfig` directly.
+            child_driver_factory: None,
         })
     }
 
@@ -318,11 +399,37 @@ pub async fn run_delegated(
     }
 
     // 4) Build a GATED child driver: NOT an orchestrator (no delegate tool),
-    //    pinned to the tier model, jailed to the shared worktree.
-    let driver = ClaudeCliDriver::new(mcp_config.display().to_string())
-        .with_worktree(&config.worktree_root)
-        .with_model(&model)
-        .as_orchestrator(false);
+    //    jailed to the shared worktree, running on the CHILD MODEL's OWN provider.
+    //
+    //    Provider coupling (the bug this fixes): when a `child_driver_factory` is
+    //    injected (the in-process server path), the child is built through it so the
+    //    model routes to its OWN provider — Claude CLI, Anthropic API, or OpenRouter —
+    //    never inheriting the parent's. The factory's contract REQUIRES the returned
+    //    driver to be gated_write-only, worktree-jailed, and depth-1/non-orchestrator,
+    //    so the gate posture is identical to the legacy CLI child.
+    //
+    //    When no factory is injected (`None`, always the case in the gateway BINARY
+    //    process that has no provider machinery) we keep TODAY's exact ClaudeCliDriver
+    //    behavior — same construction, same gate — for full back-compat.
+    let driver: Box<dyn AgentDriver> = match &config.child_driver_factory {
+        Some(factory) => {
+            match factory.build_child(&model, &config.worktree_root, &[]) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Ok(format!(
+                        "[delegate tier={tier} model={model}] child driver build FAILED: {e}\n\
+                         INCOMPLETE: could not construct the per-model child driver; do this yourself."
+                    ));
+                }
+            }
+        }
+        None => Box::new(
+            ClaudeCliDriver::new(mcp_config.display().to_string())
+                .with_worktree(&config.worktree_root)
+                .with_model(&model)
+                .as_orchestrator(false),
+        ),
+    };
 
     let role = child_role(rule_subset, &config.worktree_root);
 
@@ -391,7 +498,145 @@ mod tests {
             gateway_bin: PathBuf::from("/bin/camerata-gateway"),
             depth,
             max_depth,
+            child_driver_factory: None,
         }
+    }
+
+    // ── ChildDriverFactory test double + per-model coupling tests ──────────────
+
+    /// A `ChildDriverFactory` test double that RECORDS the model id it was asked to
+    /// build (so a test can assert per-model provider coupling), then returns a child
+    /// driver that does NOT spawn anything (keeping CI token-free): its `run` returns a
+    /// fixed marker string echoing the model it was constructed for.
+    #[derive(Clone, Default)]
+    struct RecordingFactory {
+        /// Models requested, in call order. `Arc<Mutex<..>>` so the recorder survives the
+        /// `Arc<dyn ChildDriverFactory>` boxing and stays observable from the test.
+        models: Arc<std::sync::Mutex<Vec<String>>>,
+        /// Worktrees requested, in call order (to assert per-worker jailing in fan-out).
+        worktrees: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+
+    /// A no-spawn child driver returned by [`RecordingFactory`]. Records nothing itself;
+    /// it just proves the factory path is exercised and echoes its model.
+    struct EchoChildDriver {
+        model: String,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDriver for EchoChildDriver {
+        async fn run(&self, _role: &Role, _task: &str) -> anyhow::Result<AgentOutcome> {
+            Ok(AgentOutcome {
+                session_id: "echo-child".to_string(),
+                result: format!("ECHO model={}", self.model),
+                cost_usd: None,
+                denials: vec![],
+            })
+        }
+    }
+
+    impl ChildDriverFactory for RecordingFactory {
+        fn build_child(
+            &self,
+            model: &str,
+            worktree: &std::path::Path,
+            _read_dirs: &[PathBuf],
+        ) -> std::io::Result<Box<dyn AgentDriver>> {
+            self.models.lock().unwrap().push(model.to_string());
+            self.worktrees.lock().unwrap().push(worktree.to_path_buf());
+            Ok(Box::new(EchoChildDriver {
+                model: model.to_string(),
+            }))
+        }
+    }
+
+    use camerata_core::AgentOutcome;
+
+    fn cfg_with_factory(
+        depth: u32,
+        max_depth: u32,
+        models: DelegateModels,
+        factory: Arc<RecordingFactory>,
+    ) -> OrchestratorConfig {
+        OrchestratorConfig {
+            models,
+            worktree_root: PathBuf::from("/work/crate"),
+            gateway_bin: PathBuf::from("/bin/camerata-gateway"),
+            depth,
+            max_depth,
+            child_driver_factory: Some(factory),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_delegated_asks_factory_for_the_tiers_model_claude() {
+        // A Claude tier -> the factory is asked for the Claude model id (per-model coupling).
+        let factory = Arc::new(RecordingFactory::default());
+        let config = cfg_with_factory(0, 1, models(), factory.clone());
+        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "do x", "balanced")
+            .await
+            .unwrap();
+        // The factory-built child ran (echo marker present, model echoed).
+        assert!(out.contains("ECHO model=claude-sonnet-4-6"), "got: {out}");
+        // And the factory was asked for EXACTLY the balanced (Claude) model.
+        let asked = factory.models.lock().unwrap().clone();
+        assert_eq!(asked, vec!["claude-sonnet-4-6".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_delegated_asks_factory_for_the_tiers_model_openrouter() {
+        // An OpenRouter tier -> the factory is asked for the OpenRouter model id, proving
+        // the child resolves via ITS OWN provider rather than inheriting Claude.
+        let or_models = DelegateModels {
+            fast: "openrouter/meta-llama/llama-3-8b".to_string(),
+            balanced: "openrouter/mistralai/mistral-7b".to_string(),
+            strongest: "claude-opus-4-8".to_string(),
+            vision: String::new(),
+        };
+        let factory = Arc::new(RecordingFactory::default());
+        let config = cfg_with_factory(0, 1, or_models, factory.clone());
+        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "do x", "fast")
+            .await
+            .unwrap();
+        assert!(
+            out.contains("ECHO model=openrouter/meta-llama/llama-3-8b"),
+            "got: {out}"
+        );
+        let asked = factory.models.lock().unwrap().clone();
+        assert_eq!(asked, vec!["openrouter/meta-llama/llama-3-8b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_delegated_asks_factory_for_the_vision_model() {
+        // The vision tier routes to the configured vision model via the factory.
+        let factory = Arc::new(RecordingFactory::default());
+        let config = cfg_with_factory(0, 1, models_with_vision(), factory.clone());
+        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "design", "vision")
+            .await
+            .unwrap();
+        assert!(out.contains("ECHO model=claude-vision-model"), "got: {out}");
+        let asked = factory.models.lock().unwrap().clone();
+        assert_eq!(asked, vec!["claude-vision-model".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_delegated_none_factory_falls_back_to_cli_path() {
+        // With NO factory injected, the legacy CLI path is taken. We can't run `claude`
+        // in CI, but we can prove the CLI path is selected (not the factory): the depth
+        // guard + tier resolve still pass, and the result is the ClaudeCliDriver run
+        // outcome (which, with no `claude` binary in CI, surfaces as a child-run FAILED /
+        // INCOMPLETE marker — NEVER the factory ECHO marker). The key assertion is that
+        // the factory ECHO marker is ABSENT, proving back-compat dispatch.
+        let config = cfg(0, 1); // child_driver_factory: None
+        let out = run_delegated(&config, vec![RuleId("GOV-1".to_string())], "do x", "fast")
+            .await
+            .unwrap();
+        assert!(
+            !out.contains("ECHO model="),
+            "None factory must NOT take the factory path: {out}"
+        );
+        // It went down the CLI driver path (tier/model framing present).
+        assert!(out.contains("tier=fast"), "expected CLI-path framing: {out}");
     }
 
     #[test]
