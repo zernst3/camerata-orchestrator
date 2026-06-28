@@ -242,6 +242,14 @@ impl AppState {
         &self.settings
     }
 
+    /// The Unit-of-Work store. Out-of-crate test seam (mirrors [`Self::projects`]): the
+    /// governed-dev lifecycle E2E tests drive the UoW state machine through this store
+    /// (the same store the handlers mutate) and assert stage transitions + gating. The
+    /// field itself stays private (handlers use `state.uow` in-crate).
+    pub fn uow(&self) -> &crate::uow::UowStore {
+        &self.uow
+    }
+
     /// Resolve the GitHub token: credential store first, then the
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
@@ -1051,7 +1059,7 @@ async fn start_run(
 /// Development as needed), so the persisted stage reflects that a governed run is now
 /// underway. The forward drive is best-effort: a UoW already past these stages is left
 /// as-is, never moved backward.
-fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), String> {
+pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), String> {
     use camerata_worktracker::investigation::decisions_approved_for_development;
     use crate::lifecycle::UowStage;
 
@@ -3018,7 +3026,7 @@ fn default_true() -> bool {
 /// back ON rather than do nothing (the decision: default-both over a 4xx — the scan still runs
 /// useful work and the UI keeps both checked, so this is only reachable by a hand-crafted
 /// request). Returns the pair plus whether a both-false coercion happened (for a note).
-fn effective_scan_modes(run_ai_review: bool, run_deterministic: bool) -> (bool, bool, bool) {
+pub fn effective_scan_modes(run_ai_review: bool, run_deterministic: bool) -> (bool, bool, bool) {
     if !run_ai_review && !run_deterministic {
         (true, true, true)
     } else {
