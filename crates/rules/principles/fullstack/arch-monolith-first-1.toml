@@ -1,35 +1,34 @@
 id = "ARCH-MONOLITH-FIRST-1"
-title = "Deploy as a single service and add a message broker only on measured need"
+title = "Deployment topology: a single service, a message broker, or independent services"
 tag = "stack"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [[sources]]
 url = "docs/decisions/2026-06-14_persistence_sqlite_event_sourced_versioning.md"
-title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (MONOLITH-1 cited: single-process Tokio monolith)"
+title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
 
 [decision]
-question = "What is the default deployment topology, and when is a separate message broker introduced?"
-default = "monolith-first"
-why = "A single deployable that calls its own components in-process and runs background work on its own scheduler has no network hops, no broker to operate, and no cross-service consistency problem to design around. Most products never reach the scale at which a broker or a service split pays for its operational cost. Introducing a broker or splitting into services up front buys scaling headroom the product does not yet need while immediately taking on delivery semantics, retry handling, dead-letter management, and a new piece of infrastructure to run. Conversely, refusing ever to add a broker becomes a real constraint once a genuine decoupling need appears (a slow third-party integration, a fan-out workload, a burst that must be absorbed); the rule is monolith-first, not monolith-only. The trigger for adding one is a measured need, not anticipation."
+question = "What deployment topology does the project adopt: a single service, a message broker for inter-component work, or independent services?"
+why = "All three are legitimate topologies and the right one follows from the project's actual boundaries — team structure, deployment and failure-isolation needs, and the shape of the load — not from a presumed winner. A single service keeps everything in one process: in-process calls, one thing to deploy and operate, no cross-service consistency to design, which fits a product whose components ship and scale together. A message broker decouples producers from consumers and absorbs bursts and fan-out: the right shape when work is genuinely asynchronous (slow third-party calls, fan-out workloads, spikes that must be buffered) or an event backbone is already part of the architecture. Independent services give each part its own deploy cadence, scaling profile, failure isolation, and (optionally) language — the right shape when separate teams own separate surfaces, parts scale very differently, or strong isolation between them is a requirement. Each buys its benefit at a real cost (a broker and a service split add operational surface and delivery/consistency concerns; a single service couples deploy and scaling), so choose by which boundaries the project actually has, and revisit when they change."
 
 [[option]]
 id = "monolith-first"
-label = "single service first; broker only on measured need"
-directive = "The system deploys as a single service by default. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced only when a measured need justifies it (a throughput ceiling that profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons, or a decoupling requirement an in-process design genuinely cannot satisfy). Adding broker infrastructure on anticipation alone is avoided."
-why = "A single service avoids the operational and consistency costs of a broker until the product reaches a scale that actually requires one."
+label = "deploy as a single service"
+directive = "The system deploys as a single service. Internal components communicate by in-process calls, and background or deferred work runs on an in-process scheduler or a durable queue backed by the primary datastore. A separate message broker or a service split is introduced later only when a measured need justifies it (a throughput ceiling profiling shows the single service cannot meet, a workload that must be isolated for failure or scaling reasons, or a decoupling requirement an in-process design genuinely cannot satisfy)."
+why = "Keeps the whole system in one deployable: in-process calls with no network hops, one artifact to run and observe, and no cross-service consistency problem to design around. The natural fit when the components ship and scale together as one product and there is no consumer or workload that needs to be decoupled — and it leaves the door open to add a broker or split out a service later, when a concrete need appears, rather than carrying that infrastructure before then."
 
 [[option]]
 id = "broker-up-front"
-label = "introduce a message broker from the start"
-directive = "The system uses a dedicated message broker for inter-component communication and background work from the start, regardless of current scale."
-why = "Buys scaling headroom early but takes on delivery semantics, retry and dead-letter handling, and a broker to operate before the product needs any of it."
+label = "use a message broker for inter-component and background work"
+directive = "The system uses a dedicated message broker (or managed queue/stream) for inter-component communication and background work. Producers publish and consumers subscribe; the project owns delivery semantics, retry and dead-letter handling, and the broker as a piece of operated infrastructure."
+why = "The natural fit when the work is genuinely asynchronous or bursty — slow third-party integrations, fan-out workloads, spikes that must be buffered and absorbed — or when an event/stream backbone is already part of the architecture. It decouples producers from consumers and smooths load, in exchange for owning the broker and its delivery semantics (retries, ordering, dead-letters); worth adopting up front when those needs are known rather than speculative."
 
 [[option]]
 id = "services-from-start"
-label = "split into independent services from the start"
-directive = "The system is split into independently deployed services communicating over the network from the start, regardless of current scale."
-why = "Provides independent scaling and deployment but introduces network hops and cross-service consistency problems the product may never need to solve."
+label = "split into independent services"
+directive = "The system is split into independently deployed services that communicate over the network, each with its own deploy cadence, scaling profile, and ownership boundary."
+why = "The right shape when separate teams own separate surfaces, when parts of the system scale very differently, or when strong failure/blast-radius isolation between components is a hard requirement (and it permits polyglot stacks per service). It provides independent deploy and scaling in exchange for network hops between services and cross-service consistency to design for — a worthwhile trade when those organizational or scaling boundaries genuinely exist."
