@@ -290,6 +290,19 @@ pub struct Project {
     /// and L3 config. Serde default = `Balanced`.
     #[serde(default)]
     pub model_profile: ModelProfile,
+    /// Whether the Designer (vision/multimodal) band is enabled for this project.
+    ///
+    /// When `false` (the default), the orchestrator ignores `tier_map.vision` even if it
+    /// is populated — the toggle gates *availability*, not *configuration*. Design-flavored
+    /// stories are still built; the orchestrator delegates that work to the logic tiers.
+    ///
+    /// When `true`, vision-capable stages are available and the orchestrator may invoke the
+    /// Designer band for stories that require multimodal reasoning (e.g. UI mockup work).
+    ///
+    /// Serde default fills `false` for projects persisted before this field existed — no
+    /// migration required.
+    #[serde(default)]
+    pub vision_enabled: bool,
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -572,6 +585,7 @@ impl ProjectStore {
                 stall_thresholds: StallThresholds::default(),
                 l3_review: L3ReviewConfig::default(),
                 model_profile: ModelProfile::default(),
+                vision_enabled: false,
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -639,6 +653,7 @@ impl ProjectStore {
                     stall_thresholds: StallThresholds::default(),
                     l3_review: L3ReviewConfig::default(),
                     model_profile: ModelProfile::default(),
+                    vision_enabled: false,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -772,6 +787,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -814,6 +830,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -850,6 +867,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -889,6 +907,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -940,6 +959,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1225,6 +1245,7 @@ mod tests {
             stall_thresholds: StallThresholds::default(),
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

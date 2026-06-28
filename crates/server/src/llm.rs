@@ -2203,6 +2203,7 @@ malformed line, not json
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
@@ -2237,6 +2238,7 @@ malformed line, not json
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         creds

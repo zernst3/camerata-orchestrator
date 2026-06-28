@@ -553,8 +553,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/custom", post(add_custom_rule))
         .route("/api/projects/:id/custom/delete", post(delete_custom_rule))
         .route("/api/projects/:id/max-iterations", post(set_max_iterations))
-        // Model-tiering: read/write the project's fast/balanced/strongest model bindings (#63).
+        // Model-tiering: read/write the project's fast/balanced/strongest/vision model bindings (#63).
         .route("/api/projects/:id/tier-map", post(set_tier_map))
+        // Designer (vision) band toggle: enable/disable the vision band for this project.
+        .route("/api/projects/:id/vision-enabled", post(set_vision_enabled))
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
         // Stall-detection thresholds: per-project idle timeout config.
@@ -2311,7 +2313,7 @@ where
 }
 
 /// Body for `POST /api/projects/:id/tier-map`. Mirrors [`crate::model_tier::TierMap`]
-/// with all three fields optional so callers can patch just the tiers they want.
+/// with all fields optional so callers can patch just the tiers they want.
 #[derive(serde::Deserialize)]
 struct SetTierMapReq {
     /// Model chain for fast (throughput) tasks. Single string or array (back-compat).
@@ -2323,6 +2325,9 @@ struct SetTierMapReq {
     /// Model id for strongest (frontier-class) tasks.
     #[serde(default)]
     strongest: Option<String>,
+    /// Model chain for the Designer (vision/multimodal) band. Optional; absent = leave unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_chain")]
+    vision: Option<Vec<String>>,
 }
 
 /// `POST /api/projects/:id/tier-map` — update the project's model-tier map.
@@ -2345,6 +2350,36 @@ async fn set_tier_map(
         if let Some(strongest) = req.strongest.filter(|s| !s.trim().is_empty()) {
             p.tier_map.strongest = strongest;
         }
+        // vision: an empty vec clears the slot (user removed the model); any non-None
+        // value (including []) is persisted. This lets the UI clear the vision chain.
+        if let Some(vision) = req.vision {
+            p.tier_map.vision = vision;
+        }
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/vision-enabled`.
+#[derive(serde::Deserialize)]
+struct SetVisionEnabledReq {
+    /// Whether to enable (`true`) or disable (`false`) the Designer (vision) band for this project.
+    enabled: bool,
+}
+
+/// `POST /api/projects/:id/vision-enabled` — toggle the Designer (vision) band for a project.
+///
+/// Persists `Project::vision_enabled`. When `false` (the default), the orchestrator ignores
+/// `tier_map.vision` even if populated. When `true`, the vision band is available and the
+/// orchestrator may invoke the Designer for stories that require multimodal reasoning.
+async fn set_vision_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetVisionEnabledReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        p.vision_enabled = req.enabled;
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),

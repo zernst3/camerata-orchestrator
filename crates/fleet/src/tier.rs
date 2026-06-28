@@ -108,6 +108,10 @@ where
 /// (429 / 5xx / timeout). `strongest` remains a single model (orchestrator reliability
 /// requires a single well-known model; fallbacks add complexity without benefit there).
 ///
+/// `vision` is a flat, ordered chain for the Designer (multimodal) band — a single slot
+/// orthogonal to the logic ladder. Empty by default (feature off until `vision_enabled`
+/// is set on the project and a model is assigned).
+///
 /// **Back-compat**: a project JSON written with the old `String` form (e.g.
 /// `"fast": "claude-haiku-4-5-20251001"`) deserialises correctly — the custom
 /// `deserialize_chain` helper wraps the bare string into a 1-element Vec.
@@ -127,6 +131,12 @@ pub struct TierMap {
     /// reliability requires a single well-known model.
     #[serde(default = "default_strongest_model")]
     pub strongest: String,
+    /// Ordered model-id chain for the Designer (vision/multimodal) band. Empty by default;
+    /// populated when the user assigns a vision-capable model. Guarded by
+    /// `Project::vision_enabled` — when that flag is false, this slot is ignored at
+    /// runtime even if populated (the toggle gates availability, not configuration).
+    #[serde(default)]
+    pub vision: Vec<String>,
 }
 
 /// The shipped default chain for [`TierMap::fast`]: Haiku only (1-element).
@@ -161,6 +171,7 @@ impl Default for TierMap {
             fast: default_fast_chain(),
             balanced: default_balanced_chain(),
             strongest: default_strongest_model(),
+            vision: vec![],
         }
     }
 }
@@ -503,6 +514,7 @@ mod tests {
             fast: vec!["a".into(), "b".into()],
             balanced: vec!["c".into()],
             strongest: "d".into(),
+            vision: vec![],
         };
         assert_eq!(m.fast_primary(), "a");
         assert_eq!(m.fast_chain(), &["a", "b"]);

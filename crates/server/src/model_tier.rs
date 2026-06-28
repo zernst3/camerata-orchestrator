@@ -43,6 +43,7 @@ mod tests {
             fast: vec!["my-haiku".to_string()],
             balanced: vec!["my-sonnet".to_string()],
             strongest: "my-opus".to_string(),
+            vision: vec![],
         };
         let store = ProjectStore::new();
         let mut p = store.create("TierProj", vec![]).unwrap();
@@ -90,16 +91,54 @@ mod tests {
                 fast: vec!["haiku-custom".into()],
                 balanced: vec!["sonnet-custom".into()],
                 strongest: "opus-custom".into(),
+                vision: vec![],
             },
             process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),
             step_models: crate::project::StepModels::default(),
             stall_thresholds: crate::project::StallThresholds::default(),
             l3_review: crate::project::L3ReviewConfig::default(),
             model_profile: crate::project::ModelProfile::default(),
+            vision_enabled: false,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tier_map, original.tier_map);
+    }
+
+    #[test]
+    fn tier_map_vision_round_trips_through_project_save_load() {
+        // tier_map.vision must survive a full save → reload cycle through the ProjectStore.
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-vision-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+
+        let id = {
+            let store = crate::project::ProjectStore::load_or_new(path.clone());
+            let p = store.create("VisionProj", vec![]).unwrap();
+            store
+                .update(&p.id, |proj| {
+                    proj.tier_map.vision = vec!["minimax/minimax-01:free".to_string()];
+                })
+                .unwrap();
+            p.id
+        };
+
+        // Re-load from disk and check vision survived.
+        let reloaded = crate::project::ProjectStore::load_or_new(path.clone());
+        let p = reloaded.get(&id).expect("project survived reload");
+        assert_eq!(
+            p.tier_map.vision,
+            vec!["minimax/minimax-01:free".to_string()],
+            "tier_map.vision must survive persistence + reload"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

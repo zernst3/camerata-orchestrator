@@ -1872,6 +1872,7 @@ mod tests {
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         }
     }
 

@@ -70,6 +70,13 @@ pub struct RegistryEntry {
     /// Used by the UI badge to show a `cache` tag.
     #[serde(default)]
     pub caching: bool,
+    /// Whether this model supports vision / multimodal input (images). `true` for all
+    /// Claude 4.x Opus, Sonnet, and Haiku models (all multimodal). For OpenRouter models,
+    /// derived from `architecture.input_modalities` — `true` when the list contains
+    /// `"image"`. Used to filter the Designer (vision) band model selector so only
+    /// vision-capable models are offered.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 // ── Static Claude catalog ────────────────────────────────────────────────────
@@ -122,6 +129,11 @@ pub struct RegistryEntryStatic {
 
 impl RegistryEntryStatic {
     pub fn to_entry(&self) -> RegistryEntry {
+        // All Claude 4.x models (Opus 4.x, Sonnet 4.x, Haiku 4.5) are multimodal.
+        // The static catalog only lists Claude 4 models, so all entries are vision-capable.
+        let vision = self.id.contains("claude-opus-4")
+            || self.id.contains("claude-sonnet-4")
+            || self.id.contains("claude-haiku-4");
         RegistryEntry {
             provider: "claude".to_string(),
             display: self.display.to_string(),
@@ -134,6 +146,7 @@ impl RegistryEntryStatic {
             price_out: self.price_out,
             weight: self.weight,
             caching: true, // All Claude (subscription/CLI) models support prompt caching.
+            vision,
         }
     }
 }
@@ -167,6 +180,18 @@ struct OpenRouterModelsResp {
     data: Vec<OpenRouterModelRaw>,
 }
 
+/// The `architecture` block returned by OpenRouter's `/api/v1/models` endpoint.
+///
+/// Only `input_modalities` is consumed today; all other architecture fields are ignored.
+/// Defaults to an empty modalities list so models that omit the field still parse correctly.
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterArchitecture {
+    /// Input modalities supported by this model (e.g. `["text"]`, `["text", "image"]`).
+    /// A model is considered vision-capable when this list contains `"image"`.
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenRouterModelRaw {
     id: String,
@@ -180,6 +205,9 @@ struct OpenRouterModelRaw {
     /// Supported parameters (e.g. `["tools", "temperature", ...]`).
     #[serde(default)]
     supported_parameters: Vec<String>,
+    /// Architecture metadata; used to derive vision capability from `input_modalities`.
+    #[serde(default)]
+    architecture: OpenRouterArchitecture,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -217,6 +245,12 @@ impl OpenRouterModelRaw {
         let price_out = self.pricing.completion * 1_000_000.0;
         let coding = coding_score(&self.id, &self.name, tool_use);
         let caching = caching_heuristic("openrouter", &self.id);
+        // Vision: parse from `architecture.input_modalities` — true when "image" is listed.
+        let vision = self
+            .architecture
+            .input_modalities
+            .iter()
+            .any(|m| m == "image");
         RegistryEntry {
             provider: "openrouter".to_string(),
             display: self.name.clone(),
@@ -229,6 +263,7 @@ impl OpenRouterModelRaw {
             price_out,
             weight: 0,
             caching,
+            vision,
         }
     }
 }
@@ -566,6 +601,7 @@ mod tests {
             pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
             context_length: 32_768,
             supported_parameters: vec!["tools".to_string()],
+            architecture: OpenRouterArchitecture::default(),
         };
         let entry = raw.to_entry();
         assert!(entry.free);
@@ -585,6 +621,7 @@ mod tests {
             pricing: OpenRouterPricing { prompt: 0.000005, completion: 0.000015 },
             context_length: 128_000,
             supported_parameters: vec!["tools".to_string()],
+            architecture: OpenRouterArchitecture::default(),
         };
         let entry = raw.to_entry();
         assert!(!entry.free);
@@ -640,6 +677,7 @@ mod tests {
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         };
         {
             let mut inner = reg.inner.lock().unwrap();
@@ -691,6 +729,7 @@ mod tests {
             price_out: 15.0,
             weight: 3,
             caching: true,
+            vision: true,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: RegistryEntry = serde_json::from_str(&json).unwrap();
@@ -736,5 +775,79 @@ mod tests {
         for e in claude_entries() {
             assert!(e.caching, "{} must have caching=true", e.id);
         }
+    }
+
+    // ── vision flag ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn claude_4x_entries_all_have_vision_true() {
+        // All three Claude 4.x models in the static catalog are multimodal.
+        for e in claude_entries() {
+            assert!(
+                e.vision,
+                "{} must have vision=true (all Claude 4.x models are multimodal)",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_model_with_image_modality_has_vision_true() {
+        // An OpenRouter model whose architecture.input_modalities includes "image"
+        // must have vision=true after conversion.
+        let raw = OpenRouterModelRaw {
+            id: "minimax/minimax-01".to_string(),
+            name: "MiniMax-01".to_string(),
+            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            context_length: 1_000_000,
+            supported_parameters: vec!["tools".to_string()],
+            architecture: OpenRouterArchitecture {
+                input_modalities: vec!["text".to_string(), "image".to_string()],
+            },
+        };
+        let entry = raw.to_entry();
+        assert!(
+            entry.vision,
+            "OpenRouter model with input_modalities=[text,image] must have vision=true"
+        );
+    }
+
+    #[test]
+    fn openrouter_model_without_image_modality_has_vision_false() {
+        // A text-only OpenRouter model must have vision=false.
+        let raw = OpenRouterModelRaw {
+            id: "qwen/qwen3-235b:free".to_string(),
+            name: "Qwen3 235B (free)".to_string(),
+            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            context_length: 32_768,
+            supported_parameters: vec!["tools".to_string()],
+            architecture: OpenRouterArchitecture {
+                input_modalities: vec!["text".to_string()],
+            },
+        };
+        let entry = raw.to_entry();
+        assert!(
+            !entry.vision,
+            "OpenRouter model with only text modality must have vision=false"
+        );
+    }
+
+    #[test]
+    fn openrouter_model_with_empty_modalities_has_vision_false() {
+        // A model that omits the architecture block entirely (defaults to empty) must
+        // have vision=false — no false positives from the default.
+        let raw = OpenRouterModelRaw {
+            id: "some/text-model".to_string(),
+            name: "Text Model".to_string(),
+            pricing: OpenRouterPricing { prompt: 0.0, completion: 0.0 },
+            context_length: 8_192,
+            supported_parameters: vec![],
+            architecture: OpenRouterArchitecture::default(),
+        };
+        let entry = raw.to_entry();
+        assert!(
+            !entry.vision,
+            "OpenRouter model with no modalities must have vision=false"
+        );
     }
 }

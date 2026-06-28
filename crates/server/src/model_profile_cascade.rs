@@ -56,6 +56,7 @@ fn balanced_assignments() -> ProfileAssignments {
             strongest: OPUS.to_string(),
             balanced: vec![SONNET.to_string()],
             fast: vec![HAIKU.to_string()],
+            vision: vec![],
         },
         step_models: StepModels {
             audit: HAIKU.to_string(),
@@ -81,6 +82,7 @@ fn max_quality_assignments() -> ProfileAssignments {
             strongest: OPUS.to_string(),
             balanced: vec![SONNET.to_string()],
             fast: vec![SONNET.to_string()],
+            vision: vec![],
         },
         step_models: StepModels {
             audit: SONNET.to_string(),
@@ -157,6 +159,7 @@ fn max_efficiency_assignments(registry: &ModelRegistry) -> ProfileAssignments {
             strongest: OPUS.to_string(),
             balanced: balanced_chain,
             fast: fast_chain,
+            vision: vec![],
         },
         step_models: StepModels {
             audit: step_model.clone(),
@@ -194,6 +197,7 @@ mod tests {
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         }
     }
 
@@ -210,6 +214,7 @@ mod tests {
             price_out: 0.0,
             weight: 0,
             caching: false,
+            vision: false,
         }
     }
 
