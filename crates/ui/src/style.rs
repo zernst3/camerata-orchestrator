@@ -49,6 +49,10 @@ pub const GLOBAL_CSS: &str = r#"
   /* Slow, reassuring easing. Nothing snaps. */
   --ease: cubic-bezier(.22,.61,.36,1);
 
+  /* Bombe overlay opacity — TWEAK HERE (lower = bombe more visible) */
+  --bombe-overlay-idle-alpha: 0.49;   /* idle:    0.82 was too dark; lower = bombe peeks through more */
+  --bombe-overlay-run-alpha:  0.25;   /* running: 0.48 was too dark; lower = bombe glows through clearly */
+
   /* chorale table palette → mapped onto the Bletchley amber scheme so the
      grouped tables read as part of the same dark-industrial surface.
      (chorale exposes these as overridable CSS variables.) */
@@ -2702,6 +2706,7 @@ html, body {
   flex-direction: column;
   gap: 24px;
   overflow-y: auto;
+  overflow-x: hidden;   /* mirrors .credentials-panel fix: suppress implicit h-scrollbar */
 }
 .vcs-settings-loading {
   padding: 24px;
@@ -3070,9 +3075,10 @@ html, body {
 /* Toggle row for vision-enabled: label + checkbox + hint inline. */
 .vision-toggle-row { display: flex; align-items: center; gap: 10px; }
 
-/* ── Info icon (ⓘ) inline hint marker ───────────────────────────────── */
+/* ── Info icon (ⓘ) inline hint marker with CSS hover tooltip ────────── */
 .info-icon {
   display: inline-block;
+  position: relative;   /* anchors the absolutely-positioned .info-tip */
   font-size: 11px;
   color: var(--ink-2);
   cursor: help;
@@ -3082,6 +3088,30 @@ html, body {
   user-select: none;
 }
 .info-icon:hover { opacity: 1; color: var(--accent); }
+/* Tooltip bubble — hidden by default, appears on hover */
+.info-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1a1715;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-style: normal;
+  line-height: 1.45;
+  white-space: normal;
+  max-width: 260px;
+  min-width: 120px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.55);
+  z-index: 9999;
+  pointer-events: none;
+  text-align: left;
+}
+.info-icon:hover .info-tip { display: block; }
 
 /* Step-model label + info-icon wrapper (keeps them inline). */
 .step-model-label-wrap { display: flex; align-items: center; gap: 0; }
@@ -3631,11 +3661,11 @@ html, body {
   inset: 0;
   z-index: 2;
   pointer-events: none;
-  background: rgba(16, 13, 11, 0.82);  /* strong dark → bombe barely visible idle */
+  background: rgba(16, 13, 11, var(--bombe-overlay-idle-alpha));
   transition: background 0.6s ease;
 }
 .bombe-overlay.bombe-overlay-running {
-  background: rgba(16, 13, 11, 0.48);  /* lightens → bombe glows through when active */
+  background: rgba(16, 13, 11, var(--bombe-overlay-run-alpha));
 }
 
 /* ── Outer wrapper: fixed full-viewport layer, below the app shell ── */
@@ -4858,6 +4888,22 @@ select:focus {
   position: relative;
 }
 
+/* ── Chorale Theme::Dark transparency override ──────────────────────────────
+   Chorale injects its own <style> with .chorale-root[data-chorale-theme="dark"]
+   AFTER our stylesheet, resetting --chorale-surface to opaque #1e1e1e and
+   --chorale-header-bg to opaque #252526.  We fight back with !important so the
+   bombe peeks through the table surface and header while cells stay readable.
+   Inline styles reference var(--chorale-surface) / var(--chorale-header-bg), so
+   overriding the vars here propagates to every cell/header automatically.
+   Do NOT make popovers/inputs translucent (they have their own vars and must
+   stay opaque for readability). ────────────────────────────────────────────── */
+.chorale-root[data-chorale-theme="dark"] {
+  --chorale-surface:    rgba(22,19,15,0.78) !important;   /* table body + frozen cells */
+  --chorale-header-bg:  rgba(16,13,11,0.88) !important;   /* column headers + filter row */
+  --chorale-toolbar-bg: rgba(16,13,11,0.88) !important;   /* pagination / export toolbar */
+  --chorale-row-bg:     rgba(22,19,15,0.60) !important;   /* explicit row bg (light theme only, but set for parity) */
+}
+
 /* Amber accent line at the top of each table chrome, matching the topbar cable motif */
 .chorale-root::before {
   content: '';
@@ -4911,6 +4957,7 @@ select:focus {
   flex-direction: column;
   gap: 24px;
   overflow-y: auto;
+  overflow-x: hidden;   /* overflow-y:auto implicitly makes x:auto; force-hide the h-scrollbar */
 }
 .credentials-title {
   margin: 0;

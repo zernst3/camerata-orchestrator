@@ -1562,8 +1562,8 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         "High-throughput work: tests, simple edits."
                         span {
                             class: "info-icon",
-                            title: "High-throughput work: tests, simple edits.",
                             "\u{24d8}"
+                            span { class: "info-tip", "High-throughput work: tests, simple edits." }
                         }
                     }
                     div { class: "tier-chain-list",
@@ -1662,8 +1662,8 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         "Most engineering tasks."
                         span {
                             class: "info-icon",
-                            title: "Most engineering tasks.",
                             "\u{24d8}"
+                            span { class: "info-tip", "Most engineering tasks." }
                         }
                     }
                     div { class: "tier-chain-list",
@@ -1761,8 +1761,8 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck."
                         span {
                             class: "info-icon",
-                            title: "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck.",
                             "\u{24d8}"
+                            span { class: "info-tip", "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck." }
                         }
                     }
                     if let Some(ref m) = models {
@@ -1844,8 +1844,8 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                     "Designer (vision)"
                     span {
                         class: "info-icon",
-                        title: "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind mockup the engineers translate into Dioxus. Only vision-capable models are listed.",
                         "\u{24d8}"
+                        span { class: "info-tip", "Optional, project-wide. Turns visual/design requirements into an HTML/Tailwind mockup the engineers translate into Dioxus. Only vision-capable models are listed." }
                     }
                 }
                 p { class: "section-hint tier-map-hint",
@@ -2037,8 +2037,8 @@ pub(super) fn StepModelRow(
                 label { class: "tier-map-band-label", "{label}" }
                 span {
                     class: "info-icon",
-                    title: "{hint}",
                     "\u{24d8}"
+                    span { class: "info-tip", "{hint}" }
                 }
             }
             if let Some(m) = models {
