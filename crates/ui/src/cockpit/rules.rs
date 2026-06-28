@@ -133,15 +133,11 @@ pub(super) fn CustomRulesTable(
     let id_map: std::collections::HashMap<RowId, CustomRuleView> =
         rows.iter().map(|(r, c)| (*r, c.clone())).collect();
     let handle = use_table(move || TableState::new(rows.clone(), custom_columns()));
-    // Group by domain so custom rules cluster by where they apply. Collapse all
-    // groups on initial mount (consistent with the rest of the rules tables).
-    use_hook(move || {
-        handle.set_grouping(vec![ColumnId("domain")]);
-        handle.collapse_all_groups();
-    });
 
     rsx! {
-        Table { handle, sort_enabled: true, selection_enabled: true, theme: Theme::Dark }
+        // Group by domain so custom rules cluster by where they apply; the wrapper
+        // collapses every group on mount (consistent with the rest of the rules tables).
+        CamerataTable { handle, sort_enabled: true, selection_enabled: true, group_by: vec![ColumnId("domain")] }
         button {
             class: "btn-restart",
             onclick: move |_| {
@@ -873,13 +869,11 @@ pub(super) fn ProjectRulesTable(
             }
         }
 
-        Table {
+        CamerataTable {
             handle,
             sort_enabled: true,
             filter_enabled: true,
             selection_enabled: true,
-            sticky_header: true,
-            theme: Theme::Dark,
             row_cell_renderers: applied_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(row) = id_map_click.get(&rid) {
@@ -1161,12 +1155,10 @@ pub(super) fn AllRulesTable(
     rsx! {
         // The chorale table: "Applied to" column shows the repos (comma-joined text from
         // the accessor). Row click opens the rule detail modal.
-        Table {
+        CamerataTable {
             handle,
             sort_enabled: true,
             filter_enabled: true,
-            sticky_header: true,
-            theme: Theme::Dark,
             row_cell_renderers: corpus_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
@@ -3406,18 +3398,14 @@ pub(super) fn ProposedRulesTable(
     // swallowed the next click, so the modal wouldn't reopen after being closed.
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let id_map_click = id_map.clone();
-    // Group BY DOMAIN, switch to INFINITE SCROLL (not paginated), LOAD EVERY rule so
-    // selection/audit cover all domains (paginated select-all only grabbed the first
-    // page — that's why whole domains like api-layer were missing from the audit),
-    // and PRE-SELECT the suggested rules. Once, on mount.
+    // Switch to INFINITE SCROLL (not paginated) and LOAD EVERY rule so selection/audit
+    // cover all domains (paginated select-all only grabbed the first page — that's why
+    // whole domains like api-layer were missing from the audit), and PRE-SELECT the
+    // suggested rules. Once, on mount. The grouping + collapse-by-default is owned by
+    // `CamerataTable` (via `group_by`); it applies the same load-all-then-collapse order.
     use_hook(move || {
-        handle.set_grouping(vec![ColumnId("domain")]);
-        // Load EVERY group first, THEN collapse — collapse_all_groups only collapses the
-        // groups currently in the view, so collapsing before the page size is raised left
-        // every group past the first page expanded. Order: group → load all → collapse all.
         handle.set_pagination_mode(PaginationMode::InfiniteScroll);
         let _ = handle.set_page_size(5000);
-        handle.collapse_all_groups();
         for rid in &suggested_ids {
             handle.set_selection(*rid, true);
         }
@@ -3677,13 +3665,14 @@ pub(super) fn ProposedRulesTable(
         // chorale 0.2.3 renders a tri-state select-all checkbox in each group header
         // (selection_enabled + grouping), so the old custom "Select rules by domain"
         // dropdown is gone.
-        Table {
+        CamerataTable {
             handle,
             sort_enabled: true,
             selection_enabled: true,
             filter_enabled: true,
-            theme: Theme::Dark,
             row_cell_renderers: rule_type_renderers,
+            // Grouped by domain; the wrapper collapses every group on mount.
+            group_by: vec![ColumnId("domain")],
             // 0.2.3: expand-all / collapse-all control in the grouped header. The table is
             // grouped by domain and mounts collapsed, so this lets the architect open every
             // domain's rules (and re-collapse them) in one click.

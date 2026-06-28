@@ -1437,15 +1437,9 @@ pub(super) fn FindingsTable(
     // 4× across one file renders as "RULE (4)" → "handlers.rs (4)" → the 4 individual lines.
     // Counts come free on every header. This is a PRESENTATION view of the flat finding
     // list; the CSV export stays flat + lossless (one row per finding), unchanged.
-    use_hook(move || {
-        handle.set_grouping(vec![ColumnId("type"), ColumnId("file")]);
-        // Load all groups first, then collapse all by default — the architect drills in
-        // rule → file → lines. (collapse_all only collapses groups in the loaded view, so it
-        // must run after the page size is raised.)
-        handle.set_pagination_mode(PaginationMode::InfiniteScroll);
-        let _ = handle.set_page_size(5000);
-        handle.collapse_all_groups();
-    });
+    // Grouping + collapse-by-default (rule → file → lines, all collapsed on mount) is
+    // owned by `CamerataTable` via `group_by` below; it applies the load-all-then-collapse
+    // order that works around chorale's paginated `collapse_all_groups`.
     // A durable ignore requires a reason (the require-reason invariant), captured here and
     // stored on the disposition; it's committed to the baseline at Process.
     let mut ignore_reason = use_signal(String::new);
@@ -1699,19 +1693,18 @@ pub(super) fn FindingsTable(
                 "Export CSV"
             }
         }
-        Table {
+        CamerataTable {
             handle,
             sort_enabled: true,
             filter_enabled: true,
             selection_enabled: true,
             resize_enabled: true,
-            // Pin the column header to the top of the table's scroll viewport so it
-            // stays visible while scrolling a long findings list.
-            sticky_header: true,
+            // Grouped by rule -> file; the wrapper collapses every group on mount so a
+            // long audit opens collapsed and the architect drills in deliberately.
+            group_by: vec![ColumnId("type"), ColumnId("file")],
             // 0.2.3: an expand-all / collapse-all control in the grouped header (the
             // findings table groups by rule -> file), so a long audit collapses at once.
             group_expand_toggle: true,
-            theme: Theme::Dark,
             row_cell_renderers: row_renderers,
             // Critical (security-floor) rows get a red full-row highlight via the 0.2.3
             // conditional row-styling hook — replaces the old per-cell stripe renderer.

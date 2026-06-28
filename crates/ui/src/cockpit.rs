@@ -2149,11 +2149,13 @@ fn DocsView() -> Element {
 pub mod live_run;
 pub mod rules;
 pub mod scan;
+pub mod table;
 pub mod uow;
 
 pub use live_run::*;
 pub use rules::*;
 pub use scan::*;
+pub use table::*;
 pub use uow::*;
 
 
