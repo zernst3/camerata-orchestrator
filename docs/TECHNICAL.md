@@ -629,33 +629,74 @@ One `statvfs` syscall; no shell-out to `df`.
 
 ## 4. Agent runtime
 
-`crates/agent/src/lib.rs` contains `ClaudeCliDriver`, which implements
-`camerata_core::AgentDriver`. It drives `claude -p` as a subprocess.
+`crates/agent/` contains two `AgentDriver` implementations that share the same
+`camerata_core::AgentDriver` trait and identical governance wiring (gate, jail,
+allowed/disallowed tools, read scope). The right driver is selected at spawn time
+based on which provider path is configured.
+
+### `ClaudeCliDriver` (subscription path)
+
+`crates/agent/src/lib.rs` drives `claude -p` as a subprocess. Used when the
+operator runs via the Claude CLI (local subscription).
 
 Key behavior:
 
 - `ClaudeCliDriver::new(mcp_config_path)` — stores the path to the MCP config
   JSON. The config tells Claude Code where to connect for the governed write tool.
 - `with_worktree(path)` — binds the agent to a git worktree: `current_dir` +
-  `--add-dir` in the CLI invocation, scoping the agent's cwd to its isolated
-  working directory.
+  `--add-dir` in the CLI invocation.
 - `with_read_dirs(dirs)` — adds extra READ-ONLY directories, each emitted as its
   own `--add-dir` (deduped against the cwd worktree). This is the **multi-repo
   read scope**: a project contains MULTIPLE repos, so an agent bound to one
   worktree gets the OTHER project repo clones added here as read windows. It
-  widens READS only — `--add-dir` never grants writes, so `gated_write` (jailed
-  to `CAMERATA_WORKTREE_ROOT` = the single worktree) stays the only write path.
-  See the decision `2026-06-25_all-agents-grounded-in-repo-and-rules.md`.
-- `build_args(role, task)` — pure (does not spawn) function that constructs the
-  full `claude` argv: `-p <task>`, `--strict-mcp-config`, `--mcp-config`,
-  `--allowedTools`, `--disallowedTools`, `--dangerously-skip-permissions`,
-  `--output-format json`, and one `--add-dir` per worktree + extra read dir.
+  widens READS only; `gated_write` (jailed to `CAMERATA_WORKTREE_ROOT`) stays the
+  only write path. See `2026-06-25_all-agents-grounded-in-repo-and-rules.md`.
+- `build_args(role, task)`: pure function that constructs the full `claude` argv:
+  `-p <task>`, `--strict-mcp-config`, `--mcp-config`, `--allowedTools`,
+  `--disallowedTools`, `--dangerously-skip-permissions`, `--output-format json`,
+  and one `--add-dir` per worktree + extra read dir.
 - `run(role, task)` — spawns the process, streams stdout line-by-line with
   inactivity and total-ceiling timeouts (see §4a), and parses the JSON output via
   `serde_json`. Fields extracted: `session_id`, `result`, `total_cost_usd`,
   `permission_denials`. Returns an `AgentOutcome`.
 
-`GenericCliDriver` (`crates/agent/src/generic.rs`) is a more general variant.
+`GenericCliDriver` (`crates/agent/src/generic.rs`) is a more general CLI variant.
+
+### `ApiAgentDriver` (in-process, provider-agnostic path)
+
+`crates/agent/src/api_driver.rs` is a native in-process driver. It owns the MCP
+tool-use loop directly, without spawning a subprocess, and works with any provider
+reachable via the Anthropic Messages API or OpenRouter.
+
+Key design points:
+
+- **MCP tool-use loop**: the driver sends the task to the model, handles
+  `tool_use` blocks by evaluating each call through the SAME `GovernanceGateway`
+  as `ClaudeCliDriver` (the gate seam is shared; neither driver bypasses it), then
+  sends the `tool_result` back. The loop runs until the model emits a stop block
+  or a configured iteration ceiling is reached.
+- **Provider selection**: the driver is initialized with a provider URL + API key.
+  An OpenRouter key routes through `https://openrouter.ai/api/v1`; an Anthropic
+  key routes directly. The Messages API shape is identical; only the base URL and
+  `Authorization` header differ.
+- **Model registry**: `crates/agent/src/model_registry.rs` combines a static
+  list of Claude model entries with live OpenRouter discovery
+  (`GET /api/v1/models`). Each entry is tagged with capability flags:
+  `free`, `tool_use`, `caching`, `vision`, plus `input_price`/`output_price`
+  (per-million-token). The registry is fetched once per session and cached.
+- **Prompt caching**: ephemeral `cache_control` blocks are injected on the
+  static system-prompt prefix, making the prefix cache-eligible. OpenRouter
+  response caching is honoured via `X-OpenRouter-Cache` (the driver reads
+  `Cache-Status` and `Cache-Clear` response headers). Both forms of caching are
+  transparent to the caller.
+- **Rate limiting**: per-provider rate-limit headers are parsed and respected;
+  on a 429 the driver backs off and retries within the per-request fallback policy.
+- **Request-level fallback**: if the configured primary model returns an error
+  (or is unavailable), the driver tries each model in the band's fallback chain
+  in order before surfacing an error to the coordinator.
+
+The same `with_worktree` / `with_read_dirs` read-scope semantics apply; the gate
+jail (`CAMERATA_WORKTREE_ROOT`) is enforced identically.
 
 `SessionSpawn` (`crates/agent/src/session.rs`) handles the per-session prep:
 `prepare_session(gateway_bin, role, worktree, read_dirs)` writes the MCP config
@@ -1582,8 +1623,8 @@ JSON files in `dirs::data_dir()/camerata/`:
 
 | File | Store type | Contents |
 |---|---|---|
-| `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set. |
-| `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export). |
+| `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set, `TierMap` (fleet bands + fallback chains), `DesignerBand` (enabled + model), `StepModels` (per-step helper models), `ModelProfile` (Balanced/MaxEfficiency/MaxQuality/Custom), `L3ReviewConfig` (enabled + model), stall thresholds, and loop guard. |
+| `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export) + `bombe_enabled` (global animation on/off). Credentials (OpenRouter key, GitHub token) are stored in the system keychain, not in this file. |
 | `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
 | `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, last_run/last_fired, project_id. The auto-fire scheduler (`auto_fire.rs`) ticks over these. |
@@ -2177,11 +2218,63 @@ done.
 
 See `docs/decisions/2026-06-22_structured_clarifications_in_uow_lifecycle.md`.
 
-### Per-project per-step model config (`StepModels`)
+### Per-project model configuration (`TierMap`, `StepModels`, `DesignerBand`)
+
+All model configuration for a project lives in the **Settings** page (one consolidated
+nav item), split into fleet bands, helper steps, the optional Designer band, and the
+L3 reviewer. The data is stored on the `Project` struct and is never shared across
+projects.
+
+#### Suggested profiles
+
+`ModelProfile` (`crates/server/src/project.rs`) is an enum with four variants:
+`Balanced`, `MaxEfficiency`, `MaxQuality`, `Custom`. Applying a profile
+(`POST /api/projects/:id/model-profile { "profile": "balanced" }`) writes a
+predetermined `TierMap` + `StepModels` set in one call. Any subsequent single-entry
+override switches the project to `Custom` (the profile field tracks this). There is
+no "unset" profile state; `Custom` means "manually configured."
+
+#### Fleet model bands (`TierMap`)
+
+`TierMap` stores three bands: `strongest`, `balanced`, `fast`. Each band is a
+`BandConfig { primary: String, fallback: Vec<String> }`. `tier::model_for_task`
+resolves the primary model for a given `TaskKind`; on provider error the coordinator
+tries each fallback in order via `tier::resolve_with_fallback`.
+
+`CapabilityBand` (the routing key) has three logic-ladder variants:
+`Strongest`, `Balanced`, `Fast`. The orchestrator is always `Strongest`; child
+agents spawned via `delegate` default to `Balanced` or `Fast` per subtask
+classification. Escalation (a child returning `INCOMPLETE:`) routes the re-handle
+back to the orchestrator (Strongest); there is no separate escalation band.
+
+#### Designer (vision) band (`DesignerBand`)
+
+`DesignerBand { enabled: bool, model: String }` is an optional, project-wide
+configuration stored on `Project` (`#[serde(default)]`, back-compat with older
+project JSON where the field is absent).
+
+When `enabled = true`:
+
+- The model registry filters the Designer selector to only models with
+  `vision = true` in their capability flags.
+- The fleet routing step checks task domain BEFORE the logic ladder: a task
+  classified as visual work is routed to `DesignerBand::model` regardless of
+  `TaskKind` difficulty.
+- The designer agent receives the existing in-code layout and styling as context
+  (gathered from the project's repo clones by the orchestrator), then produces an
+  **HTML/Tailwind mockup** as an intermediate representation (IR).
+- A separate logic-tier agent (Strongest or Balanced depending on complexity)
+  translates that IR into Dioxus `rsx!` markup. The vision model never writes Rust.
+
+`DesignerBand` is orthogonal to the `TierMap` logic ladder. Both are stored on the
+same `Project`; a `tier_map` change never overwrites `designer_band`, and vice versa.
+The in-hierarchy designer agent is distinct from any planned end-user designer module.
+
+#### Per-project per-step model config (`StepModels`)
 
 Every non-fleet AI step (audit, calibration, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
-`StepModels`, stored ON the `Project` (`#[serde(default)]`, back-compat). Default
+`StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
 at project creation: `DEFAULT_MODEL` (`claude-sonnet-4-6`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
@@ -2537,10 +2630,11 @@ Routines · Repository Workspace · Docs.**
 | Variant | Nav label | What it shows |
 |---|---|---|
 | `Onboard` | "Onboard repos" | Brownfield onboarding wizard: scan → audit → propose rules → arm → apply. |
-| `Stories` | "Governed Development" (the default landing tab) | The Issue Management + WorkItem table + UoW cards + dev-controls surface. Renders `GovernedDevPage`. |
-| `Rules` | "Rules" | Active project ruleset management after onboarding. |
+| `Stories` | "Governed Development" (the default landing tab) | The Issue Management + WorkItem table + UoW cards + dev-controls surface. Renders `GovernedDevPage`. No settings gear or popup on this page. |
+| `Rules` | "Rules" | Active project ruleset management after onboarding. Rule tables grouped by domain (corpus folder), collapsed by default; clicking a row opens a rule-detail modal. Rules-only: model config is in Settings. |
 | `Routines` | "Routines" | Scheduled-routine dashboard. |
 | `Workspace` | "Repository Workspace" | Local workspace: clone repos, checkout status, ship (push + PR). |
+| `Settings` | "Settings" | Consolidated configuration: cross-project credentials (OpenRouter key + GitHub token, keychain-backed, masked) and Bombe animation controls; per-project model configuration (profile, fleet bands + fallback chains, Designer vision band, helper steps, L3 review). |
 | `Docs` | "Docs" | In-app documentation viewer: `USER_GUIDE.md` and `TECHNICAL.md` rendered as markdown. |
 
 `CockpitNav` (`fn CockpitNav(view: Signal<CockpitView>)`) renders the tab bar;
@@ -2580,14 +2674,11 @@ reached via the "Governed Development" tab. Its left nav (`GovDevSel`) is an
     live run + provenance + sign-off.
   This is the surface that replaced the retired adopt-issue flow (§10).
 
-A `ProjectSettingsGear` button sits in a `govdev-gear-row` at the top of the Governed Development
-left nav (always visible regardless of which UoW is selected). It opens a `proj-settings-modal`
-popup holding the **project-scoped** settings that used to be rendered inline (which made
-project-level settings read like per-UoW fields): the **loop guard** (`LoopGuardControl` →
-`project.max_iterations`) and the **default tier-map** (`TierMapEditor` → `project.tier_map`).
-`TierMapEditor` ALSO stays in the Rules view as a second discoverability surface (both write the
-same project row). The UoW dev controls now show only per-UoW state. See
-`docs/decisions/2026-06-22_project_settings_gear_popup.md` and
+Project-level configuration (loop guard, model tier map, designer band, helper-step models, stall
+thresholds, and L3 review) lives in the dedicated **Settings** nav item, not on the Governed
+Development page. The Governed Development page shows no settings gear or popup. Per-run model
+overrides (the Strongest / Balanced / Fast selectors on the UoW card) still appear inline, but
+they are run-scoped overrides that default from the project tier-map in Settings. See
 `docs/decisions/2026-06-21_uow_workitem_ux.md`.
 
 The **deterministic-scan progress** component (`DeterministicProgress`) and the **scan-type
@@ -2696,6 +2787,11 @@ table, proposed-rules table, and the work-item table share the same warm palette
 homage to the Bletchley Park Bombe codebreaking machine. It renders as a fixed-position
 background layer (`pointer-events: none`) so it never interferes with interactions.
 
+**Appearance:**
+- **Idle:** dark and subtle (low opacity, dim glow). Text is always readable against the overlay.
+- **Run active:** brighter (higher opacity, more vivid animation). The obscuring overlay lifts
+  slightly to reveal more of the machine, signaling that work is in flight.
+
 The animation is driven by a **global ref-counted loading state** (`crates/ui/src/loading.rs`):
 
 - `provide_loading_context()` — call once at the root to install the `Signal<u32>` into the
@@ -2708,6 +2804,18 @@ The animation is driven by a **global ref-counted loading state** (`crates/ui/sr
 element. When running, CSS animations bring the Bombe "to life" at higher opacity; when idle,
 the machine is dim (opacity 0.38 vs 0.72 running). The net effect: the background subtly
 animates whenever ANY async operation is in flight across the entire cockpit.
+
+**Settings controls (in Settings → Cross-project):**
+
+- **Global ON/OFF**: a boolean stored in `SettingsStore` (`bombe_enabled: bool`, default `true`).
+  When off, `BombeBg` is not rendered at all; the background is a plain dark surface.
+- **Play/Pause preview**: a per-session in-memory toggle (does not persist) that lets the user
+  preview the Bombe in motion or freeze it without waiting for a real run. The preview overrides
+  the loading-state drive: `is_loading()` is bypassed, and the `.bombe-running` class is forced
+  on or off by the preview flag while the preview is active.
+
+`GET /api/settings` and `POST /api/settings` carry the `bombe_enabled` field alongside
+`workspace_root`; the UI reads it on mount to decide whether to render `BombeBg`.
 
 ---
 

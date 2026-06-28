@@ -15,7 +15,8 @@ boundary moved.
 | **LLM** | Claude itself, the raw model | a contractor you pay per message |
 | **Agent** | an LLM given a job, tools, and boundaries, running in a loop | an LLM wrapped in a loop that can call functions |
 | **`claude -p` / the CLI** | Claude Code run headlessly; the orchestrator spawns it | `child_process.spawn`; this *is* the agent runtime |
-| **Agent SDK** | Anthropic's in-process agent library (TS/Python only, no Rust) | the library we deliberately do NOT use |
+| **Agent SDK** | Anthropic's in-process agent library (TS/Python only, no Rust) | the library we deliberately do NOT use; replaced by `ApiAgentDriver` |
+| **`ApiAgentDriver`** | Camerata's own in-process agent driver; owns the MCP tool-use loop for any API-reachable provider | the in-house equivalent of the Agent SDK, written in Rust |
 | **Orchestrator** | the "staff engineer" brain; deterministic Rust, **zero model calls** | a CI server / job scheduler, for agents |
 | **MCP** (Model Context Protocol) | open standard for giving a model tools via a separate "tool server" | a plugin protocol; the model uses only the plugins you expose |
 | **MCP tool-gateway** | *our* Rust MCP server that checks every tool call against the rules before running it | authorization middleware for agent actions |
@@ -141,7 +142,7 @@ governance gate.
 | Orchestrator core | Rust | deterministic, zero model calls |
 | Governance gateway | Rust (rmcp/MCP) | **verified**; MCP has a first-party Rust SDK |
 | Persistence | Rust (sqlx/serde) | language-agnostic, Rust-native |
-| Agent runtime | `claude -p` subprocess | the CLI is the agent; language-agnostic to drive |
+| Agent runtime | `claude -p` subprocess (`ClaudeCliDriver`) OR in-process `ApiAgentDriver` | two drivers behind one `AgentDriver` trait; both are Rust; the CLI subprocess is used for the subscription path, the in-process driver for any API provider |
 | `ts-morph` sidecar | TypeScript | *optional*, P2+; only for TS-AST checks the linter can't express; a subprocess, not core |
 
 Everything load-bearing is Rust. The single optional TS piece is a sidecar for

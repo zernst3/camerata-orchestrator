@@ -15,47 +15,69 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > resolve to **local folders** with a health check, and onboarding state **auto-saves**. Governed
 > Development is now a **3-phase cockpit** (Intake · Investigation & Refinement · Development) with
 > free navigation between phases, **Finish/Reopen** controls per phase, **per-story repo/branch
-> scoping** (Intake), **prose contract settling** and a **contract precondition** (no development for
-> cross-boundary work without a contract), and a **per-repo Ship panel** with a "Ship all repos"
-> chain button. UoWs reach a **Done/archive** terminal state. The gear popup adds an opt-in
-> **L3 AI code review** (per-project, model-selectable, runs parallel to Layer-2). The **Rules view**
-> has a **"Re-emit rules"** button that regenerates governance files directly into local repo clones
-> with no commit. The UI theme is **Bletchley industrial amber** with a background **Bombe machine**
-> animation driven by the global loading state. A project-settings **gear popup** (loop guard +
-> tier-map + per-project step-model config + **stall thresholds** + **L3 AI review**), **blank UoWs
-> you author with AI**, an **AI-assisted Update-branch** control, a work-item modal with comments +
-> @-mention autocomplete, a one-time **layer-2 bootstrap bypass** for installing tooling, a one-click
-> **Gate self-check** (go/no-go), **multiple concurrent UoWs** (each runs in its own isolated git
-> worktree), **PR lifecycle buttons** per UoW (push, open PR, pull PR info, resolve with agent), and
-> **structured clarifications** that auto-save at pause points. Dev runs and onboarding scans show
-> **run liveness**: an amber **stall warning** appears when a run makes no progress for the watched
-> threshold, and a **Stop button** is always available to cancel any running dev run or scan at any
-> time (the run ends in a **Cancelled** state). Scan findings now include a **Test badge** for
-> test-scope violations, a separate **Scan coverage** section (tools that didn't run), and scan tools
-> (Semgrep/ESLint) **auto-install on first use**. The in-app assistant retains **conversation context**
-> across messages and is grounded on your active project and pulled issues. A persistent **token usage
-> meter** tracks 5-hour and session-wide spend. The **check manifest** (`.camerata/checks.toml`) is
-> the single source of truth for custom deterministic gates: one entry wires a check into BOTH the
-> in-loop dev gate and the generated CI workflow. The two things you connect are a **GitHub token**
-> and **Claude** (the `claude` CLI).
+> scoping** (Intake, with the repos-in-scope selector at the top of the page), **prose contract settling**
+> and a **contract precondition** (no development for cross-boundary work without a contract), and a
+> **per-repo Ship panel** with a "Ship all repos" chain button. UoWs reach a **Done/archive** terminal
+> state. Settings is a **single consolidated nav item** (no settings button on the Governed Development
+> page): cross-project credentials (OpenRouter key + GitHub token, keychain-backed, masked) and Bombe
+> animation controls on one side; per-project **model configuration** on the other. Model tiering is
+> **domain-aware**: Strongest / Balanced / Fast fleet bands, an optional project-wide **Designer
+> (vision) band** for visual work, **suggested profiles** (Balanced / Max Efficiency / Max Quality /
+> Custom), and individually selectable **helper-agent models** (audit, calibration, research chat,
+> story authoring, decomposition, escalation, clarification). L3 AI code review has its own model
+> selector (defaults to Balanced). The **Rules page** is rules-only (model config moved to Settings).
+> The **Rules view** has a **"Re-emit rules"** button that regenerates governance files directly into
+> local repo clones with no commit. The UI theme is **Bletchley industrial amber** with a background
+> **Bombe machine** animation (idle: dark and subtle; run active: brighter; text always readable);
+> Settings exposes a global ON/OFF and a Play/Pause preview. The **Intake page** renders the whole
+> story inline (no separate modal) with a large **"Context for the investigation agent"** field that
+> is editable and deletable after it is added. The **Rules page** groups rule tables by domain,
+> collapsed by default; clicking a row opens a rule-detail modal. **Blank UoWs you author with AI**,
+> an **AI-assisted Update-branch** control, a work-item modal with comments + @-mention autocomplete,
+> a one-time **layer-2 bootstrap bypass** for installing tooling, a one-click **Gate self-check**
+> (go/no-go), **multiple concurrent UoWs** (each runs in its own isolated git worktree), **PR
+> lifecycle buttons** per UoW (push, open PR, pull PR info, resolve with agent), and **structured
+> clarifications** that auto-save at pause points. Dev runs and onboarding scans show **run liveness**:
+> an amber **stall warning** appears when a run makes no progress for the watched threshold, and a
+> **Stop button** is always available to cancel any running dev run or scan at any time (the run ends
+> in a **Cancelled** state). Scan findings now include a **Test badge** for test-scope violations, a
+> separate **Scan coverage** section (tools that didn't run), and scan tools (Semgrep/ESLint)
+> **auto-install on first use**. The in-app assistant retains **conversation context** across messages
+> and is grounded on your active project and pulled issues. A persistent **token usage meter** tracks
+> 5-hour and session-wide spend. The **check manifest** (`.camerata/checks.toml`) is the single
+> source of truth for custom deterministic gates: one entry wires a check into BOTH the in-loop dev
+> gate and the generated CI workflow. The runtime is **provider-agnostic**: a native in-process
+> `ApiAgentDriver` owns the MCP tool-use loop for any provider; the `ClaudeCliDriver` remains for
+> the Claude subscription path. Credentials are an **OpenRouter API key** (for API-path models) and
+> a **GitHub token** (for repo operations).
 
 ---
 
-## 0. The two connections (the only setup)
+## 0. Credentials (the only setup)
 
-1. **GitHub** — a token via environment variable. One token serves every repo it can reach:
+Credentials live in **Settings** (the dedicated nav item, not the old gear popup). They are stored
+in the system keychain and shown masked in the UI. Two credentials, both optional depending on which
+paths you use:
+
+1. **GitHub token**: for push/PR operations and Issues read/write. One token serves every repo it
+   can reach. You can also set it via environment variable for scripted launches:
    ```bash
-   export CAMERATA_GITHUB_TOKEN=github_pat_xxx      # Contents + PR write to apply/open PRs; Issues R/W for tickets
+   export CAMERATA_GITHUB_TOKEN=github_pat_xxx
    ```
-2. **Claude** — the `claude` CLI on your PATH, logged in (subscription) or with `ANTHROPIC_API_KEY`
-   set (metered API). This is what the audit and the governed fleet run as. Set
-   `CAMERATA_LIVE_BUILD=1` to run a real `claude -p` fleet for governed dev work.
+2. **Model provider**: two paths, pick one:
+   - **Claude CLI (subscription):** the `claude` CLI on your PATH, logged in. Camerata drives it as
+     a subprocess (`ClaudeCliDriver`). Set `CAMERATA_LIVE_BUILD=1` to activate the live fleet.
+   - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings (or
+     `ANTHROPIC_API_KEY` for direct Anthropic). The `ApiAgentDriver` owns the MCP tool-use loop
+     in-process and works with any provider the model registry discovers (Claude, and every
+     OpenRouter-listed model flagged for tool use).
 
 Launch:
 ```bash
-CAMERATA_GITHUB_TOKEN=github_pat_xxx cargo run -p camerata-ui
+cargo run -p camerata-ui
 ```
-The desktop app opens with its embedded server; the topbar shows the live connection.
+The desktop app opens with its embedded server; the topbar shows the live connection status and
+which provider path is active.
 
 **Local-first:** Camerata stores only configs + pointers (JSON in your OS app-data dir —
 `projects.json`, `settings.json`, `onboarding-draft.json`); your repo code lives on your own
@@ -87,15 +109,18 @@ import a project on a new machine you start with no UoWs; they accumulate as you
 ## 2. The cockpit views
 
 Inside a project the nav shows: **Onboard repos · Governed Development · Rules · Routines ·
-Repository Workspace · Docs**.
+Repository Workspace · Settings · Docs**.
 - **Onboard repos** — bring a repo under governance (§3).
 - **Governed Development** — the work control surface: pull work items from a tracker (or author a new
   story from a blank UoW with AI), create a Unit of Work (UoW) from one, then run governed development
-  on it with the human↔AI clarify loop, comment back, and sign off (§6). A project-settings **gear
-  popup** at the top holds the loop guard + default tier-map + per-step model config.
+  on it with the human↔AI clarify loop, comment back, and sign off (§6). There is no settings button
+  on this page; all configuration lives in Settings (below).
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
+  Rule tables are grouped by domain, collapsed by default; clicking a row opens a rule-detail modal.
+  This page is rules-only: model configuration has moved to Settings.
 - **Routines** — schedule governed runs.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
+- **Settings**: all configuration in one place, split into two clearly-labeled scopes (see §17).
 - **Docs** — the in-app documentation viewer (this guide and the technical reference).
 
 ---
@@ -346,6 +371,8 @@ Design rationale: [`decisions/2026-06-15_brownfield_onboarding_flow.md`](decisio
 
 ## 4. The Rules view (manage the ruleset)
 
+The Rules page is **rules-only**: model configuration lives in Settings (§17), not here.
+
 Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
@@ -353,6 +380,11 @@ Two tables:
 - **All rules** — the full corpus, viewable even when unassigned. Each row shows **which repos it's
   applied to**, with **"Add to repo"** (add a rule to any repo it's not yet on — directly here) and a
   jump to the project-rules table for editing.
+
+**Rule tables are grouped by domain** (derived from the rule's folder in the corpus), collapsed by
+default. Clicking a group header expands it; clicking a row opens a **rule-detail modal** showing the
+decision question, all options and their rationale, the sources the rule is grounded in, and the
+enforcement kind. Tables use the dark Bletchley amber theme.
 
 The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
 
@@ -411,33 +443,24 @@ The **Governed Development** view is built around two objects:
   GitHub Projects are **planned per-provider adapters, not yet shipped**.
 - A **Unit of Work (UoW)** is the dev lifecycle that references a WorkItem.
 
-### Project settings (the gear popup)
+### Project settings
 
-A small **Settings** button (gear icon) sits at the top of the Governed Development left nav and is
-always visible regardless of which UoW is selected. It opens a popup holding the **project-wide**
-settings:
+All project-level configuration lives in the **Settings** nav item (§17), not on the Governed
+Development page. The settings that affect runs are:
+
 - **Loop guard** — the maximum number of revise iterations a governed run may take before it stops.
-- **Default tier-map** — the project's default Fast / Balanced / Strongest model ids.
-- **Step models** — the AI model to use for each non-fleet step (audit, calibration, research chat,
-  story authoring, decomposition, escalation, clarification). Each step has its own model selector;
-  they default to `claude-sonnet-4-6` when a project is created. Per-project isolation: a change to
-  project A never touches project B's step models. See §16 for more detail.
+- **Model configuration**: the full tier-map, suggested profile, helper-agent models, Designer band
+  toggle, and L3 AI code review config (see §17).
 - **Stall thresholds** — two numeric fields (in seconds) that control how long a run can be idle
   before Camerata considers it stalled:
   - **Watched (interactive)** — default 120 s. Applies to dev runs you are actively watching. On
     stall, an amber warning appears in the run panel; the run keeps going and you decide what to do.
   - **Routine (autonomous)** — default 600 s. Applies to walk-away autonomous runs (scheduled
-    routines). On stall, the run is **auto-cancelled** and transitions to **Failed** with the stall
-    reason recorded — the failure reason is the operator signal for an unattended job. Two separate
-    thresholds exist because a human-watched run warrants a shorter patience window, while a walk-away
-    routine warrants more room and should fail explicitly rather than hang indefinitely. Both values
-    must be positive integers greater than zero; saving zero is blocked.
-- **L3 AI code review** — an opt-in, per-project agentic code reviewer that runs in parallel with
-  Layer-2 after each dev-run iteration. See §6a for full details.
+    routines). On stall, the run is auto-cancelled and transitions to **Failed** with the stall
+    reason recorded. Both values must be positive integers greater than zero; saving zero is blocked.
 
-These are project defaults, not per-UoW knobs. (The tier-map is also still editable in the Rules view
-for discoverability; both surfaces save to the same project row.) Per-run model overrides stay on the
-UoW card — they default *from* this tier-map but override only that one run.
+These are project defaults, not per-UoW knobs. Per-run model overrides stay on the UoW card; they
+default from the project tier-map and override only that one run.
 
 ### Issue Management — pull work items
 
@@ -523,20 +546,23 @@ automatically, and you can always reopen.
 
 #### Phase 1: Intake
 
-The Intake phase is where you set the scope of the story:
+The Intake phase renders the whole story inline (no separate modal). The page layout from top to
+bottom:
 
-- **Scope notes** — a free-text context note for the investigation agent ("extra context the story
-  doesn't capture"). Persisted to the UoW; the agent receives it at investigation time.
-- **Repos in scope** — which repos the story touches and which branch each targets. Setting the scope
-  here affects the **per-repo Ship panel** in Development (only in-scope repos appear). Out-of-scope
-  repos are simply not listed.
+- **Update-branch notice**: any pending upstream branch update is shown at the very top.
+- **Repos in scope**: the repos-in-scope selector sits directly under the update-branch notice.
+  Set which repos the story touches and which branch each targets. This affects the **per-repo Ship
+  panel** in Development (only in-scope repos appear); out-of-scope repos are not listed.
+- **Context for the investigation agent**: a large free-text field. Add context the story itself
+  doesn't capture; the agent receives it at investigation time. The field is **editable and
+  deletable** after it is added (it is not locked once saved).
 
 A **▶ Begin investigation** button (with a model select) starts the investigation run from Intake.
 The model defaults to the project's strongest tier. Clicking it transitions the UoW to
 **Investigating** and starts a single gated investigation agent.
 
 Without `CAMERATA_LIVE_BUILD=1` the run completes with a placeholder note; with it set and `claude`
-connected, a real `claude -p` investigation agent runs.
+connected, a real gated investigation agent runs.
 
 #### Phase 2: Investigation & Refinement
 
@@ -679,17 +705,14 @@ after each dev-run iteration. It is the third enforcement stage in the canonical
 
 ### Enabling it
 
-In the project-settings gear popup (§6), the **L3 AI code review** section has:
+In **Settings** (§17), the per-project **Model configuration** section includes an **L3 AI code
+review** subsection with:
 - An **enable/disable toggle** — off by default (opt-in per project; a project without L3 configured
   never runs the reviewer).
-- A **model selector** — empty = fall back to the project's Balanced tier model.
+- A **model selector** (empty falls back to the project's Balanced tier model.
 
 The setting is per-project, not per-UoW. Enabling it applies to every subsequent dev run in that
 project.
-
-> **Note:** the project settings route for saving L3 config exists in the server (`set_l3_review`)
-> and is correctly consumed in the dev run path, but the gear popup UI control to expose the toggle
-> is **in progress** — it is not yet rendered in the gear popup in the current build.
 
 ### What it does
 
@@ -1214,13 +1237,73 @@ observational: it does not change model selection, retry behavior, or the gate.
 
 ---
 
-## 17. Per-project model settings
+## 17. Settings
 
-Every AI step in Camerata has a configurable model, set **per project** via the **Step models**
-section in the project-settings gear popup (§6). One labeled selector per step; the available options
-come from the connected provider.
+Settings is a **single consolidated nav item** inside a project. It is split into two clearly-labeled
+scopes.
 
-**Steps you can configure per project:**
+### Cross-project settings (apply to all projects)
+
+- **OpenRouter API key**: for API-path model access. Stored in the system keychain; shown masked.
+- **GitHub token**: for push, PR, and Issues operations. Stored in the system keychain; shown masked.
+- **Bombe animation**: a global ON/OFF toggle and a Play/Pause preview control. ON by default;
+  turning it off stops the background animation entirely. The preview lets you see the Bombe in motion
+  (and pause it) without waiting for a real run to start.
+
+### Per-project model configuration
+
+Model configuration is the other half of the Settings page, scoped to the open project.
+
+#### Suggested profiles
+
+A **suggested model level** (a profile) cascades an opinionated set of model choices across every
+fleet band and helper step in one click. Four profiles are available:
+
+| Profile | Intent |
+|---|---|
+| **Balanced** | A sensible default: mid-tier models everywhere, reasonable cost. |
+| **Max Efficiency** | Faster and cheaper models throughout; best for high-volume or low-stakes work. |
+| **Max Quality** | Strongest models everywhere; best for complex or high-stakes stories. |
+| **Custom** | You have manually overridden one or more entries; the profile stays at Custom until you re-apply a preset. |
+
+Applying a profile sets all entries at once. Any single entry remains overridable afterward.
+
+#### Fleet model bands
+
+The governed development fleet uses a three-band logic ladder:
+
+| Band | Role | Who runs here |
+|---|---|---|
+| **Strongest** | Lead / orchestrator | Drives the whole run; handles complex, one-way-door decisions; re-handles escalations. |
+| **Balanced** | Mid engineer | Subtasks delegated by the orchestrator (`delegate` tool). |
+| **Fast** | Quick engineer | Well-scoped, low-risk subtasks. |
+
+Each band has a **primary** model and an optional **fallback chain** (tried in order when the primary
+is unavailable or rate-limited).
+
+**Escalation routing:** when a child returns `INCOMPLETE:`, the orchestrator re-handles the work
+itself (Strongest tier). There is no separate escalation tier.
+
+#### Designer (vision) band
+
+An optional, project-wide **Designer** band sits orthogonal to the logic ladder. When enabled (a
+toggle in Settings), it intercepts visual work before the ladder applies:
+
+- Only **vision-capable (multimodal)** models are listed in the Designer selector.
+- The designer agent receives the existing in-code layout and styling as context, then produces an
+  **HTML/Tailwind mockup** as an intermediate representation (IR).
+- A logic-tier agent then translates that IR into Dioxus `rsx!` markup. The vision model never
+  writes Rust directly.
+- Routing is domain-first: any task classified as visual work goes to the Designer; the Strongest /
+  Balanced / Fast ladder handles everything else.
+
+> The **in-hierarchy designer agent** (above) is distinct from a planned, separate **designer
+> module** (an interactive mockup tool for end users). They do not overlap.
+
+#### Helper-agent models
+
+Each one-shot helper step has its own model selector with an info icon explaining what the step
+does and where it runs:
 
 | Step | When it runs |
 |---|---|
@@ -1232,39 +1315,41 @@ come from the connected provider.
 | Escalation | Translating escalation decisions into prose |
 | Clarification | Generating structured clarification questions |
 
-All steps default to `claude-sonnet-4-6` when a project is created. The defaults are seeded at
-creation time — there is no "unset" state. A change to one project never touches another project's
-step models.
+All steps default to `claude-sonnet-4-6` when a project is created. A change to one project never
+touches another project's step models.
 
 For steps where you also pick a model per run (audit, calibration, research chat), your per-run
-choice wins over the project default for that run only. The project default is what you see when you
-open a fresh run.
+choice wins over the project default for that run only.
 
-The governed development fleet (investigation, dev run, update-branch, PR resolve) is configured
-separately via the **tier-map** (Strongest / Balanced / Fast) in the same gear popup — those runs
-are orchestrated differently and belong to a different configuration axis.
+#### L3 AI code review
+
+An opt-in, per-project agentic reviewer that runs in parallel with Layer-2 after each dev-run
+iteration. Toggle it on here; select the model (defaults to the Balanced tier when left blank).
+See §6a for the full description of what it does and when to use it.
 
 ---
 
 ## The whole loop, in one line
 
-**Create/open a project → onboard each repo (browse to its local folder → scan the local code,
-choosing AI review and/or deterministic scans → pick per-repo rules (opt-in rules are never
-pre-checked) → Add rules to repo(s): local branch+push → optionally audit + triage (check Test
-badge + Scan coverage section) + wire CI via two separate stories (mechanical and architectural)) →
-manage the ruleset in the Rules view (Re-emit rules to bring local clones up to date) → in
-Governed Development, pull work items (or author a new story from a blank UoW with AI), create a
-Unit of Work from one → 3-phase cockpit (Intake: scope repos + set context → Investigation: run
-investigation agent, approve decisions, settle prose contract for cross-boundary work → Development:
-run three-tier orchestrator-led build, use per-repo Ship panel, mark Done/archive) → use PR
-lifecycle buttons to push, open PR, pull CI status, and resolve feedback with a gated agent →
-sign off.**
+**Create/open a project → configure credentials in Settings (OpenRouter key + GitHub token,
+keychain-backed) + set model configuration (profile, fleet bands, Designer band, helper steps, L3
+review) → onboard each repo (browse to its local folder → scan the local code, choosing AI review
+and/or deterministic scans → pick per-repo rules (opt-in rules are never pre-checked) → Add rules
+to repo(s): local branch+push → optionally audit + triage (check Test badge + Scan coverage
+section) + wire CI via two separate stories (mechanical and architectural)) → manage the ruleset
+in the Rules view (rules-only; Re-emit rules to bring local clones up to date; rules grouped by
+domain, collapsed by default, click to expand) → in Governed Development, pull work items (or
+author a new story from a blank UoW with AI), create a Unit of Work from one → 3-phase cockpit
+(Intake: inline story view, set repos-in-scope at top, add/edit/delete context for the
+investigation agent → Investigation: run investigation agent, approve decisions, settle prose
+contract for cross-boundary work → Development: run three-tier orchestrator-led build with optional
+Designer band for visual work, use per-repo Ship panel, mark Done/archive) → use PR lifecycle
+buttons to push, open PR, pull CI status, and resolve feedback with a gated agent → sign off.**
 
-Onboarding is local-first (no GitHub needed); connect GitHub + Claude for the push/PR and the AI
-audit + governed dev. Export/import a project (config only; UoWs stay local) to move it between
-machines; resolve local repo paths on the receiving side. Multiple UoWs can run concurrently, each
-in its own isolated git worktree. Wire custom checks via `.camerata/checks.toml` (the SSOT for
-both the dev loop and CI); pin exact tool versions to prevent drift. Opt in to the L3 AI code
-reviewer in the project settings gear popup for spec-grounded post-iteration diff review. Watch the
-token usage meter in the nav for cumulative spend. Use the chat bubble to ask data-driven questions
-about your active project — it retains context across messages.
+Onboarding is local-first (no GitHub needed); connect GitHub and a model provider for the push/PR
+and the AI audit + governed dev. Export/import a project (config only; UoWs stay local) to move it
+between machines; resolve local repo paths on the receiving side. Multiple UoWs can run
+concurrently, each in its own isolated git worktree. Wire custom checks via `.camerata/checks.toml`
+(the SSOT for both the dev loop and CI); pin exact tool versions to prevent drift. Watch the token
+usage meter in the nav for cumulative spend. Use the chat bubble to ask data-driven questions about
+your active project; it retains context across messages.

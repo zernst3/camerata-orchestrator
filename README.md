@@ -24,6 +24,16 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
       the UI; live-agent runs across the cycle are the validation milestone below.
     ▸ EVERY AGENT IS GROUNDED — on-demand READ access to the entire set of a
       project's repo clones + the project's rules; writes stay gated to one worktree.
+    ▸ PROVIDER-AGNOSTIC RUNTIME: a native in-process ApiAgentDriver owns the
+      MCP tool-use loop for any provider; the Claude CLI driver remains for the
+      subscription path. Model registry combines Claude static entries with live
+      OpenRouter discovery (free / tool-use / caching / vision flags, pricing).
+    ▸ DOMAIN-AWARE MODEL TIERING: Strongest / Balanced / Fast fleet bands plus
+      an optional Designer (vision) band; suggested profiles (Balanced, Max
+      Efficiency, Max Quality, Custom); per-step helper models; L3 AI code review.
+    ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
+      credentials (keychain-backed, masked) + Bombe animation controls, and
+      per-project model configuration. The Rules page is rules-only.
     ▸ 16-crate Rust workspace · ~2,000 tests · governs its OWN source in CI.
 
  ⏳ STAGED — built & tested, NOT yet validated live (please don't grade these as proven)
@@ -138,9 +148,10 @@ cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local d
 - **Everything load-bearing is Rust** (no TypeScript core; that early design was abandoned on evidence). One Tokio process is the server, the brain, and the gate.
 - **Orchestrator core:** deterministic Rust that makes ZERO model calls (intake, rule selection, planning, worktrees, coordination, provenance).
 - **Governance gateway:** a Rust MCP server. Every agent tool call routes through it; it allows or denies before anything executes (deny-before-execute).
-- **Agent layer:** short-lived `claude -p` subprocesses, one per role, scoped by prompt, allowed tools, path boundaries, and rule subset — each with read access to the project's repos and writes jailed to its worktree. Provider/model agnostic behind a seam.
+- **Agent layer:** short-lived agents, one per role, scoped by prompt, allowed tools, path boundaries, and rule subset. Each gets read access to all of the project's repos; writes are jailed to its worktree. Two drivers: `ClaudeCliDriver` (subscription path, drives `claude -p`) and `ApiAgentDriver` (in-process, owns the MCP tool-use loop, works with any OpenRouter-listed or Anthropic API provider).
+- **Model registry:** Claude static entries merged with live OpenRouter discovery. Each entry is flagged for free tier, tool-use support, prompt caching, vision capability, and pricing. Fleet routing is domain-first (visual work to the Designer band) then by difficulty within the Strongest / Balanced / Fast logic ladder.
 - **Persistence:** a versioned store (SQLite now, Postgres later behind the same trait seam) so every user/AI edit is saved with full history.
-- **UI:** a Dioxus desktop app; tabular surfaces dogfood [Chorale](../rust-chorale).
+- **UI:** a Dioxus desktop app with a Bombe machine background animation; tabular surfaces dogfood [Chorale](../rust-chorale).
 
 ## The crate dependency graph
 
@@ -210,7 +221,7 @@ no app-crate edge. Full crate map + the runtime model in [`docs/TECHNICAL.md`](d
 
 ## How an AI agent fits behind the gate
 
-The orchestrator makes zero model calls; it prepares a session and spawns a `claude -p` agent behind the `AgentDriver` seam. The agent can READ the project's repos, but its built-in write tools are disallowed — its only way to write is the gateway's MCP tool, which denies or allows each write before it executes (layer 1). Allowed writes land in an isolated worktree; layer-2 checks bounce failures back. The agent uses your own local Claude login (Camerata holds no model credentials), and the gate is model-agnostic.
+The orchestrator makes zero model calls; it prepares a session and spawns an agent behind the `AgentDriver` seam. Two drivers implement that seam: `ClaudeCliDriver` (drives `claude -p` subprocesses, used with the Claude subscription path) and `ApiAgentDriver` (in-process, owns the MCP tool-use loop for any provider reachable via the Anthropic API or OpenRouter). Either way, the agent can READ the project's repos but its built-in write tools are disallowed. Its only way to write is the gateway's MCP tool, which denies or allows each write before it executes (layer 1). Allowed writes land in an isolated worktree; layer-2 checks bounce failures back. The gate is provider-neutral and model-agnostic.
 
 ![Camerata architecture: how an AI agent fits behind the governance gate](docs/architecture-agent-gate.svg)
 
