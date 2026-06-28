@@ -127,9 +127,14 @@ Repository Workspace · Settings · Docs**.
 
 ## 3. Onboarding a repo (the main flow)
 
-Open **Onboard repos**. The flow: **scan → pick rules → apply → (optional audit → triage → CI step)
-→ onboarded.** Onboarding state **auto-saves** continuously, so you can quit and reopen without
-re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs the scan).
+Open **Onboard repos**. The flow: **detect stack → pick rules → scan the repo for violations (audit)
+→ triage findings → apply governance → (optional: wire CI) → onboarded.** The **violation scan is a
+core part of onboarding**, not an afterthought: it is where Camerata reads your existing code and
+surfaces what already violates the rules (existing hardcoded secrets, SQL injection, disabled TLS,
+architectural problems, and more), so you start governed development from a known baseline. You
+*can* skip it and just apply the governance files, but running it is strongly recommended.
+Onboarding state **auto-saves** continuously, so you can quit and reopen without re-scanning (a
+fresh scan starts a new session; a crash mid-scan just re-runs the scan).
 
 1. **Point at the repo(s)** — **browse to each repo's local folder.** Onboarding is **local-first**:
    it reads the code on disk, so a repo must already be cloned locally. Camerata derives the
@@ -169,7 +174,10 @@ re-scanning (a fresh scan starts a new session; a crash mid-scan just re-runs th
    **"Available"** (no recommended badge, no pre-checked checkbox). You opt in deliberately. See §3
    step 6 for details.
 
-4. **Audit (optional) + triage** — optionally scan the existing code to surface violations. Each repo
+4. **Scan the repo for violations + triage (recommended core step)** — scan the existing code to
+   surface what already violates your rules. This is the heart of brownfield onboarding: you can skip
+   it and apply governance straight away, but it is where Camerata finds the existing security and
+   architectural problems in your repo, so running it is strongly recommended. Each repo
    is scanned only against **its own selected rules** plus the always-on **deterministic security
    floor** (hardcoded secrets, raw-SQL concatenation, secrets in URLs, private-key blocks, vendor
    credential tokens, secret-bearing file paths, TLS verification disabled — ranked Critical, free +
