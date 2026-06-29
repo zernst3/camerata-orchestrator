@@ -294,8 +294,14 @@ All hermetic, matching the existing suites' style (scripted gate, deterministic 
 ## 9. Build phases (proposed order)
 
 1. **Run history (data + endpoint + tests)** -- the load-bearing addition; everything visual builds
-   on it.
-2. **Table on CamerataTable** + the next-fire column + the status strip.
+   on it. **DONE** (`2207b8f`): RoutineRun + bounded history, run_now/run_now_scheduled recording,
+   escalation linking, `GET /api/routines/:id/runs`, unit + integration tests.
+2. **Status strip + next-fire column.** **DONE** (server `d9db513`: `schedule::next_fire` + the list
+   payload's `next_fire_label`/`due_soon`; UI `ce4166f`: filterable count-pill strip + next-fire
+   subline). **CamerataTable conversion: DEFERRED** -- the routine rows are rich (multi-action + a
+   full-width inline escalation panel rendered as a grid sibling), a poor fit for the tabular
+   CamerataTable/chorale primitive, which is also `pub(super)` to cockpit while routines is a
+   top-level module. High effort + risk, low benefit; the bespoke table stays.
 3. **Create/edit polish** (scope vocabulary decision, sections) + **template preview**.
 4. **Run-history UI** (row expand or drawer) + denied-rules surfacing.
 5. **Escalation drawer** (optional polish).
