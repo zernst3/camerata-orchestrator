@@ -1008,7 +1008,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
             div {
                 style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
                         width:28rem;max-height:80vh;display:flex;flex-direction:column;\
-                        background:rgba(255,255,255,0.82);backdrop-filter:blur(12px);\
+                        background:rgba(255,255,255,0.76);backdrop-filter:blur(12px);\
                         -webkit-backdrop-filter:blur(12px);\
                         border:1px solid rgba(226,232,240,0.7);border-radius:.75rem;\
                         box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
@@ -1062,7 +1062,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 // ── "what this assistant can see" affordance ─────────────
                 div {
                     style: "padding:.5rem 1rem;border-bottom:1px solid #e2e8f0;\
-                            background:#f0f9ff;font-size:.75rem;color:#0369a1;",
+                            background:rgba(240,249,255,0.45);font-size:.75rem;color:#0369a1;",
                     div {
                         style: "font-weight:600;margin-bottom:.2rem;",
                         "What this assistant can see:"
@@ -1233,7 +1233,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
                 // ── transcript ──────────────────────────────────────────────
                 div {
-                    style: "flex:1;overflow-y:auto;overflow-x:hidden;padding:.75rem 1rem;display:flex;\
+                    style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:.75rem 1rem;display:flex;\
                             flex-direction:column;gap:.5rem;min-height:8rem;",
                     if turns().is_empty() {
                         p {
