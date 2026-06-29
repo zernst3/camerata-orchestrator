@@ -5628,7 +5628,16 @@ async fn emit_project(
 async fn emit_project_local(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    // Tolerant of a missing/empty/malformed body: it defaults to all-false (write locally only),
+    // the safe baseline. The UI always sends the explicit toggles.
+    req: Option<Json<EmitLocalReq>>,
 ) -> Json<serde_json::Value> {
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    // Enforce the cascade defensively (the UI also gates it): a PR needs a push, a push needs a
+    // branch. All-false = write the governance files into the working copy only.
+    let (want_branch, want_push, want_pr) =
+        normalize_emit_cascade(req.branch, req.push, req.open_pr);
+
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
@@ -5636,6 +5645,9 @@ async fn emit_project_local(
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_default();
+    if want_push && token.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }));
+    }
 
     let rules = resolve_project_arm_rules(&project).await;
     if rules.is_empty() && project.ruleset.custom.is_empty() {
@@ -5708,7 +5720,7 @@ async fn emit_project_local(
             workspace_root.as_deref().map(std::path::Path::new)
         };
         let msg = format!("chore(governance): re-emit Camerata ruleset to {repo}");
-        match crate::workspace::apply_local_and_push(
+        match crate::workspace::apply_local(
             &dir,
             repo,
             clone_root,
@@ -5716,13 +5728,39 @@ async fn emit_project_local(
             &files,
             &msg,
             &token,
+            want_branch,
+            want_push,
         )
         .await
         {
             Ok(path) => {
-                results.push(serde_json::json!({
-                    "repo": repo, "ok": true, "branch": crate::arm::ARM_BRANCH, "path": path
-                }));
+                let mut entry = serde_json::json!({ "repo": repo, "ok": true, "path": path });
+                if want_branch {
+                    entry["branch"] = crate::arm::ARM_BRANCH.into();
+                }
+                if want_pr {
+                    let title = format!("chore(governance): Camerata ruleset for {repo}");
+                    let body = "Camerata-managed governance files (AGENTS.md / CONVENTIONS.md / .camerata gate config), regenerated from the project ruleset.";
+                    match crate::workspace::open_branch_pr(
+                        repo,
+                        crate::arm::ARM_BRANCH,
+                        &title,
+                        body,
+                        &token,
+                    )
+                    .await
+                    {
+                        Ok(url) => {
+                            entry["pr_url"] = url.into();
+                        }
+                        Err(e) => {
+                            entry["ok"] = serde_json::Value::Bool(false);
+                            entry["message"] =
+                                format!("emitted + pushed, but opening the PR failed: {e}").into();
+                        }
+                    }
+                }
+                results.push(entry);
             }
             Err(e) => results.push(serde_json::json!({
                 "repo": repo, "ok": false, "message": format!("{e}")
@@ -5730,6 +5768,30 @@ async fn emit_project_local(
         }
     }
     Json(serde_json::json!({ "ok": true, "results": results }))
+}
+
+/// The escalation toggles for [`emit_project_local`], cascading (each requires the previous):
+/// `branch` (commit onto the managed branch) → `push` (push it to origin) → `open_pr`. All
+/// false = write the governance files into the working copy only (the default local emit).
+#[derive(serde::Deserialize, Default)]
+struct EmitLocalReq {
+    #[serde(default)]
+    branch: bool,
+    #[serde(default)]
+    push: bool,
+    #[serde(default)]
+    open_pr: bool,
+}
+
+/// Normalize the emit cascade so each level implies the ones beneath it: opening a PR requires
+/// a push, and a push requires a branch. Returns `(want_branch, want_push, want_pr)`. This makes
+/// a malformed request (e.g. `push=true` with `branch=false`) safe rather than pushing the
+/// current branch.
+fn normalize_emit_cascade(branch: bool, push: bool, open_pr: bool) -> (bool, bool, bool) {
+    let want_pr = open_pr;
+    let want_push = push || want_pr;
+    let want_branch = branch || want_push;
+    (want_branch, want_push, want_pr)
 }
 
 /// Query for draining the notification feed: only items newer than `since`.
@@ -10237,6 +10299,18 @@ mod tests {
             1,
             "custom survived the re-arm upsert"
         );
+    }
+
+    /// The emit cascade normalization: each level implies the ones beneath it, so a malformed
+    /// request (push without branch) is made safe rather than pushing the current branch.
+    #[test]
+    fn emit_cascade_normalizes_each_level_to_imply_the_ones_beneath() {
+        use super::normalize_emit_cascade as n;
+        assert_eq!(n(false, false, false), (false, false, false)); // all off → local-only
+        assert_eq!(n(true, false, false), (true, false, false)); // branch only
+        assert_eq!(n(false, true, false), (true, true, false)); // push implies branch
+        assert_eq!(n(false, false, true), (true, true, true)); // PR implies push + branch
+        assert_eq!(n(true, true, true), (true, true, true)); // already consistent
     }
 
     /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run

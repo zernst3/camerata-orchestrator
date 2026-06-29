@@ -1,52 +1,66 @@
 use super::*;
 
 
-/// Re-emit the project's ruleset (source of truth) into its repos — one PR per repo.
-pub(super) async fn emit_project_rules(project_id: &str) -> Option<Vec<ArmResultView>> {
-    let v: serde_json::Value = reqwest::Client::new()
-        .post(format!(
-            "{}/api/projects/{}/emit",
-            crate::BFF_URL,
-            project_id
-        ))
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-        return None;
-    }
-    serde_json::from_value(v.get("results").cloned()?).ok()
-}
-
-/// Re-emit the project's ruleset locally into each repo's working copy
-/// (POST /api/projects/:id/emit-local).  Writes AGENTS.md + CONVENTIONS.md
-/// directly into the local checkout; no GitHub token needed, no PR opened.
-/// Returns `(ok, message)` — ok=true means at least one file was written.
-pub(super) async fn emit_project_local(project_id: &str) -> (bool, String) {
+/// Emit the project's ruleset into its repos' LOCAL working copies (POST
+/// /api/projects/:id/emit-local). Writes AGENTS.md + CONVENTIONS.md + the gate config. The
+/// cascade flags escalate (each requires the previous): `branch` commits onto the managed
+/// branch, `push` pushes it to origin, `open_pr` opens a PR. All false = write the files in
+/// place for the architect to review. Returns `(ok, summary)` for a single toast.
+pub(super) async fn emit_project_local(
+    project_id: &str,
+    branch: bool,
+    push: bool,
+    open_pr: bool,
+) -> (bool, String) {
+    let body = serde_json::json!({ "branch": branch, "push": push, "open_pr": open_pr });
     let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/emit-local",
             crate::BFF_URL,
             project_id
         ))
+        .json(&body)
         .send()
         .await;
-    match resp {
-        Ok(r) => {
-            let v: serde_json::Value = r.json().await.unwrap_or_default();
-            let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
-            let msg = v
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or(if ok { "Rules emitted locally." } else { "emit-local failed." })
-                .to_string();
-            (ok, msg)
-        }
-        Err(e) => (false, format!("Network error: {e}")),
+    let v: serde_json::Value = match resp {
+        Ok(r) => r.json().await.unwrap_or_default(),
+        Err(e) => return (false, format!("Network error: {e}")),
+    };
+    let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+    // A top-level message means an early return (no such project / token required / no local path).
+    if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+        return (ok, msg.to_string());
     }
+    // Otherwise summarize the per-repo results into one line.
+    let results = v
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if results.is_empty() {
+        return (
+            false,
+            "Nothing emitted (no repo-local or custom rules for the configured repos).".to_string(),
+        );
+    }
+    let mut all_ok = true;
+    let mut lines = Vec::new();
+    for r in &results {
+        let repo = r.get("repo").and_then(|s| s.as_str()).unwrap_or("?");
+        let rok = r.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
+        all_ok &= rok;
+        if !rok {
+            let m = r.get("message").and_then(|s| s.as_str()).unwrap_or("failed");
+            lines.push(format!("{repo}: {m}"));
+        } else if let Some(pr) = r.get("pr_url").and_then(|s| s.as_str()) {
+            lines.push(format!("{repo}: PR \u{2192} {pr}"));
+        } else if r.get("branch").is_some() {
+            lines.push(format!("{repo}: committed to branch"));
+        } else {
+            lines.push(format!("{repo}: emitted locally"));
+        }
+    }
+    (all_ok, lines.join(" · "))
 }
 
 /// Add or edit (by name) a custom rule on a project.
@@ -2413,8 +2427,12 @@ pub(super) fn RulesView() -> Element {
     let mut cr_name = use_signal(String::new);
     let mut cr_domain = use_signal(String::new);
     let mut cr_body = use_signal(String::new);
-    let mut emitting = use_signal(|| false);
     let mut emitting_local = use_signal(|| false);
+    // Emit cascade toggles (each requires the previous): commit to a managed branch → push it →
+    // open a PR. All off = write the ruleset into the local working copy only.
+    let mut emit_branch = use_signal(|| false);
+    let mut emit_push = use_signal(|| false);
+    let mut emit_pr = use_signal(|| false);
 
     // Shared context: the open rule in the detail modal (Tables 1 + 2 both write here).
     let detail_rule = use_signal(|| Option::<ProposedRuleView>::None);
@@ -2494,7 +2512,6 @@ pub(super) fn RulesView() -> Element {
                     })).unwrap_or_default();
                     let pid = p.id.clone();
                     let pid_rec = p.id.clone();
-                    let pid_emit = p.id.clone();
                     let pid_emit_local = p.id.clone();
                     let pid_sup = p.id.clone();
                     let pid_health = p.id.clone();
@@ -2608,68 +2625,67 @@ pub(super) fn RulesView() -> Element {
                             rules: ci_rule_items_from_selections(&p_owned.ruleset.selections, &corpus),
                         }
 
-                        // Re-emit: rebuild the source-of-truth emit from this project's
-                        // ruleset (base selections + custom) and open a PR per repo.
+                        // Emit: write this project's ruleset (base selections + custom) into each
+                        // repo's LOCAL working copy. Rules ONLY ever emit locally; the cascade
+                        // toggles below escalate from there (each requires the previous):
+                        // commit onto a managed branch → push it → open a PR.
                         div { class: "rules-emit",
                             button {
                                 class: "btn-run",
-                                disabled: emitting(),
-                                onclick: move |_| {
-                                    let id = pid_emit.clone();
-                                    emitting.set(true);
-                                    spawn(async move {
-                                        match emit_project_rules(&id).await {
-                                            Some(results) => {
-                                                if results.is_empty() {
-                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Nothing emitted (no repo-local or custom rules, or repos unreachable).");
-                                                }
-                                                for r in results {
-                                                    if r.ok {
-                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("{}: emitted \u{2192} {}", r.repo, r.url.unwrap_or_default()));
-                                                    } else {
-                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("{}: {}", r.repo, r.message.unwrap_or_default()));
-                                                    }
-                                                }
-                                            }
-                                            None => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Emit failed — needs GitHub Contents + PR write on the connected token."),
-                                        }
-                                        emitting.set(false);
-                                    });
-                                },
-                                if emitting() { "Emitting…" } else { "Emit ruleset to repos (re-emit)" }
-                            }
-                            span { class: "rules-emit-hint", "Rebuilds each repo's AGENTS.md / CONVENTIONS.md / gate config from this project's ruleset. Custom rules are always carried through." }
-
-                            // #106 Re-emit rules locally: writes AGENTS.md + CONVENTIONS.md
-                            // directly into each repo's local working copy (no GitHub token,
-                            // no PR).  Calls POST /api/projects/:id/emit-local.
-                            button {
-                                class: "btn-emit-local",
                                 disabled: emitting_local(),
-                                title: "Re-emit rules locally — writes AGENTS.md + CONVENTIONS.md into each repo's local checkout without opening a PR.",
                                 onclick: move |_| {
                                     let id = pid_emit_local.clone();
+                                    let (b, pu, pr) = (emit_branch(), emit_push(), emit_pr());
                                     emitting_local.set(true);
                                     spawn(async move {
-                                        let (ok, msg) = emit_project_local(&id).await;
-                                        if ok {
-                                            crate::toast::push_toast(
-                                                toasts,
-                                                crate::toast::ToastKind::Info,
-                                                msg,
-                                            );
-                                        } else {
-                                            crate::toast::push_toast(
-                                                toasts,
-                                                crate::toast::ToastKind::Error,
-                                                msg,
-                                            );
-                                        }
+                                        let (ok, msg) = emit_project_local(&id, b, pu, pr).await;
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            if ok { crate::toast::ToastKind::Info } else { crate::toast::ToastKind::Error },
+                                            msg,
+                                        );
                                         emitting_local.set(false);
                                     });
                                 },
-                                if emitting_local() { "Re-emitting locally…" } else { "Re-emit rules locally" }
+                                if emitting_local() { "Emitting…" } else { "Emit rules locally" }
                             }
+                            // Cascading toggles. Unchecking a level clears the deeper ones so a
+                            // request can never be branch=false but push=true.
+                            label { class: "emit-toggle",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: emit_branch(),
+                                    onchange: move |e| {
+                                        let on = e.checked();
+                                        emit_branch.set(on);
+                                        if !on { emit_push.set(false); emit_pr.set(false); }
+                                    },
+                                }
+                                "Save emits on a new branch"
+                            }
+                            label { class: if emit_branch() { "emit-toggle" } else { "emit-toggle disabled" },
+                                input {
+                                    r#type: "checkbox",
+                                    checked: emit_push(),
+                                    disabled: !emit_branch(),
+                                    onchange: move |e| {
+                                        let on = e.checked();
+                                        emit_push.set(on);
+                                        if !on { emit_pr.set(false); }
+                                    },
+                                }
+                                "Push to GitHub"
+                            }
+                            label { class: if emit_push() { "emit-toggle" } else { "emit-toggle disabled" },
+                                input {
+                                    r#type: "checkbox",
+                                    checked: emit_pr(),
+                                    disabled: !emit_push(),
+                                    onchange: move |e| emit_pr.set(e.checked()),
+                                }
+                                "Open a PR"
+                            }
+                            span { class: "rules-emit-hint", "Rebuilds each repo's AGENTS.md / CONVENTIONS.md / gate config from this project's ruleset into the local checkout. Custom rules are always carried through. Push and Open-a-PR require a connected GitHub token." }
                         }
 
                         // Reconcile: read what's ACTUALLY in the repos and rehydrate

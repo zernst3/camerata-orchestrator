@@ -1160,6 +1160,9 @@ html, body {
 .rules-sections { display: flex; gap: 14px; flex-wrap: wrap; margin: 12px 0 16px; }
 .rules-emit { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; flex-wrap: wrap; }
 .rules-emit-hint { font-size: 12px; color: var(--ink-soft); }
+.emit-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); cursor: pointer; user-select: none; }
+.emit-toggle.disabled { opacity: 0.45; cursor: not-allowed; }
+.emit-toggle input { cursor: inherit; }
 .rule-count { display: flex; flex-direction: column; min-width: 150px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .rule-count-n { font-size: 22px; font-weight: 700; color: var(--ink); }
 .rule-count-l { font-size: 12px; color: var(--ink-soft); }

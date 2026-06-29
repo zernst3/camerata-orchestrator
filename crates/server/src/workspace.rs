@@ -296,6 +296,37 @@ pub async fn apply_local_and_push(
     commit_msg: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    // Back-compat wrapper for callers (onboarding) that always want branch + commit + push.
+    apply_local(
+        dir, repo, clone_root, branch, files, commit_msg, token, true, true,
+    )
+    .await
+}
+
+/// Apply governance files into the repo's LOCAL clone, with optional escalation. This is the
+/// staged primitive behind the Rules-page "Emit rules locally" cascade (each level requires
+/// the previous):
+/// - `do_branch == false`: just WRITE the files into the working copy on the current branch
+///   (no branch, no commit). The lightest "emit locally" — drops the files in for the architect
+///   to review and commit themselves.
+/// - `do_branch == true`: create/switch to `branch`, write the files, then stage + commit ONLY
+///   those files onto that branch.
+/// - `do_push == true` (requires `do_branch`): force-push that branch to origin.
+///
+/// Opening a PR is a further step the caller performs via [`open_branch_pr`]. Returns the local
+/// working-copy path.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_local(
+    dir: &Path,
+    repo: &str,
+    clone_root: Option<&Path>,
+    branch: &str,
+    files: &[(String, String)],
+    commit_msg: &str,
+    token: &str,
+    do_branch: bool,
+    do_push: bool,
+) -> anyhow::Result<String> {
     // The repo must be local. With a workspace root (`clone_root`), clone it into that root if
     // it isn't on disk yet. With a per-repo path override (`clone_root = None`), the folder must
     // already be a local clone — we never clone over an explicitly-chosen path.
@@ -313,7 +344,11 @@ pub async fn apply_local_and_push(
             ),
         }
     }
-    create_branch_at(dir, branch).await?;
+    // Only switch to the managed branch when the caller wants the emit committed there. Without
+    // it, the files land on whatever branch is currently checked out, uncommitted.
+    if do_branch {
+        create_branch_at(dir, branch).await?;
+    }
     // Write the governance files into the working copy, creating parent dirs as needed.
     for (rel, content) in files {
         let full = dir.join(rel);
@@ -326,52 +361,56 @@ pub async fn apply_local_and_push(
             .await
             .map_err(|e| anyhow::anyhow!("write {}: {e}", full.display()))?;
     }
-    // Stage + commit ONLY the governance files we just wrote. NEVER `git add -A` here: that
-    // would sweep the architect's unrelated in-flight work (untracked or modified files already
-    // in the clone) onto this Camerata-MANAGED branch and force-push it. We stage the exact
-    // files by pathspec AND restrict the commit to the same pathspecs, so even pre-staged
-    // unrelated changes are excluded. A no-op re-apply (identical files) leaves nothing to commit.
-    let rels: Vec<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
-    let mut add_args: Vec<&str> = vec!["add", "--"];
-    add_args.extend_from_slice(&rels);
-    let add = git(Some(dir), &add_args).await?;
-    if !add.status.success() {
-        anyhow::bail!("git add: {}", stderr_of(&add));
-    }
-    let mut commit_args: Vec<&str> = vec!["commit", "-m", commit_msg, "--"];
-    commit_args.extend_from_slice(&rels);
-    let commit = git(Some(dir), &commit_args).await?;
-    if !commit.status.success() {
-        let err = stderr_of(&commit);
-        let out = String::from_utf8_lossy(&commit.stdout);
-        let nothing = err.contains("nothing to commit")
-            || out.contains("nothing to commit")
-            || err.contains("no changes added")
-            || out.contains("no changes added");
-        if !nothing {
-            anyhow::bail!("git commit: {err}");
+    if do_branch {
+        // Stage + commit ONLY the governance files we just wrote. NEVER `git add -A` here: that
+        // would sweep the architect's unrelated in-flight work (untracked or modified files already
+        // in the clone) onto this Camerata-MANAGED branch and force-push it. We stage the exact
+        // files by pathspec AND restrict the commit to the same pathspecs, so even pre-staged
+        // unrelated changes are excluded. A no-op re-apply (identical files) leaves nothing to commit.
+        let rels: Vec<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
+        let mut add_args: Vec<&str> = vec!["add", "--"];
+        add_args.extend_from_slice(&rels);
+        let add = git(Some(dir), &add_args).await?;
+        if !add.status.success() {
+            anyhow::bail!("git add: {}", stderr_of(&add));
+        }
+        let mut commit_args: Vec<&str> = vec!["commit", "-m", commit_msg, "--"];
+        commit_args.extend_from_slice(&rels);
+        let commit = git(Some(dir), &commit_args).await?;
+        if !commit.status.success() {
+            let err = stderr_of(&commit);
+            let out = String::from_utf8_lossy(&commit.stdout);
+            let nothing = err.contains("nothing to commit")
+                || out.contains("nothing to commit")
+                || err.contains("no changes added")
+                || out.contains("no changes added");
+            if !nothing {
+                anyhow::bail!("git commit: {err}");
+            }
         }
     }
-    // Push the branch to origin so it exists remotely too (no PR). FORCE the push: this is a
-    // Camerata-MANAGED branch that Apply fully REGENERATES each run (the governance files are
-    // rewritten from the current ruleset). Re-applying — especially after re-cloning/re-
-    // onboarding a repo — creates a fresh local branch whose history doesn't descend from the
-    // stale remote one left by a prior Apply, so an ordinary push is rejected non-fast-forward.
-    // Force-pushing makes origin mirror the freshly regenerated branch, which is exactly the
-    // intent. It only ever touches `camerata/onboard-governance`, never the repo's own branches.
-    let push = git(
-        Some(dir),
-        &[
-            "push",
-            "--force",
-            "--set-upstream",
-            &authed_url(repo, token),
-            branch,
-        ],
-    )
-    .await?;
-    if !push.status.success() {
-        anyhow::bail!("git push {branch}: {}", stderr_of(&push));
+    if do_push {
+        // Push the branch to origin so it exists remotely too. FORCE the push: this is a
+        // Camerata-MANAGED branch that Apply fully REGENERATES each run (the governance files are
+        // rewritten from the current ruleset). Re-applying — especially after re-cloning/re-
+        // onboarding a repo — creates a fresh local branch whose history doesn't descend from the
+        // stale remote one left by a prior Apply, so an ordinary push is rejected non-fast-forward.
+        // Force-pushing makes origin mirror the freshly regenerated branch, which is exactly the
+        // intent. It only ever touches `camerata/onboard-governance`, never the repo's own branches.
+        let push = git(
+            Some(dir),
+            &[
+                "push",
+                "--force",
+                "--set-upstream",
+                &authed_url(repo, token),
+                branch,
+            ],
+        )
+        .await?;
+        if !push.status.success() {
+            anyhow::bail!("git push {branch}: {}", stderr_of(&push));
+        }
     }
     Ok(dir.to_string_lossy().into_owned())
 }
