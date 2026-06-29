@@ -633,6 +633,10 @@ pub async fn execute_dev_implement_run(
     // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1). When the run blocks on a tampered
     // existing test, the block is recorded as a human-review escalation here.
     escalations: crate::escalation::EscalationStore,
+    // Resumable checkpoints: when the run PAUSES on a review-needed denial (the test-tamper
+    // guard), its resumable state is persisted here and linked to the escalation, so resolving
+    // the escalation can RE-SPAWN the run from where it stopped instead of starting over.
+    checkpoints: crate::checkpoint::CheckpointStore,
     // Whether the test-tamper guard is enforced for this run. The caller computes this
     // from the active project's selected ruleset (DEFAULT-ON when no project / selection
     // cannot be determined — the rule's stated intent is deny + escalate). When false,
@@ -1137,18 +1141,52 @@ pub async fn execute_dev_implement_run(
                 ],
                 raw_context: format!("story_id={story_id}; branch={target_branch}; tampered={listed}"),
             };
-            // Deduped so a re-run of the same blocked story doesn't pile up duplicate reviews.
-            let _ = escalations.raise_deduped(raise_req, "dev-implement test-tamper guard");
+            // PAUSE (do NOT fail): persist the run's resumable state as a checkpoint, raise a
+            // deduped UoW review escalation, link the two, and park the run at AwaitingReview.
+            // The worktree is left intact (the agent's partial work stays on disk). Resolving the
+            // escalation RE-SPAWNS the run from this checkpoint with the human's directive.
+            let esc = escalations.raise_deduped(raise_req, "dev-implement test-tamper guard");
+            // Idempotent: a re-run that hits the same still-open escalation reuses its checkpoint
+            // rather than piling up duplicates.
+            if esc.checkpoint_id.is_none() {
+                let ckpt = checkpoints.create(crate::checkpoint::NewCheckpoint {
+                    story_id: story_id.clone(),
+                    run_id: run_id.clone(),
+                    escalation_id: esc.id.clone(),
+                    pause_reason: "test-tamper".to_string(),
+                    repo: repo.clone(),
+                    branch: target_branch.clone(),
+                    worktree_dir: dir.to_string_lossy().to_string(),
+                    base_commit: base_commit.clone(),
+                    iteration,
+                    max_iterations,
+                    model: model.clone(),
+                    project_id: None,
+                });
+                escalations.set_checkpoint(&esc.id, &ckpt.id);
+            }
 
-            fail(
-                &runs,
-                &uow,
-                format!(
-                    "blocked by AGENTIC-NO-TEST-TAMPER-1: existing test(s) modified/deleted \
-                     without human review — {listed}. Not committed; raised a human-review \
-                     escalation."
-                ),
+            let pause_detail = format!(
+                "PAUSED for human review by AGENTIC-NO-TEST-TAMPER-1: existing test(s) \
+                 modified/deleted — {listed}. Not committed; the worktree is left intact and a \
+                 review escalation ({esc_id}) is open. Resolve it to resume from where the run \
+                 stopped.",
+                esc_id = esc.id
             );
+            runs.push_event(
+                &run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "dev-implement".to_string(),
+                    verdict: "paused".to_string(),
+                    rule: Some("AGENTIC-NO-TEST-TAMPER-1".to_string()),
+                    detail: pause_detail.clone(),
+                    content_hash: None,
+                },
+            );
+            uow.append_history(&story_id, "dev_implement", &pause_detail);
+            // Parked, NOT done — waiting on the human's review of the test edit.
+            runs.set_status(&run_id, RunStatus::AwaitingReview, false);
             return;
         }
     }
@@ -1507,6 +1545,7 @@ mod tests {
             std::sync::Arc::new(crate::credentials::MemoryCredentialStore::new()),
             std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             crate::escalation::EscalationStore::new(),
+            crate::checkpoint::CheckpointStore::new(),
             true, // test-tamper guard default-on (unreached here: live mode is off)
         )
         .await;

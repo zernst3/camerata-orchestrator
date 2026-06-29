@@ -1377,6 +1377,7 @@ async fn start_governed_run(
                 .map(|p| crate::test_tamper::test_tamper_guard_active(&p.ruleset.selections))
                 .unwrap_or(false);
             let impl_escalations = state.escalations.clone();
+            let impl_checkpoints = state.checkpoints.clone();
 
             // Clone the provider-dispatch context before the move closure captures it.
             let impl_registry = state.model_registry.clone();
@@ -1407,6 +1408,7 @@ async fn start_governed_run(
                     impl_creds,
                     impl_limiter,
                     impl_escalations,
+                    impl_checkpoints,
                     enforce_test_tamper_guard,
                 )
                 .await

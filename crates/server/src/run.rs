@@ -63,6 +63,14 @@ pub enum RunStatus {
     /// point, auto-saved; the run resumes when a human answers it. A run in this state is
     /// not `done`: it is parked, waiting on the human.
     AwaitingClarification,
+    /// The run is PAUSED on a human-review escalation raised mid-run (e.g. the test-tamper
+    /// guard). The open UoW escalation (in the escalation store) is the pause point and a
+    /// [`crate::checkpoint::Checkpoint`] holds the resumable state; the run RESUMES (re-spawns
+    /// from the checkpoint with the human's directive) when the escalation is resolved. Like
+    /// `AwaitingClarification`, a run in this state is not `done`: it is parked, waiting on the
+    /// human. Distinct from `AwaitingClarification` because the pause point is an escalation
+    /// (Governed Development review), not a clarifying question in the clarify store.
+    AwaitingReview,
     AwaitingQa,
     /// The run failed with a human-readable reason (e.g. stall timeout, infra error).
     Failed { reason: String },

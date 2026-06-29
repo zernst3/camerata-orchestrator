@@ -567,6 +567,18 @@ impl EscalationStore {
         self.items.lock().ok()?.iter().find(|e| e.id == id).cloned()
     }
 
+    /// Link a UoW escalation to the checkpoint a resume continues from. Set once at pause time
+    /// (idempotent). Returns the updated record (or `None` for an unknown id).
+    pub fn set_checkpoint(&self, id: &str, checkpoint_id: &str) -> Option<Escalation> {
+        let mut guard = self.items.lock().ok()?;
+        let e = guard.iter_mut().find(|e| e.id == id)?;
+        e.checkpoint_id = Some(checkpoint_id.to_string());
+        let updated = e.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
     /// Append a user message + the lead-engineer's reply to an escalation's conversation.
     /// Chatting never resolves the escalation (only explicit authorization does), so even a
     /// resolved escalation can still be discussed as a read-back. Returns the updated record.
@@ -721,6 +733,30 @@ mod tests {
         let again = store.raise_deduped(uow_req("x", "ckpt-2"), "Story x");
         assert_eq!(again.id, uow_esc.id, "uow dedup returns the open one");
         assert_eq!(store.list_open_uow().len(), 1);
+    }
+
+    #[test]
+    fn set_checkpoint_links_escalation_to_its_checkpoint() {
+        // The pause flow raises the escalation with no checkpoint yet, then links it once the
+        // checkpoint is created (chicken/egg: the checkpoint records the escalation id too).
+        let store = EscalationStore::new();
+        let esc = store.raise(
+            RaiseEscalationReq {
+                subject_kind: SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: "s#1".to_string(),
+                reason: "test-tamper".to_string(),
+                stopped_for: String::new(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Story",
+        );
+        assert!(esc.checkpoint_id.is_none());
+        let linked = store.set_checkpoint(&esc.id, "ckpt-7").unwrap();
+        assert_eq!(linked.checkpoint_id.as_deref(), Some("ckpt-7"));
+        assert_eq!(store.get(&esc.id).unwrap().checkpoint_id.as_deref(), Some("ckpt-7"));
+        assert!(store.set_checkpoint("nope", "ckpt-7").is_none(), "unknown id -> None");
     }
 
     #[test]
