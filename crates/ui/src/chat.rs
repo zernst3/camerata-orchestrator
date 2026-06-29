@@ -1263,12 +1263,17 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     for (i, t) in turns().iter().enumerate() {
                         div {
                             key: "{i}",
+                            // flex:none (flex-shrink:0) is critical: these bubbles are flex items in
+                            // the column transcript, so by default they SHRINK to fit the pane —
+                            // squishing each reply down to a sliver and clipping the body — which is
+                            // why the text vanished and there was "nothing to scroll". Keeping full
+                            // height makes the transcript overflow so overflow-y can actually scroll.
                             style: if t.role == "you" {
-                                "align-self:flex-end;max-width:80%;background:#2563eb;\
+                                "align-self:flex-end;flex:none;max-width:80%;background:#2563eb;\
                                  color:#fff;border-radius:.5rem .5rem 0 .5rem;\
                                  padding:.5rem .75rem;font-size:.875rem;"
                             } else {
-                                "align-self:flex-start;max-width:90%;min-width:0;overflow:hidden;\
+                                "align-self:flex-start;flex:none;max-width:90%;min-width:0;overflow-x:hidden;\
                                  background:rgba(241,245,249,0.78);\
                                  color:#1e293b;border-radius:.5rem .5rem .5rem 0;\
                                  padding:.5rem .75rem;font-size:.875rem;"
@@ -1286,7 +1291,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     }
                     if sending() {
                         div {
-                            style: "align-self:flex-start;background:rgba(241,245,249,0.78);color:#94a3b8;\
+                            style: "align-self:flex-start;flex:none;background:rgba(241,245,249,0.78);color:#94a3b8;\
                                     border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;",
                             "thinking…"
                         }
