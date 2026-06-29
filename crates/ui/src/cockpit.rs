@@ -859,6 +859,20 @@ enum CockpitScreen {
     InProject,
 }
 
+/// Which surface the projects-home navbar is showing. The home screen exposes only the
+/// project-INDEPENDENT surfaces (Docs + global Settings) alongside the project list, so docs and
+/// the global settings (credentials, the global chat-assistant model, Bombe) are reachable before
+/// any project exists.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HomeView {
+    /// The project list (pick / create / import).
+    Projects,
+    /// The in-app docs viewer (project-independent).
+    Docs,
+    /// Global-only settings (credentials, chat-assistant model, Bombe).
+    Settings,
+}
+
 /// The shell for the enterprise edition: shows the projects home first; the cockpit only
 /// renders once a project is open. The screen is shared via context so the cockpit's nav
 /// can navigate back to the projects list.
@@ -988,10 +1002,67 @@ async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult 
     }
 }
 
-/// The projects home: the first thing you see. Open a stored project, create one, or
-/// import one. Nothing else in the app is reachable until a project is open.
+/// The projects-home shell: a LIMITED navbar (Projects · Docs · Settings + the usage meter) over
+/// the project-independent surfaces, so Docs and the GLOBAL settings are reachable before any
+/// project exists. The project list itself is [`ProjectsHome`]; the full cockpit nav only appears
+/// once a project is open.
 #[component]
 fn ProjectGate() -> Element {
+    let home_view = use_signal(|| HomeView::Projects);
+    rsx! {
+        div { class: "cockpit",
+            HomeNav { home_view }
+            match home_view() {
+                // The project list owns its own scroll (.project-gate) so it sits directly under
+                // the nav; Docs/Settings render .page and need the tinted cockpit-scroll wrapper.
+                HomeView::Projects => rsx! { ProjectsHome {} },
+                HomeView::Docs => rsx! { div { class: "cockpit-scroll", DocsView {} } },
+                HomeView::Settings => rsx! {
+                    div { class: "cockpit-scroll", SettingsView { global_only: true } }
+                },
+            }
+        }
+    }
+}
+
+/// The projects-home navbar: only the project-INDEPENDENT tabs (Docs + global Settings) plus the
+/// always-on usage meter (token cost), so they work before any project is open.
+#[component]
+fn HomeNav(home_view: Signal<HomeView>) -> Element {
+    let mut hv = home_view;
+    let cls = |v: HomeView| {
+        if hv() == v {
+            "cockpit-nav-tab on"
+        } else {
+            "cockpit-nav-tab"
+        }
+    };
+    rsx! {
+        div { class: "cockpit-nav",
+            button {
+                class: cls(HomeView::Projects),
+                onclick: move |_| hv.set(HomeView::Projects),
+                "Projects"
+            }
+            button {
+                class: cls(HomeView::Docs),
+                onclick: move |_| hv.set(HomeView::Docs),
+                "Docs"
+            }
+            button {
+                class: cls(HomeView::Settings),
+                onclick: move |_| hv.set(HomeView::Settings),
+                "Settings"
+            }
+            UsageMeter {}
+        }
+    }
+}
+
+/// The project list (pick / create / import), rendered inside [`ProjectGate`]'s shell. Nothing
+/// project-scoped is reachable until one is opened.
+#[component]
+fn ProjectsHome() -> Element {
     let mut screen = use_context::<Signal<CockpitScreen>>();
     let mut refresh = use_signal(|| 0u32);
     let projects = use_resource(move || {
@@ -1711,7 +1782,7 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
-                    SettingsView {}
+                    SettingsView { global_only: false }
                 }
             }
         };
@@ -1843,7 +1914,7 @@ fn ChatModelSetting() -> Element {
 }
 
 #[component]
-fn SettingsView() -> Element {
+fn SettingsView(global_only: bool) -> Element {
     let refresh = use_signal(|| 0u32);
     let active = use_resource(move || {
         let _ = refresh();
@@ -1875,13 +1946,15 @@ fn SettingsView() -> Element {
             ChatModelSetting {}
 
             // ── Section 2: This project ───────────────────────────────────────
-            // All settings below are scoped to the currently active project.
+            // All settings below are scoped to the currently active project. Hidden entirely in
+            // the home/global-only view (reached before any project is open).
+            if !global_only {
             h2 { class: "settings-section-heading", "This project" }
             p { class: "proj-settings-scope-note",
                 "These settings apply to the active project and affect all governed runs within it."
             }
 
-            match &proj {
+            {match &proj {
                 None => rsx! {
                     p { class: "section-hint", "Create or select a project to configure project-level settings." }
                 },
@@ -1916,6 +1989,7 @@ fn SettingsView() -> Element {
                         crate::vcs_settings::VcsGateSettings { project_id: p_owned.id.clone() }
                     }
                 }
+            }}
             }
         }
     }
