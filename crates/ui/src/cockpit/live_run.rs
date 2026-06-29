@@ -68,6 +68,143 @@ pub(super) async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
     resp.json::<Vec<ClarificationView>>().await.unwrap_or_default()
 }
 
+/// Fetch all OPEN UoW (Governed Development) review escalations across every story — paused runs
+/// awaiting an Approve / Amend / Reject. Filters the shared escalation feed to UoW subjects.
+pub(super) async fn fetch_open_uow_escalations() -> Vec<crate::routines::EscalationView> {
+    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::BFF_URL)).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    resp.json::<Vec<crate::routines::EscalationView>>()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| e.subject_kind == "uow")
+        .collect()
+}
+
+/// Resolve a UoW review with the human's free-text decision + the chosen action
+/// (`"approve"` | `"amend"` | `"reject"`). Approve/Amend resume the paused run from its checkpoint;
+/// Reject reverts the worktree and stops it. Returns the resolved escalation.
+pub(super) async fn answer_uow_escalation(
+    id: &str,
+    answer: &str,
+    action: &str,
+) -> Option<crate::routines::EscalationView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/escalations/{}/answer", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "answer": answer, "action": action }))
+        .send()
+        .await
+        .ok()?
+        .json::<crate::routines::EscalationView>()
+        .await
+        .ok()
+}
+
+/// Resolve a UoW review (free fn so each action button can call it without moving a shared
+/// closure). Fills a sensible default decision for a bare Approve/Reject; Amend requires text.
+fn submit_uow_review(
+    esc_id: String,
+    decision_text: String,
+    action: &'static str,
+    mut submitting: Signal<bool>,
+    on_resolved: EventHandler<()>,
+) {
+    if submitting() {
+        return;
+    }
+    if action == "amend" && decision_text.trim().is_empty() {
+        return;
+    }
+    submitting.set(true);
+    spawn(async move {
+        let _guard = crate::loading::LoadingGuard::new();
+        let answer = if decision_text.trim().is_empty() {
+            match action {
+                "approve" => "Approved: proceed with the change as-is.".to_string(),
+                "reject" => "Rejected: discard this change and stop.".to_string(),
+                _ => decision_text,
+            }
+        } else {
+            decision_text
+        };
+        let ok = answer_uow_escalation(&esc_id, &answer, action).await.is_some();
+        submitting.set(false);
+        if ok {
+            on_resolved.call(());
+        }
+    });
+}
+
+/// The Governed Development REVIEW panel — the human-in-the-loop surface for a run paused at
+/// `RunStatus::AwaitingReview` (e.g. the test-tamper guard). Shows what happened (the rule, what it
+/// stopped for, the context, suggestions) and a free-text decision plus three actions: Approve
+/// (resume as-is), Amend (resume with a correction), Reject (revert + stop). Resolving re-spawns or
+/// stops the run server-side and drops this off the NEEDS YOU queue.
+#[component]
+pub(super) fn UowReviewPanel(
+    esc: crate::routines::EscalationView,
+    on_resolved: EventHandler<()>,
+) -> Element {
+    let mut decision = use_signal(String::new);
+    let submitting = use_signal(|| false);
+    let id_approve = esc.id.clone();
+    let id_amend = esc.id.clone();
+    let id_reject = esc.id.clone();
+
+    rsx! {
+        div { class: "uow-review-card",
+            div { class: "uow-review-head",
+                span { class: "uow-review-badge", "NEEDS YOUR REVIEW" }
+                span { class: "uow-review-rule", "{esc.reason}" }
+            }
+            p { class: "uow-review-stopped", "{esc.stopped_for}" }
+            if !esc.raw_context.is_empty() {
+                p { class: "uow-review-context", "{esc.raw_context}" }
+            }
+            if !esc.suggestions.is_empty() {
+                ul { class: "uow-review-suggestions",
+                    for s in esc.suggestions.iter() {
+                        li { key: "{s}", "{s}" }
+                    }
+                }
+            }
+            textarea {
+                class: "uow-review-input",
+                rows: 3,
+                placeholder: "Your decision (optional for Approve/Reject; required to Amend)\u{2026}",
+                value: "{decision}",
+                disabled: submitting(),
+                oninput: move |e| decision.set(e.value()),
+            }
+            div { class: "uow-review-actions",
+                button {
+                    class: "btn-run uow-review-approve",
+                    disabled: submitting(),
+                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved),
+                    "Approve & resume"
+                }
+                button {
+                    class: "btn-run uow-review-amend",
+                    disabled: submitting() || decision().trim().is_empty(),
+                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved),
+                    "Amend & resume"
+                }
+                button {
+                    class: "btn-stop uow-review-reject",
+                    disabled: submitting(),
+                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved),
+                    "Reject & revert"
+                }
+            }
+            if submitting() {
+                p { class: "uow-review-status", "Applying your decision\u{2026}" }
+            }
+        }
+    }
+}
+
 /// Submit a structured answer to a clarification (`POST /api/clarifications/:cid/answer`).
 /// Posts `{ selected, free_text, answered_by }`. Returns true on success.
 pub(super) async fn answer_clarification(
@@ -227,15 +364,33 @@ pub(super) fn NeedsYouQueue() -> Element {
         let _dep = refresh();
         async move { fetch_all_open_clarifications().await }
     });
+    // UoW (Governed Development) review escalations — paused runs awaiting Approve/Amend/Reject.
+    let reviews = use_resource(move || {
+        let _dep = refresh();
+        async move { fetch_open_uow_escalations().await }
+    });
     let open = open.read().clone().unwrap_or_default();
+    let reviews = reviews.read().clone().unwrap_or_default();
+    let total = open.len() + reviews.len();
 
     rsx! {
         div { class: "needs-you",
-            p { class: "govdev-nav-label", "NEEDS YOU ({open.len()})" }
-            if open.is_empty() {
+            p { class: "govdev-nav-label", "NEEDS YOU ({total})" }
+            if total == 0 {
                 p { class: "needs-empty", "Nothing waiting on you." }
             } else {
                 div { class: "needs-list",
+                    // Paused-run reviews first (a blocked run is the most urgent thing).
+                    for esc in reviews.iter() {
+                        UowReviewPanel {
+                            key: "{esc.id}",
+                            esc: esc.clone(),
+                            on_resolved: move |_| {
+                                let mut refresh = refresh;
+                                refresh += 1;
+                            },
+                        }
+                    }
                     for clar in open.iter() {
                         ClarifyQuestion {
                             key: "{clar.id}",

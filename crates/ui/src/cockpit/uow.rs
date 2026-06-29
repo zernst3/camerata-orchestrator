@@ -458,6 +458,9 @@ pub(super) fn run_status_badge(status: &str) -> (&'static str, &'static str) {
         // Phase 3b: the gated agent raised a clarifying question; the run is parked
         // waiting on a human answer (it resumes when answered).
         "awaiting_clarification" => ("WAITING ON YOU", "warn"),
+        // The run PAUSED on a human-review escalation (e.g. test-tamper); it resumes when the
+        // review is resolved (Approve/Amend) or stops (Reject).
+        "awaiting_review" => ("NEEDS YOUR REVIEW", "warn"),
         "awaiting_qa" => ("AWAITING QA", "warn"),
         "failed" => ("FAILED", "error"),
         "cancelled" => ("CANCELLED", "neutral"),

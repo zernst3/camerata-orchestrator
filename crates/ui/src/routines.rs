@@ -369,6 +369,14 @@ pub struct EscalationView {
     pub id: String,
     pub routine_id: String,
     pub routine_name: String,
+    /// `"routine"` | `"uow"` — which surface this review belongs to (defaults to `"routine"` for
+    /// older BFF builds).
+    #[serde(default)]
+    pub subject_kind: String,
+    /// For a UoW (Governed Development) review: the checkpoint the resume continues from (present
+    /// once the run has paused and persisted its state).
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
     /// Why the routine stopped and raised this escalation.
     pub reason: String,
     /// The specific decision that is blocking the routine: what the architect
@@ -443,10 +451,10 @@ async fn chat_escalation(id: &str, message: &str, model: &str) -> Option<Escalat
 
 /// Submit the architect's authorization to an escalation. Returns the resolved
 /// escalation (including the server's `translated_directive`) on success.
-async fn answer_escalation(id: &str, answer: &str) -> Option<EscalationView> {
+async fn answer_escalation(id: &str, answer: &str, action: &str) -> Option<EscalationView> {
     reqwest::Client::new()
         .post(format!("{}/api/escalations/{}/answer", crate::BFF_URL, id))
-        .json(&serde_json::json!({ "answer": answer }))
+        .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
         .ok()?
@@ -1096,7 +1104,7 @@ pub fn RoutineDashboard() -> Element {
                                                             let text = answer_draft();
                                                             if text.trim().is_empty() { return; }
                                                             spawn(async move {
-                                                                if let Some(resolved) = answer_escalation(&id, &text).await {
+                                                                if let Some(resolved) = answer_escalation(&id, &text, "approve").await {
                                                                     if let Some(directive) = resolved.translated_directive {
                                                                         last_directive.set(Some(directive));
                                                                     }

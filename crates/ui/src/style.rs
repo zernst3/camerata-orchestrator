@@ -1319,6 +1319,34 @@ html, body {
 .needs-who { display: block; margin-top: 2px; font-size: 11px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .needs-empty { font-size: 12.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
 
+/* Governed Development REVIEW card (a run paused at AwaitingReview: test-tamper etc.). Amber,
+   like the clarification card, but with the three explicit decision actions. */
+.uow-review-card {
+  border: 1px solid rgba(202,138,4,0.45); background: rgba(202,138,4,0.10); border-radius: 10px;
+  padding: 11px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.uow-review-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.uow-review-badge {
+  flex: none; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+  color: #7a5b00; background: rgba(202,138,4,0.22); border-radius: 6px; padding: 2px 7px;
+}
+.uow-review-rule { font-size: 12px; font-weight: 700; color: var(--ink); line-height: 1.35; }
+.uow-review-stopped { font-size: 12.5px; color: var(--ink); margin: 0; line-height: 1.4; }
+.uow-review-context {
+  font-size: 11px; color: var(--ink-faint); margin: 0; line-height: 1.35;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-word;
+}
+.uow-review-suggestions { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
+.uow-review-suggestions li { font-size: 12px; color: var(--ink-faint); line-height: 1.35; }
+.uow-review-input {
+  width: 100%; box-sizing: border-box; resize: vertical; border-radius: 8px;
+  border: 1px solid var(--line); padding: 7px 9px; font-size: 12.5px; color: var(--ink);
+  background: rgba(255,255,255,0.7); font-family: inherit;
+}
+.uow-review-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.uow-review-actions button { font-size: 12px; }
+.uow-review-status { font-size: 11.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
+
 /* AskUserQuestion-style structured clarification card (reusable). */
 .clarify-q-card {
   border: 1px solid rgba(202,138,4,0.3); background: rgba(202,138,4,0.08); border-radius: 10px;
