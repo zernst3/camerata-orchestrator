@@ -1773,6 +1773,18 @@ html, body {
 .chat-turn-text { font-size: 13px; line-height: 1.5; color: var(--ink); white-space: pre-wrap; word-break: break-word; padding: 8px 11px; border-radius: 12px; background: var(--paper); border: 1px solid var(--line-soft); }
 .chat-turn.you .chat-turn-text { background: var(--accent-wash); border-color: var(--accent-wash); }
 .chat-turn-text.dim { color: var(--ink-faint); font-style: italic; }
+/* The floating ChatBubble's rendered-markdown AI reply (inline-styled bubble; this class targets
+   the injected HTML so long lines + fenced code blocks WRAP instead of forcing a horizontal
+   scroll out of the chat box). */
+.chat-ai-md { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
+.chat-ai-md pre {
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  max-width: 100%; overflow-x: auto; margin: 6px 0; padding: 8px 10px;
+  background: rgba(15,23,42,0.06); border-radius: 6px; font-size: 0.82rem;
+}
+.chat-ai-md code { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.chat-ai-md p, .chat-ai-md li, .chat-ai-md h1, .chat-ai-md h2, .chat-ai-md h3 { overflow-wrap: anywhere; }
+
 /* Rendered-markdown assistant replies: normal whitespace + styled block elements. */
 .chat-turn-text.md { white-space: normal; }
 .chat-turn-text.md > :first-child { margin-top: 0; }
@@ -1860,9 +1872,10 @@ html, body {
   position: fixed; right: 76px; bottom: 86px; z-index: 1000;
   width: 640px; max-width: calc(100vw - 96px); height: 420px; max-height: calc(100vh - 130px);
   display: flex; flex-direction: column;
-  /* Slightly translucent + frosted so the Bombe shows through (the xterm canvas uses a matching
-     rgba background with allowTransparency; see terminal.rs). */
-  background: rgba(27,26,24,0.86); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  /* Transparent fill (frosted via backdrop-blur only): the xterm canvas on top carries the single
+     translucent layer (rgba theme + allowTransparency in terminal.rs). Tinting here too would
+     compound with the canvas to near-opaque, which is the bug this avoids. */
+  background: transparent; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
   border: 1px solid #2e2d2a; border-radius: var(--r-md);
   box-shadow: var(--shadow-pop); overflow: hidden;
 }

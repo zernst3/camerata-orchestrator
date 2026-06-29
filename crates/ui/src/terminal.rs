@@ -130,11 +130,12 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     cursorBlink: true,
     fontSize: 13,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-    // Slightly translucent so the Bombe shows through (paired with the .term-panel
-    // backdrop-blur in style.rs for legibility). allowTransparency lets the rgba background blend.
+    // Slightly translucent so what's behind shows through. The xterm canvas carries the SINGLE
+    // translucent fill; .term-panel behind it is transparent (backdrop-blur only) so the two don't
+    // compound to near-opaque. allowTransparency lets the rgba background actually blend.
     allowTransparency: true,
     theme: {{
-      background: 'rgba(27,26,24,0.86)',
+      background: 'rgba(27,26,24,0.78)',
       foreground: '#faf9f6',
       cursor: '#b35636',
     }},

@@ -1005,16 +1005,16 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
             div {
                 style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
                         width:28rem;max-height:80vh;display:flex;flex-direction:column;\
-                        background:rgba(255,255,255,0.90);backdrop-filter:blur(10px);\
-                        -webkit-backdrop-filter:blur(10px);\
-                        border:1px solid #e2e8f0;border-radius:.75rem;\
+                        background:rgba(255,255,255,0.82);backdrop-filter:blur(12px);\
+                        -webkit-backdrop-filter:blur(12px);\
+                        border:1px solid rgba(226,232,240,0.7);border-radius:.75rem;\
                         box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
 
                 // ── header ──────────────────────────────────────────────────
                 div {
                     style: "display:flex;align-items:center;justify-content:space-between;\
-                            padding:.75rem 1rem;border-bottom:1px solid #e2e8f0;\
-                            background:rgba(248,250,252,0.82);",
+                            padding:.75rem 1rem;border-bottom:1px solid rgba(226,232,240,0.6);\
+                            background:rgba(248,250,252,0.55);",
                     span {
                         style: "font-weight:600;font-size:.95rem;color:#1e293b;",
                         "Camerata assistant"
@@ -1220,7 +1220,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
                 // ── transcript ──────────────────────────────────────────────
                 div {
-                    style: "flex:1;overflow-y:auto;padding:.75rem 1rem;display:flex;\
+                    style: "flex:1;overflow-y:auto;overflow-x:hidden;padding:.75rem 1rem;display:flex;\
                             flex-direction:column;gap:.5rem;min-height:8rem;",
                     if turns().is_empty() {
                         p {
@@ -1241,13 +1241,15 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                  color:#fff;border-radius:.5rem .5rem 0 .5rem;\
                                  padding:.5rem .75rem;font-size:.875rem;"
                             } else {
-                                "align-self:flex-start;max-width:90%;background:#f1f5f9;\
+                                "align-self:flex-start;max-width:90%;min-width:0;overflow:hidden;\
+                                 background:rgba(241,245,249,0.78);\
                                  color:#1e293b;border-radius:.5rem .5rem .5rem 0;\
                                  padding:.5rem .75rem;font-size:.875rem;"
                             },
                             if t.role == "ai" {
                                 div {
-                                    style: "line-height:1.55;",
+                                    class: "chat-ai-md",
+                                    style: "line-height:1.55;min-width:0;",
                                     dangerous_inner_html: md_to_html(&t.text)
                                 }
                             } else {
@@ -1257,7 +1259,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     }
                     if sending() {
                         div {
-                            style: "align-self:flex-start;background:#f1f5f9;color:#94a3b8;\
+                            style: "align-self:flex-start;background:rgba(241,245,249,0.78);color:#94a3b8;\
                                     border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;",
                             "thinking…"
                         }
@@ -1267,7 +1269,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 // ── compose bar ─────────────────────────────────────────────
                 div {
                     style: "display:flex;gap:.5rem;padding:.75rem 1rem;\
-                            border-top:1px solid #e2e8f0;background:#f8fafc;",
+                            border-top:1px solid rgba(226,232,240,0.6);background:rgba(248,250,252,0.55);",
                     textarea {
                         style: "flex:1;resize:none;border:1px solid #cbd5e1;border-radius:.375rem;\
                                 padding:.5rem .75rem;font-size:.875rem;font-family:inherit;\
